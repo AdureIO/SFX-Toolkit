@@ -62,11 +62,13 @@ export class OrgTreeProvider implements vscode.TreeDataProvider<OrgItem> {
     readonly onDidChangeTreeData: vscode.Event<OrgItem | undefined | null | void> = this._onDidChangeTreeData.event;
 
     private data: any = null;
+    private _rootItems: OrgItem[] = [];
 
     constructor() {}
 
     refresh(): void {
         this.data = null; // Clear cache
+        this._rootItems = []; // Clear root item cache
         this._onDidChangeTreeData.fire();
     }
 
@@ -80,22 +82,53 @@ export class OrgTreeProvider implements vscode.TreeDataProvider<OrgItem> {
             if (!this.data) {
                 await this.fetchOrgs();
             }
-            // Return Groups
-            return [
-                new OrgItem("Connected Orgs", vscode.TreeItemCollapsibleState.Expanded, null, 'GROUP', 'group-connected'),
+            
+            // If roots cached, return them to maintain reference equality for reveal()
+            if (this._rootItems.length > 0) {
+                 return this._rootItems;
+            }
+
+            // Return Groups and cache them
+            this._rootItems = [
+                new OrgItem("Dev Hubs", vscode.TreeItemCollapsibleState.Expanded, null, 'GROUP', 'group-devhub'),
+                new OrgItem("Production", vscode.TreeItemCollapsibleState.Expanded, null, 'GROUP', 'group-production'),
+                new OrgItem("Sandboxes", vscode.TreeItemCollapsibleState.Expanded, null, 'GROUP', 'group-sandbox'),
                 new OrgItem("Scratch Orgs", vscode.TreeItemCollapsibleState.Expanded, null, 'GROUP', 'group-scratch')
             ];
+            return this._rootItems;
         }
 
         if (element.type === 'GROUP') {
-            if (element.contextValue === 'group-connected') {
-                return this.data.nonScratchOrgs.map((org: any) => {
-                    const label = org.alias || org.username.split('@')[0]; // Fallback to partial username if no alias
-                    const context = org.isDevHub ? 'org-devhub' : 'org-connected';
-                    return new OrgItem(label, vscode.TreeItemCollapsibleState.None, org, 'ORG', context);
-                });
+            const allNonScratch = this.data.nonScratchOrgs || [];
+
+            if (element.contextValue === 'group-devhub') {
+                const orgs = allNonScratch.filter((o: any) => o.isDevHub);
+                orgs.sort((a: any, b: any) => (a.alias || a.username).localeCompare(b.alias || b.username));
+                return orgs.map((org: any) => new OrgItem(org.alias || org.username.split('@')[0], vscode.TreeItemCollapsibleState.None, org, 'ORG', 'org-devhub'));
+
+            } else if (element.contextValue === 'group-production') {
+                // Production = Not DevHub AND Not Sandbox
+                const orgs = allNonScratch.filter((o: any) => !o.isDevHub && !o.isSandbox);
+                orgs.sort((a: any, b: any) => (a.alias || a.username).localeCompare(b.alias || b.username));
+                return orgs.map((org: any) => new OrgItem(org.alias || org.username.split('@')[0], vscode.TreeItemCollapsibleState.None, org, 'ORG', 'org-connected'));
+
+            } else if (element.contextValue === 'group-sandbox') {
+                // Sandbox = Not DevHub AND isSandbox
+                const orgs = allNonScratch.filter((o: any) => !o.isDevHub && o.isSandbox);
+                orgs.sort((a: any, b: any) => (a.alias || a.username).localeCompare(b.alias || b.username));
+                return orgs.map((org: any) => new OrgItem(org.alias || org.username.split('@')[0], vscode.TreeItemCollapsibleState.None, org, 'ORG', 'org-connected'));
+
             } else if (element.contextValue === 'group-scratch') {
-                return this.data.scratchOrgs.map((org: any) => {
+                const orgs = [...this.data.scratchOrgs];
+                
+                // Sort: Default > Alphabetical
+                orgs.sort((a: any, b: any) => {
+                    if (a.isDefaultUsername && !b.isDefaultUsername) return -1;
+                    if (!a.isDefaultUsername && b.isDefaultUsername) return 1;
+                    return (a.alias || a.username).localeCompare(b.alias || b.username);
+                });
+
+                return orgs.map((org: any) => {
                     const label = org.alias || "Scratch Org";
                     return new OrgItem(label, vscode.TreeItemCollapsibleState.None, org, 'ORG', 'org-scratch');
                 });
@@ -119,6 +152,36 @@ export class OrgTreeProvider implements vscode.TreeDataProvider<OrgItem> {
             vscode.window.showErrorMessage("Error listing orgs: " + e.message);
             this.data = { nonScratchOrgs: [], scratchOrgs: [] };
         }
+    }
+    getParent(element: OrgItem): vscode.ProviderResult<OrgItem> {
+        if (element.type === 'GROUP') {
+            return null;
+        }
+
+        // Ensure roots are loaded
+        if (this._rootItems.length === 4) {
+             const [devHubs, prod, sandboxes, scratches] = this._rootItems;
+             
+             if (element.contextValue === 'org-scratch') {
+                 return scratches;
+             }
+             if (element.contextValue === 'org-devhub') {
+                 return devHubs;
+             }
+             
+             // Remaining are connected orgs: either prod or sandbox
+             // We can check based on orgData.isSandbox
+             if (element.orgData.isSandbox) {
+                 return sandboxes;
+             } else {
+                 return prod;
+             }
+        }
+        return null; // Should not happen if tree is consistent
+    }
+
+    getRootItems(): OrgItem[] {
+      return this._rootItems;
     }
 }
 

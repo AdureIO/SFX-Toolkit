@@ -12,12 +12,13 @@ import { TraceTreeProvider } from './providers/TraceTreeProvider';
 import { quickTrace, deleteTrace } from './commands/traceCommands';
 import { logContentProvider } from './providers/LogContentProvider';
 
-import { openOrg, setAsDefault, copyUsername, deleteOrg, renameAlias, generatePassword, setAsDefaultDevHub } from './commands/orgCommands';
+import { openOrg, setAsDefault, copyUsername, deleteOrg, renameAlias, generatePassword, setAsDefaultDevHub, connectOrg, createScratch, quickScratch } from './commands/orgCommands';
 import { orgTreeProvider } from './providers/OrgTreeProvider';
 import { ApexCodeLensProvider } from './providers/ApexCodeLensProvider';
 import { DevActionsProvider } from './providers/DevActionsProvider';
 import { pushSource, pullSource, deployCurrentFile, retrieveCurrentFile, runLocalTests } from './commands/devCommands';
 import { PermissionSetEditorProvider } from './editors/PermissionSetEditorProvider';
+import { ScratchOrgDefEditorProvider } from './editors/ScratchOrgDefEditorProvider';
 
 export function activate(context: vscode.ExtensionContext) {
     console.log('Congratulations, your extension "salesforce-utils" is now active!');
@@ -100,7 +101,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
     
     // 7. Org Manager
-    vscode.window.registerTreeDataProvider('salesforce-utils.orgs', orgTreeProvider);
+    const orgTreeView = vscode.window.createTreeView('salesforce-utils.orgs', { treeDataProvider: orgTreeProvider });
     
     let refreshOrgsCmd = vscode.commands.registerCommand('salesforce-utils.refreshOrgs', () => orgTreeProvider.refresh());
     let openOrgCmd = vscode.commands.registerCommand('salesforce-utils.openOrg', openOrg);
@@ -110,6 +111,10 @@ export function activate(context: vscode.ExtensionContext) {
     let renameAliasCmd = vscode.commands.registerCommand('salesforce-utils.renameAlias', renameAlias);
     let generatePasswordCmd = vscode.commands.registerCommand('salesforce-utils.generatePassword', generatePassword);
     let deleteOrgCmd = vscode.commands.registerCommand('salesforce-utils.deleteOrg', deleteOrg);
+
+    let connectOrgCmd = vscode.commands.registerCommand('salesforce-utils.connectOrg', connectOrg);
+    let createScratchCmd = vscode.commands.registerCommand('salesforce-utils.createScratch', createScratch);
+    let quickScratchCmd = vscode.commands.registerCommand('salesforce-utils.quickScratch', quickScratch);
 
     // 8. Development Actions
     const devProvider = new DevActionsProvider();
@@ -122,7 +127,23 @@ export function activate(context: vscode.ExtensionContext) {
     let runTestsCmd = vscode.commands.registerCommand('salesforce-utils.runLocalTests', runLocalTests);
 
     // 9. Permission Set Editor
-    context.subscriptions.push(PermissionSetEditorProvider.register(context));
+    context.subscriptions.push(
+        PermissionSetEditorProvider.register(context)
+    );
+    
+    // Command to open permission set in UI mode
+    let openPermissionSetUICmd = vscode.commands.registerCommand('salesforce-utils.openPermissionSetUI', async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (editor && editor.document.fileName.endsWith('.permissionset-meta.xml')) {
+            await vscode.commands.executeCommand('vscode.openWith', editor.document.uri, 'salesforce-utils.permissionSetEditor');
+        }
+    });
+    context.subscriptions.push(openPermissionSetUICmd);
+
+    // Register Scratch Org Definition Editor
+    context.subscriptions.push(
+        ScratchOrgDefEditorProvider.register(context)
+    );
 
     // 10. Log Content Provider (sf-log and sf-anon-log scheme)
     context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider('sf-log', logContentProvider));
@@ -190,7 +211,10 @@ export function activate(context: vscode.ExtensionContext) {
         copyUsernameCmd,
         renameAliasCmd,
         generatePasswordCmd,
-        deleteOrgCmd
+        deleteOrgCmd,
+        connectOrgCmd,
+        createScratchCmd,
+        quickScratchCmd
     );
 }
 

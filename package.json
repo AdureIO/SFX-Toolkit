@@ -1,7 +1,9 @@
 {
-  "name": "salesforce-utils",
+  "name": "sfx-toolkit",
   "displayName": "Adure SFX Toolkit",
+  "publisher": "io.adure",
   "description": "Utilities for Salesforce development: Log filtering, Debug Traces, Deployment, and more.",
+  "icon": "resources/icon.png",
   "version": "0.0.1",
   "engines": {
     "vscode": "^1.80.0"
@@ -16,33 +18,50 @@
       {
         "command": "salesforce-utils.filterLogDebug",
         "title": "Filter Debug",
-        "icon": "$(debug-alt)"
+        "icon": {
+          "light": "resources/light/debug-inactive.svg",
+          "dark": "resources/dark/debug-inactive.svg"
+        }
       },
       {
         "command": "salesforce-utils.filterLogDebugActive",
         "title": "Filter Debug (Active)",
         "icon": {
-          "light": "resources/filter-debug-active.svg",
-          "dark": "resources/filter-debug-active.svg"
+          "light": "resources/light/debug-active.svg",
+          "dark": "resources/dark/debug-active.svg"
         }
       },
       {
         "command": "salesforce-utils.filterLogSOQL",
         "title": "Filter SOQL",
-        "icon": "$(database)"
+        "icon": {
+          "light": "resources/light/soql-inactive.svg",
+          "dark": "resources/dark/soql-inactive.svg"
+        }
       },
       {
-        "command": "salesforce-utils.filterLogDMLActive",
-        "title": "Filter DML (Active)",
+        "command": "salesforce-utils.filterLogSOQLActive",
+        "title": "Filter SOQL (Active)",
         "icon": {
-          "light": "resources/dml-active.svg",
-          "dark": "resources/dml-active.svg"
+          "light": "resources/light/soql-active.svg",
+          "dark": "resources/dark/soql-active.svg"
         }
       },
       {
         "command": "salesforce-utils.filterLogDML",
         "title": "Filter DML",
-        "icon": "$(list-unordered)"
+        "icon": {
+          "light": "resources/light/dml-inactive.svg",
+          "dark": "resources/dark/dml-inactive.svg"
+        }
+      },
+      {
+        "command": "salesforce-utils.filterLogDMLActive",
+        "title": "Filter DML (Active)",
+        "icon": {
+          "light": "resources/light/dml-active.svg",
+          "dark": "resources/dark/dml-active.svg"
+        }
       },
       {
         "command": "salesforce-utils.refreshLogs",
@@ -149,6 +168,26 @@
         "command": "salesforce-utils.deleteOrg",
         "title": "Delete/Logout",
         "icon": "$(trash)"
+      },
+      {
+        "command": "salesforce-utils.connectOrg",
+        "title": "Connect Org",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "salesforce-utils.openPermissionSetUI",
+        "title": "Open in Permission UI",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "salesforce-utils.createScratch",
+        "title": "Create Scratch Org",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "salesforce-utils.quickScratch",
+        "title": "Quick Scratch (Defaults)",
+        "icon": "$(rocket)"
       }
     ],
     "languages": [
@@ -176,7 +215,7 @@
         {
           "id": "salesforce-utils-activitybar",
           "title": "Adure SFX Toolkit",
-          "icon": "$(list-flat)"
+          "icon": "resources/dark/sidebar.png"
         }
       ]
     },
@@ -228,9 +267,9 @@
           "group": "navigation"
         },
         {
-           "command": "salesforce-utils.quickTrace",
-           "when": "view == salesforce-utils.traces",
-           "group": "navigation"
+          "command": "salesforce-utils.quickTrace",
+          "when": "view == salesforce-utils.traces",
+          "group": "navigation"
         },
         {
           "command": "salesforce-utils.addDebugTrace",
@@ -239,6 +278,21 @@
         },
         {
           "command": "salesforce-utils.refreshOrgs",
+          "when": "view == salesforce-utils.orgs",
+          "group": "navigation"
+        },
+        {
+          "command": "salesforce-utils.connectOrg",
+          "when": "view == salesforce-utils.orgs",
+          "group": "navigation"
+        },
+        {
+          "command": "salesforce-utils.createScratch",
+          "when": "view == salesforce-utils.orgs",
+          "group": "navigation"
+        },
+        {
+          "command": "salesforce-utils.quickScratch",
           "when": "view == salesforce-utils.orgs",
           "group": "navigation"
         }
@@ -330,6 +384,11 @@
           "command": "salesforce-utils.filterLogDMLActive",
           "when": "(resourceScheme == sf-log || resourceScheme == sf-anon-log) && salesforce-utils:filterDML",
           "group": "navigation"
+        },
+        {
+          "command": "salesforce-utils.openPermissionSetUI",
+          "when": "resourceFilename =~ /\\.permissionset-meta\\.xml$/",
+          "group": "navigation"
         }
       ],
       "commandPalette": [
@@ -354,6 +413,19 @@
         "selector": [
           {
             "filenamePattern": "*.permissionset-meta.xml"
+          }
+        ],
+        "priority": "option"
+      },
+      {
+        "viewType": "salesforce-utils.scratchOrgDefEditor",
+        "displayName": "Scratch Org Definition Editor",
+        "selector": [
+          {
+            "filenamePattern": "*-scratch-def.json"
+          },
+          {
+            "filenamePattern": "project-scratch-def.json"
           }
         ],
         "priority": "default"
