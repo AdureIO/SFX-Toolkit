@@ -18,4 +18,6 @@ Improvements
   - add button to open the permissionset in xml viewer
 
 
-easily switch between html, css, 
+## LWC
+
+LWC easily switch between html, css, 
