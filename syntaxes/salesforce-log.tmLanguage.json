@@ -1,0 +1,35 @@
+{
+    "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+    "name": "Salesforce Log",
+    "patterns": [
+        {
+            "match": "\\b(USER_DEBUG)\\b",
+            "name": "keyword.control.debug.salesforce-log"
+        },
+        {
+            "match": "\\b(FATAL_ERROR|EXCEPTION_THROWN|System.AssertException)\\b",
+            "name": "invalid.illegal.error.salesforce-log"
+        },
+        {
+            "match": "^\\d{2}:\\d{2}:\\d{2}\\.\\d{1,3}\\s+\\(\\d+\\)",
+            "name": "comment.line.timestamp.salesforce-log"
+        },
+        {
+            "match": "\\|METHOD_ENTRY\\|",
+            "name": "entity.name.function.method-entry.salesforce-log"
+        },
+        {
+            "match": "\\|METHOD_EXIT\\|",
+            "name": "entity.name.function.method-exit.salesforce-log"
+        },
+        {
+            "match": "\\|SOQL_EXECUTE_BEGIN\\|",
+            "name": "variable.language.soql.begin.salesforce-log"
+        },
+        {
+            "match": "\\|SOQL_EXECUTE_END\\|",
+            "name": "variable.language.soql.end.salesforce-log"
+        }
+    ],
+    "scopeName": "source.salesforce-log"
+}

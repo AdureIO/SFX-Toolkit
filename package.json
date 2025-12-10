@@ -1,0 +1,387 @@
+{
+  "name": "salesforce-utils",
+  "displayName": "Adure SFX Toolkit",
+  "description": "Utilities for Salesforce development: Log filtering, Debug Traces, Deployment, and more.",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "salesforce-utils.filterLogDebug",
+        "title": "Filter Debug",
+        "icon": "$(debug-alt)"
+      },
+      {
+        "command": "salesforce-utils.filterLogDebugActive",
+        "title": "Filter Debug (Active)",
+        "icon": {
+          "light": "resources/filter-debug-active.svg",
+          "dark": "resources/filter-debug-active.svg"
+        }
+      },
+      {
+        "command": "salesforce-utils.filterLogSOQL",
+        "title": "Filter SOQL",
+        "icon": "$(database)"
+      },
+      {
+        "command": "salesforce-utils.filterLogDMLActive",
+        "title": "Filter DML (Active)",
+        "icon": {
+          "light": "resources/dml-active.svg",
+          "dark": "resources/dml-active.svg"
+        }
+      },
+      {
+        "command": "salesforce-utils.filterLogDML",
+        "title": "Filter DML",
+        "icon": "$(list-unordered)"
+      },
+      {
+        "command": "salesforce-utils.refreshLogs",
+        "title": "Refresh Logs",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "salesforce-utils.openLog",
+        "title": "Open Log"
+      },
+      {
+        "command": "salesforce-utils.listLogs",
+        "title": "Salesforce Utils: List and Open Logs"
+      },
+      {
+        "command": "salesforce-utils.addDebugTrace",
+        "title": "New Trace",
+        "icon": "$(plus)"
+      },
+      {
+        "command": "salesforce-utils.quickTrace",
+        "title": "Quick Trace (Current User)",
+        "icon": "$(zap)"
+      },
+      {
+        "command": "salesforce-utils.deleteAllLogs",
+        "title": "Delete All Logs",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "salesforce-utils.startPolling",
+        "title": "Start Polling",
+        "icon": "$(play)"
+      },
+      {
+        "command": "salesforce-utils.stopPolling",
+        "title": "Stop Polling",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "salesforce-utils.deleteTrace",
+        "title": "Delete Trace",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "salesforce-utils.refreshTraces",
+        "title": "Refresh Traces",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "salesforce-utils.deployClasses",
+        "title": "Salesforce Utils: Deploy Classes"
+      },
+      {
+        "command": "salesforce-utils.executeAnonymous",
+        "title": "Salesforce Utils: Execute Anonymous Apex",
+        "icon": "$(play)"
+      },
+      {
+        "command": "salesforce-utils.rerunLastApex",
+        "title": "Rerun Last Apex",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "salesforce-utils.executeSOQL",
+        "title": "Salesforce Utils: Execute SOQL Query"
+      },
+      {
+        "command": "salesforce-utils.refreshOrgs",
+        "title": "Refresh Orgs",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "salesforce-utils.openOrg",
+        "title": "Open Org",
+        "icon": "$(globe)"
+      },
+      {
+        "command": "salesforce-utils.setAsDefaultOrg",
+        "title": "Set as Default",
+        "icon": "$(check)"
+      },
+      {
+        "command": "salesforce-utils.setAsDefaultDevHub",
+        "title": "Set as Default Dev Hub",
+        "icon": "$(hub)"
+      },
+      {
+        "command": "salesforce-utils.copyUsername",
+        "title": "Copy Username",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "salesforce-utils.renameAlias",
+        "title": "Rename Alias",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "salesforce-utils.generatePassword",
+        "title": "Generate Password",
+        "icon": "$(key)"
+      },
+      {
+        "command": "salesforce-utils.deleteOrg",
+        "title": "Delete/Logout",
+        "icon": "$(trash)"
+      }
+    ],
+    "languages": [
+      {
+        "id": "salesforce-log",
+        "aliases": [
+          "Salesforce Log",
+          "sf-log"
+        ],
+        "extensions": [
+          ".log"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "salesforce-log",
+        "scopeName": "source.salesforce-log",
+        "path": "./syntaxes/salesforce-log.tmLanguage.json"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "salesforce-utils-activitybar",
+          "title": "Adure SFX Toolkit",
+          "icon": "$(list-flat)"
+        }
+      ]
+    },
+    "views": {
+      "salesforce-utils-activitybar": [
+        {
+          "id": "salesforce-utils.logs",
+          "name": "Logs"
+        },
+        {
+          "id": "salesforce-utils.traces",
+          "name": "Debug Traces"
+        },
+        {
+          "id": "salesforce-utils.orgs",
+          "name": "Orgs"
+        },
+        {
+          "id": "salesforce-utils.development",
+          "name": "Development"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "salesforce-utils.refreshLogs",
+          "when": "view == salesforce-utils.logs",
+          "group": "navigation"
+        },
+        {
+          "command": "salesforce-utils.deleteAllLogs",
+          "when": "view == salesforce-utils.logs",
+          "group": "navigation"
+        },
+        {
+          "command": "salesforce-utils.startPolling",
+          "when": "view == salesforce-utils.logs && !salesforce-utils:polling",
+          "group": "navigation"
+        },
+        {
+          "command": "salesforce-utils.stopPolling",
+          "when": "view == salesforce-utils.logs && salesforce-utils:polling",
+          "group": "navigation"
+        },
+        {
+          "command": "salesforce-utils.refreshTraces",
+          "when": "view == salesforce-utils.traces",
+          "group": "navigation"
+        },
+        {
+           "command": "salesforce-utils.quickTrace",
+           "when": "view == salesforce-utils.traces",
+           "group": "navigation"
+        },
+        {
+          "command": "salesforce-utils.addDebugTrace",
+          "when": "view == salesforce-utils.traces",
+          "group": "navigation"
+        },
+        {
+          "command": "salesforce-utils.refreshOrgs",
+          "when": "view == salesforce-utils.orgs",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "salesforce-utils.deleteTrace",
+          "when": "view == salesforce-utils.traces",
+          "group": "inline"
+        },
+        {
+          "command": "salesforce-utils.openOrg",
+          "when": "view == salesforce-utils.orgs && viewItem =~ /org-*/",
+          "group": "inline"
+        },
+        {
+          "command": "salesforce-utils.setAsDefaultOrg",
+          "when": "view == salesforce-utils.orgs && viewItem =~ /org-*/",
+          "group": "inline"
+        },
+        {
+          "command": "salesforce-utils.setAsDefaultDevHub",
+          "when": "view == salesforce-utils.orgs && viewItem == org-devhub",
+          "group": "inline"
+        },
+        {
+          "command": "salesforce-utils.renameAlias",
+          "when": "view == salesforce-utils.orgs && viewItem =~ /org-*/",
+          "group": "1_modify"
+        },
+        {
+          "command": "salesforce-utils.generatePassword",
+          "when": "view == salesforce-utils.orgs && viewItem =~ /org-*/",
+          "group": "1_modify"
+        },
+        {
+          "command": "salesforce-utils.copyUsername",
+          "when": "view == salesforce-utils.orgs && viewItem =~ /org-*/",
+          "group": "2_copy"
+        },
+        {
+          "command": "salesforce-utils.deleteOrg",
+          "when": "view == salesforce-utils.orgs && viewItem == org-scratch",
+          "group": "3_danger"
+        },
+        {
+          "command": "salesforce-utils.deleteOrg",
+          "when": "view == salesforce-utils.orgs && (viewItem == org-connected || viewItem == org-devhub)",
+          "group": "3_danger"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "salesforce-utils.executeAnonymous",
+          "when": "resourceLangId == apex",
+          "group": "navigation"
+        },
+        {
+          "command": "salesforce-utils.rerunLastApex",
+          "when": "resourceScheme == sf-anon-log",
+          "group": "navigation"
+        },
+        {
+          "command": "salesforce-utils.filterLogDebug",
+          "when": "(resourceScheme == sf-log || resourceScheme == sf-anon-log) && !salesforce-utils:filterDebug",
+          "group": "navigation"
+        },
+        {
+          "command": "salesforce-utils.filterLogDebugActive",
+          "when": "(resourceScheme == sf-log || resourceScheme == sf-anon-log) && salesforce-utils:filterDebug",
+          "group": "navigation"
+        },
+        {
+          "command": "salesforce-utils.filterLogSOQL",
+          "when": "(resourceScheme == sf-log || resourceScheme == sf-anon-log) && !salesforce-utils:filterSOQL",
+          "group": "navigation"
+        },
+        {
+          "command": "salesforce-utils.filterLogSOQLActive",
+          "when": "(resourceScheme == sf-log || resourceScheme == sf-anon-log) && salesforce-utils:filterSOQL",
+          "group": "navigation"
+        },
+        {
+          "command": "salesforce-utils.filterLogDML",
+          "when": "(resourceScheme == sf-log || resourceScheme == sf-anon-log) && !salesforce-utils:filterDML",
+          "group": "navigation"
+        },
+        {
+          "command": "salesforce-utils.filterLogDMLActive",
+          "when": "(resourceScheme == sf-log || resourceScheme == sf-anon-log) && salesforce-utils:filterDML",
+          "group": "navigation"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "salesforce-utils.filterLogDebug",
+          "when": "false"
+        },
+        {
+          "command": "salesforce-utils.filterLogSOQL",
+          "when": "false"
+        },
+        {
+          "command": "salesforce-utils.filterLogDML",
+          "when": "false"
+        }
+      ]
+    },
+    "customEditors": [
+      {
+        "viewType": "salesforce-utils.permissionSetEditor",
+        "displayName": "Permission Set Editor",
+        "selector": [
+          {
+            "filenamePattern": "*.permissionset-meta.xml"
+          }
+        ],
+        "priority": "default"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/glob": "^8.1.0",
+    "@types/mocha": "^10.0.1",
+    "@types/node": "^20.2.5",
+    "@types/vscode": "^1.80.0",
+    "@typescript-eslint/eslint-plugin": "^5.59.8",
+    "@typescript-eslint/parser": "^5.59.8",
+    "@vscode/test-electron": "^2.3.2",
+    "eslint": "^8.41.0",
+    "glob": "^8.1.0",
+    "mocha": "^10.2.0",
+    "typescript": "^5.1.3"
+  },
+  "dependencies": {
+    "fast-xml-parser": "^5.3.2"
+  }
+}
