@@ -3,3 +3,9 @@ node_modules
 .vscode-test
 .DS_Store
 *.log
+
+features.md
+functions.md
+settings.md
+
+*.vsix

@@ -169,7 +169,7 @@ export class LogTreeProvider implements vscode.TreeDataProvider<LogItem> {
                     log.Id,
                     vscode.TreeItemCollapsibleState.None,
                     {
-                        command: 'salesforce-utils.openLog',
+                        command: 'adure-sfx-toolkit.openLog',
                         title: 'Open Log',
                         arguments: [log.Id]
                     },

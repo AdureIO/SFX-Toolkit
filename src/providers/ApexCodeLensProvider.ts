@@ -9,7 +9,7 @@ export class ApexCodeLensProvider implements vscode.CodeLensProvider {
         const range = new vscode.Range(0, 0, 0, 0);
         const cmd: vscode.Command = {
             title: "$(play) Run Anonymous Apex",
-            command: "salesforce-utils.executeAnonymous"
+            command: "adure-sfx-toolkit.executeAnonymous"
         };
         
         lenses.push(new vscode.CodeLens(range, cmd));

@@ -10,7 +10,7 @@ export class ScratchOrgDefEditorProvider implements vscode.CustomTextEditorProvi
     public static register(context: vscode.ExtensionContext): vscode.Disposable {
         const provider = new ScratchOrgDefEditorProvider(context);
         const providerRegistration = vscode.window.registerCustomEditorProvider(
-            'salesforce-utils.scratchOrgDefEditor',
+            'adure-sfx-toolkit.scratchOrgDefEditor',
             provider
         );
         return providerRegistration;

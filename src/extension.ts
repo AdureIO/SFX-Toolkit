@@ -21,18 +21,18 @@ import { PermissionSetEditorProvider } from './editors/PermissionSetEditorProvid
 import { ScratchOrgDefEditorProvider } from './editors/ScratchOrgDefEditorProvider';
 
 export function activate(context: vscode.ExtensionContext) {
-    console.log('Congratulations, your extension "salesforce-utils" is now active!');
+    console.log('Congratulations, your extension "adure-sfx-toolkit" is now active!');
 
     // 1. Filter Logs Commands
     // 1. Filter Logs Commands (Normal and Active versions point to same handler)
-    let filterDebugCmd = vscode.commands.registerCommand('salesforce-utils.filterLogDebug', filterLogDebug);
-    let filterDebugActiveCmd = vscode.commands.registerCommand('salesforce-utils.filterLogDebugActive', filterLogDebug);
+    let filterDebugCmd = vscode.commands.registerCommand('adure-sfx-toolkit.filterLogDebug', filterLogDebug);
+    let filterDebugActiveCmd = vscode.commands.registerCommand('adure-sfx-toolkit.filterLogDebugActive', filterLogDebug);
     
-    let filterSOQLCmd = vscode.commands.registerCommand('salesforce-utils.filterLogSOQL', filterLogSOQL);
-    let filterSOQLActiveCmd = vscode.commands.registerCommand('salesforce-utils.filterLogSOQLActive', filterLogSOQL);
+    let filterSOQLCmd = vscode.commands.registerCommand('adure-sfx-toolkit.filterLogSOQL', filterLogSOQL);
+    let filterSOQLActiveCmd = vscode.commands.registerCommand('adure-sfx-toolkit.filterLogSOQLActive', filterLogSOQL);
     
-    let filterDMLCmd = vscode.commands.registerCommand('salesforce-utils.filterLogDML', filterLogDML);
-    let filterDMLActiveCmd = vscode.commands.registerCommand('salesforce-utils.filterLogDMLActive', filterLogDML);
+    let filterDMLCmd = vscode.commands.registerCommand('adure-sfx-toolkit.filterLogDML', filterLogDML);
+    let filterDMLActiveCmd = vscode.commands.registerCommand('adure-sfx-toolkit.filterLogDMLActive', filterLogDML);
     
     // Sync Context on Switch
     vscode.window.onDidChangeActiveTextEditor(editor => {
@@ -40,17 +40,17 @@ export function activate(context: vscode.ExtensionContext) {
     });
 
     // 2. List Logs
-    let listLogsCmd = vscode.commands.registerCommand('salesforce-utils.listLogs', listLogs);
+    let listLogsCmd = vscode.commands.registerCommand('adure-sfx-toolkit.listLogs', listLogs);
 
     // 3. Add Debug Trace
-    let addDebugTraceCmd = vscode.commands.registerCommand('salesforce-utils.addDebugTrace', addDebugTrace);
+    let addDebugTraceCmd = vscode.commands.registerCommand('adure-sfx-toolkit.addDebugTrace', addDebugTrace);
 
     // 4. Deploy Classes
-    let deployClassesCmd = vscode.commands.registerCommand('salesforce-utils.deployClasses', deployClasses);
+    let deployClassesCmd = vscode.commands.registerCommand('adure-sfx-toolkit.deployClasses', deployClasses);
 
     // 5. Execute Anonymous Apex
-    let executeAnonCmd = vscode.commands.registerCommand('salesforce-utils.executeAnonymous', executeAnonymous);
-    let rerunAnonCmd = vscode.commands.registerCommand('salesforce-utils.rerunLastApex', rerunLastApex);
+    let executeAnonCmd = vscode.commands.registerCommand('adure-sfx-toolkit.executeAnonymous', executeAnonymous);
+    let rerunAnonCmd = vscode.commands.registerCommand('adure-sfx-toolkit.rerunLastApex', rerunLastApex);
     
     // CodeLens
     context.subscriptions.push(
@@ -61,36 +61,36 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     // 6. Execute SOQL
-    let executeSOQLCmd = vscode.commands.registerCommand('salesforce-utils.executeSOQL', executeSOQL);
+    let executeSOQLCmd = vscode.commands.registerCommand('adure-sfx-toolkit.executeSOQL', executeSOQL);
 
     // 7. Side Bar Log Provider
     // Use singleton
-    vscode.window.registerTreeDataProvider('salesforce-utils.logs', logTreeProvider);
+    vscode.window.registerTreeDataProvider('adure-sfx-toolkit.logs', logTreeProvider);
 
-    let refreshLogsCmd = vscode.commands.registerCommand('salesforce-utils.refreshLogs', () => {
+    let refreshLogsCmd = vscode.commands.registerCommand('adure-sfx-toolkit.refreshLogs', () => {
         logTreeProvider.refresh();
     });
 
-    let openLogCmd = vscode.commands.registerCommand('salesforce-utils.openLog', async (logId: string) => {
+    let openLogCmd = vscode.commands.registerCommand('adure-sfx-toolkit.openLog', async (logId: string) => {
         if (logId) {
             await openLogById(logId);
         }
     });
 
-    let deleteAllLogsCmd = vscode.commands.registerCommand('salesforce-utils.deleteAllLogs', deleteAllLogs);
+    let deleteAllLogsCmd = vscode.commands.registerCommand('adure-sfx-toolkit.deleteAllLogs', deleteAllLogs);
 
     // 8. Side Bar Trace Provider
     const traceProvider = new TraceTreeProvider();
-    vscode.window.registerTreeDataProvider('salesforce-utils.traces', traceProvider);
+    vscode.window.registerTreeDataProvider('adure-sfx-toolkit.traces', traceProvider);
 
-    let refreshTracesCmd = vscode.commands.registerCommand('salesforce-utils.refreshTraces', () => {
+    let refreshTracesCmd = vscode.commands.registerCommand('adure-sfx-toolkit.refreshTraces', () => {
         traceProvider.refresh();
     });
 
-    let quickTraceCmd = vscode.commands.registerCommand('salesforce-utils.quickTrace', quickTrace);
+    let quickTraceCmd = vscode.commands.registerCommand('adure-sfx-toolkit.quickTrace', quickTrace);
 
     // For deleteTrace, we expect a TraceItem which has a traceId, or a generic call.
-    let deleteTraceCmd = vscode.commands.registerCommand('salesforce-utils.deleteTrace', async (item?: any) => {
+    let deleteTraceCmd = vscode.commands.registerCommand('adure-sfx-toolkit.deleteTrace', async (item?: any) => {
         if (item && item.traceId) {
             await deleteTrace(item.traceId);
         } else {
@@ -101,30 +101,30 @@ export function activate(context: vscode.ExtensionContext) {
     });
     
     // 7. Org Manager
-    const orgTreeView = vscode.window.createTreeView('salesforce-utils.orgs', { treeDataProvider: orgTreeProvider });
+    const orgTreeView = vscode.window.createTreeView('adure-sfx-toolkit.orgs', { treeDataProvider: orgTreeProvider });
     
-    let refreshOrgsCmd = vscode.commands.registerCommand('salesforce-utils.refreshOrgs', () => orgTreeProvider.refresh());
-    let openOrgCmd = vscode.commands.registerCommand('salesforce-utils.openOrg', openOrg);
-    let setAsDefaultCmd = vscode.commands.registerCommand('salesforce-utils.setAsDefaultOrg', setAsDefault);
-    let setAsDefaultDevHubCmd = vscode.commands.registerCommand('salesforce-utils.setAsDefaultDevHub', setAsDefaultDevHub);
-    let copyUsernameCmd = vscode.commands.registerCommand('salesforce-utils.copyUsername', copyUsername);
-    let renameAliasCmd = vscode.commands.registerCommand('salesforce-utils.renameAlias', renameAlias);
-    let generatePasswordCmd = vscode.commands.registerCommand('salesforce-utils.generatePassword', generatePassword);
-    let deleteOrgCmd = vscode.commands.registerCommand('salesforce-utils.deleteOrg', deleteOrg);
+    let refreshOrgsCmd = vscode.commands.registerCommand('adure-sfx-toolkit.refreshOrgs', () => orgTreeProvider.refresh());
+    let openOrgCmd = vscode.commands.registerCommand('adure-sfx-toolkit.openOrg', openOrg);
+    let setAsDefaultCmd = vscode.commands.registerCommand('adure-sfx-toolkit.setAsDefaultOrg', setAsDefault);
+    let setAsDefaultDevHubCmd = vscode.commands.registerCommand('adure-sfx-toolkit.setAsDefaultDevHub', setAsDefaultDevHub);
+    let copyUsernameCmd = vscode.commands.registerCommand('adure-sfx-toolkit.copyUsername', copyUsername);
+    let renameAliasCmd = vscode.commands.registerCommand('adure-sfx-toolkit.renameAlias', renameAlias);
+    let generatePasswordCmd = vscode.commands.registerCommand('adure-sfx-toolkit.generatePassword', generatePassword);
+    let deleteOrgCmd = vscode.commands.registerCommand('adure-sfx-toolkit.deleteOrg', deleteOrg);
 
-    let connectOrgCmd = vscode.commands.registerCommand('salesforce-utils.connectOrg', connectOrg);
-    let createScratchCmd = vscode.commands.registerCommand('salesforce-utils.createScratch', createScratch);
-    let quickScratchCmd = vscode.commands.registerCommand('salesforce-utils.quickScratch', quickScratch);
+    let connectOrgCmd = vscode.commands.registerCommand('adure-sfx-toolkit.connectOrg', connectOrg);
+    let createScratchCmd = vscode.commands.registerCommand('adure-sfx-toolkit.createScratch', createScratch);
+    let quickScratchCmd = vscode.commands.registerCommand('adure-sfx-toolkit.quickScratch', quickScratch);
 
     // 8. Development Actions
     const devProvider = new DevActionsProvider();
-    vscode.window.registerTreeDataProvider('salesforce-utils.development', devProvider);
+    vscode.window.registerTreeDataProvider('adure-sfx-toolkit.development', devProvider);
     
-    let pushCmd = vscode.commands.registerCommand('salesforce-utils.pushSource', pushSource);
-    let pullCmd = vscode.commands.registerCommand('salesforce-utils.pullSource', pullSource);
-    let deployFileCmd = vscode.commands.registerCommand('salesforce-utils.deployCurrentFile', deployCurrentFile);
-    let retrieveFileCmd = vscode.commands.registerCommand('salesforce-utils.retrieveCurrentFile', retrieveCurrentFile);
-    let runTestsCmd = vscode.commands.registerCommand('salesforce-utils.runLocalTests', runLocalTests);
+    let pushCmd = vscode.commands.registerCommand('adure-sfx-toolkit.pushSource', pushSource);
+    let pullCmd = vscode.commands.registerCommand('adure-sfx-toolkit.pullSource', pullSource);
+    let deployFileCmd = vscode.commands.registerCommand('adure-sfx-toolkit.deployCurrentFile', deployCurrentFile);
+    let retrieveFileCmd = vscode.commands.registerCommand('adure-sfx-toolkit.retrieveCurrentFile', retrieveCurrentFile);
+    let runTestsCmd = vscode.commands.registerCommand('adure-sfx-toolkit.runLocalTests', runLocalTests);
 
     // 9. Permission Set Editor
     context.subscriptions.push(
@@ -132,10 +132,10 @@ export function activate(context: vscode.ExtensionContext) {
     );
     
     // Command to open permission set in UI mode
-    let openPermissionSetUICmd = vscode.commands.registerCommand('salesforce-utils.openPermissionSetUI', async () => {
+    let openPermissionSetUICmd = vscode.commands.registerCommand('adure-sfx-toolkit.openPermissionSetUI', async () => {
         const editor = vscode.window.activeTextEditor;
         if (editor && editor.document.fileName.endsWith('.permissionset-meta.xml')) {
-            await vscode.commands.executeCommand('vscode.openWith', editor.document.uri, 'salesforce-utils.permissionSetEditor');
+            await vscode.commands.executeCommand('vscode.openWith', editor.document.uri, 'adure-sfx-toolkit.permissionSetEditor');
         }
     });
     context.subscriptions.push(openPermissionSetUICmd);
@@ -153,10 +153,10 @@ export function activate(context: vscode.ExtensionContext) {
     let pollingInterval: NodeJS.Timeout | undefined;
     let isPolling = false;
 
-    let startPollingCmd = vscode.commands.registerCommand('salesforce-utils.startPolling', async () => {
+    let startPollingCmd = vscode.commands.registerCommand('adure-sfx-toolkit.startPolling', async () => {
         isPolling = true;
         logTreeProvider.isPolling = true;
-        await vscode.commands.executeCommand('setContext', 'salesforce-utils:polling', true);
+        await vscode.commands.executeCommand('setContext', 'adure-sfx-toolkit:polling', true);
         
         // Refresh every 5 seconds
         if (!pollingInterval) {
@@ -168,10 +168,10 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.window.showInformationMessage('Log Polling Started (5s)');
     });
 
-    let stopPollingCmd = vscode.commands.registerCommand('salesforce-utils.stopPolling', async () => {
+    let stopPollingCmd = vscode.commands.registerCommand('adure-sfx-toolkit.stopPolling', async () => {
         isPolling = false;
         logTreeProvider.isPolling = false;
-        await vscode.commands.executeCommand('setContext', 'salesforce-utils:polling', false);
+        await vscode.commands.executeCommand('setContext', 'adure-sfx-toolkit:polling', false);
         
         if (pollingInterval) {
             clearInterval(pollingInterval);
@@ -181,7 +181,7 @@ export function activate(context: vscode.ExtensionContext) {
     });
     
     // Initialize context
-    vscode.commands.executeCommand('setContext', 'salesforce-utils:polling', false);
+    vscode.commands.executeCommand('setContext', 'adure-sfx-toolkit:polling', false);
 
     context.subscriptions.push(
         filterDebugCmd,

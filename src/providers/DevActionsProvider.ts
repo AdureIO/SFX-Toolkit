@@ -11,11 +11,11 @@ export class DevActionsProvider implements vscode.TreeDataProvider<vscode.TreeIt
 
         // Root items
         return [
-            this.createItem("Push Source", "salesforce-utils.pushSource", "cloud-upload", "Deploy all source to default org"),
-            this.createItem("Pull Source", "salesforce-utils.pullSource", "cloud-download", "Retrieve all source from default org"),
-            this.createItem("Deploy Active File", "salesforce-utils.deployCurrentFile", "file-code", "Deploy the currently open file"),
-            this.createItem("Retrieve Active File", "salesforce-utils.retrieveCurrentFile", "reply", "Retrieve the currently open file"),
-            this.createItem("Run Local Tests", "salesforce-utils.runLocalTests", "beaker", "Run all local Apex tests")
+            this.createItem("Push Source", "adure-sfx-toolkit.pushSource", "cloud-upload", "Deploy all source to default org"),
+            this.createItem("Pull Source", "adure-sfx-toolkit.pullSource", "cloud-download", "Retrieve all source from default org"),
+            this.createItem("Deploy Active File", "adure-sfx-toolkit.deployCurrentFile", "file-code", "Deploy the currently open file"),
+            this.createItem("Retrieve Active File", "adure-sfx-toolkit.retrieveCurrentFile", "reply", "Retrieve the currently open file"),
+            this.createItem("Run Local Tests", "adure-sfx-toolkit.runLocalTests", "beaker", "Run all local Apex tests")
         ];
     }
     

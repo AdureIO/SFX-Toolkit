@@ -73,7 +73,7 @@ export async function createTrace(durationMinutes: number, userId: string | null
             await runCommand(createCmd);
 
             vscode.window.showInformationMessage(`Debug trace set for ${durationMinutes} minutes.`);
-            vscode.commands.executeCommand('salesforce-utils.refreshTraces');
+            vscode.commands.executeCommand('adure-sfx-toolkit.refreshTraces');
         
         } catch (e: any) {
             vscode.window.showErrorMessage(`Failed to set trace: ${e.stderr || e.message}`);
@@ -95,7 +95,7 @@ export async function deleteTrace(traceId: string) {
          try {
              await runCommand(`sf data delete record -s TraceFlag -i ${traceId} -t`);
              vscode.window.showInformationMessage('Trace flag deleted.');
-             vscode.commands.executeCommand('salesforce-utils.refreshTraces');
+             vscode.commands.executeCommand('adure-sfx-toolkit.refreshTraces');
          } catch (e: any) {
              vscode.window.showErrorMessage(`Failed to delete trace: ${e.message}`);
          }

@@ -3,7 +3,7 @@ import { XMLParser, XMLBuilder } from 'fast-xml-parser';
 
 export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvider {
 
-    public static readonly viewType = 'salesforce-utils.permissionSetEditor';
+    public static readonly viewType = 'adure-sfx-toolkit.permissionSetEditor';
 
     constructor(
         private readonly context: vscode.ExtensionContext

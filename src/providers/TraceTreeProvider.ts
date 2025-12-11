@@ -66,7 +66,7 @@ export class TraceTreeProvider implements vscode.TreeDataProvider<TraceItem> {
                     trace.Id,
                     vscode.TreeItemCollapsibleState.None,
                     {
-                        command: 'salesforce-utils.editTrace', // Placeholder
+                        command: 'adure-sfx-toolkit.editTrace', // Placeholder
                         title: 'Edit Trace',
                         arguments: [trace.Id]
                     }

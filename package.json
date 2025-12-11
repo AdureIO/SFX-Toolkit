@@ -1,12 +1,16 @@
 {
   "name": "sfx-toolkit",
   "displayName": "Adure SFX Toolkit",
-  "publisher": "io.adure",
+  "publisher": "AdureIO",
   "description": "Utilities for Salesforce development: Log filtering, Debug Traces, Deployment, and more.",
   "icon": "resources/icon.png",
   "version": "0.0.1",
   "engines": {
     "vscode": "^1.80.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AdureIO/SFX-Toolkit.git"
   },
   "categories": [
     "Other"
@@ -16,177 +20,177 @@
   "contributes": {
     "commands": [
       {
-        "command": "salesforce-utils.filterLogDebug",
-        "title": "Filter Debug",
+        "command": "adure-sfx-toolkit.filterLogDebug",
+        "title": "ASFXT: Filter Debug",
         "icon": {
           "light": "resources/light/debug-inactive.svg",
           "dark": "resources/dark/debug-inactive.svg"
         }
       },
       {
-        "command": "salesforce-utils.filterLogDebugActive",
-        "title": "Filter Debug (Active)",
+        "command": "adure-sfx-toolkit.filterLogDebugActive",
+        "title": "ASFXT: Filter Debug (Active)",
         "icon": {
           "light": "resources/light/debug-active.svg",
           "dark": "resources/dark/debug-active.svg"
         }
       },
       {
-        "command": "salesforce-utils.filterLogSOQL",
-        "title": "Filter SOQL",
+        "command": "adure-sfx-toolkit.filterLogSOQL",
+        "title": "ASFXT: Filter SOQL",
         "icon": {
           "light": "resources/light/soql-inactive.svg",
           "dark": "resources/dark/soql-inactive.svg"
         }
       },
       {
-        "command": "salesforce-utils.filterLogSOQLActive",
-        "title": "Filter SOQL (Active)",
+        "command": "adure-sfx-toolkit.filterLogSOQLActive",
+        "title": "ASFXT: Filter SOQL (Active)",
         "icon": {
           "light": "resources/light/soql-active.svg",
           "dark": "resources/dark/soql-active.svg"
         }
       },
       {
-        "command": "salesforce-utils.filterLogDML",
-        "title": "Filter DML",
+        "command": "adure-sfx-toolkit.filterLogDML",
+        "title": "ASFXT: Filter DML",
         "icon": {
           "light": "resources/light/dml-inactive.svg",
           "dark": "resources/dark/dml-inactive.svg"
         }
       },
       {
-        "command": "salesforce-utils.filterLogDMLActive",
-        "title": "Filter DML (Active)",
+        "command": "adure-sfx-toolkit.filterLogDMLActive",
+        "title": "ASFXT: Filter DML (Active)",
         "icon": {
           "light": "resources/light/dml-active.svg",
           "dark": "resources/dark/dml-active.svg"
         }
       },
       {
-        "command": "salesforce-utils.refreshLogs",
-        "title": "Refresh Logs",
+        "command": "adure-sfx-toolkit.refreshLogs",
+        "title": "ASFXT: Refresh Logs",
         "icon": "$(refresh)"
       },
       {
-        "command": "salesforce-utils.openLog",
-        "title": "Open Log"
+        "command": "adure-sfx-toolkit.openLog",
+        "title": "ASFXT: Open Log"
       },
       {
-        "command": "salesforce-utils.listLogs",
-        "title": "Salesforce Utils: List and Open Logs"
+        "command": "adure-sfx-toolkit.listLogs",
+        "title": "ASFXT: List and Open Logs"
       },
       {
-        "command": "salesforce-utils.addDebugTrace",
-        "title": "New Trace",
+        "command": "adure-sfx-toolkit.addDebugTrace",
+        "title": "ASFXT: New Trace",
         "icon": "$(plus)"
       },
       {
-        "command": "salesforce-utils.quickTrace",
-        "title": "Quick Trace (Current User)",
+        "command": "adure-sfx-toolkit.quickTrace",
+        "title": "ASFXT: Quick Trace (Current User)",
         "icon": "$(zap)"
       },
       {
-        "command": "salesforce-utils.deleteAllLogs",
-        "title": "Delete All Logs",
+        "command": "adure-sfx-toolkit.deleteAllLogs",
+        "title": "ASFXT: Delete All Logs",
         "icon": "$(trash)"
       },
       {
-        "command": "salesforce-utils.startPolling",
-        "title": "Start Polling",
+        "command": "adure-sfx-toolkit.startPolling",
+        "title": "ASFXT: Start Polling",
         "icon": "$(play)"
       },
       {
-        "command": "salesforce-utils.stopPolling",
-        "title": "Stop Polling",
+        "command": "adure-sfx-toolkit.stopPolling",
+        "title": "ASFXT: Stop Polling",
         "icon": "$(debug-stop)"
       },
       {
-        "command": "salesforce-utils.deleteTrace",
-        "title": "Delete Trace",
+        "command": "adure-sfx-toolkit.deleteTrace",
+        "title": "ASFXT: Delete Trace",
         "icon": "$(trash)"
       },
       {
-        "command": "salesforce-utils.refreshTraces",
-        "title": "Refresh Traces",
+        "command": "adure-sfx-toolkit.refreshTraces",
+        "title": "ASFXT: Refresh Traces",
         "icon": "$(refresh)"
       },
       {
-        "command": "salesforce-utils.deployClasses",
-        "title": "Salesforce Utils: Deploy Classes"
+        "command": "adure-sfx-toolkit.deployClasses",
+        "title": "ASFXT: Deploy Classes"
       },
       {
-        "command": "salesforce-utils.executeAnonymous",
-        "title": "Salesforce Utils: Execute Anonymous Apex",
+        "command": "adure-sfx-toolkit.executeAnonymous",
+        "title": "ASFXT: Execute Anonymous Apex",
         "icon": "$(play)"
       },
       {
-        "command": "salesforce-utils.rerunLastApex",
-        "title": "Rerun Last Apex",
+        "command": "adure-sfx-toolkit.rerunLastApex",
+        "title": "ASFXT: Rerun Last Apex",
         "icon": "$(debug-restart)"
       },
       {
-        "command": "salesforce-utils.executeSOQL",
-        "title": "Salesforce Utils: Execute SOQL Query"
+        "command": "adure-sfx-toolkit.executeSOQL",
+        "title": "ASFXT: Execute SOQL Query"
       },
       {
-        "command": "salesforce-utils.refreshOrgs",
-        "title": "Refresh Orgs",
+        "command": "adure-sfx-toolkit.refreshOrgs",
+        "title": "ASFXT: Refresh Orgs",
         "icon": "$(refresh)"
       },
       {
-        "command": "salesforce-utils.openOrg",
-        "title": "Open Org",
+        "command": "adure-sfx-toolkit.openOrg",
+        "title": "ASFXT: Open Org",
         "icon": "$(globe)"
       },
       {
-        "command": "salesforce-utils.setAsDefaultOrg",
-        "title": "Set as Default",
+        "command": "adure-sfx-toolkit.setAsDefaultOrg",
+        "title": "ASFXT: Set as Default",
         "icon": "$(check)"
       },
       {
-        "command": "salesforce-utils.setAsDefaultDevHub",
-        "title": "Set as Default Dev Hub",
+        "command": "adure-sfx-toolkit.setAsDefaultDevHub",
+        "title": "ASFXT: Set as Default Dev Hub",
         "icon": "$(hub)"
       },
       {
-        "command": "salesforce-utils.copyUsername",
-        "title": "Copy Username",
+        "command": "adure-sfx-toolkit.copyUsername",
+        "title": "ASFXT: Copy Username",
         "icon": "$(copy)"
       },
       {
-        "command": "salesforce-utils.renameAlias",
-        "title": "Rename Alias",
+        "command": "adure-sfx-toolkit.renameAlias",
+        "title": "ASFXT: Rename Alias",
         "icon": "$(edit)"
       },
       {
-        "command": "salesforce-utils.generatePassword",
-        "title": "Generate Password",
+        "command": "adure-sfx-toolkit.generatePassword",
+        "title": "ASFXT: Generate Password",
         "icon": "$(key)"
       },
       {
-        "command": "salesforce-utils.deleteOrg",
-        "title": "Delete/Logout",
+        "command": "adure-sfx-toolkit.deleteOrg",
+        "title": "ASFXT: Delete/Logout",
         "icon": "$(trash)"
       },
       {
-        "command": "salesforce-utils.connectOrg",
-        "title": "Connect Org",
+        "command": "adure-sfx-toolkit.connectOrg",
+        "title": "ASFXT: Connect Org",
         "icon": "$(plug)"
       },
       {
-        "command": "salesforce-utils.openPermissionSetUI",
-        "title": "Open in Permission UI",
+        "command": "adure-sfx-toolkit.openPermissionSetUI",
+        "title": "ASFXT: Open in Permission UI",
         "icon": "$(edit)"
       },
       {
-        "command": "salesforce-utils.createScratch",
-        "title": "Create Scratch Org",
+        "command": "adure-sfx-toolkit.createScratch",
+        "title": "ASFXT: Create Scratch Org",
         "icon": "$(beaker)"
       },
       {
-        "command": "salesforce-utils.quickScratch",
-        "title": "Quick Scratch (Defaults)",
+        "command": "adure-sfx-toolkit.quickScratch",
+        "title": "ASFXT: Quick Scratch (Defaults)",
         "icon": "$(rocket)"
       }
     ],
@@ -213,28 +217,28 @@
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "salesforce-utils-activitybar",
+          "id": "adure-sfx-toolkit-activitybar",
           "title": "Adure SFX Toolkit",
           "icon": "resources/dark/sidebar.png"
         }
       ]
     },
     "views": {
-      "salesforce-utils-activitybar": [
+      "adure-sfx-toolkit-activitybar": [
         {
-          "id": "salesforce-utils.logs",
+          "id": "adure-sfx-toolkit.logs",
           "name": "Logs"
         },
         {
-          "id": "salesforce-utils.traces",
+          "id": "adure-sfx-toolkit.traces",
           "name": "Debug Traces"
         },
         {
-          "id": "salesforce-utils.orgs",
+          "id": "adure-sfx-toolkit.orgs",
           "name": "Orgs"
         },
         {
-          "id": "salesforce-utils.development",
+          "id": "adure-sfx-toolkit.development",
           "name": "Development"
         }
       ]
@@ -242,173 +246,173 @@
     "menus": {
       "view/title": [
         {
-          "command": "salesforce-utils.refreshLogs",
-          "when": "view == salesforce-utils.logs",
+          "command": "adure-sfx-toolkit.refreshLogs",
+          "when": "view == adure-sfx-toolkit.logs",
           "group": "navigation"
         },
         {
-          "command": "salesforce-utils.deleteAllLogs",
-          "when": "view == salesforce-utils.logs",
+          "command": "adure-sfx-toolkit.deleteAllLogs",
+          "when": "view == adure-sfx-toolkit.logs",
           "group": "navigation"
         },
         {
-          "command": "salesforce-utils.startPolling",
-          "when": "view == salesforce-utils.logs && !salesforce-utils:polling",
+          "command": "adure-sfx-toolkit.startPolling",
+          "when": "view == adure-sfx-toolkit.logs && !adure-sfx-toolkit:polling",
           "group": "navigation"
         },
         {
-          "command": "salesforce-utils.stopPolling",
-          "when": "view == salesforce-utils.logs && salesforce-utils:polling",
+          "command": "adure-sfx-toolkit.stopPolling",
+          "when": "view == adure-sfx-toolkit.logs && adure-sfx-toolkit:polling",
           "group": "navigation"
         },
         {
-          "command": "salesforce-utils.refreshTraces",
-          "when": "view == salesforce-utils.traces",
+          "command": "adure-sfx-toolkit.refreshTraces",
+          "when": "view == adure-sfx-toolkit.traces",
           "group": "navigation"
         },
         {
-          "command": "salesforce-utils.quickTrace",
-          "when": "view == salesforce-utils.traces",
+          "command": "adure-sfx-toolkit.quickTrace",
+          "when": "view == adure-sfx-toolkit.traces",
           "group": "navigation"
         },
         {
-          "command": "salesforce-utils.addDebugTrace",
-          "when": "view == salesforce-utils.traces",
+          "command": "adure-sfx-toolkit.addDebugTrace",
+          "when": "view == adure-sfx-toolkit.traces",
           "group": "navigation"
         },
         {
-          "command": "salesforce-utils.refreshOrgs",
-          "when": "view == salesforce-utils.orgs",
+          "command": "adure-sfx-toolkit.refreshOrgs",
+          "when": "view == adure-sfx-toolkit.orgs",
           "group": "navigation"
         },
         {
-          "command": "salesforce-utils.connectOrg",
-          "when": "view == salesforce-utils.orgs",
+          "command": "adure-sfx-toolkit.connectOrg",
+          "when": "view == adure-sfx-toolkit.orgs",
           "group": "navigation"
         },
         {
-          "command": "salesforce-utils.createScratch",
-          "when": "view == salesforce-utils.orgs",
+          "command": "adure-sfx-toolkit.createScratch",
+          "when": "view == adure-sfx-toolkit.orgs",
           "group": "navigation"
         },
         {
-          "command": "salesforce-utils.quickScratch",
-          "when": "view == salesforce-utils.orgs",
+          "command": "adure-sfx-toolkit.quickScratch",
+          "when": "view == adure-sfx-toolkit.orgs",
           "group": "navigation"
         }
       ],
       "view/item/context": [
         {
-          "command": "salesforce-utils.deleteTrace",
-          "when": "view == salesforce-utils.traces",
+          "command": "adure-sfx-toolkit.deleteTrace",
+          "when": "view == adure-sfx-toolkit.traces",
           "group": "inline"
         },
         {
-          "command": "salesforce-utils.openOrg",
-          "when": "view == salesforce-utils.orgs && viewItem =~ /org-*/",
+          "command": "adure-sfx-toolkit.openOrg",
+          "when": "view == adure-sfx-toolkit.orgs && viewItem =~ /org-*/",
           "group": "inline"
         },
         {
-          "command": "salesforce-utils.setAsDefaultOrg",
-          "when": "view == salesforce-utils.orgs && viewItem =~ /org-*/",
+          "command": "adure-sfx-toolkit.setAsDefaultOrg",
+          "when": "view == adure-sfx-toolkit.orgs && viewItem =~ /org-*/",
           "group": "inline"
         },
         {
-          "command": "salesforce-utils.setAsDefaultDevHub",
-          "when": "view == salesforce-utils.orgs && viewItem == org-devhub",
+          "command": "adure-sfx-toolkit.setAsDefaultDevHub",
+          "when": "view == adure-sfx-toolkit.orgs && viewItem == org-devhub",
           "group": "inline"
         },
         {
-          "command": "salesforce-utils.renameAlias",
-          "when": "view == salesforce-utils.orgs && viewItem =~ /org-*/",
+          "command": "adure-sfx-toolkit.renameAlias",
+          "when": "view == adure-sfx-toolkit.orgs && viewItem =~ /org-*/",
           "group": "1_modify"
         },
         {
-          "command": "salesforce-utils.generatePassword",
-          "when": "view == salesforce-utils.orgs && viewItem =~ /org-*/",
+          "command": "adure-sfx-toolkit.generatePassword",
+          "when": "view == adure-sfx-toolkit.orgs && viewItem =~ /org-*/",
           "group": "1_modify"
         },
         {
-          "command": "salesforce-utils.copyUsername",
-          "when": "view == salesforce-utils.orgs && viewItem =~ /org-*/",
+          "command": "adure-sfx-toolkit.copyUsername",
+          "when": "view == adure-sfx-toolkit.orgs && viewItem =~ /org-*/",
           "group": "2_copy"
         },
         {
-          "command": "salesforce-utils.deleteOrg",
-          "when": "view == salesforce-utils.orgs && viewItem == org-scratch",
+          "command": "adure-sfx-toolkit.deleteOrg",
+          "when": "view == adure-sfx-toolkit.orgs && viewItem == org-scratch",
           "group": "3_danger"
         },
         {
-          "command": "salesforce-utils.deleteOrg",
-          "when": "view == salesforce-utils.orgs && (viewItem == org-connected || viewItem == org-devhub)",
+          "command": "adure-sfx-toolkit.deleteOrg",
+          "when": "view == adure-sfx-toolkit.orgs && (viewItem == org-connected || viewItem == org-devhub)",
           "group": "3_danger"
         }
       ],
       "editor/title": [
         {
-          "command": "salesforce-utils.executeAnonymous",
+          "command": "adure-sfx-toolkit.executeAnonymous",
           "when": "resourceLangId == apex",
           "group": "navigation"
         },
         {
-          "command": "salesforce-utils.rerunLastApex",
+          "command": "adure-sfx-toolkit.rerunLastApex",
           "when": "resourceScheme == sf-anon-log",
           "group": "navigation"
         },
         {
-          "command": "salesforce-utils.filterLogDebug",
-          "when": "(resourceScheme == sf-log || resourceScheme == sf-anon-log) && !salesforce-utils:filterDebug",
+          "command": "adure-sfx-toolkit.filterLogDebug",
+          "when": "(resourceScheme == sf-log || resourceScheme == sf-anon-log) && !adure-sfx-toolkit:filterDebug",
           "group": "navigation"
         },
         {
-          "command": "salesforce-utils.filterLogDebugActive",
-          "when": "(resourceScheme == sf-log || resourceScheme == sf-anon-log) && salesforce-utils:filterDebug",
+          "command": "adure-sfx-toolkit.filterLogDebugActive",
+          "when": "(resourceScheme == sf-log || resourceScheme == sf-anon-log) && adure-sfx-toolkit:filterDebug",
           "group": "navigation"
         },
         {
-          "command": "salesforce-utils.filterLogSOQL",
-          "when": "(resourceScheme == sf-log || resourceScheme == sf-anon-log) && !salesforce-utils:filterSOQL",
+          "command": "adure-sfx-toolkit.filterLogSOQL",
+          "when": "(resourceScheme == sf-log || resourceScheme == sf-anon-log) && !adure-sfx-toolkit:filterSOQL",
           "group": "navigation"
         },
         {
-          "command": "salesforce-utils.filterLogSOQLActive",
-          "when": "(resourceScheme == sf-log || resourceScheme == sf-anon-log) && salesforce-utils:filterSOQL",
+          "command": "adure-sfx-toolkit.filterLogSOQLActive",
+          "when": "(resourceScheme == sf-log || resourceScheme == sf-anon-log) && adure-sfx-toolkit:filterSOQL",
           "group": "navigation"
         },
         {
-          "command": "salesforce-utils.filterLogDML",
-          "when": "(resourceScheme == sf-log || resourceScheme == sf-anon-log) && !salesforce-utils:filterDML",
+          "command": "adure-sfx-toolkit.filterLogDML",
+          "when": "(resourceScheme == sf-log || resourceScheme == sf-anon-log) && !adure-sfx-toolkit:filterDML",
           "group": "navigation"
         },
         {
-          "command": "salesforce-utils.filterLogDMLActive",
-          "when": "(resourceScheme == sf-log || resourceScheme == sf-anon-log) && salesforce-utils:filterDML",
+          "command": "adure-sfx-toolkit.filterLogDMLActive",
+          "when": "(resourceScheme == sf-log || resourceScheme == sf-anon-log) && adure-sfx-toolkit:filterDML",
           "group": "navigation"
         },
         {
-          "command": "salesforce-utils.openPermissionSetUI",
+          "command": "adure-sfx-toolkit.openPermissionSetUI",
           "when": "resourceFilename =~ /\\.permissionset-meta\\.xml$/",
           "group": "navigation"
         }
       ],
       "commandPalette": [
         {
-          "command": "salesforce-utils.filterLogDebug",
+          "command": "adure-sfx-toolkit.filterLogDebug",
           "when": "false"
         },
         {
-          "command": "salesforce-utils.filterLogSOQL",
+          "command": "adure-sfx-toolkit.filterLogSOQL",
           "when": "false"
         },
         {
-          "command": "salesforce-utils.filterLogDML",
+          "command": "adure-sfx-toolkit.filterLogDML",
           "when": "false"
         }
       ]
     },
     "customEditors": [
       {
-        "viewType": "salesforce-utils.permissionSetEditor",
+        "viewType": "adure-sfx-toolkit.permissionSetEditor",
         "displayName": "Permission Set Editor",
         "selector": [
           {
@@ -418,7 +422,7 @@
         "priority": "option"
       },
       {
-        "viewType": "salesforce-utils.scratchOrgDefEditor",
+        "viewType": "adure-sfx-toolkit.scratchOrgDefEditor",
         "displayName": "Scratch Org Definition Editor",
         "selector": [
           {

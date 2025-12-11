@@ -31,8 +31,8 @@ export async function setAsDefault(item: OrgItem) {
             vscode.window.showInformationMessage(`Set ${item.label} as default org.`);
             orgTreeProvider.refresh();
             // Update Logs & Traces as they depend on default org/current user
-            vscode.commands.executeCommand('salesforce-utils.refreshLogs');
-            vscode.commands.executeCommand('salesforce-utils.refreshTraces');
+            vscode.commands.executeCommand('adure-sfx-toolkit.refreshLogs');
+            vscode.commands.executeCommand('adure-sfx-toolkit.refreshTraces');
         } catch (e: any) {
             vscode.window.showErrorMessage(`Failed to set default: ${e.message}`);
         }
@@ -87,7 +87,7 @@ export async function deleteOrg(item: OrgItem) {
             await runCommand(cmd);
             vscode.window.showInformationMessage(`${action} successful.`);
             orgTreeProvider.refresh();
-            vscode.commands.executeCommand('salesforce-utils.refreshLogs');
+            vscode.commands.executeCommand('adure-sfx-toolkit.refreshLogs');
         } catch (e: any) {
             vscode.window.showErrorMessage(`Failed: ${e.message}`);
         }
@@ -187,7 +187,7 @@ export async function connectOrg() {
             await runCommand(`sf org login web --alias ${alias} --instance-url ${instanceUrl} --set-default`);
             vscode.window.showInformationMessage(`Successfully connected to ${alias}.`);
             orgTreeProvider.refresh();
-            vscode.commands.executeCommand('salesforce-utils.refreshLogs');
+            vscode.commands.executeCommand('adure-sfx-toolkit.refreshLogs');
         } catch (e: any) {
             vscode.window.showErrorMessage(`Connection failed: ${e.message}`);
         }
