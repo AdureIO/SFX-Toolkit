@@ -1,7 +1,8 @@
 import * as vscode from 'vscode';
+import { Logger } from '../utils/outputChannel';
 
 // Filter Modes
-export type FilterType = 'DEBUG' | 'SOQL' | 'DML';
+export type FilterType = 'DEBUG' | 'SOQL';
 
 export class LogContentProvider implements vscode.TextDocumentContentProvider {
     // Map uri string -> { original: string, activeFilters: Set<FilterType> }
@@ -11,9 +12,15 @@ export class LogContentProvider implements vscode.TextDocumentContentProvider {
     private _onDidChange = new vscode.EventEmitter<vscode.Uri>();
     readonly onDidChange = this._onDidChange.event;
 
+    private getKey(uri: vscode.Uri): string {
+        return uri.toString();
+    }
+
     provideTextDocumentContent(uri: vscode.Uri): string {
-        const data = this.logData.get(uri.toString());
+        const key = this.getKey(uri);
+        const data = this.logData.get(key);
         if (!data) {
+            Logger.warn(`LogContentProvider: No content found for ${key}`);
             return "Log content not found or cleared.";
         }
         
@@ -27,28 +34,38 @@ export class LogContentProvider implements vscode.TextDocumentContentProvider {
     }
     
     public setContent(uri: vscode.Uri, content: string) {
-        this.logData.set(uri.toString(), { original: content, activeFilters: new Set() });
+        const key = this.getKey(uri);
+        Logger.info(`LogContentProvider: Setting content for ${key}`);
+        this.logData.set(key, { original: content, activeFilters: new Set() });
         // Fire change if it existed
         this._onDidChange.fire(uri);
     }
     
     public toggleFilter(uri: vscode.Uri, type: FilterType) {
-        const data = this.logData.get(uri.toString());
-        if (!data) return;
+        const key = this.getKey(uri);
+        const data = this.logData.get(key);
+        
+        if (!data) {
+            Logger.error(`LogContentProvider: Failed to toggle filter ${type} for ${key} - Content not found`);
+            return;
+        }
         
         if (data.activeFilters.has(type)) {
+            Logger.info(`LogContentProvider: Removing filter ${type} for ${key}`);
             data.activeFilters.delete(type);
         } else {
+            Logger.info(`LogContentProvider: Adding filter ${type} for ${key}`);
             data.activeFilters.add(type);
         }
         
-        this.logData.set(uri.toString(), data);
+        this.logData.set(key, data);
         this._onDidChange.fire(uri); 
     }
     
     // Check if a specific filter is active
     public isFilterActive(uri: vscode.Uri, type: FilterType): boolean {
-        return this.logData.get(uri.toString())?.activeFilters.has(type) || false;
+        const key = this.getKey(uri);
+        return this.logData.get(key)?.activeFilters.has(type) || false;
     }
 
     private getFilteredContent(original: string, filters: Set<FilterType>): string {
@@ -69,10 +86,8 @@ export class LogContentProvider implements vscode.TextDocumentContentProvider {
                     if (line.includes('|USER_DEBUG|') || line.includes('FATAL_ERROR') || line.includes('EXCEPTION_THROWN') || line.includes('|ERROR|')) matches = true;
                 }
                 if (!matches && filters.has('SOQL')) {
-                    if (line.includes('|SOQL_EXECUTE')) matches = true;
-                }
-                if (!matches && filters.has('DML')) {
-                    if (line.includes('|DML_')) matches = true;
+                    // Combine SOQL and DML
+                    if (line.includes('|SOQL_EXECUTE') || line.includes('|DML_')) matches = true;
                 }
                 
                 keepNext = matches;
