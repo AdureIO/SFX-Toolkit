@@ -27,10 +27,11 @@ import {
 import { orgTreeProvider } from "./providers/OrgTreeProvider";
 import { ApexCodeLensProvider } from "./providers/ApexCodeLensProvider";
 import { DevActionsProvider } from "./providers/DevActionsProvider";
-import { pushSource, pullSource, deployCurrentFile, retrieveCurrentFile, runLocalTests } from "./commands/devCommands";
+import { pushSource, pushSourceForce, pullSource, deployCurrentFile, retrieveCurrentFile, runLocalTests, resetSourceTracking } from "./commands/devCommands";
 import { PermissionSetEditorProvider } from "./editors/PermissionSetEditorProvider";
 import { ScratchOrgDefEditorProvider } from "./editors/ScratchOrgDefEditorProvider";
-import { Logger } from "./utils/outputChannel";
+import { SOQLEditorProvider } from "./providers/SOQLEditorProvider";
+import { Logger, outputChannel } from "./utils/outputChannel";
 import { isSalesforceProject } from "./utils/projectUtils";
 
 // Helper to register commands with logging
@@ -174,10 +175,12 @@ export function activate(context: vscode.ExtensionContext) {
 		vscode.window.registerTreeDataProvider("adure-sfx-toolkit.development", devProvider);
 
 		let pushCmd = register("adure-sfx-toolkit.pushSource", pushSource);
+		let pushForceCmd = register("adure-sfx-toolkit.pushSourceForce", pushSourceForce);
 		let pullCmd = register("adure-sfx-toolkit.pullSource", pullSource);
 		let deployFileCmd = register("adure-sfx-toolkit.deployCurrentFile", deployCurrentFile);
 		let retrieveFileCmd = register("adure-sfx-toolkit.retrieveCurrentFile", retrieveCurrentFile);
 		let runTestsCmd = register("adure-sfx-toolkit.runLocalTests", runLocalTests);
+		let resetTrackingCmd = register("adure-sfx-toolkit.resetSourceTracking", resetSourceTracking);
 
 		// 9. Permission Set Editor
 		context.subscriptions.push(PermissionSetEditorProvider.register(context));
@@ -238,6 +241,16 @@ export function activate(context: vscode.ExtensionContext) {
 		// Initialize context
 		vscode.commands.executeCommand("setContext", "adure-sfx-toolkit:polling", false);
 
+		// 12. SOQL Editor
+		let openSOQLEditorCmd = register("adure-sfx-toolkit.openSOQLEditor", () => {
+			SOQLEditorProvider.show(context.extensionUri);
+		});
+
+		// 13. Show Output
+		let showOutputCmd = register("adure-sfx-toolkit.showOutput", () => {
+			outputChannel.show();
+		});
+
 		context.subscriptions.push(
 			filterDebugCmd,
 			filterDebugActiveCmd,
@@ -267,7 +280,10 @@ export function activate(context: vscode.ExtensionContext) {
 			deleteOrgCmd,
 			connectOrgCmd,
 			createScratchCmd,
-			quickScratchCmd
+			quickScratchCmd,
+			resetTrackingCmd,
+			openSOQLEditorCmd,
+			showOutputCmd
 		);
 
 		Logger.info('Extension "adure-sfx-toolkit" activated successfully.');

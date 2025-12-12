@@ -5,6 +5,7 @@
 	"description": "Utilities for Salesforce development: Log filtering, Debug Traces, Deployment, and more.",
 	"icon": "resources/icon.png",
 	"version": "0.1.0",
+	"license": "BSD-3-Clause",
 	"engines": {
 		"vscode": "^1.80.0"
 	},
@@ -13,7 +14,20 @@
 		"url": "https://github.com/AdureIO/SFX-Toolkit.git"
 	},
 	"categories": [
+		"Programming Languages",
+		"Debuggers",
+		"Testing",
 		"Other"
+	],
+	"keywords": [
+		"salesforce",
+		"sfdx",
+		"apex",
+		"soql",
+		"logs",
+		"debug",
+		"deployment",
+		"toolkit"
 	],
 	"activationEvents": [],
 	"main": "./out/extension.js",
@@ -176,6 +190,43 @@
 				"command": "adure-sfx-toolkit.quickScratch",
 				"title": "ASFXT: Quick Scratch (Defaults)",
 				"icon": "$(rocket)"
+			},
+			{
+				"command": "adure-sfx-toolkit.pushSource",
+				"title": "ASFXT: Push Source",
+				"icon": "$(cloud-upload)"
+			},
+			{
+				"command": "adure-sfx-toolkit.pushSourceForce",
+				"title": "ASFXT: Push Source (Force/Override)",
+				"icon": "$(alert)"
+			},
+			{
+				"command": "adure-sfx-toolkit.pullSource",
+				"title": "ASFXT: Pull Source",
+				"icon": "$(cloud-download)"
+			},
+			{
+				"command": "adure-sfx-toolkit.deployCurrentFile",
+				"title": "ASFXT: Deploy Current File"
+			},
+			{
+				"command": "adure-sfx-toolkit.retrieveCurrentFile",
+				"title": "ASFXT: Retrieve Current File"
+			},
+			{
+				"command": "adure-sfx-toolkit.runLocalTests",
+				"title": "ASFXT: Run Local Tests"
+			},
+			{
+				"command": "adure-sfx-toolkit.resetSourceTracking",
+				"title": "ASFXT: Reset Source Tracking",
+				"icon": "$(history)"
+			},
+			{
+				"command": "adure-sfx-toolkit.openSOQLEditor",
+				"title": "ASFXT: Open SOQL Editor",
+				"icon": "$(database)"
 			}
 		],
 		"languages": [
@@ -292,6 +343,26 @@
 				{
 					"command": "adure-sfx-toolkit.quickScratch",
 					"when": "view == adure-sfx-toolkit.orgs",
+					"group": "navigation"
+				},
+				{
+					"command": "adure-sfx-toolkit.retrieveCurrentFile",
+					"when": "view == adure-sfx-toolkit.development",
+					"group": "inline"
+				},
+				{
+					"command": "adure-sfx-toolkit.runLocalTests",
+					"when": "view == adure-sfx-toolkit.development",
+					"group": "inline"
+				},
+				{
+					"command": "adure-sfx-toolkit.resetSourceTracking",
+					"when": "view == adure-sfx-toolkit.development",
+					"group": "inline"
+				},
+				{
+					"command": "adure-sfx-toolkit.openSOQLEditor",
+					"when": "view == adure-sfx-toolkit.development",
 					"group": "navigation"
 				}
 			],
