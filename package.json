@@ -4,7 +4,7 @@
 	"publisher": "AdureIO",
 	"description": "Utilities for Salesforce development: Log filtering, Debug Traces, Deployment, and more.",
 	"icon": "resources/icon.png",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"license": "BSD-3-Clause",
 	"engines": {
 		"vscode": "^1.80.0"

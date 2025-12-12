@@ -1,6 +1,6 @@
 # Adure SFX Toolkit
 
-Adure SFX Toolkit is an open-source VSCode extension designed to supercharge your Salesforce development workflow. It provides a comprehensive set of utilities for log management, debugging, org management, and more.
+Adure SFX Toolkit is an open-source VSCode extension designed to supercharge your Salesforce development workflow. It provides a comprehensive set of utilities for log management, debugging, org management, source tracking, and more.
 
 ## Features
 
@@ -22,7 +22,11 @@ Adure SFX Toolkit is an open-source VSCode extension designed to supercharge you
 
 -   **Execute Anonymous**: Run Apex code directly from the editor (`.apex` files or selections).
 -   **Rerun Last**: Quickly rerun the last executed Apex snippet without re-selecting code.
--   **Execute SOQL**: Run SOQL queries and view results in a clean format.
+-   **SOQL Editor**: A powerful visual editor for SOQL queries (`ASFXT: Open SOQL Editor`).
+    -   **Interactive Table**: View query results in a responsive table.
+    -   **Inline Editing**: Directly edit record fields in the table.
+    -   **Smart Save**: Commit changes back to Salesforce (`sf data update record`) with automatic quote escaping and error handling.
+    -   **Discard Changes**: Easily revert unsaved edits.
 -   **Apex CodeLens**: Run specific test methods or entire test classes directly from your Apex code.
 
 ### ☁️ Org Management
@@ -42,8 +46,11 @@ Adure SFX Toolkit is an open-source VSCode extension designed to supercharge you
 ### 🛠️ Development Tools
 
 -   **Source Operations**:
-    -   **Push/Pull**: Sync source code between your local project and the org.
+    -   **Push Source**: Intelligent push that automatically detects if source tracking is available. Uses `sf project deploy start` (diff) for tracked orgs and falls back to sequential package deployment for others.
+    -   **Push Source (Force)**: Override conflicts and force push changes.
+    -   **Pull Source**: Retrieve changes from the org.
     -   **Deploy/Retrieve**: Contextual commands to deploy or retrieve the currently open file.
+    -   **Reset Source Tracking**: Quickly reset tracking for the default org (`sf project reset tracking`).
 -   **Test Runner**: Run local tests with ease.
 -   **Custom Editors**:
     -   **Permission Set Editor**: A dedicated, user-friendly UI for editing Permission Sets (`.permissionset-meta.xml`).
@@ -52,7 +59,7 @@ Adure SFX Toolkit is an open-source VSCode extension designed to supercharge you
 ### ⚙️ System & Setup
 
 -   **Project Validation**: Automatically checks for `sfdx-project.json` to ensure you are working in a valid Salesforce project.
--   **Output Logging**: Detailed execution logs and error reporting available in the "Adure SFX Toolkit" output channel for easy troubleshooting.
+-   **Output Logging**: detailed logs are available in the "Adure SFX Toolkit" output channel. Logs are suppressed by default during deployments to keep the view clean, opening only on errors.
 
 ## Open Source
 
