@@ -10,7 +10,14 @@ export class Logger {
     static error(message: string, error?: any) {
         let errorMsg = message;
         if (error) {
-            errorMsg += `\nError Details: ${error instanceof Error ? error.message : JSON.stringify(error)}`;
+            const details = error instanceof Error 
+                ? error.message 
+                : typeof error === 'string' 
+                    ? error 
+                    : JSON.stringify(error, null, 2);
+
+            errorMsg += `\nError Details: ${details}`;
+
             if (error instanceof Error && error.stack) {
                 errorMsg += `\nStack: ${error.stack}`;
             }

@@ -6,7 +6,8 @@ export async function runCommandArgs(
 	command: string,
 	args: string[],
 	cwd?: string,
-	onOutput?: (data: string) => void
+	onOutput?: (data: string) => void,
+	logOnError: boolean = true
 ): Promise<string> {
 	Logger.info(`Executing Command: ${command} ${args.join(" ")}`);
 	return new Promise((resolve, reject) => {
@@ -46,17 +47,32 @@ export async function runCommandArgs(
 				Logger.info(`Command executed successfully: ${command}`);
 				resolve(stdout);
 			} else {
-				Logger.error(`Command failed: ${command}`, stderr);
+				// The CLI might output useful info to STDOUT even on error (like failures tables).
+				// We should capture that and not just stderr.
+				const combinedOutput = stdout + (stderr ? "\n" + stderr : "");
+				
+				if (logOnError) {
+					Logger.error(`Command failed: ${command}`, combinedOutput);
+				} else {
+					Logger.error(`Command failed: ${command}`);
+				}
+
 				const error = new Error(`Command exited with code ${code}`);
 				(error as any).stderr = stderr;
 				(error as any).stdout = stdout;
+				(error as any).message = combinedOutput;
 				reject(error);
 			}
 		});
 	});
 }
 
-export async function runCommand(command: string, cwd?: string, onOutput?: (data: string) => void): Promise<string> {
+export async function runCommand(
+	command: string,
+	cwd?: string,
+	onOutput?: (data: string) => void,
+	logOnError: boolean = true
+): Promise<string> {
 	Logger.info(`Executing Command: ${command}`);
 	return new Promise((resolve, reject) => {
 		const options: cp.SpawnOptions = {
@@ -95,10 +111,20 @@ export async function runCommand(command: string, cwd?: string, onOutput?: (data
 				Logger.info(`Command executed successfully: ${command}`);
 				resolve(stdout);
 			} else {
-				Logger.error(`Command failed: ${command}`, stderr);
+				// The CLI might output useful info to STDOUT even on error (like failures tables).
+				// We should capture that and not just stderr.
+				const combinedOutput = stdout + (stderr ? "\n" + stderr : "");
+				
+				if (logOnError) {
+					Logger.error(`Command failed: ${command}`, combinedOutput);
+				} else {
+					Logger.error(`Command failed: ${command}`);
+				}
+
 				const error = new Error(`Command exited with code ${code}`);
 				(error as any).stderr = stderr;
 				(error as any).stdout = stdout;
+				(error as any).message = combinedOutput;
 				reject(error);
 			}
 		});

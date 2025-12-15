@@ -11,12 +11,10 @@
 - open results in a table
 - quick field changes - save to database
 
-
 Improvements
 - permissionset viewer: 
   - Add option to add extra permissions, but keep in mind restrictions like required fields, etc.
   - add button to open the permissionset in xml viewer
-
 
 ## LWC
 

@@ -8,26 +8,111 @@ import { AuthInfo } from "../utils/authInfo";
 // Helper to strip ANSI and progress lines
 function cleanDeployOutput(output: string): string {
 	const cleanData = output.replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, "");
+
+	// Find where the final status block starts
+	// It usually starts with "Status: Succeeded" or "Status: Failed"
+	const statusMatch = cleanData.match(/Status: (Succeeded|Failed|SucceededPartial)/);
+
+	if (statusMatch && statusMatch.index !== undefined) {
+		// Find the start of the line where Status appears to include indentation
+		const lineStart = cleanData.lastIndexOf("\n", statusMatch.index);
+		const startIndex = lineStart !== -1 ? lineStart + 1 : statusMatch.index;
+
+		// If failed, we might want to capture context before the status if it contains "Component Failures"
+		// But usually "Component Failures" comes AFTER the status line in CLI output.
+		// Let's check the user provided example:
+		// Status: Failed ... Elapsed Time ... Component Failures [...] Table...
+		// So capturing from Status onwards is correct for the standard table.
+
+		return cleanData.substring(startIndex).trim();
+	}
+
+	// Fallback if no standard status line found (e.g. strict failure or different format)
+	// We want to keep everything except progress updates.
 	const lines = cleanData.split(/\r?\n/);
 	const filtered = lines.filter((line) => {
 		const l = line.trim();
-		if (!l) return true;
-		// Filter progress indicators
-		if (l.startsWith("Status: In Progress")) return false;
-		if (l.startsWith("Deploying Metadata") && !l.includes("Done")) return false;
-		if (l.startsWith("Components:")) return false;
-		if (l.startsWith("Elapsed Time:")) return false;
-		if (l.startsWith("Waiting for the org to respond")) return false;
+		// Filter header and intro
+		if (l.includes("Deploying Metadata") && l.includes("──")) return false;
+		if (l.includes("Deploying v") && l.includes("metadata to")) return false;
+
+		// Filter progress lines starting with symbols or specific keywords
+		if (/[✔◯▸]/.test(l)) return false;
+
 		if (l.startsWith("Preparing")) return false;
-		if (l.startsWith("Running Tests")) return false; // Usually intermediate
+		if (l.startsWith("Waiting for the org to respond")) return false;
+		if (l.startsWith("Running Tests")) return false;
+		if (l.startsWith("Updating Source Tracking")) return false;
+		if (l.startsWith("Components:")) return false;
+		if (l.startsWith("Members:")) return false;
+
+		if (l === "Done" || l.startsWith("Done ")) return false;
+
+		// For failures without a "Status:" line, we typically want to see everything else (e.g. Warnings, Errors).
+		// But user asked to skip output before status "just like with completed".
+		// If there is NO status line, we can't skip "before" it easily without losing the error.
+		// However, the user might be referring to cases where "Component Failures" exists but regex missed Status?
+		// Or maybe they mean "Component Failures" block should be the start if Status is missing?
+
 		return true;
 	});
-	return filtered.join("\n");
+
+	// If we have "Component Failures", try to start from there if we didn't find "Status:"
+	const result = filtered.join("\n").trim();
+	const failuresMatch = result.match(/Component Failures \[\d+\]/);
+	if (failuresMatch && failuresMatch.index !== undefined) {
+		return result.substring(failuresMatch.index).trim();
+	}
+
+	return result;
+}
+
+// Helper to extract deployed component count from output
+function getDeployedCount(output: string): number {
+	const clean = output.replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, "");
+
+	// Strategy 1: Look for "Status: ... | N/M Components"
+	const statusMatch = clean.match(/\|\s*(\d+)\/\d+\s*Components/);
+	if (statusMatch) {
+		return parseInt(statusMatch[1], 10);
+	}
+
+	// Strategy 2: Count lines in "Deployed Source" table
+	const lines = output.split(/\r?\n/);
+	let inTable = false;
+	let count = 0;
+
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i].trim();
+		if (line.includes("Deployed Source") && !line.startsWith("Not")) {
+			inTable = true;
+			i += 2; // Skip headers (Table header and separator)
+			continue;
+		}
+		if (inTable) {
+			if (!line || line.startsWith("Not Deployed Source") || line.startsWith("Retrieved Source")) {
+				break;
+			}
+			// Check if it's a table row (starts with box chars or has content)
+			// Simple check: if it has │ separator
+			if (line.includes("│")) {
+				count++;
+			}
+		}
+	}
+
+	return count;
 }
 
 // Helper to reuse push logic
 async function pushSourceHelper(force: boolean) {
-	const title = force ? "Pushing Source (Force)..." : "Pushing Source...";
+	const title = "ASFXT: " + (force ? " F-" : " ") + "Push";
+
+	// Ensure active file is saved before pushing
+	const activeEditor = vscode.window.activeTextEditor;
+	if (activeEditor) {
+		await activeEditor.document.save();
+	}
 
 	// We want to stream output to the log so user sees progress.
 	outputChannel.clear();
@@ -169,27 +254,6 @@ async function pushSourceHelper(force: boolean) {
 							progress.report({ message: msg });
 							statusBar.text = `$(sync~spin) ${msg}`;
 						}
-
-						// 2. Filter Log Output - SUPPRESSED
-						// User requested only final output, no progress stream in logs.
-						// We will log the cleaned result at the end.
-						/*
-						const filteredLines = lines.filter((line) => {
-							const l = line.trim();
-							if (!l) return true;
-							if (l.startsWith("Status: In Progress")) return false;
-							if (l.startsWith("Deploying Metadata") && !l.includes("Done")) return false;
-							if (l.startsWith("Components:")) return false;
-							if (l.startsWith("Elapsed Time:")) return false;
-							if (l.startsWith("Waiting for the org to respond")) return false;
-							if (l.startsWith("Preparing")) return false;
-							return true;
-						});
-
-						if (filteredLines.length > 0) {
-							outputChannel.append(filteredLines.join("\n") + (cleanData.endsWith("\n") ? "\n" : ""));
-						}
-						*/
 					};
 
 					// Check if source tracking is active locally
@@ -214,15 +278,22 @@ async function pushSourceHelper(force: boolean) {
 						const flag = force ? "--ignore-conflicts" : "";
 						Logger.info(`Running: sf project deploy start ${flag}`);
 
-						const result = await runCommand(`sf project deploy start ${flag}`, undefined, (data) =>
-							handleOutput(data)
+						const result = await runCommand(
+							`sf project deploy start ${flag}`,
+							undefined,
+							(data) => handleOutput(data),
+							false
 						);
 						Logger.info(cleanDeployOutput(result));
-						vscode.window.showInformationMessage("Source pushed successfully.");
+
+						const count = getDeployedCount(result);
+						vscode.window.showInformationMessage(`ASFXT: Push: Deployed ${count} components.`);
 					} else {
 						// No Source Tracking -> Full Sequential Deploy
 						if (packageDirs.length > 0) {
 							progress.report({ message: `Found ${packageDirs.length} package directories.` });
+
+							let totalCount = 0;
 
 							for (const pkgDir of packageDirs) {
 								const fullPkgPath = path.join(rootPath, pkgDir);
@@ -235,12 +306,14 @@ async function pushSourceHelper(force: boolean) {
 								const result = await runCommand(
 									`sf project deploy start -d "${fullPkgPath}" ${flag}`,
 									undefined,
-									(data) => handleOutput(data, pkgDir)
+									(data) => handleOutput(data, pkgDir),
+									false
 								);
 								Logger.info(cleanDeployOutput(result));
+								totalCount += getDeployedCount(result);
 							}
 							vscode.window.showInformationMessage(
-								`Successfully pushed source for ${packageDirs.length} packages.`
+								`Successfully pushed source for ${packageDirs.length} packages. Deployed ${totalCount} components.`
 							);
 						} else {
 							// Fallback if no packages found
@@ -252,14 +325,26 @@ async function pushSourceHelper(force: boolean) {
 								handleOutput(data)
 							);
 							Logger.info(cleanDeployOutput(result));
-							vscode.window.showInformationMessage("Source pushed successfully.");
+
+							const count = getDeployedCount(result);
+							vscode.window.showInformationMessage(
+								`Source pushed successfully. Deployed ${count} components.`
+							);
 						}
 					}
 				} catch (e: any) {
-					const errorMsg = e.stderr || e.message;
-					Logger.error(`Push failed:`, errorMsg);
+					// e.message contains combined stdout/stderr from commandRunner
+					const cleanError = cleanDeployOutput(e.message || e.stderr || "Unknown Error");
+					Logger.error(`Push failed:`, cleanError);
 					outputChannel.show(); // Auto-open log on error
-					vscode.window.showErrorMessage(`Push failed. Check output log for details.`);
+
+					vscode.window
+						.showErrorMessage(`Push failed. Check output log for details.`, "View Log")
+						.then((selection) => {
+							if (selection === "View Log") {
+								outputChannel.show();
+							}
+						});
 				}
 			}
 		);
@@ -301,6 +386,8 @@ export async function deployCurrentFile() {
 		return;
 	}
 
+	await editor.document.save(); // Save the current file before deploying
+
 	const filePath = editor.document.uri.fsPath;
 
 	await vscode.window.withProgress(
@@ -312,8 +399,9 @@ export async function deployCurrentFile() {
 		async () => {
 			try {
 				// Use --source-dir or -d to deploy specific file/path
-				await runCommand(`sf project deploy start -d "${filePath}"`);
-				vscode.window.showInformationMessage("File deployed successfully.");
+				const result = await runCommand(`sf project deploy start -d "${filePath}"`);
+				const count = getDeployedCount(result);
+				vscode.window.showInformationMessage(`File deployed successfully. Deployed ${count} components.`);
 			} catch (e: any) {
 				vscode.window.showErrorMessage(`Deploy failed: ${e.message}`);
 			}
