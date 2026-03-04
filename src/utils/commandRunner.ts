@@ -71,7 +71,8 @@ export async function runCommand(
 	command: string,
 	cwd?: string,
 	onOutput?: (data: string) => void,
-	logOnError: boolean = true
+	logOnError: boolean = true,
+	cancellationToken?: vscode.CancellationToken
 ): Promise<string> {
 	Logger.info(`Executing Command: ${command}`);
 	return new Promise((resolve, reject) => {
@@ -81,6 +82,15 @@ export async function runCommand(
 		};
 
 		const child = cp.spawn(command, options);
+		let cancelledByUser = false;
+
+		if (cancellationToken) {
+			const sub = cancellationToken.onCancellationRequested(() => {
+				cancelledByUser = true;
+				child.kill("SIGINT");
+			});
+			child.on("close", () => sub.dispose());
+		}
 
 		let stdout = "";
 		let stderr = "";
@@ -107,6 +117,12 @@ export async function runCommand(
 		});
 
 		child.on("close", (code) => {
+			if (cancelledByUser) {
+				const err = new Error("Command cancelled.");
+				(err as any).cancelled = true;
+				reject(err);
+				return;
+			}
 			if (code === 0) {
 				Logger.info(`Command executed successfully: ${command}`);
 				resolve(stdout);

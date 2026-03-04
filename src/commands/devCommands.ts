@@ -130,9 +130,9 @@ async function pushSourceHelper(force: boolean) {
 			{
 				location: vscode.ProgressLocation.Notification,
 				title: title,
-				cancellable: false,
+				cancellable: true,
 			},
-			async (progress) => {
+			async (progress, token) => {
 				try {
 					// 1. Detect sfdx-project.json
 					const workspaceFolders = vscode.workspace.workspaceFolders;
@@ -140,7 +140,7 @@ async function pushSourceHelper(force: boolean) {
 						// Fallback
 						const flag = force ? "--ignore-conflicts" : "";
 						Logger.info(`Running: sf project deploy start ${flag}`);
-						const result = await runCommand(`sf project deploy start ${flag}`);
+						const result = await runCommand(`sf project deploy start ${flag}`, undefined, undefined, true, token);
 						Logger.info(result);
 						vscode.window.showInformationMessage("Source pushed successfully (No workspace).");
 						return;
@@ -282,7 +282,8 @@ async function pushSourceHelper(force: boolean) {
 							`sf project deploy start ${flag}`,
 							undefined,
 							(data) => handleOutput(data),
-							false
+							false,
+							token
 						);
 						Logger.info(cleanDeployOutput(result));
 
@@ -307,7 +308,8 @@ async function pushSourceHelper(force: boolean) {
 									`sf project deploy start -d "${fullPkgPath}" ${flag}`,
 									undefined,
 									(data) => handleOutput(data, pkgDir),
-									false
+									false,
+									token
 								);
 								Logger.info(cleanDeployOutput(result));
 								totalCount += getDeployedCount(result);
@@ -321,8 +323,12 @@ async function pushSourceHelper(force: boolean) {
 							const flag = force ? "--ignore-conflicts" : "";
 							Logger.info(`Running: sf project deploy start ${flag}`);
 
-							const result = await runCommand(`sf project deploy start ${flag}`, undefined, (data) =>
-								handleOutput(data)
+							const result = await runCommand(
+								`sf project deploy start ${flag}`,
+								undefined,
+								(data) => handleOutput(data),
+								true,
+								token
 							);
 							Logger.info(cleanDeployOutput(result));
 
@@ -333,6 +339,10 @@ async function pushSourceHelper(force: boolean) {
 						}
 					}
 				} catch (e: any) {
+					if (e.cancelled) {
+						Logger.info("Push cancelled by user.");
+						return;
+					}
 					// e.message contains combined stdout/stderr from commandRunner
 					const cleanError = cleanDeployOutput(e.message || e.stderr || "Unknown Error");
 					Logger.error(`Push failed:`, cleanError);
