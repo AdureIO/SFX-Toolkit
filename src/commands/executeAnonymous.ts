@@ -4,9 +4,13 @@ import * as path from 'path';
 import * as os from 'os';
 import { runCommand } from '../utils/commandRunner';
 import { openLogById } from './listLogs';
+import { AuthInfo } from '../utils/authInfo';
 
 // Track last executed file for Rerun capability
 let lastAnonymousContent: string = '';
+
+// Cache userId for the session to avoid repeated "sf org display user" calls
+let cachedUserId: string | null = null;
 
 export async function executeAnonymous() {
     const editor = vscode.window.activeTextEditor;
@@ -45,69 +49,132 @@ export async function rerunLastApex() {
     await executeContent(lastAnonymousContent);
 }
 
-async function executeContent(text: string) {
-    // Create temp file for execution
+export type ExecuteAnonymousResult = { success: true } | { success: false; errorMessage: string };
+
+/** Org option for the Execute Apex panel dropdown. */
+export type OrgOption = { label: string; username: string };
+
+/** Returns list of orgs (alias/username) for the target-org dropdown. Default org first. */
+export async function getAnonymousApexOrgList(): Promise<OrgOption[]> {
+    try {
+        const result = await runCommand('sf org list --json', undefined, undefined, true);
+        const parsed = JSON.parse(result);
+        if (parsed.status !== 0 || !parsed.result) return [];
+        const { nonScratchOrgs = [], scratchOrgs = [] } = parsed.result;
+        const all: { alias?: string; username: string; isDefaultUsername?: boolean }[] = [
+            ...(nonScratchOrgs as any[]),
+            ...(scratchOrgs as any[])
+        ];
+        const defaultUsername = all.find((o: any) => o.isDefaultUsername)?.username;
+        const options: OrgOption[] = all
+            .filter((o: any) => o.username)
+            .map((o: any) => ({
+                label: (o.alias || o.username) + (o.username === defaultUsername ? ' (default)' : ''),
+                username: o.username
+            }));
+        options.sort((a, b) => (b.username === defaultUsername ? 1 : 0) - (a.username === defaultUsername ? 1 : 0));
+        return options;
+    } catch {
+        return [];
+    }
+}
+
+/** Execute Apex code (e.g. from the Execute Apex panel). Updates lastAnonymousContent for rerun.
+ * When fromPanel is true, errors are returned instead of opening the output channel.
+ * targetOrg: username (or alias) to run against; empty/undefined = default org. */
+export async function executeAnonymousApex(code: string, options?: { fromPanel?: boolean; targetOrg?: string }): Promise<ExecuteAnonymousResult> {
+    if (!code || !code.trim()) {
+        const msg = 'No code to execute.';
+        if (options?.fromPanel) return { success: false, errorMessage: msg };
+        vscode.window.showInformationMessage(msg);
+        return { success: false, errorMessage: msg };
+    }
+    lastAnonymousContent = code;
+    try {
+        await executeContent(code, options?.fromPanel === true, options?.targetOrg);
+        return { success: true };
+    } catch (e: any) {
+        const message = e?.message || e?.stderr || String(e);
+        if (options?.fromPanel) return { success: false, errorMessage: message };
+        throw e;
+    }
+}
+
+async function executeContent(text: string, fromPanel?: boolean, targetOrg?: string) {
     const tmpDir = os.tmpdir();
     const tmpFile = path.join(tmpDir, `anon-${Date.now()}.apex`);
     fs.writeFileSync(tmpFile, text);
 
-    vscode.window.withProgress({
+    const orgFlag = targetOrg ? ` -o ${targetOrg}` : '';
+
+    await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
-        title: "Executing Anonymous Apex...",
-        cancellable: false
-    }, async () => {
+        title: targetOrg ? `Executing Anonymous Apex (${targetOrg})...` : "Executing Anonymous Apex...",
+        cancellable: true
+    }, async (_progress, token) => {
         try {
-            // 1. Get User
-            let userId: string; 
-            try {
-                const userRes = await runCommand('sf org display user --json');
-                const userJson = JSON.parse(userRes);
-                if (userJson.status === 0) {
-                    userId = userJson.result.id;
-                } else {
-                    throw new Error("Could not determine current user.");
+            let userId: string;
+            if (targetOrg) {
+                try {
+                    const userRes = await runCommand(`sf org display user --json${orgFlag}`, undefined, undefined, true, token);
+                    const userJson = JSON.parse(userRes);
+                    userId = (userJson.status === 0 && userJson.result?.id) ? userJson.result.id : '';
+                } catch {
+                    userId = '';
                 }
-            } catch (e) {
-                userId = ''; 
+            } else {
+                const [auth, userRes] = await Promise.all([
+                    AuthInfo.getAuthInfo(),
+                    cachedUserId !== null
+                        ? Promise.resolve(JSON.stringify({ status: 0, result: { id: cachedUserId } }))
+                        : runCommand('sf org display user --json', undefined, undefined, true, token).catch(() => '{"status":1}')
+                ]);
+                if (auth) { /* warm cache for openLogById REST */ }
+                try {
+                    const userJson = JSON.parse(userRes);
+                    if (userJson.status === 0 && userJson.result?.id) {
+                        userId = userJson.result.id;
+                        cachedUserId = userId;
+                    } else {
+                        userId = '';
+                    }
+                } catch {
+                    userId = '';
+                }
             }
 
             let oldHeadLogId: string | null = null;
-            
-            // 2. Pre-Check: Get current latest log ID
-            let query = "SELECT Id FROM ApexLog";
-            if (userId) query += ` WHERE LogUserId = '${userId}'`;
-            query += " ORDER BY StartTime DESC LIMIT 1";
-            
+            const query = "SELECT Id FROM ApexLog" + (userId ? ` WHERE LogUserId = '${userId}'` : '') + " ORDER BY StartTime DESC LIMIT 1";
+
             try {
-                const prevRes = await runCommand(`sf data query -q "${query}" -t --json`);
+                const prevRes = await runCommand(`sf data query -q "${query}" -t --json${orgFlag}`, undefined, undefined, true, token);
                 const prevJson = JSON.parse(prevRes);
                 if (prevJson.status === 0 && prevJson.result.records?.length > 0) {
                     oldHeadLogId = prevJson.result.records[0].Id;
                 }
-            } catch(e){}
+            } catch (e: any) {
+                if (e.cancelled) return;
+            }
 
-            // 3. Execute
-            const res = await runCommand(`sf apex run -f "${tmpFile}"`);
-            
-            // 4. Query Log (Again)
-            const logRes = await runCommand(`sf data query -q "${query}" -t --json`);
-            const logJson = JSON.parse(logRes);
+            const res = await runCommand(`sf apex run -f "${tmpFile}"${orgFlag}`, undefined, undefined, true, token);
 
-            // Check if we found a log, AND it is different from the old HEAD
-            if (logJson.status === 0 && logJson.result.records && logJson.result.records.length > 0) {
-                const logId = logJson.result.records[0].Id;
-                
-                if (logId === oldHeadLogId) {
-                    // No new log generated
-                     vscode.window.showWarningMessage("Code executed successfully, but NO NEW debug log was generated. Please check if a Trace Flag is active for your user.");
-                     const channel = vscode.window.createOutputChannel("Salesforce Apex Execution");
-                     channel.clear();
-                     channel.append(res);
-                     channel.show();
-                     return;
+            let logId: string | null = null;
+            const maxAttempts = 3;
+            const delayMs = 400;
+            for (let attempt = 0; attempt < maxAttempts && !token.isCancellationRequested; attempt++) {
+                if (attempt > 0) await new Promise((r) => setTimeout(r, delayMs));
+                const logRes = await runCommand(`sf data query -q "${query}" -t --json${orgFlag}`, undefined, undefined, true, token);
+                const logJson = JSON.parse(logRes);
+                if (logJson.status === 0 && logJson.result.records?.length > 0) {
+                    const id = logJson.result.records[0].Id;
+                    if (id !== oldHeadLogId) {
+                        logId = id;
+                        break;
+                    }
                 }
-                
-                // 4. Open in Split Bottom
+            }
+
+            if (logId) {
                 // Strategy: 
                 // A) If we are in the Primary Source Editor (ViewColumn 1 usually), split DOWN.
                 // B) If we are already in a Log View (ViewColumn 2/Bottom), just replace it.
@@ -142,17 +209,23 @@ async function executeContent(text: string) {
                     targetColumn = vscode.ViewColumn.Active;
                 }
                 
-                await openLogById(logId, targetColumn, 'sf-anon-log');
-
+                await openLogById(logId, targetColumn, 'sf-anon-log', true, targetOrg);
             } else {
-                 vscode.window.showWarningMessage("Code executed, but no debug log was found.");
-                 const channel = vscode.window.createOutputChannel("Salesforce Apex Execution");
-                 channel.clear();
-                 channel.append(res);
-                 channel.show();
+                const msg = "Code executed successfully, but NO NEW debug log was generated. Please check if a Trace Flag is active for your user.";
+                if (!fromPanel) {
+                    vscode.window.showWarningMessage(msg);
+                    const channel = vscode.window.createOutputChannel("Salesforce Apex Execution");
+                    channel.clear();
+                    channel.append(res);
+                    channel.show();
+                } else {
+                    throw new Error(msg);
+                }
             }
 
         } catch (e: any) {
+            if (e.cancelled) return;
+            if (fromPanel) throw e;
             vscode.window.showErrorMessage(`Execution failed.`);
             const channel = vscode.window.createOutputChannel("Salesforce Apex Execution");
             channel.clear();

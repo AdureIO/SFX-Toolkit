@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { runCommand } from '../utils/commandRunner';
+import { isSalesforceProject } from '../utils/projectUtils';
 
 export class TraceTreeProvider implements vscode.TreeDataProvider<TraceItem> {
     private _onDidChangeTreeData: vscode.EventEmitter<TraceItem | undefined | null | void> = new vscode.EventEmitter<TraceItem | undefined | null | void>();
@@ -20,9 +21,13 @@ export class TraceTreeProvider implements vscode.TreeDataProvider<TraceItem> {
         if (element) {
             return [];
         }
+        if (!isSalesforceProject()) {
+            return [new TraceItem('Open an SFDX project', '', '', vscode.TreeItemCollapsibleState.None)];
+        }
 
         try {
-            // Fetch TraceFlag records via Tooling API
+            // Fetch all TraceFlag records visible to the current user (Tooling API)
+            // Includes traces for this user, Automated Process, and other users they can see
             const query = `SELECT Id, TracedEntity.Name, ExpirationDate, DebugLevel.DeveloperName FROM TraceFlag ORDER BY ExpirationDate DESC`;
             const result = await runCommand(`sf data query -q "${query}" -t --json`);
             const parsed = JSON.parse(result);
@@ -34,7 +39,7 @@ export class TraceTreeProvider implements vscode.TreeDataProvider<TraceItem> {
             const traces: any[] = parsed.result.records;
             if (!traces || traces.length === 0) {
                 if (this.timer) clearTimeout(this.timer);
-                return [new TraceItem('No active traces', '', '', vscode.TreeItemCollapsibleState.None)];
+                return [new TraceItem('No debug traces', '', '', vscode.TreeItemCollapsibleState.None)];
             }
 
             // Track next expiration for auto-refresh

@@ -13,10 +13,10 @@ export async function addDebugTrace() {
         await vscode.window.withProgress({
             location: vscode.ProgressLocation.Notification,
             title: "Fetching Users...",
-            cancellable: false
-        }, async () => {
+            cancellable: true
+        }, async (_progress, token) => {
             const usersQuery = "SELECT Id, Name, Username FROM User WHERE IsActive = true ORDER BY Name LIMIT 50";
-            const usersRes = await runCommand(`sf data query -q "${usersQuery}" --json`);
+            const usersRes = await runCommand(`sf data query -q "${usersQuery}" --json`, undefined, undefined, true, token);
             const usersJson = JSON.parse(usersRes);
             
             userItems.push({
@@ -34,7 +34,7 @@ export async function addDebugTrace() {
                     });
                 });
             }
-        });
+        }).then(undefined, (e: any) => { if (e.cancelled) throw e; });
 
         const selectedUser = await vscode.window.showQuickPick(userItems, {
             placeHolder: 'Select User for Trace (or use Current User)'
@@ -51,10 +51,10 @@ export async function addDebugTrace() {
         await vscode.window.withProgress({
             location: vscode.ProgressLocation.Notification,
             title: "Fetching Debug Levels...",
-            cancellable: false
-        }, async () => {
+            cancellable: true
+        }, async (_progress, token) => {
             const levelsQuery = "SELECT Id, DeveloperName FROM DebugLevel ORDER BY DeveloperName";
-            const levelsRes = await runCommand(`sf data query -q "${levelsQuery}" -t --json`);
+            const levelsRes = await runCommand(`sf data query -q "${levelsQuery}" -t --json`, undefined, undefined, true, token);
             const levelsJson = JSON.parse(levelsRes);
             
             if (levelsJson.status === 0 && levelsJson.result.records) {
@@ -65,7 +65,7 @@ export async function addDebugTrace() {
                     });
                 });
             }
-        });
+        }).then(undefined, (e: any) => { if (e.cancelled) throw e; });
 
         if (levelItems.length === 0) {
             vscode.window.showWarningMessage('No Debug Levels found in Org. Please create one first.');
@@ -91,6 +91,7 @@ export async function addDebugTrace() {
         await createTrace(duration, targetUserId, targetLevelId);
 
     } catch (e: any) {
+        if (e.cancelled) return;
         vscode.window.showErrorMessage(`Failed to start flow: ${e.message || e}`);
     }
 }

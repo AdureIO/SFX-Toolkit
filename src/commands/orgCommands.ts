@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { runCommand } from '../utils/commandRunner';
 import { OrgItem, orgTreeProvider } from '../providers/OrgTreeProvider';
+import { AuthInfo } from '../utils/authInfo';
 
 export async function openOrg(item: OrgItem) {
     if (!item.orgData || !item.orgData.username) return;
@@ -8,11 +9,12 @@ export async function openOrg(item: OrgItem) {
     await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
         title: `Opening Org ${item.label}...`,
-        cancellable: false
-    }, async () => {
+        cancellable: true
+    }, async (_progress, token) => {
         try {
-            await runCommand(`sf org open -o ${item.orgData.username}`);
+            await runCommand(`sf org open -o ${item.orgData.username}`, undefined, undefined, true, token);
         } catch (e: any) {
+            if (e.cancelled) return;
             vscode.window.showErrorMessage(`Failed to open org: ${e.message}`);
         }
     });
@@ -24,16 +26,17 @@ export async function setAsDefault(item: OrgItem) {
     await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
         title: `Setting ${item.label} as Default...`,
-        cancellable: false
-    }, async () => {
+        cancellable: true
+    }, async (_progress, token) => {
         try {
-            await runCommand(`sf config set target-org=${item.orgData.username}`);
+            await runCommand(`sf config set target-org=${item.orgData.username}`, undefined, undefined, true, token);
+            AuthInfo.clearCache();
             vscode.window.showInformationMessage(`Set ${item.label} as default org.`);
             orgTreeProvider.refresh();
-            // Update Logs & Traces as they depend on default org/current user
             vscode.commands.executeCommand('adure-sfx-toolkit.refreshLogs');
             vscode.commands.executeCommand('adure-sfx-toolkit.refreshTraces');
         } catch (e: any) {
+            if (e.cancelled) return;
             vscode.window.showErrorMessage(`Failed to set default: ${e.message}`);
         }
     });
@@ -45,13 +48,15 @@ export async function setAsDefaultDevHub(item: OrgItem) {
     await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
         title: `Setting ${item.label} as Default Dev Hub...`,
-        cancellable: false
-    }, async () => {
+        cancellable: true
+    }, async (_progress, token) => {
         try {
-            await runCommand(`sf config set target-dev-hub=${item.orgData.username}`);
+            await runCommand(`sf config set target-dev-hub=${item.orgData.username}`, undefined, undefined, true, token);
+            AuthInfo.clearCache();
             vscode.window.showInformationMessage(`Set ${item.label} as default Dev Hub.`);
             orgTreeProvider.refresh();
         } catch (e: any) {
+            if (e.cancelled) return;
             vscode.window.showErrorMessage(`Failed to set default hub: ${e.message}`);
         }
     });
@@ -81,14 +86,16 @@ export async function deleteOrg(item: OrgItem) {
     await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
         title: `${action}...`,
-        cancellable: false
-    }, async () => {
+        cancellable: true
+    }, async (_progress, token) => {
         try {
-            await runCommand(cmd);
+            await runCommand(cmd, undefined, undefined, true, token);
+            AuthInfo.clearCache();
             vscode.window.showInformationMessage(`${action} successful.`);
             orgTreeProvider.refresh();
             vscode.commands.executeCommand('adure-sfx-toolkit.refreshLogs');
         } catch (e: any) {
+            if (e.cancelled) return;
             vscode.window.showErrorMessage(`Failed: ${e.message}`);
         }
     });
@@ -100,11 +107,10 @@ export async function generatePassword(item: OrgItem) {
     await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
         title: `Generating password for ${item.label}...`,
-        cancellable: false
-    }, async () => {
+        cancellable: true
+    }, async (_progress, token) => {
         try {
-            // Returns JSON with password
-            const res = await runCommand(`sf org generate password -o ${item.orgData.username} --json`);
+            const res = await runCommand(`sf org generate password -o ${item.orgData.username} --json`, undefined, undefined, true, token);
             const json = JSON.parse(res);
             if (json.status === 0 && json.result && json.result.password) {
                 // Show password and offering to copy
@@ -117,6 +123,7 @@ export async function generatePassword(item: OrgItem) {
                  vscode.window.showErrorMessage("Failed to generate password.");
             }
         } catch (e: any) {
+            if (e.cancelled) return;
             vscode.window.showErrorMessage(`Error: ${e.message}`);
         }
     });
@@ -138,13 +145,14 @@ export async function renameAlias(item: OrgItem) {
     await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
         title: `Setting alias...`,
-        cancellable: false
-    }, async () => {
+        cancellable: true
+    }, async (_progress, token) => {
         try {
-            await runCommand(`sf alias set ${newAlias}=${item.orgData.username}`);
+            await runCommand(`sf alias set ${newAlias}=${item.orgData.username}`, undefined, undefined, true, token);
             orgTreeProvider.refresh();
         } catch (e: any) {
-             vscode.window.showErrorMessage(`Failed to set alias: ${e.message}`);
+            if (e.cancelled) return;
+            vscode.window.showErrorMessage(`Failed to set alias: ${e.message}`);
         }
     });
 }
@@ -184,11 +192,13 @@ export async function connectOrg() {
         cancellable: true
     }, async (progress, token) => {
         try {
-            await runCommand(`sf org login web --alias ${alias} --instance-url ${instanceUrl} --set-default`);
+            await runCommand(`sf org login web --alias ${alias} --instance-url ${instanceUrl} --set-default`, undefined, undefined, true, token);
+            AuthInfo.clearCache();
             vscode.window.showInformationMessage(`Successfully connected to ${alias}.`);
             orgTreeProvider.refresh();
             vscode.commands.executeCommand('adure-sfx-toolkit.refreshLogs');
         } catch (e: any) {
+            if (e.cancelled) return;
             vscode.window.showErrorMessage(`Connection failed: ${e.message}`);
         }
     });
@@ -203,17 +213,18 @@ export async function createScratch() {
         await vscode.window.withProgress({
             location: vscode.ProgressLocation.Notification,
             title: "Fetching Dev Hubs...",
-            cancellable: false
-        }, async () => {
+            cancellable: true
+        }, async (_progress, token) => {
              try {
-                const orgsJson = await runCommand('sf org list --json');
+                const orgsJson = await runCommand('sf org list --json', undefined, undefined, true, token);
                 const orgs = JSON.parse(orgsJson).result;
                 hubs = (orgs.nonScratchOrgs || []).filter((o: any) => o.isDevHub);
-             } catch (e) {
+             } catch (e: any) {
+                 if (e.cancelled) throw e;
                  console.error(e);
              }
         });
-        
+
         if (hubs.length === 0) {
             vscode.window.showErrorMessage("No Dev Hubs found. Please authorize a Dev Hub first.");
             return;
@@ -288,14 +299,20 @@ export async function createScratch() {
         await vscode.window.withProgress({
             location: vscode.ProgressLocation.Notification,
             title: `Creating Scratch Org (${alias})...`,
-            cancellable: false
-        }, async () => {
-             await runCommand(cmd);
-             vscode.window.showInformationMessage(`Scratch Org ${alias} created successfully.`);
-             orgTreeProvider.refresh();
+            cancellable: true
+        }, async (_progress, token) => {
+             try {
+                 await runCommand(cmd, undefined, undefined, true, token);
+                 vscode.window.showInformationMessage(`Scratch Org ${alias} created successfully.`);
+                 orgTreeProvider.refresh();
+             } catch (e: any) {
+                 if (e.cancelled) return;
+                 throw e;
+             }
         });
 
     } catch (e: any) {
+        if (e.cancelled) return;
         vscode.window.showErrorMessage("Failed to start scratch creation: " + e.message);
     }
 }
@@ -353,14 +370,20 @@ export async function quickScratch() {
         await vscode.window.withProgress({
             location: vscode.ProgressLocation.Notification,
             title: `Creating Quick Scratch Org (${alias})...`,
-            cancellable: false
-        }, async () => {
-             await runCommand(`sf org create scratch -f "${defFile}" -a ${alias} --duration-days 30 --set-default`);
-             vscode.window.showInformationMessage(`Scratch Org ${alias} created.`);
-             orgTreeProvider.refresh();
+            cancellable: true
+        }, async (_progress, token) => {
+             try {
+                 await runCommand(`sf org create scratch -f "${defFile}" -a ${alias} --duration-days 30 --set-default`, undefined, undefined, true, token);
+                 vscode.window.showInformationMessage(`Scratch Org ${alias} created.`);
+                 orgTreeProvider.refresh();
+             } catch (e: any) {
+                 if (e.cancelled) return;
+                 throw e;
+             }
         });
 
     } catch (e: any) {
-         vscode.window.showErrorMessage("Error: " + e.message);
+        if (e.cancelled) return;
+        vscode.window.showErrorMessage("Error: " + e.message);
     }
 }

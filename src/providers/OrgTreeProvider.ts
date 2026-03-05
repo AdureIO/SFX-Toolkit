@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { runCommand } from '../utils/commandRunner';
+import { isSalesforceProject } from '../utils/projectUtils';
 
 export class OrgItem extends vscode.TreeItem {
     constructor(
@@ -78,17 +79,15 @@ export class OrgTreeProvider implements vscode.TreeDataProvider<OrgItem> {
 
     async getChildren(element?: OrgItem): Promise<OrgItem[]> {
         if (!element) {
-            // Root: Check if we have data
+            if (!isSalesforceProject()) {
+                return [new OrgItem('Open an SFDX project', vscode.TreeItemCollapsibleState.None, null, 'GROUP', 'placeholder')];
+            }
             if (!this.data) {
                 await this.fetchOrgs();
             }
-            
-            // If roots cached, return them to maintain reference equality for reveal()
             if (this._rootItems.length > 0) {
                  return this._rootItems;
             }
-
-            // Return Groups and cache them
             this._rootItems = [
                 new OrgItem("Dev Hubs", vscode.TreeItemCollapsibleState.Expanded, null, 'GROUP', 'group-devhub'),
                 new OrgItem("Production", vscode.TreeItemCollapsibleState.Expanded, null, 'GROUP', 'group-production'),
@@ -154,30 +153,27 @@ export class OrgTreeProvider implements vscode.TreeDataProvider<OrgItem> {
         }
     }
     getParent(element: OrgItem): vscode.ProviderResult<OrgItem> {
-        if (element.type === 'GROUP') {
+        if (element.type === 'GROUP' || element.contextValue === 'placeholder') {
             return null;
         }
 
-        // Ensure roots are loaded
         if (this._rootItems.length === 4) {
              const [devHubs, prod, sandboxes, scratches] = this._rootItems;
-             
+
              if (element.contextValue === 'org-scratch') {
                  return scratches;
              }
              if (element.contextValue === 'org-devhub') {
                  return devHubs;
              }
-             
-             // Remaining are connected orgs: either prod or sandbox
-             // We can check based on orgData.isSandbox
-             if (element.orgData.isSandbox) {
+
+             if (element.orgData && element.orgData.isSandbox) {
                  return sandboxes;
              } else {
                  return prod;
              }
         }
-        return null; // Should not happen if tree is consistent
+        return null;
     }
 
     getRootItems(): OrgItem[] {

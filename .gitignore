@@ -1,6 +1,7 @@
 out
 node_modules
 .vscode-test
+.vscode/anon-apex-buffer.apex
 .DS_Store
 *.log
 

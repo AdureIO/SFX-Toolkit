@@ -225,7 +225,7 @@
 			},
 			{
 				"command": "adure-sfx-toolkit.openSOQLEditor",
-				"title": "ASFXT: Open SOQL Editor",
+				"title": "ASFXT: Open SOQL Builder & Editor",
 				"icon": "$(database)"
 			}
 		],
@@ -256,6 +256,13 @@
 					"title": "Adure SFX Toolkit",
 					"icon": "resources/dark/sidebar.png"
 				}
+			],
+			"panel": [
+				{
+					"id": "adure-sfx-toolkit-panel",
+					"title": "Execute Apex",
+					"icon": "$(play)"
+				}
 			]
 		},
 		"views": {
@@ -275,6 +282,13 @@
 				{
 					"id": "adure-sfx-toolkit.development",
 					"name": "Development"
+				}
+			],
+			"adure-sfx-toolkit-panel": [
+				{
+					"type": "webview",
+					"id": "adure-sfx-toolkit.anonymousApexPanel",
+					"name": "Apex"
 				}
 			]
 		},
@@ -344,6 +358,11 @@
 					"command": "adure-sfx-toolkit.quickScratch",
 					"when": "view == adure-sfx-toolkit.orgs",
 					"group": "navigation"
+				},
+				{
+					"command": "adure-sfx-toolkit.deployClasses",
+					"when": "view == adure-sfx-toolkit.development",
+					"group": "inline"
 				},
 				{
 					"command": "adure-sfx-toolkit.retrieveCurrentFile",

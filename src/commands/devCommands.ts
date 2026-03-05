@@ -376,13 +376,14 @@ export async function pullSource() {
 		{
 			location: vscode.ProgressLocation.Notification,
 			title: "Pulling Source from Default Org...",
-			cancellable: false,
+			cancellable: true,
 		},
-		async () => {
+		async (_progress, token) => {
 			try {
-				await runCommand("sf project retrieve start");
+				await runCommand("sf project retrieve start", undefined, undefined, true, token);
 				vscode.window.showInformationMessage("Source pulled successfully.");
 			} catch (e: any) {
+				if (e.cancelled) { Logger.info("Pull cancelled by user."); return; }
 				vscode.window.showErrorMessage(`Pull failed: ${e.message}`);
 			}
 		}
@@ -404,15 +405,15 @@ export async function deployCurrentFile() {
 		{
 			location: vscode.ProgressLocation.Notification,
 			title: "Deploying current file...",
-			cancellable: false,
+			cancellable: true,
 		},
-		async () => {
+		async (_progress, token) => {
 			try {
-				// Use --source-dir or -d to deploy specific file/path
-				const result = await runCommand(`sf project deploy start -d "${filePath}"`);
+				const result = await runCommand(`sf project deploy start -d "${filePath}"`, undefined, undefined, true, token);
 				const count = getDeployedCount(result);
 				vscode.window.showInformationMessage(`File deployed successfully. Deployed ${count} components.`);
 			} catch (e: any) {
+				if (e.cancelled) { Logger.info("Deploy cancelled by user."); return; }
 				vscode.window.showErrorMessage(`Deploy failed: ${e.message}`);
 			}
 		}
@@ -432,13 +433,14 @@ export async function retrieveCurrentFile() {
 		{
 			location: vscode.ProgressLocation.Notification,
 			title: "Retrieving current file...",
-			cancellable: false,
+			cancellable: true,
 		},
-		async () => {
+		async (_progress, token) => {
 			try {
-				await runCommand(`sf project retrieve start -d "${filePath}"`);
+				await runCommand(`sf project retrieve start -d "${filePath}"`, undefined, undefined, true, token);
 				vscode.window.showInformationMessage("File retrieved successfully.");
 			} catch (e: any) {
+				if (e.cancelled) { Logger.info("Retrieve cancelled by user."); return; }
 				vscode.window.showErrorMessage(`Retrieve failed: ${e.message}`);
 			}
 		}
@@ -455,10 +457,7 @@ export async function runLocalTests() {
 		async (progress, token) => {
 			try {
 				// -w 10 (wait 10 mins), -l RunLocalTests, -r human
-				// Use runCommand but maybe output to channel?
-				// Tests can have long output.
-
-				const result = await runCommand("sf apex run test -l RunLocalTests -w 10 -r human");
+				const result = await runCommand("sf apex run test -l RunLocalTests -w 10 -r human", undefined, undefined, true, token);
 
 				const channel = vscode.window.createOutputChannel("Salesforce Test Results");
 				channel.clear();
@@ -471,6 +470,10 @@ export async function runLocalTests() {
 					vscode.window.showWarningMessage("Some tests failed. Check output.");
 				}
 			} catch (e: any) {
+				if (e.cancelled) {
+					Logger.info("Run Local Tests cancelled by user.");
+					return;
+				}
 				vscode.window.showErrorMessage(`Tests execution failed.`);
 				const channel = vscode.window.createOutputChannel("Salesforce Test Results");
 				channel.append(e.stderr || e.message);
@@ -498,14 +501,15 @@ export async function resetSourceTracking() {
 		{
 			location: vscode.ProgressLocation.Notification,
 			title: "Resetting Source Tracking...",
-			cancellable: false,
+			cancellable: true,
 		},
-		async () => {
+		async (_progress, token) => {
 			try {
-				const result = await runCommand("sf project reset tracking --no-prompt");
+				const result = await runCommand("sf project reset tracking --no-prompt", undefined, undefined, true, token);
 				Logger.info(result);
 				vscode.window.showInformationMessage("Source tracking reset successfully.");
 			} catch (e: any) {
+				if (e.cancelled) { Logger.info("Reset tracking cancelled by user."); return; }
 				const msg = e.stderr || e.message;
 				Logger.error("Reset tracking failed:", msg);
 				vscode.window.showErrorMessage(`Reset tracking failed: ${msg}`);

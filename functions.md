@@ -16,6 +16,9 @@ Improvements
   - Add option to add extra permissions, but keep in mind restrictions like required fields, etc.
   - add button to open the permissionset in xml viewer
 
+- apex excecute
+  - shortkey cmd+enter to execute file/ selection
+
 ## LWC
 
 LWC easily switch between html, css, 

@@ -31,24 +31,20 @@ import { pushSource, pushSourceForce, pullSource, deployCurrentFile, retrieveCur
 import { PermissionSetEditorProvider } from "./editors/PermissionSetEditorProvider";
 import { ScratchOrgDefEditorProvider } from "./editors/ScratchOrgDefEditorProvider";
 import { SOQLEditorProvider } from "./providers/SOQLEditorProvider";
+import { AnonymousApexViewProvider } from "./providers/AnonymousApexViewProvider";
 import { Logger, outputChannel } from "./utils/outputChannel";
-import { isSalesforceProject } from "./utils/projectUtils";
+import { isSalesforceProject, updateSalesforceProjectContext, NOT_SFDX_PROJECT_MESSAGE } from "./utils/projectUtils";
+import { getSalesforceLogDirectory } from "./utils/logPaths";
 
-// Helper to register commands with logging
+// Helper to register commands with logging; blocks execution when not in an SFDX project
 function register(command: string, callback: (...args: any[]) => any, thisArg?: any): vscode.Disposable {
 	return vscode.commands.registerCommand(command, async (...args: any[]) => {
 		Logger.info(`Command triggered: ${command}`);
+		if (!isSalesforceProject()) {
+			vscode.window.showInformationMessage(NOT_SFDX_PROJECT_MESSAGE);
+			return;
+		}
 		try {
-			// Check if project is valid for commands that likely require it
-			// Most commands interact with SF, so we can do a broad check or check inside commands.
-			// The user requested checking on activation, but checking here protects execution.
-			if (!isSalesforceProject()) {
-				// Allow some commands like creating a project or settings? 
-				// For now, let's warn but allow execution if the user persists, or maybe block sensitive ones?
-				// User said "to avoid errors", so let's log a warning.
-				// However, blocking might be too aggressive if they are just opening a log file.
-				// Let's just rely on the activation check for the main warning.
-			}
 			return await callback.call(thisArg, ...args);
 		} catch (error) {
 			Logger.error(`Error executing command: ${command}`, error);
@@ -60,12 +56,11 @@ function register(command: string, callback: (...args: any[]) => any, thisArg?: 
 export function activate(context: vscode.ExtensionContext) {
 	Logger.info('Extension "adure-sfx-toolkit" is starting activation...');
 
-	// Check for Salesforce Project
-	if (!isSalesforceProject()) {
-		const msg = 'Adure SFX Toolkit: No "sfdx-project.json" found in workspace root. Some Salesforce features may not work correctly.';
-		Logger.warn(msg);
-		vscode.window.showWarningMessage(msg);
-	}
+	// Set context so panels can show placeholder when not in SFDX project; update when workspace changes
+	updateSalesforceProjectContext();
+	context.subscriptions.push(
+		vscode.workspace.onDidChangeWorkspaceFolders(() => updateSalesforceProjectContext())
+	);
 
 	try {
 		console.log('Congratulations, your extension "adure-sfx-toolkit" is now active!');
@@ -115,13 +110,24 @@ export function activate(context: vscode.ExtensionContext) {
 		// 6. Execute SOQL
 		let executeSOQLCmd = register("adure-sfx-toolkit.executeSOQL", executeSOQL);
 
-		// 7. Side Bar Log Provider
-		// Use singleton
+		// 7. Side Bar Log Provider (shows logs from .sfdx/tools/debug/logs, no own download)
 		vscode.window.registerTreeDataProvider("adure-sfx-toolkit.logs", logTreeProvider);
 
 		let refreshLogsCmd = register("adure-sfx-toolkit.refreshLogs", () => {
 			logTreeProvider.refresh();
 		});
+
+		// Watch .sfdx/tools/debug/logs so the tree updates when Salesforce extensions add/change/remove logs
+		const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+		if (workspaceFolder) {
+			const logWatcher = vscode.workspace.createFileSystemWatcher(
+				new vscode.RelativePattern(workspaceFolder, ".sfdx/tools/debug/logs/*.log")
+			);
+			logWatcher.onDidCreate(() => logTreeProvider.refresh());
+			logWatcher.onDidChange(() => logTreeProvider.refresh());
+			logWatcher.onDidDelete(() => logTreeProvider.refresh());
+			context.subscriptions.push(logWatcher);
+		}
 
 		let openLogCmd = register("adure-sfx-toolkit.openLog", async (logId: string) => {
 			if (logId) {
@@ -170,7 +176,13 @@ export function activate(context: vscode.ExtensionContext) {
 		let createScratchCmd = register("adure-sfx-toolkit.createScratch", createScratch);
 		let quickScratchCmd = register("adure-sfx-toolkit.quickScratch", quickScratch);
 
-		// 8. Development Actions
+		// 8. Execute Apex panel (bottom panel only; content persisted in .vscode/anon-apex-buffer.apex)
+		const anonymousApexProvider = new AnonymousApexViewProvider(context.extensionUri);
+		context.subscriptions.push(
+			vscode.window.registerWebviewViewProvider("adure-sfx-toolkit.anonymousApexPanel", anonymousApexProvider)
+		);
+
+		// 9. Development Actions
 		const devProvider = new DevActionsProvider();
 		vscode.window.registerTreeDataProvider("adure-sfx-toolkit.development", devProvider);
 
@@ -182,7 +194,7 @@ export function activate(context: vscode.ExtensionContext) {
 		let runTestsCmd = register("adure-sfx-toolkit.runLocalTests", runLocalTests);
 		let resetTrackingCmd = register("adure-sfx-toolkit.resetSourceTracking", resetSourceTracking);
 
-		// 9. Permission Set Editor
+		// 10. Permission Set Editor
 		context.subscriptions.push(PermissionSetEditorProvider.register(context));
 
 		// Command to open permission set in UI mode
@@ -201,29 +213,32 @@ export function activate(context: vscode.ExtensionContext) {
 		// Register Scratch Org Definition Editor
 		context.subscriptions.push(ScratchOrgDefEditorProvider.register(context));
 
-		// 10. Log Content Provider (sf-log and sf-anon-log scheme)
+		// 11. Log Content Provider (sf-log and sf-anon-log scheme)
 		context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider("sf-log", logContentProvider));
 		context.subscriptions.push(
 			vscode.workspace.registerTextDocumentContentProvider("sf-anon-log", logContentProvider)
 		);
 
-		// 11. Polling Logic
+		// 12. Polling Logic
 		let pollingInterval: NodeJS.Timeout | undefined;
 		let isPolling = false;
 
+		const POLL_INTERVAL_SEC = 5;
 		let startPollingCmd = register("adure-sfx-toolkit.startPolling", async () => {
 			isPolling = true;
 			logTreeProvider.isPolling = true;
 			await vscode.commands.executeCommand("setContext", "adure-sfx-toolkit:polling", true);
 
-			// Refresh every 5 seconds
 			if (!pollingInterval) {
-				logTreeProvider.refresh(); // Immediate refresh
+				// Immediate fetch from org, then every N seconds
+				logTreeProvider.fetchNewLogsFromOrg().then(() => logTreeProvider.refresh());
 				pollingInterval = setInterval(() => {
-					logTreeProvider.refresh();
-				}, 5000);
+					if (logTreeProvider.isPolling) {
+						logTreeProvider.fetchNewLogsFromOrg();
+					}
+				}, POLL_INTERVAL_SEC * 1000);
 			}
-			vscode.window.showInformationMessage("Log Polling Started (5s)");
+			vscode.window.showInformationMessage(`Log polling started: retrieving logs every ${POLL_INTERVAL_SEC}s`);
 		});
 
 		let stopPollingCmd = register("adure-sfx-toolkit.stopPolling", async () => {
@@ -241,12 +256,12 @@ export function activate(context: vscode.ExtensionContext) {
 		// Initialize context
 		vscode.commands.executeCommand("setContext", "adure-sfx-toolkit:polling", false);
 
-		// 12. SOQL Editor
+		// 13. SOQL Editor
 		let openSOQLEditorCmd = register("adure-sfx-toolkit.openSOQLEditor", () => {
 			SOQLEditorProvider.show(context.extensionUri);
 		});
 
-		// 13. Show Output
+		// 14. Show Output
 		let showOutputCmd = register("adure-sfx-toolkit.showOutput", () => {
 			outputChannel.show();
 		});

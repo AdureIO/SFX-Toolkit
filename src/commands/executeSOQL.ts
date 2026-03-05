@@ -23,20 +23,19 @@ export async function executeSOQL() {
     vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
         title: "Executing SOQL Query...",
-        cancellable: false
-    }, async () => {
+        cancellable: true
+    }, async (_progress, token) => {
         try {
-            const result = await runCommand(`sf data query --query "${query}"`);
-            
-            // Open in new document or output channel?
-            // A new document is nicer for viewing JSON or large tables.
+            const result = await runCommand(`sf data query --query "${query}"`, undefined, undefined, true, token);
+
             const doc = await vscode.workspace.openTextDocument({
                 content: result,
-                language: 'plaintext' // or json if we used --json
+                language: 'plaintext'
             });
             await vscode.window.showTextDocument(doc);
-            
-        } catch (e) {
+
+        } catch (e: any) {
+            if (e.cancelled) return;
             vscode.window.showErrorMessage(`Query failed: ${e}`);
         }
     });

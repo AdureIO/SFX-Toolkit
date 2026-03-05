@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { isSalesforceProject } from "../utils/projectUtils";
 
 export class DevActionsProvider implements vscode.TreeDataProvider<vscode.TreeItem> {
 	getTreeItem(element: vscode.TreeItem): vscode.TreeItem {
@@ -7,8 +8,12 @@ export class DevActionsProvider implements vscode.TreeDataProvider<vscode.TreeIt
 
 	getChildren(element?: vscode.TreeItem): vscode.ProviderResult<vscode.TreeItem[]> {
 		if (element) return [];
+		if (!isSalesforceProject()) {
+			const item = new vscode.TreeItem("Open an SFDX project", vscode.TreeItemCollapsibleState.None);
+			item.tooltip = "Open a folder that contains sfdx-project.json to use Development actions.";
+			return [item];
+		}
 
-		// Root items
 		return [
 			this.createItem(
 				"Push Source",
@@ -29,6 +34,12 @@ export class DevActionsProvider implements vscode.TreeDataProvider<vscode.TreeIt
 				"Retrieve all source from default org"
 			),
 			this.createItem(
+				"Deploy Classes",
+				"adure-sfx-toolkit.deployClasses",
+				"package",
+				"Select classes and deploy with chosen test option"
+			),
+			this.createItem(
 				"Deploy Active File",
 				"adure-sfx-toolkit.deployCurrentFile",
 				"file-code",
@@ -47,7 +58,7 @@ export class DevActionsProvider implements vscode.TreeDataProvider<vscode.TreeIt
 				"history",
 				"Reset source tracking for default org"
 			),
-			this.createItem("SOQL Editor", "adure-sfx-toolkit.openSOQLEditor", "database", "Open SOQL Editor"),
+			this.createItem("SOQL Builder & Editor", "adure-sfx-toolkit.openSOQLEditor", "database", "Build and run SOQL queries"),
 		];
 	}
 

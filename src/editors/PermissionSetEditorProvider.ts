@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { XMLParser, XMLBuilder } from 'fast-xml-parser';
+import { isSalesforceProject, NOT_SFDX_PROJECT_MESSAGE } from '../utils/projectUtils';
 
 export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvider {
 
@@ -108,18 +109,20 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
 
     private async fetchObjects(webview: vscode.Webview) {
         try {
+            if (!isSalesforceProject()) {
+                throw new Error(NOT_SFDX_PROJECT_MESSAGE);
+            }
             const { runCommand } = require('../utils/commandRunner');
-            
+
             console.log('Starting to fetch objects and fields...');
-            
-            // First, check if we have a default org
+
             let orgResult;
             try {
                 orgResult = await runCommand('sf org display --json');
             } catch (e) {
                 throw new Error('No default org set. Please run "sf org login" or set a default org.');
             }
-            
+
             const orgParsed = JSON.parse(orgResult);
             if (orgParsed.status !== 0) {
                 throw new Error('No default org set. Please set a default org first.');
