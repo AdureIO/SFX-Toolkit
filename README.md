@@ -6,7 +6,8 @@ Adure SFX Toolkit is an open-source VSCode extension designed to supercharge you
 
 ### 🔍 Log Management & Filtering
 
--   **Log Viewer**: Easily list, download, and open Salesforce debug logs directly from the sidebar.
+-   **Log Viewer**: Easily list, download, and open Salesforce debug logs directly from the sidebar. Works with the Salesforce default extensions’ log locations.
+-   **Delete All Logs**: Remove logs from both the org (Tooling API with CLI fallback when needed) and clear the local log cache in one action.
 -   **Smart Filtering**: Toggle filters to focus on what matters.
     -   **Debug Filter** (`Cmd+D` / `Ctrl+D`): Instantly show only `USER_DEBUG` statements, errors, and exceptions.
     -   **SOQL & DML Filter**: Filter logs to show only database queries (`SOQL_EXECUTE`) and DML operations.
@@ -20,9 +21,10 @@ Adure SFX Toolkit is an open-source VSCode extension designed to supercharge you
 
 ### ⚡ Apex & SOQL
 
--   **Execute Anonymous**: Run Apex code directly from the editor (`.apex` files or selections).
+-   **Execute Anonymous**: Run Apex code directly from the editor (`.apex` files or selections). Output runs in the **Execute Apex** bottom panel for fast feedback and history.
 -   **Rerun Last**: Quickly rerun the last executed Apex snippet without re-selecting code.
--   **SOQL Editor**: A powerful visual editor for SOQL queries (`ASFXT: Open SOQL Editor`).
+-   **SOQL Editor** (`ASFXT: Open SOQL Builder & Editor`): A powerful SOQL builder and editor with completion.
+    -   **Builder & Completion**: Object and field completion to write SOQL faster.
     -   **Interactive Table**: View query results in a responsive table.
     -   **Inline Editing**: Directly edit record fields in the table.
     -   **Smart Save**: Commit changes back to Salesforce (`sf data update record`) with automatic quote escaping and error handling.
@@ -51,6 +53,7 @@ Adure SFX Toolkit is an open-source VSCode extension designed to supercharge you
     -   **Pull Source**: Retrieve changes from the org.
     -   **Deploy/Retrieve**: Contextual commands to deploy or retrieve the currently open file.
     -   **Reset Source Tracking**: Quickly reset tracking for the default org (`sf project reset tracking`).
+-   **Deploy Classes** (`ASFXT: Deploy Classes`): Production-style deployment with full control. Select classes to deploy, then choose test option: run all tests, run specified tests (pick test classes), validate only (dry-run), or no test run. You can cancel at any step, or save a **preset** (classes + test option) for repeat deployments.
 -   **Test Runner**: Run local tests with ease.
 -   **Custom Editors**:
     -   **Permission Set Editor**: A dedicated, user-friendly UI for editing Permission Sets (`.permissionset-meta.xml`).
@@ -69,3 +72,8 @@ Check out the [GitHub Repository](https://github.com/AdureIO/SFX-Toolkit).
 ## Feedback
 
 If you encounter any issues or have suggestions, please file an issue on our GitHub repository.
+
+## Build
+
+- vsce package
+- vsce publish

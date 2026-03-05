@@ -1,5 +1,9 @@
 ## Functions
 
+### Logs
+
+- Delete All Logs: removes logs from org (Tooling API + CLI fallback) and clears local log cache — done
+
 ### tests
 
 - can we show the test coverage percentage per class in the explorer?
@@ -7,17 +11,23 @@
 
 ## SOQL editor
 
-- view to write / test soql queries
-- open results in a table
-- quick field changes - save to database
+- view to write / test soql queries — done
+- open results in a table — done
+- quick field changes - save to database — done
+- SOQL builder with object/field completion — done
+
+### Deploy
+
+- Deploy Classes: production-style deploy with Run All / Run Specified Tests / Validate only / No tests, cancel at any step, save presets — done
 
 Improvements
 - permissionset viewer: 
   - Add option to add extra permissions, but keep in mind restrictions like required fields, etc.
   - add button to open the permissionset in xml viewer
 
-- apex excecute
-  - shortkey cmd+enter to execute file/ selection
+- apex execute
+  - Execute Anonymous runs in bottom panel "Execute Apex" for speed and history — done
+  - shortkey cmd+enter to execute file/ selection (optional improvement)
 
 ## LWC
 
