@@ -83,8 +83,7 @@ export async function lwcNavigate() {
     }
 
     if (siblings.length === 1) {
-        const doc = await vscode.workspace.openTextDocument(siblings[0].filePath);
-        await vscode.window.showTextDocument(doc, { preview: false });
+        await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(siblings[0].filePath));
         return;
     }
 
@@ -100,8 +99,7 @@ export async function lwcNavigate() {
     });
 
     if (picked) {
-        const doc = await vscode.workspace.openTextDocument(picked.filePath);
-        await vscode.window.showTextDocument(doc, { preview: false });
+        await vscode.commands.executeCommand('vscode.open', vscode.Uri.file(picked.filePath));
     }
 }
 
@@ -114,18 +112,23 @@ async function lwcGoToExt(targetExt: string) {
     const editor = vscode.window.activeTextEditor;
     if (!editor) return;
 
-    const filePath = editor.document.uri.fsPath;
-    const dir = path.dirname(filePath);
+    const currentUri = editor.document.uri;
+    const dir = path.dirname(currentUri.fsPath);
     const baseName = path.basename(dir);
-    const target = path.join(dir, baseName + targetExt);
+    const targetPath = path.join(dir, baseName + targetExt);
 
-    if (!fs.existsSync(target)) {
+    if (!fs.existsSync(targetPath)) {
         vscode.window.showInformationMessage(`No ${targetExt} file found for this component.`);
         return;
     }
 
-    if (target === filePath) return;
+    if (targetPath === currentUri.fsPath) return;
 
-    const doc = await vscode.workspace.openTextDocument(target);
-    await vscode.window.showTextDocument(doc, { preview: false });
+    const targetUri = vscode.Uri.file(targetPath);
+    try {
+        await vscode.commands.executeCommand('vscode.open', targetUri);
+    } catch {
+        const doc = await vscode.workspace.openTextDocument(targetUri);
+        await vscode.window.showTextDocument(doc, { preview: false });
+    }
 }
