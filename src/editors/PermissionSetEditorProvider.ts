@@ -28,8 +28,6 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
 
         webviewPanel.webview.html = this.getHtmlForWebview(webviewPanel.webview);
 
-        let updatingFromWebview = false;
-
         const parser = new XMLParser({
             ignoreAttributes: false,
             parseAttributeValue: true,
@@ -43,7 +41,7 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
             }
         });
 
-        function updateWebview() {
+        function sendDataToWebview() {
             try {
                 const text = document.getText();
                 if (!text.trim()) {
@@ -60,23 +58,10 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
             }
         }
 
-        const changeDocumentSubscription = vscode.workspace.onDidChangeTextDocument(e => {
-            if (e.document.uri.toString() === document.uri.toString()) {
-                if (updatingFromWebview) return;
-                updateWebview();
-            }
-        });
-
-        webviewPanel.onDidDispose(() => {
-            changeDocumentSubscription.dispose();
-        });
-
         webviewPanel.webview.onDidReceiveMessage(async (e) => {
             switch (e.type) {
                 case 'update':
-                    updatingFromWebview = true;
                     await this.updateDocument(document, e.data);
-                    updatingFromWebview = false;
                     return;
                 case 'fetchObjects':
                     this.fetchObjects(webviewPanel.webview);
@@ -84,7 +69,7 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
             }
         });
 
-        updateWebview();
+        sendDataToWebview();
     }
 
     private async updateDocument(document: vscode.TextDocument, permissionSetData: any) {
@@ -214,8 +199,8 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
                     .tab { padding: 8px 16px; cursor: pointer; border-bottom: 2px solid transparent; opacity: 0.7; }
                     .tab:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground); }
                     .tab.active { border-bottom: 2px solid var(--vscode-activityBar-activeBorder); opacity: 1; font-weight: bold; }
-                    .content { display: none; }
-                    .content.active { display: block; }
+                    .content { display: none !important; }
+                    .content.active { display: block !important; }
                     input[type="text"], textarea { width: 100%; padding: 8px; margin-bottom: 10px; background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border); color: var(--vscode-input-foreground); box-sizing: border-box; }
                     textarea { font-family: 'Courier New', monospace; font-size: 12px; }
                     select { padding: 6px; background: var(--vscode-dropdown-background); border: 1px solid var(--vscode-dropdown-border); color: var(--vscode-dropdown-foreground); }
@@ -256,7 +241,8 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
                 </div>
 
                 <!-- Object Permissions (default tab) -->
-                <div id="objectPerms" class="content active">
+                <div id="objectPerms" class="content active" style="display:block">
+                    <div id="objStatus" style="padding: 8px; margin-bottom: 8px; opacity: 0.7; font-size: 12px;">Loading permission data...</div>
                     <input type="text" id="objSearch" placeholder="Search Objects..." onkeyup="filterTable('objTable', 0)">
                     <table id="objTable">
                         <thead>
@@ -275,7 +261,7 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
                 </div>
 
                 <!-- Field Permissions -->
-                <div id="fields" class="content">
+                <div id="fields" class="content" style="display:none">
                     <input type="text" id="fieldSearch" placeholder="Search Fields..." onkeyup="filterTable('fieldTable', 0)">
                     <table id="fieldTable">
                         <thead>
@@ -291,7 +277,7 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
                 </div>
 
                 <!-- Apex Classes -->
-                <div id="classes" class="content">
+                <div id="classes" class="content" style="display:none">
                     <input type="text" id="classSearch" placeholder="Search Classes..." onkeyup="filterTable('classTable', 0)">
                     <table id="classTable">
                         <thead>
@@ -305,7 +291,7 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
                 </div>
 
                 <!-- User Permissions -->
-                <div id="user" class="content">
+                <div id="user" class="content" style="display:none">
                     <input type="text" id="userSearch" placeholder="Search User Permissions..." onkeyup="filterTable('userTable', 0)">
                     <table id="userTable">
                         <thead>
@@ -319,7 +305,7 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
                 </div>
 
                 <!-- Visualforce Pages -->
-                <div id="pages" class="content">
+                <div id="pages" class="content" style="display:none">
                     <input type="text" id="pageSearch" placeholder="Search Pages..." onkeyup="filterTable('pageTable', 0)">
                     <table id="pageTable">
                         <thead>
@@ -333,7 +319,7 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
                 </div>
 
                 <!-- Tab Settings -->
-                <div id="tabs" class="content">
+                <div id="tabs" class="content" style="display:none">
                     <input type="text" id="tabSearch" placeholder="Search Tabs..." onkeyup="filterTable('tabTable', 0)">
                     <table id="tabTable">
                         <thead>
@@ -347,7 +333,7 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
                 </div>
 
                 <!-- Applications -->
-                <div id="apps" class="content">
+                <div id="apps" class="content" style="display:none">
                     <input type="text" id="appSearch" placeholder="Search Applications..." onkeyup="filterTable('appTable', 0)">
                     <table id="appTable">
                         <thead>
@@ -362,7 +348,7 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
                 </div>
 
                 <!-- Record Types -->
-                <div id="recordTypes" class="content">
+                <div id="recordTypes" class="content" style="display:none">
                     <input type="text" id="rtSearch" placeholder="Search Record Types..." onkeyup="filterTable('rtTable', 0)">
                     <table id="rtTable">
                         <thead>
@@ -378,7 +364,7 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
                 </div>
 
                 <!-- Custom Permissions -->
-                <div id="customPerms" class="content">
+                <div id="customPerms" class="content" style="display:none">
                     <input type="text" id="cpSearch" placeholder="Search Custom Permissions..." onkeyup="filterTable('cpTable', 0)">
                     <table id="cpTable">
                         <thead>
@@ -392,14 +378,14 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
                 </div>
 
                 <!-- Objects & Fields Tree (loads from org on demand) -->
-                <div id="objectsFields" class="content">
+                <div id="objectsFields" class="content" style="display:none">
                     <button onclick="loadObjectsFromOrg()" id="loadObjBtn" style="padding: 8px 16px; margin-bottom: 12px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; cursor: pointer; border-radius: 3px;">Load Objects & Fields from Org</button>
                     <input type="text" id="objFieldSearch" placeholder="Search objects and fields..." onkeyup="filterTree()" style="display:none;">
                     <div id="objectsTree" class="tree"></div>
                 </div>
 
                 <!-- XML Tab -->
-                <div id="xml" class="content">
+                <div id="xml" class="content" style="display:none">
                     <textarea id="xmlEditor" rows="25"></textarea>
                 </div>
 
@@ -408,6 +394,13 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
                     let currentData = {};
                     let isUpdatingUI = false;
                     let allObjectsTree = [];
+
+                    // Force initial tab visibility with JS (CSS may be overridden by VS Code webview styles)
+                    (function initTabs() {
+                        document.querySelectorAll('.content').forEach(el => { el.style.setProperty('display', 'none', 'important'); });
+                        const defaultTab = document.getElementById('objectPerms');
+                        if (defaultTab) defaultTab.style.setProperty('display', 'block', 'important');
+                    })();
 
                     window.addEventListener('message', event => {
                         const message = event.data;
@@ -598,33 +591,44 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
                     }
 
                     function render() {
-                        isUpdatingUI = true;
-                        renderObjects(currentData.objectPermissions || []);
-                        renderFields(currentData.fieldPermissions || []);
-                        renderClasses(currentData.classAccesses || []);
-                        renderUserPermissions(currentData.userPermissions || []);
-                        renderPages(currentData.pageAccesses || []);
-                        renderTabs(currentData.tabSettings || []);
-                        renderApps(currentData.applicationVisibilities || []);
-                        renderRecordTypes(currentData.recordTypeVisibilities || []);
-                        renderCustomPermissions(currentData.customPermissions || []);
-                        if (document.querySelector('.tab[onclick*="xml"]')?.classList.contains('active')) {
-                            updateXmlEditor();
+                        try {
+                            isUpdatingUI = true;
+                            renderObjects(currentData.objectPermissions || []);
+                            renderFields(currentData.fieldPermissions || []);
+                            renderClasses(currentData.classAccesses || []);
+                            renderUserPermissions(currentData.userPermissions || []);
+                            renderPages(currentData.pageAccesses || []);
+                            renderTabs(currentData.tabSettings || []);
+                            renderApps(currentData.applicationVisibilities || []);
+                            renderRecordTypes(currentData.recordTypeVisibilities || []);
+                            renderCustomPermissions(currentData.customPermissions || []);
+                            if (document.querySelector('.tab[onclick*="xml"]')?.classList.contains('active')) {
+                                updateXmlEditor();
+                            }
+                            isUpdatingUI = false;
+                        } catch (err) {
+                            isUpdatingUI = false;
+                            const status = document.getElementById('objStatus');
+                            if (status) status.textContent = 'Error rendering: ' + (err.message || err);
+                            if (status) status.style.color = 'var(--vscode-errorForeground)';
                         }
-                        isUpdatingUI = false;
                     }
 
                     function openTab(tabName, clickedTab) {
                         if (tabName === 'xml') {
                             updateXmlEditor();
-                        } else if (document.querySelector('.tab[onclick*="xml"]')?.classList.contains('active')) {
-                            parseXmlEditor();
                         }
                         
-                        document.querySelectorAll('.content').forEach(c => c.classList.remove('active'));
+                        document.querySelectorAll('.content').forEach(c => {
+                            c.classList.remove('active');
+                            c.style.setProperty('display', 'none', 'important');
+                        });
                         document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
                         const target = document.getElementById(tabName);
-                        if (target) target.classList.add('active');
+                        if (target) {
+                            target.classList.add('active');
+                            target.style.setProperty('display', 'block', 'important');
+                        }
                         if (clickedTab) clickedTab.classList.add('active');
                     }
 
@@ -802,6 +806,8 @@ return;
                     // --- RENDERERS ---
 
                     function renderObjects(perms) {
+                        const status = document.getElementById('objStatus');
+                        if (status) status.textContent = perms.length > 0 ? perms.length + ' object(s)' : 'No object permissions in this file';
                         const tbody = document.getElementById('objBody');
                         tbody.innerHTML = '';
                         perms.forEach((p, index) => {

@@ -344,6 +344,12 @@
     },
     "keybindings": [
       {
+        "command": "adure-sfx-toolkit.executeAnonymous",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "editorTextFocus && resourceExtname == .apex"
+      },
+      {
         "command": "adure-sfx-toolkit.filterLogDebug",
         "key": "cmd+d",
         "mac": "cmd+d",
