@@ -51,8 +51,16 @@ export class OrgItem extends vscode.TreeItem {
             // Toolkit for tooltip
             this.tooltip = `Username: ${orgData.username}\nOrgId: ${orgData.orgId}\nStatus: ${orgData.status || 'Connected'}\nType: ${typeStr}`;
             if (isScratch && orgData.expirationDate) {
-                this.tooltip += `\nExpires: ${orgData.expirationDate}`;
-                this.description += ` [${orgData.expirationDate.split('T')[0]}]`;
+                const expDate = new Date(orgData.expirationDate);
+                const daysLeft = Math.ceil((expDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+                this.tooltip += `\nExpires: ${orgData.expirationDate} (${daysLeft} days)`;
+                if (daysLeft <= 3 && daysLeft > 0) {
+                    this.description += ` ⚠️ [${daysLeft}d left]`;
+                } else if (daysLeft <= 0) {
+                    this.description += ` ❌ [Expired]`;
+                } else {
+                    this.description += ` [${daysLeft}d]`;
+                }
             }
         }
     }

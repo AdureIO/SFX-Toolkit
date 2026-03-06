@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { runCommand } from '../utils/commandRunner';
 import { isSalesforceProject } from '../utils/projectUtils';
+import { Logger } from '../utils/outputChannel';
 
 export class TraceTreeProvider implements vscode.TreeDataProvider<TraceItem> {
     private _onDidChangeTreeData: vscode.EventEmitter<TraceItem | undefined | null | void> = new vscode.EventEmitter<TraceItem | undefined | null | void>();
@@ -63,7 +64,16 @@ export class TraceTreeProvider implements vscode.TreeDataProvider<TraceItem> {
                 // 'check' for active, 'circle-slash' for expired (red)
                 const icon = isActive ? new vscode.ThemeIcon('check', new vscode.ThemeColor('testing.iconPassed')) : new vscode.ThemeIcon('circle-slash', new vscode.ThemeColor('testing.iconFailed'));
                 
-                const description = `[${statusStr}] ${trace.DebugLevel?.DeveloperName} - Exp: ${expirationDate.toLocaleString()}`;
+                let timeInfo = '';
+                if (isActive) {
+                    const diffMs = expirationDate.getTime() - now.getTime();
+                    const diffMin = Math.round(diffMs / 60000);
+                    if (diffMin < 60) timeInfo = diffMin + 'min remaining';
+                    else timeInfo = Math.round(diffMin / 60) + 'h ' + (diffMin % 60) + 'min remaining';
+                } else {
+                    timeInfo = 'Expired ' + expirationDate.toLocaleString();
+                }
+                const description = `[${statusStr}] ${trace.DebugLevel?.DeveloperName} - ${timeInfo}`;
                 
                 const item = new TraceItem(
                     label,
@@ -91,7 +101,7 @@ export class TraceTreeProvider implements vscode.TreeDataProvider<TraceItem> {
             return traceItems;
 
         } catch (e: any) {
-             console.error(e);
+             Logger.error('Error fetching traces', e);
              return [new TraceItem('Error: ' + e.message, '', '', vscode.TreeItemCollapsibleState.None)];
         }
     }

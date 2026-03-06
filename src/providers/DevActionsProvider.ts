@@ -59,6 +59,8 @@ export class DevActionsProvider implements vscode.TreeDataProvider<vscode.TreeIt
 				"Reset source tracking for default org"
 			),
 			this.createItem("SOQL Builder & Editor", "adure-sfx-toolkit.openSOQLEditor", "database", "Build and run SOQL queries"),
+			this.createItem("Compare with Org", "adure-sfx-toolkit.metadataDiff", "diff", "Compare local file against org version"),
+			this.createItem("Org Health", "adure-sfx-toolkit.orgHealth", "dashboard", "View org limits and health metrics"),
 		];
 	}
 
