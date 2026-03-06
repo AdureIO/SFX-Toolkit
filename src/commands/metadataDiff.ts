@@ -20,54 +20,56 @@ export async function metadataDiff() {
     }
 
     const relativePath = path.relative(workspaceRoot, filePath);
+    const fileName = path.basename(filePath);
 
     await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
-        title: `Comparing ${path.basename(filePath)} with org...`,
+        title: `Comparing ${fileName} with org...`,
         cancellable: true
     }, async (_progress, token) => {
+        let localBackup: string | undefined;
         try {
-            const tmpDir = path.join(os.tmpdir(), 'asfxt-diff-' + Date.now());
-            fs.mkdirSync(tmpDir, { recursive: true });
+            _progress.report({ message: 'Saving local copy...' });
+            localBackup = fs.readFileSync(filePath, 'utf8');
 
+            _progress.report({ message: 'Retrieving from org...' });
             await runCommand(
-                `sf project retrieve start -d "${relativePath}" --target-metadata-dir "${tmpDir}"`,
-                undefined, undefined, true, token
+                `sf project retrieve start -d "${relativePath}" --json`,
+                workspaceRoot, undefined, true, token
             );
 
-            const orgFilePath = path.join(tmpDir, relativePath);
-            if (!fs.existsSync(orgFilePath)) {
-                const files = findFilesRecursive(tmpDir);
-                const matching = files.find(f => path.basename(f) === path.basename(filePath));
-                if (matching) {
-                    await openDiff(vscode.Uri.file(matching), editor.document.uri, path.basename(filePath));
-                } else {
-                    vscode.window.showWarningMessage('Could not find the retrieved file. The metadata may not exist in the org.');
-                }
-            } else {
-                await openDiff(vscode.Uri.file(orgFilePath), editor.document.uri, path.basename(filePath));
+            const orgContent = fs.readFileSync(filePath, 'utf8');
+
+            _progress.report({ message: 'Restoring local file...' });
+            fs.writeFileSync(filePath, localBackup, 'utf8');
+
+            if (orgContent === localBackup) {
+                vscode.window.showInformationMessage(`${fileName} is identical to the org version.`);
+                return;
             }
+
+            const tmpFile = path.join(os.tmpdir(), `org-${Date.now()}-${fileName}`);
+            fs.writeFileSync(tmpFile, orgContent, 'utf8');
+
+            await vscode.commands.executeCommand(
+                'vscode.diff',
+                vscode.Uri.file(tmpFile),
+                editor.document.uri,
+                `Org ↔ Local: ${fileName}`
+            );
         } catch (e: any) {
+            if (localBackup !== undefined) {
+                try { fs.writeFileSync(filePath, localBackup, 'utf8'); } catch { /* best effort restore */ }
+            }
             if (e.cancelled) return;
-            Logger.error('Metadata diff failed', e);
-            vscode.window.showErrorMessage(`Compare failed: ${e.message || e}`);
+
+            const msg = e.message || String(e);
+            if (msg.includes('No results found') || msg.includes('does not exist') || msg.includes('NOT_FOUND')) {
+                vscode.window.showWarningMessage(`${fileName} does not exist in the org.`);
+            } else {
+                Logger.error('Metadata diff failed', e);
+                vscode.window.showErrorMessage(`Compare failed: ${msg}`);
+            }
         }
     });
-}
-
-function findFilesRecursive(dir: string): string[] {
-    const results: string[] = [];
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory()) {
-            results.push(...findFilesRecursive(full));
-        } else {
-            results.push(full);
-        }
-    }
-    return results;
-}
-
-async function openDiff(orgUri: vscode.Uri, localUri: vscode.Uri, filename: string) {
-    await vscode.commands.executeCommand('vscode.diff', orgUri, localUri, `Org ↔ Local: ${filename}`);
 }
