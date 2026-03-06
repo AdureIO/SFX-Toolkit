@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { XMLParser, XMLBuilder } from 'fast-xml-parser';
 import { isSalesforceProject, NOT_SFDX_PROJECT_MESSAGE } from '../utils/projectUtils';
+import { Logger } from '../utils/outputChannel';
 
 export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvider {
 
@@ -53,7 +54,7 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
                     data: jsonObj.PermissionSet || {}
                 });
             } catch (e) {
-                console.error("Error parsing XML", e);
+                Logger.error("Error parsing XML", e);
             }
         }
 
@@ -112,9 +113,9 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
             if (!isSalesforceProject()) {
                 throw new Error(NOT_SFDX_PROJECT_MESSAGE);
             }
-            const { runCommand } = require('../utils/commandRunner');
+            const { runCommand } = await import('../utils/commandRunner');
 
-            console.log('Starting to fetch objects and fields...');
+            Logger.info('Starting to fetch objects and fields...');
 
             let orgResult;
             try {
@@ -129,7 +130,7 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
             }
             
             const orgAlias = orgParsed.result?.alias || orgParsed.result?.username;
-            console.log('Using org:', orgAlias);
+            Logger.info('Using org: ' + orgAlias);
             
             // Single query to get all objects and their fields using EntityParticle
             const query = `SELECT EntityDefinition.QualifiedApiName, EntityDefinition.Label, QualifiedApiName, Label, DataType 
@@ -137,23 +138,23 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
                           WHERE EntityDefinition.IsCustomizable = true 
                           ORDER BY EntityDefinition.QualifiedApiName, QualifiedApiName`;
             
-            console.log('Executing Tooling API query...');
+            Logger.info('Executing Tooling API query...');
             const result = await runCommand(`sf data query --query "${query}" --use-tooling-api --json`);
-            console.log('Query completed, parsing results...');
+            Logger.info('Query completed, parsing results...');
             
             const parsed = JSON.parse(result);
             
             if (parsed.status !== 0) {
-                console.error('Query failed:', parsed.message);
+                Logger.error('Query failed: ' + parsed.message);
                 throw new Error(parsed.message || 'Query failed');
             }
             
             if (!parsed.result || !parsed.result.records) {
-                console.error('No records in result');
+                Logger.error('No records in result');
                 throw new Error('No records returned from query');
             }
             
-            console.log('Received ' + parsed.result.records.length + ' field records');
+            Logger.info('Received ' + parsed.result.records.length + ' field records');
             
             // Group fields by object
             const objectsMap = new Map<string, any>();
@@ -178,14 +179,14 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
             }
             
             const objectsWithFields = Array.from(objectsMap.values());
-            console.log('Prepared ' + objectsWithFields.length + ' objects with fields');
+            Logger.info('Prepared ' + objectsWithFields.length + ' objects with fields');
 
             webview.postMessage({
                 type: 'objectsTree',
                 data: objectsWithFields
             });
         } catch (error: any) {
-            console.error('Failed to fetch objects:', error);
+            Logger.error('Failed to fetch objects', error);
             
             webview.postMessage({
                 type: 'objectsTree',
@@ -201,6 +202,7 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
             <html lang="en">
             <head>
                 <meta charset="UTF-8">
+                <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
                 <style>
                     body { font-family: var(--vscode-font-family); padding: 20px; color: var(--vscode-editor-foreground); background-color: var(--vscode-editor-background); }
                     .tabs { display: flex; border-bottom: 1px solid var(--vscode-panel-border); margin-bottom: 10px; flex-wrap: wrap; }
@@ -235,15 +237,17 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
             </head>
             <body>
                 <div class="tabs">
-                    <div class="tab active" onclick="openTab('objectsFields')">Objects & Fields</div>
-                    <div class="tab" onclick="openTab('classes')">Apex Classes</div>
-                    <div class="tab" onclick="openTab('user')">User Permissions</div>
-                    <div class="tab" onclick="openTab('pages')">Visualforce Pages</div>
-                    <div class="tab" onclick="openTab('tabs')">Tabs</div>
-                    <div class="tab" onclick="openTab('apps')">Applications</div>
-                    <div class="tab" onclick="openTab('recordTypes')">Record Types</div>
-                    <div class="tab" onclick="openTab('customPerms')">Custom Permissions</div>
-                    <div class="tab" onclick="openTab('xml')">XML</div>
+                    <div class="tab active" onclick="openTab('objectsFields', this)">Objects & Fields</div>
+                    <div class="tab" onclick="openTab('objectPerms', this)">Object Permissions</div>
+                    <div class="tab" onclick="openTab('fields', this)">Field Permissions</div>
+                    <div class="tab" onclick="openTab('classes', this)">Apex Classes</div>
+                    <div class="tab" onclick="openTab('user', this)">User Permissions</div>
+                    <div class="tab" onclick="openTab('pages', this)">Visualforce Pages</div>
+                    <div class="tab" onclick="openTab('tabs', this)">Tabs</div>
+                    <div class="tab" onclick="openTab('apps', this)">Applications</div>
+                    <div class="tab" onclick="openTab('recordTypes', this)">Record Types</div>
+                    <div class="tab" onclick="openTab('customPerms', this)">Custom Permissions</div>
+                    <div class="tab" onclick="openTab('xml', this)">XML</div>
                 </div>
 
                 <!-- Objects & Fields Tree -->
@@ -254,6 +258,8 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
                     </div>
                 </div>
 
+                <!-- Object Permissions -->
+                <div id="objectPerms" class="content">
                     <input type="text" id="objSearch" placeholder="Search Objects..." onkeyup="filterTable('objTable', 0)">
                     <table id="objTable">
                         <thead>
@@ -271,7 +277,7 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
                     </table>
                 </div>
 
-                <!-- Apex Classes -->
+                <!-- Field Permissions -->
                 <div id="fields" class="content">
                     <input type="text" id="fieldSearch" placeholder="Search Fields..." onkeyup="filterTable('fieldTable', 0)">
                     <table id="fieldTable">
@@ -589,17 +595,18 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
                         isUpdatingUI = false;
                     }
 
-                    function openTab(tabName) {
+                    function openTab(tabName, clickedTab) {
                         if (tabName === 'xml') {
                             updateXmlEditor();
-                        } else if (document.querySelector('.tab[onclick*="xml"]').parentElement.querySelector('.tab.active')?.textContent === 'XML') {
+                        } else if (document.querySelector('.tab[onclick*="xml"]')?.classList.contains('active')) {
                             parseXmlEditor();
                         }
                         
                         document.querySelectorAll('.content').forEach(c => c.classList.remove('active'));
                         document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-                        document.getElementById(tabName).classList.add('active');
-                        event.target.classList.add('active');
+                        const target = document.getElementById(tabName);
+                        if (target) target.classList.add('active');
+                        if (clickedTab) clickedTab.classList.add('active');
                     }
 
                     function filterTable(tableId, colIndex) {
@@ -627,14 +634,50 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
 
                     function updateXmlEditor() {
                         const xmlEditor = document.getElementById('xmlEditor');
-                        // Convert JSON to XML-like display (simple indented JSON for now)
-                        xmlEditor.value = JSON.stringify(currentData, null, 4);
+                        xmlEditor.value = jsonToXml(currentData);
+                    }
+
+                    function jsonToXml(data) {
+                        let xml = '<?xml version="1.0" encoding="UTF-8"?>\\n';
+                        xml += '<PermissionSet xmlns="http://soap.sforce.com/2006/04/metadata">\\n';
+                        function indent(level) { return '    '.repeat(level); }
+                        function renderValue(key, val, level) {
+                            if (Array.isArray(val)) {
+                                return val.map(item => renderValue(key, item, level)).join('');
+                            }
+                            if (typeof val === 'object' && val !== null) {
+                                let s = indent(level) + '<' + key + '>\\n';
+                                for (const [k, v] of Object.entries(val)) {
+                                    if (k.startsWith('@_')) continue;
+                                    s += renderValue(k, v, level + 1);
+                                }
+                                s += indent(level) + '</' + key + '>\\n';
+                                return s;
+                            }
+                            return indent(level) + '<' + key + '>' + escapeXml(String(val)) + '</' + key + '>\\n';
+                        }
+                        function escapeXml(s) {
+                            return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+                        }
+                        for (const [k, v] of Object.entries(data)) {
+                            if (k.startsWith('@_')) continue;
+                            xml += renderValue(k, v, 1);
+                        }
+                        xml += '</PermissionSet>';
+                        return xml;
                     }
 
                     function parseXmlEditor() {
                         const xmlEditor = document.getElementById('xmlEditor');
                         try {
-                            const parsed = JSON.parse(xmlEditor.value);
+                            const text = xmlEditor.value.trim();
+                            let parsed;
+                            if (text.startsWith('{')) {
+                                parsed = JSON.parse(text);
+                            } else {
+                                vscode.postMessage({ type: 'update', data: currentData });
+                                return;
+                            }
                             currentData = parsed;
                             vscode.postMessage({ type: 'update', data: parsed });
                             isUpdatingUI = true;
@@ -649,7 +692,7 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
                             renderCustomPermissions(currentData.customPermissions || []);
                             isUpdatingUI = false;
                         } catch (e) {
-                            console.error('Invalid JSON:', e);
+                            Logger.error('Invalid JSON:', e);
                         }
                     }
 
