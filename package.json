@@ -227,6 +227,22 @@
         "command": "adure-sfx-toolkit.openSOQLEditor",
         "title": "ASFXT: Open SOQL Builder & Editor",
         "icon": "$(database)"
+      },
+      {
+        "command": "adure-sfx-toolkit.metadataDiff",
+        "title": "ASFXT: Compare with Org"
+      },
+      {
+        "command": "adure-sfx-toolkit.orgHealth",
+        "title": "ASFXT: Org Health Dashboard"
+      },
+      {
+        "command": "adure-sfx-toolkit.quickSoql",
+        "title": "ASFXT: Quick SOQL from Selection"
+      },
+      {
+        "command": "adure-sfx-toolkit.deployHistory",
+        "title": "ASFXT: Deployment History"
       }
     ],
     "languages": [
@@ -512,7 +528,69 @@
         ],
         "priority": "default"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Adure SFX Toolkit",
+      "properties": {
+        "adure-sfx-toolkit.pollingIntervalSeconds": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "maximum": 60,
+          "description": "Interval in seconds for polling new debug logs from the org."
+        },
+        "adure-sfx-toolkit.maxLogFiles": {
+          "type": "number",
+          "default": 20,
+          "minimum": 5,
+          "maximum": 200,
+          "description": "Maximum number of log files to fetch when polling."
+        },
+        "adure-sfx-toolkit.quickTraceDurationMinutes": {
+          "type": "number",
+          "default": 240,
+          "minimum": 1,
+          "maximum": 1440,
+          "description": "Duration in minutes for Quick Trace."
+        },
+        "adure-sfx-toolkit.quickTraceDebugLevel": {
+          "type": "string",
+          "default": "SFDC_DevConsole",
+          "description": "Debug level name for Quick Trace."
+        },
+        "adure-sfx-toolkit.toolingApiVersion": {
+          "type": "string",
+          "default": "v60.0",
+          "description": "Salesforce Tooling API version."
+        },
+        "adure-sfx-toolkit.parallelDeletes": {
+          "type": "number",
+          "default": 8,
+          "minimum": 1,
+          "maximum": 50,
+          "description": "Number of parallel API calls when deleting logs."
+        },
+        "adure-sfx-toolkit.testRunTimeoutMinutes": {
+          "type": "number",
+          "default": 10,
+          "minimum": 1,
+          "maximum": 120,
+          "description": "Timeout in minutes for running local tests."
+        },
+        "adure-sfx-toolkit.autoSaveBeforePush": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically save all files before pushing source."
+        },
+        "adure-sfx-toolkit.httpTimeoutMs": {
+          "type": "number",
+          "default": 30000,
+          "minimum": 5000,
+          "maximum": 120000,
+          "description": "HTTP request timeout in milliseconds."
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",

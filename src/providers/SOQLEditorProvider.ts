@@ -12,7 +12,7 @@ const ASFX_DIR = ".sfdx/asfx";
 export class SOQLEditorProvider {
 	public static readonly viewType = "adure-sfx-toolkit.soqlEditor";
 
-	public static async show(extensionUri: vscode.Uri) {
+	public static async show(extensionUri: vscode.Uri, initialQuery?: string) {
 		const column = vscode.window.activeTextEditor ? vscode.window.activeTextEditor.viewColumn : undefined;
 
 		const panel = vscode.window.createWebviewPanel(
@@ -26,7 +26,7 @@ export class SOQLEditorProvider {
 		);
 
 		const { lastQuery, history } = await SOQLEditorProvider.loadSoqlState();
-		panel.webview.html = this._getHtmlForWebview(panel.webview, extensionUri, lastQuery, history);
+		panel.webview.html = this._getHtmlForWebview(panel.webview, extensionUri, initialQuery || lastQuery, history);
 
 		panel.webview.onDidReceiveMessage(
 			async (message) => {
@@ -63,6 +63,10 @@ export class SOQLEditorProvider {
 			null,
 			[]
 		);
+
+		panel.onDidDispose(() => {
+			SOQLEditorProvider.editableFieldsCache = {};
+		});
 	}
 
 	private static getSoqlStorageDir(): string | null {

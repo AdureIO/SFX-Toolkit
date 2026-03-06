@@ -33,6 +33,11 @@ import { ScratchOrgDefEditorProvider } from "./editors/ScratchOrgDefEditorProvid
 import { SOQLEditorProvider } from "./providers/SOQLEditorProvider";
 import { AnonymousApexViewProvider } from "./providers/AnonymousApexViewProvider";
 import { Logger, outputChannel } from "./utils/outputChannel";
+import { metadataDiff } from './commands/metadataDiff';
+import { OrgHealthProvider } from './commands/orgHealth';
+import { quickSoqlFromSelection } from './commands/quickSoql';
+import { DeployHistoryProvider } from './commands/deployHistory';
+import { getPollingInterval } from './utils/constants';
 import { isSalesforceProject, updateSalesforceProjectContext, NOT_SFDX_PROJECT_MESSAGE } from "./utils/projectUtils";
 import { getSalesforceLogDirectory } from "./utils/logPaths";
 
@@ -63,7 +68,7 @@ export function activate(context: vscode.ExtensionContext) {
 	);
 
 	try {
-		console.log('Congratulations, your extension "adure-sfx-toolkit" is now active!');
+		Logger.info('Extension activation starting...');
 
 		// 1. Filter Logs Commands
 		// 1. Filter Logs Commands (Normal and Active versions point to same handler)
@@ -223,7 +228,6 @@ export function activate(context: vscode.ExtensionContext) {
 		let pollingInterval: NodeJS.Timeout | undefined;
 		let isPolling = false;
 
-		const POLL_INTERVAL_SEC = 5;
 		let startPollingCmd = register("adure-sfx-toolkit.startPolling", async () => {
 			isPolling = true;
 			logTreeProvider.isPolling = true;
@@ -236,9 +240,9 @@ export function activate(context: vscode.ExtensionContext) {
 					if (logTreeProvider.isPolling) {
 						logTreeProvider.fetchNewLogsFromOrg();
 					}
-				}, POLL_INTERVAL_SEC * 1000);
+				}, getPollingInterval() * 1000);
 			}
-			vscode.window.showInformationMessage(`Log polling started: retrieving logs every ${POLL_INTERVAL_SEC}s`);
+			vscode.window.showInformationMessage(`Log polling started: retrieving logs every ${getPollingInterval()}s`);
 		});
 
 		let stopPollingCmd = register("adure-sfx-toolkit.stopPolling", async () => {
@@ -265,6 +269,12 @@ export function activate(context: vscode.ExtensionContext) {
 		let showOutputCmd = register("adure-sfx-toolkit.showOutput", () => {
 			outputChannel.show();
 		});
+
+		// 15. New Feature Commands
+		let metadataDiffCmd = register("adure-sfx-toolkit.metadataDiff", metadataDiff);
+		let orgHealthCmd = register("adure-sfx-toolkit.orgHealth", () => OrgHealthProvider.show(context.extensionUri));
+		let quickSoqlCmd = register("adure-sfx-toolkit.quickSoql", () => quickSoqlFromSelection(context.extensionUri));
+		let deployHistoryCmd = register("adure-sfx-toolkit.deployHistory", () => DeployHistoryProvider.show());
 
 		context.subscriptions.push(
 			filterDebugCmd,
@@ -296,9 +306,19 @@ export function activate(context: vscode.ExtensionContext) {
 			connectOrgCmd,
 			createScratchCmd,
 			quickScratchCmd,
+			pushCmd,
+			pushForceCmd,
+			pullCmd,
+			deployFileCmd,
+			retrieveFileCmd,
+			runTestsCmd,
 			resetTrackingCmd,
 			openSOQLEditorCmd,
-			showOutputCmd
+			showOutputCmd,
+			metadataDiffCmd,
+			orgHealthCmd,
+			quickSoqlCmd,
+			deployHistoryCmd
 		);
 
 		Logger.info('Extension "adure-sfx-toolkit" activated successfully.');
