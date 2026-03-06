@@ -93,6 +93,14 @@ export class OrgTreeProvider implements vscode.TreeDataProvider<OrgItem> {
             if (!this.data) {
                 await this.fetchOrgs();
             }
+            if (this.data?._error) {
+                if (this.data._error === 'sf-not-found') {
+                    return [new OrgItem('Salesforce CLI not found', vscode.TreeItemCollapsibleState.None, null, 'GROUP', 'placeholder')];
+                }
+                if (this.data._error.includes('No default') || this.data._error.includes('authenticate')) {
+                    return [new OrgItem('No default org set', vscode.TreeItemCollapsibleState.None, null, 'GROUP', 'placeholder')];
+                }
+            }
             if (this._rootItems.length > 0) {
                  return this._rootItems;
             }
@@ -152,12 +160,15 @@ export class OrgTreeProvider implements vscode.TreeDataProvider<OrgItem> {
             if (json.status === 0) {
                 this.data = json.result;
             } else {
-                vscode.window.showErrorMessage("Failed to fetch orgs: " + json.message);
-                this.data = { nonScratchOrgs: [], scratchOrgs: [] };
+                this.data = { nonScratchOrgs: [], scratchOrgs: [], _error: json.message || 'Unknown error' };
             }
         } catch (e: any) {
-            vscode.window.showErrorMessage("Error listing orgs: " + e.message);
-            this.data = { nonScratchOrgs: [], scratchOrgs: [] };
+            const msg = e?.message || String(e);
+            if (msg.includes('not found') || msg.includes('ENOENT') || msg.includes('command not found')) {
+                this.data = { nonScratchOrgs: [], scratchOrgs: [], _error: 'sf-not-found' };
+            } else {
+                this.data = { nonScratchOrgs: [], scratchOrgs: [], _error: msg };
+            }
         }
     }
     getParent(element: OrgItem): vscode.ProviderResult<OrgItem> {

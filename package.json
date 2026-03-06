@@ -29,7 +29,11 @@
     "deployment",
     "toolkit"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "workspaceContains:sfdx-project.json",
+    "onCustomEditor:adure-sfx-toolkit.permissionSetEditor",
+    "onCustomEditor:adure-sfx-toolkit.scratchOrgDefEditor"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
@@ -285,26 +289,31 @@
       "adure-sfx-toolkit-activitybar": [
         {
           "id": "adure-sfx-toolkit.logs",
-          "name": "Logs"
+          "name": "Logs",
+          "when": "adure-sfx-toolkit:isSalesforceProject"
         },
         {
           "id": "adure-sfx-toolkit.traces",
-          "name": "Debug Traces"
+          "name": "Debug Traces",
+          "when": "adure-sfx-toolkit:isSalesforceProject"
         },
         {
           "id": "adure-sfx-toolkit.orgs",
-          "name": "Orgs"
+          "name": "Orgs",
+          "when": "adure-sfx-toolkit:isSalesforceProject"
         },
         {
           "id": "adure-sfx-toolkit.development",
-          "name": "Development"
+          "name": "Development",
+          "when": "adure-sfx-toolkit:isSalesforceProject"
         }
       ],
       "adure-sfx-toolkit-panel": [
         {
           "type": "webview",
           "id": "adure-sfx-toolkit.anonymousApexPanel",
-          "name": "Apex"
+          "name": "Apex",
+          "when": "adure-sfx-toolkit:isSalesforceProject"
         }
       ]
     },

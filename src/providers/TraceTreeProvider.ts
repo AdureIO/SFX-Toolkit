@@ -101,8 +101,16 @@ export class TraceTreeProvider implements vscode.TreeDataProvider<TraceItem> {
             return traceItems;
 
         } catch (e: any) {
+             const msg = e?.message || String(e);
+             if (msg.includes('not found') || msg.includes('ENOENT') || msg.includes('command not found')) {
+                 Logger.warn('Salesforce CLI (sf) not found — trace view unavailable');
+                 return [new TraceItem('Salesforce CLI not found', 'Install sf CLI to view traces', '', vscode.TreeItemCollapsibleState.None)];
+             }
+             if (msg.includes('No default') || msg.includes('target-org') || msg.includes('authenticate')) {
+                 return [new TraceItem('No default org set', 'Connect an org first', '', vscode.TreeItemCollapsibleState.None)];
+             }
              Logger.error('Error fetching traces', e);
-             return [new TraceItem('Error: ' + e.message, '', '', vscode.TreeItemCollapsibleState.None)];
+             return [new TraceItem('Could not load traces', 'Check output log for details', '', vscode.TreeItemCollapsibleState.None)];
         }
     }
 

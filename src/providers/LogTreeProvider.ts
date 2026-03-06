@@ -86,7 +86,12 @@ export class LogTreeProvider implements vscode.TreeDataProvider<LogItem> {
                         this.refresh();
                     }
                 } catch (e: any) {
-                    outputChannel.appendLine(`LogTreeProvider: Polling query failed: ${e?.message ?? e}`);
+                    const msg = e?.message ?? String(e);
+                    if (msg.includes('not found') || msg.includes('ENOENT')) {
+                        outputChannel.appendLine('LogTreeProvider: Salesforce CLI (sf) not found — polling skipped.');
+                    } else {
+                        outputChannel.appendLine(`LogTreeProvider: Polling query failed: ${msg}`);
+                    }
                 }
             }
         );
