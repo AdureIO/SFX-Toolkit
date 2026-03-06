@@ -38,9 +38,35 @@ import { OrgHealthProvider } from './commands/orgHealth';
 import { quickSoqlFromSelection } from './commands/quickSoql';
 import { DeployHistoryProvider } from './commands/deployHistory';
 import { lwcNavigate, lwcGoToJs, lwcGoToHtml, lwcGoToMeta, lwcGoToCss } from './commands/lwcNavigator';
+import * as path from 'path';
+import * as fs from 'fs';
 import { getPollingInterval } from './utils/constants';
 import { isSalesforceProject, updateSalesforceProjectContext, NOT_SFDX_PROJECT_MESSAGE } from "./utils/projectUtils";
 import { getSalesforceLogDirectory } from "./utils/logPaths";
+
+function updateLwcContext(editor: vscode.TextEditor | undefined): void {
+	if (!editor) {
+		vscode.commands.executeCommand('setContext', 'adure-sfx-toolkit:isLwcFile', false);
+		return;
+	}
+	const filePath = editor.document.uri.fsPath.replace(/\\/g, '/');
+	const inLwc = filePath.includes('/lwc/') || filePath.includes('/aura/');
+	vscode.commands.executeCommand('setContext', 'adure-sfx-toolkit:isLwcFile', inLwc);
+	if (!inLwc) {
+		vscode.commands.executeCommand('setContext', 'adure-sfx-toolkit:lwcHasJs', false);
+		vscode.commands.executeCommand('setContext', 'adure-sfx-toolkit:lwcHasHtml', false);
+		vscode.commands.executeCommand('setContext', 'adure-sfx-toolkit:lwcHasCss', false);
+		vscode.commands.executeCommand('setContext', 'adure-sfx-toolkit:lwcHasMeta', false);
+		return;
+	}
+	const dir = path.dirname(filePath);
+	const base = path.basename(dir);
+	const ext = filePath.endsWith('.js-meta.xml') ? '.js-meta.xml' : path.extname(filePath);
+	vscode.commands.executeCommand('setContext', 'adure-sfx-toolkit:lwcHasJs', ext !== '.js' && fs.existsSync(path.join(dir, base + '.js')));
+	vscode.commands.executeCommand('setContext', 'adure-sfx-toolkit:lwcHasHtml', ext !== '.html' && fs.existsSync(path.join(dir, base + '.html')));
+	vscode.commands.executeCommand('setContext', 'adure-sfx-toolkit:lwcHasCss', ext !== '.css' && fs.existsSync(path.join(dir, base + '.css')));
+	vscode.commands.executeCommand('setContext', 'adure-sfx-toolkit:lwcHasMeta', !filePath.endsWith('.js-meta.xml') && fs.existsSync(path.join(dir, base + '.js-meta.xml')));
+}
 
 // Helper to register commands with logging; blocks execution when not in an SFDX project
 function register(command: string, callback: (...args: any[]) => any, thisArg?: any): vscode.Disposable {
@@ -82,11 +108,13 @@ export function activate(context: vscode.ExtensionContext) {
 		// Sync Context on Switch
 		vscode.window.onDidChangeActiveTextEditor((editor) => {
 			updateContextForEditor(editor);
+			updateLwcContext(editor);
 		});
 
         // Initialize context for current editor
         if (vscode.window.activeTextEditor) {
             updateContextForEditor(vscode.window.activeTextEditor);
+			updateLwcContext(vscode.window.activeTextEditor);
         }
 
 		// 2. List Logs

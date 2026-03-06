@@ -550,22 +550,22 @@
         },
         {
           "command": "adure-sfx-toolkit.lwcGoToJs",
-          "when": "resourcePath =~ /.*[/\\\\]lwc[/\\\\][^/\\\\]+[/\\\\][^/\\\\]+$/",
+          "when": "adure-sfx-toolkit:lwcHasJs",
           "group": "navigation@10"
         },
         {
           "command": "adure-sfx-toolkit.lwcGoToHtml",
-          "when": "resourcePath =~ /.*[/\\\\]lwc[/\\\\][^/\\\\]+[/\\\\][^/\\\\]+$/",
+          "when": "adure-sfx-toolkit:lwcHasHtml",
           "group": "navigation@11"
         },
         {
           "command": "adure-sfx-toolkit.lwcGoToCss",
-          "when": "resourcePath =~ /.*[/\\\\]lwc[/\\\\][^/\\\\]+[/\\\\][^/\\\\]+$/",
+          "when": "adure-sfx-toolkit:lwcHasCss",
           "group": "navigation@12"
         },
         {
           "command": "adure-sfx-toolkit.lwcGoToMeta",
-          "when": "resourcePath =~ /.*[/\\\\]lwc[/\\\\][^/\\\\]+[/\\\\][^/\\\\]+$/",
+          "when": "adure-sfx-toolkit:lwcHasMeta",
           "group": "navigation@13"
         }
       ],
