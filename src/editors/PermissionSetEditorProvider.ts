@@ -237,8 +237,8 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
             </head>
             <body>
                 <div class="tabs">
-                    <div class="tab active" onclick="openTab('objectsFields', this)">Objects & Fields</div>
-                    <div class="tab" onclick="openTab('objectPerms', this)">Object Permissions</div>
+                    <div class="tab active" onclick="openTab('objectPerms', this)">Object Permissions</div>
+                    <div class="tab" onclick="openTab('objectsFields', this)">Objects & Fields (Org)</div>
                     <div class="tab" onclick="openTab('fields', this)">Field Permissions</div>
                     <div class="tab" onclick="openTab('classes', this)">Apex Classes</div>
                     <div class="tab" onclick="openTab('user', this)">User Permissions</div>
@@ -250,16 +250,8 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
                     <div class="tab" onclick="openTab('xml', this)">XML</div>
                 </div>
 
-                <!-- Objects & Fields Tree -->
-                <div id="objectsFields" class="content active">
-                    <input type="text" id="objFieldSearch" placeholder="Search objects and fields..." onkeyup="filterTree()">
-                    <div id="objectsTree" class="tree">
-                        <div class="loading">Loading objects and fields from org...</div>
-                    </div>
-                </div>
-
-                <!-- Object Permissions -->
-                <div id="objectPerms" class="content">
+                <!-- Object Permissions (default tab) -->
+                <div id="objectPerms" class="content active">
                     <input type="text" id="objSearch" placeholder="Search Objects..." onkeyup="filterTable('objTable', 0)">
                     <table id="objTable">
                         <thead>
@@ -394,6 +386,13 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
                     </table>
                 </div>
 
+                <!-- Objects & Fields Tree (loads from org on demand) -->
+                <div id="objectsFields" class="content">
+                    <button onclick="loadObjectsFromOrg()" id="loadObjBtn" style="padding: 8px 16px; margin-bottom: 12px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; cursor: pointer; border-radius: 3px;">Load Objects & Fields from Org</button>
+                    <input type="text" id="objFieldSearch" placeholder="Search objects and fields..." onkeyup="filterTree()" style="display:none;">
+                    <div id="objectsTree" class="tree"></div>
+                </div>
+
                 <!-- XML Tab -->
                 <div id="xml" class="content">
                     <textarea id="xmlEditor" rows="25"></textarea>
@@ -404,25 +403,40 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
                     let currentData = {};
                     let isUpdatingUI = false;
                     let allObjectsTree = [];
+                    let ignoreNextUpdate = false;
 
                     window.addEventListener('message', event => {
                         const message = event.data;
                         if (message.type === 'update') {
+                            if (ignoreNextUpdate) { ignoreNextUpdate = false; return; }
                             currentData = message.data;
                             render();
                         } else if (message.type === 'objectsTree') {
                             allObjectsTree = message.data;
+                            objectsLoaded = true;
+                            const btn = document.getElementById('loadObjBtn');
+                            if (btn) btn.style.display = 'none';
+                            const searchBox = document.getElementById('objFieldSearch');
+                            if (searchBox) searchBox.style.display = '';
                             if (message.error) {
                                 const container = document.getElementById('objectsTree');
-                                container.innerHTML = '<div class="loading" style="color: var(--vscode-errorForeground);">Error loading objects: ' + message.error + '</div>';
+                                container.innerHTML = '<div class="loading" style="color: var(--vscode-errorForeground);">Error: ' + message.error + '</div>';
+                                if (btn) { btn.style.display = ''; btn.textContent = 'Retry'; btn.disabled = false; }
+                                objectsLoaded = false;
                             } else {
                                 renderObjectsTree();
                             }
                         }
                     });
 
-                    // Fetch objects from org on load
-                    vscode.postMessage({ type: 'fetchObjects' });
+                    let objectsLoaded = false;
+                    function loadObjectsFromOrg() {
+                        if (objectsLoaded) return;
+                        const btn = document.getElementById('loadObjBtn');
+                        if (btn) { btn.textContent = 'Loading...'; btn.disabled = true; }
+                        document.getElementById('objectsTree').innerHTML = '<div class="loading">Fetching objects and fields from org...</div>';
+                        vscode.postMessage({ type: 'fetchObjects' });
+                    }
 
                     function renderObjectsTree() {
                         const container = document.getElementById('objectsTree');
@@ -610,7 +624,8 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
                     }
 
                     function filterTable(tableId, colIndex) {
-                        const input = event.target;
+                        const input = document.querySelector('#' + tableId)?.parentElement?.querySelector('input[type="text"]');
+                        if (!input) return;
                         const filter = input.value.toUpperCase();
                         const table = document.getElementById(tableId);
                         const tr = table.getElementsByTagName("tr");
@@ -625,6 +640,7 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
 
                     function updateState() {
                         if (!isUpdatingUI) {
+                            ignoreNextUpdate = true;
                             vscode.postMessage({
                                 type: 'update',
                                 data: currentData
@@ -692,7 +708,7 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
                             renderCustomPermissions(currentData.customPermissions || []);
                             isUpdatingUI = false;
                         } catch (e) {
-                            Logger.error('Invalid JSON:', e);
+                            // invalid JSON/XML during edit
                         }
                     }
 
