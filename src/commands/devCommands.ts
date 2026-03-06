@@ -4,6 +4,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { Logger, outputChannel } from "../utils/outputChannel";
 import { AuthInfo } from "../utils/authInfo";
+import { getAutoSaveBeforePush, getTestRunTimeout } from '../utils/constants';
 
 // Helper to strip ANSI and progress lines
 function cleanDeployOutput(output: string): string {
@@ -109,9 +110,13 @@ async function pushSourceHelper(force: boolean) {
 	const title = "ASFXT: " + (force ? " F-" : " ") + "Push";
 
 	// Ensure active file is saved before pushing
-	const activeEditor = vscode.window.activeTextEditor;
-	if (activeEditor) {
-		await activeEditor.document.save();
+	if (getAutoSaveBeforePush()) {
+		await vscode.workspace.saveAll(false);
+	} else {
+		const activeEditor = vscode.window.activeTextEditor;
+		if (activeEditor) {
+			await activeEditor.document.save();
+		}
 	}
 
 	// We want to stream output to the log so user sees progress.
@@ -457,7 +462,7 @@ export async function runLocalTests() {
 		async (progress, token) => {
 			try {
 				// -w 10 (wait 10 mins), -l RunLocalTests, -r human
-				const result = await runCommand("sf apex run test -l RunLocalTests -w 10 -r human", undefined, undefined, true, token);
+				const result = await runCommand(`sf apex run test -l RunLocalTests -w ${getTestRunTimeout()} -r human`, undefined, undefined, true, token);
 
 				const channel = vscode.window.createOutputChannel("Salesforce Test Results");
 				channel.clear();

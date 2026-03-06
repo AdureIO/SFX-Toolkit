@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { runCommand } from '../utils/commandRunner';
 import { OrgItem, orgTreeProvider } from '../providers/OrgTreeProvider';
 import { AuthInfo } from '../utils/authInfo';
+import { Logger } from '../utils/outputChannel';
 
 export async function openOrg(item: OrgItem) {
     if (!item.orgData || !item.orgData.username) return;
@@ -77,7 +78,7 @@ export async function deleteOrg(item: OrgItem) {
     const cmd = isScratch ? `sf org delete scratch -o ${item.orgData.username} -p` : `sf org logout -o ${item.orgData.username} -p`;
 
     const confirm = await vscode.window.showWarningMessage(
-        `Are you sure you want to ${action.toLowerCase()}?`,
+        `Are you sure you want to ${action.toLowerCase()} "${item.orgData.username}"?`,
         'Yes', 'No'
     );
     
@@ -115,10 +116,8 @@ export async function generatePassword(item: OrgItem) {
             if (json.status === 0 && json.result && json.result.password) {
                 // Show password and offering to copy
                 const pwd = json.result.password;
-                const selection = await vscode.window.showInformationMessage(`Password generated: ${pwd}`, 'Copy to Clipboard');
-                if (selection === 'Copy to Clipboard') {
-                    await vscode.env.clipboard.writeText(pwd);
-                }
+                await vscode.env.clipboard.writeText(pwd);
+                vscode.window.showInformationMessage('Password generated and copied to clipboard.');
             } else {
                  vscode.window.showErrorMessage("Failed to generate password.");
             }
@@ -221,7 +220,7 @@ export async function createScratch() {
                 hubs = (orgs.nonScratchOrgs || []).filter((o: any) => o.isDevHub);
              } catch (e: any) {
                  if (e.cancelled) throw e;
-                 console.error(e);
+                 Logger.error('Error fetching dev hubs', e);
              }
         });
 
@@ -266,7 +265,7 @@ export async function createScratch() {
             const content = await vscode.workspace.fs.readFile(fileUri);
             defJson = JSON.parse(content.toString());
         } catch (e) {
-            console.warn("Failed to read definition file for defaults", e);
+            Logger.warn("Failed to read definition file for defaults: " + e);
         }
 
         // 3. Alias (Default to orgName or filename)
@@ -355,7 +354,7 @@ export async function quickScratch() {
                 }
             }
         } catch (e) {
-            console.warn("Failed to read definition file for alias", e);
+            Logger.warn("Failed to read definition file for alias: " + e);
         }
 
         // 2. Alias (with smart default from definition)

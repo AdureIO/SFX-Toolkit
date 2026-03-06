@@ -1,9 +1,11 @@
 import * as vscode from 'vscode';
 import { runCommand } from '../utils/commandRunner';
+import { Logger } from '../utils/outputChannel';
+import { getQuickTraceDuration, getQuickTraceDebugLevel } from '../utils/constants';
 
 export async function quickTrace() {
     // Current User, 4 hours (240 min), Debug Level 'SFDC_DevConsole' (default widely used)
-    await createTrace(240, null);
+    await createTrace(getQuickTraceDuration(), null);
 }
 
 export async function createTrace(durationMinutes: number, userId: string | null, debugLevelId: string | null = null) {
@@ -23,7 +25,7 @@ export async function createTrace(durationMinutes: number, userId: string | null
 
             let targetDebugLevelId = debugLevelId;
             if (!targetDebugLevelId) {
-                const dlQuery = "SELECT Id FROM DebugLevel WHERE DeveloperName = 'SFDC_DevConsole'";
+                const dlQuery = `SELECT Id FROM DebugLevel WHERE DeveloperName = '${getQuickTraceDebugLevel()}'`;
                 const dlRes = await runCommand(`sf data query -q "${dlQuery}" -t --json`, undefined, undefined, true, token);
                 const dlJson = JSON.parse(dlRes);
 
@@ -55,7 +57,7 @@ export async function createTrace(durationMinutes: number, userId: string | null
                 }
             } catch (e: any) {
                 if (e.cancelled) return;
-                console.warn('Failed to cleanup old traces', e);
+                Logger.warn('Failed to cleanup old traces: ' + (e?.message || e));
             }
 
             const createCmd = `sf data create record -s TraceFlag -v "DebugLevelId='${targetDebugLevelId}' LogType='USER_DEBUG' TracedEntityId='${targetUserId}' ExpirationDate='${expirationDate}'" -t --json`;
@@ -74,9 +76,9 @@ export async function createTrace(durationMinutes: number, userId: string | null
 export async function deleteTrace(traceId: string) {
      if (!traceId) return;
      
-     // Confirm? optional. Let's just delete to be "Quick".
-     // Actually, UI usually implies right-click delete is explicit.
-     
+    const confirm = await vscode.window.showWarningMessage('Delete this trace flag?', 'Delete', 'Cancel');
+    if (confirm !== 'Delete') return;
+
     vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
         title: "Deleting Trace...",

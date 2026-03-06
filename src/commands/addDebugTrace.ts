@@ -81,11 +81,16 @@ export async function addDebugTrace() {
 
         // 3. Select Duration
         const durationStr = await vscode.window.showInputBox({
-            prompt: 'Enter duration in minutes',
-            value: '60'
+            prompt: 'Enter duration in minutes (1-1440)',
+            value: '60',
+            validateInput: (val) => {
+                const n = parseInt(val, 10);
+                if (isNaN(n) || n < 1 || n > 1440) return 'Duration must be between 1 and 1440 minutes.';
+                return null;
+            }
         });
         if (!durationStr) return;
-        const duration = parseInt(durationStr);
+        const duration = parseInt(durationStr, 10);
 
         // Call the shared createTrace
         await createTrace(duration, targetUserId, targetLevelId);

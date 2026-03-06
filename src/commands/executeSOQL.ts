@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { runCommand } from '../utils/commandRunner';
+import { runCommand, runCommandArgs } from '../utils/commandRunner';
 
 export async function executeSOQL() {
     const editor = vscode.window.activeTextEditor;
@@ -26,7 +26,7 @@ export async function executeSOQL() {
         cancellable: true
     }, async (_progress, token) => {
         try {
-            const result = await runCommand(`sf data query --query "${query}"`, undefined, undefined, true, token);
+            const result = await runCommandArgs('sf', ['data', 'query', '--query', query], undefined, undefined, true);
 
             const doc = await vscode.workspace.openTextDocument({
                 content: result,

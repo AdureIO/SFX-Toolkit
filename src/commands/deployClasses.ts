@@ -145,7 +145,14 @@ export async function deployClasses() {
 		testLevel = "RunAllTestsInOrg";
 	} else if (chosenType.label === DEPLOY_TYPE_SPECIFIED) {
 		testLevel = "RunSpecifiedTests";
-		const testClassItems = items.filter((i) => /test/i.test(i.label));
+		const testClassItems = items.filter((i) => {
+			if (/test/i.test(i.label)) return true;
+			try {
+				const content = fs.readFileSync(path.join(workspaceRoot, i.description), 'utf8');
+				if (/@isTest/i.test(content)) return true;
+			} catch { /* ignore */ }
+			return false;
+		});
 		if (testClassItems.length === 0) {
 			vscode.window.showWarningMessage(
 				'No test classes found (names containing "Test"). Deploy cancelled.'

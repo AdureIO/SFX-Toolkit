@@ -52,7 +52,7 @@ export async function listLogs() {
     }
 }
 
-const TOOLING_VERSION = 'v60.0';
+import { getToolingApiVersion } from '../utils/constants';
 
 /**
  * Open a log by id (filename without .log).
@@ -89,7 +89,7 @@ export async function openLogById(
                 const auth = await AuthInfo.getAuthInfo();
                 if (auth) {
                     try {
-                        const url = `${auth.instanceUrl}/services/data/${TOOLING_VERSION}/tooling/sobjects/ApexLog/${logId}/Body`;
+                        const url = `${auth.instanceUrl}/services/data/${getToolingApiVersion()}/tooling/sobjects/ApexLog/${logId}/Body`;
                         const body = await httpsGet(url, auth.accessToken);
                         fs.writeFileSync(logPath, body);
                     } catch {
