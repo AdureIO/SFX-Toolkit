@@ -28,20 +28,22 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
 
         webviewPanel.webview.html = this.getHtmlForWebview(webviewPanel.webview);
 
+        let updatingFromWebview = false;
+
+        const parser = new XMLParser({
+            ignoreAttributes: false,
+            parseAttributeValue: true,
+            isArray: (name: string) => { 
+                return [
+                    'classAccesses', 'fieldPermissions', 'objectPermissions', 'pageAccesses', 
+                    'recordTypeVisibilities', 'tabSettings', 'userPermissions', 'applicationVisibilities',
+                    'customPermissions', 'customMetadataTypeAccesses', 'flowAccesses',
+                    'externalDataSourceAccesses', 'customSettingAccesses'
+                ].indexOf(name) !== -1;
+            }
+        });
+
         function updateWebview() {
-            const parser = new XMLParser({
-                ignoreAttributes: false,
-                parseAttributeValue: true,
-                isArray: (name, jpath, isLeafNode, isAttribute) => { 
-                    return [
-                        'classAccesses', 'fieldPermissions', 'objectPermissions', 'pageAccesses', 
-                        'recordTypeVisibilities', 'tabSettings', 'userPermissions', 'applicationVisibilities',
-                        'customPermissions', 'customMetadataTypeAccesses', 'flowAccesses',
-                        'externalDataSourceAccesses', 'customSettingAccesses'
-                    ].indexOf(name) !== -1;
-                }
-            });
-            
             try {
                 const text = document.getText();
                 if (!text.trim()) {
@@ -60,6 +62,7 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
 
         const changeDocumentSubscription = vscode.workspace.onDidChangeTextDocument(e => {
             if (e.document.uri.toString() === document.uri.toString()) {
+                if (updatingFromWebview) return;
                 updateWebview();
             }
         });
@@ -68,10 +71,12 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
             changeDocumentSubscription.dispose();
         });
 
-        webviewPanel.webview.onDidReceiveMessage(e => {
+        webviewPanel.webview.onDidReceiveMessage(async (e) => {
             switch (e.type) {
                 case 'update':
-                    this.updateDocument(document, e.data);
+                    updatingFromWebview = true;
+                    await this.updateDocument(document, e.data);
+                    updatingFromWebview = false;
                     return;
                 case 'fetchObjects':
                     this.fetchObjects(webviewPanel.webview);
@@ -82,7 +87,7 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
         updateWebview();
     }
 
-    private updateDocument(document: vscode.TextDocument, permissionSetData: any) {
+    private async updateDocument(document: vscode.TextDocument, permissionSetData: any) {
         const builder = new XMLBuilder({
             ignoreAttributes: false,
             format: true,
@@ -105,7 +110,7 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
             xmlContent
         );
 
-        vscode.workspace.applyEdit(edit);
+        await vscode.workspace.applyEdit(edit);
     }
 
     private async fetchObjects(webview: vscode.Webview) {
@@ -403,12 +408,10 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
                     let currentData = {};
                     let isUpdatingUI = false;
                     let allObjectsTree = [];
-                    let ignoreNextUpdate = false;
 
                     window.addEventListener('message', event => {
                         const message = event.data;
                         if (message.type === 'update') {
-                            if (ignoreNextUpdate) { ignoreNextUpdate = false; return; }
                             currentData = message.data;
                             render();
                         } else if (message.type === 'objectsTree') {
@@ -605,7 +608,9 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
                         renderApps(currentData.applicationVisibilities || []);
                         renderRecordTypes(currentData.recordTypeVisibilities || []);
                         renderCustomPermissions(currentData.customPermissions || []);
-                        updateXmlEditor();
+                        if (document.querySelector('.tab[onclick*="xml"]')?.classList.contains('active')) {
+                            updateXmlEditor();
+                        }
                         isUpdatingUI = false;
                     }
 
@@ -640,7 +645,6 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
 
                     function updateState() {
                         if (!isUpdatingUI) {
-                            ignoreNextUpdate = true;
                             vscode.postMessage({
                                 type: 'update',
                                 data: currentData
