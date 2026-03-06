@@ -247,6 +247,31 @@
       {
         "command": "adure-sfx-toolkit.deployHistory",
         "title": "ASFXT: Deployment History"
+      },
+      {
+        "command": "adure-sfx-toolkit.lwcNavigate",
+        "title": "ASFXT: LWC Navigate to Sibling",
+        "icon": "$(files)"
+      },
+      {
+        "command": "adure-sfx-toolkit.lwcGoToJs",
+        "title": "ASFXT: LWC → JavaScript",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "adure-sfx-toolkit.lwcGoToHtml",
+        "title": "ASFXT: LWC → HTML Template",
+        "icon": "$(code)"
+      },
+      {
+        "command": "adure-sfx-toolkit.lwcGoToMeta",
+        "title": "ASFXT: LWC → Meta XML",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "adure-sfx-toolkit.lwcGoToCss",
+        "title": "ASFXT: LWC → CSS",
+        "icon": "$(paintcan)"
       }
     ],
     "languages": [
@@ -325,6 +350,36 @@
         "win": "ctrl+d",
         "linux": "ctrl+d",
         "when": "editorTextFocus && adure-sfx-toolkit:isLogFile"
+      },
+      {
+        "command": "adure-sfx-toolkit.lwcNavigate",
+        "key": "alt+l",
+        "mac": "alt+l",
+        "when": "editorTextFocus && resourcePath =~ /.*[/\\\\]lwc[/\\\\]/"
+      },
+      {
+        "command": "adure-sfx-toolkit.lwcGoToJs",
+        "key": "alt+1",
+        "mac": "alt+1",
+        "when": "editorTextFocus && resourcePath =~ /.*[/\\\\]lwc[/\\\\]/"
+      },
+      {
+        "command": "adure-sfx-toolkit.lwcGoToHtml",
+        "key": "alt+2",
+        "mac": "alt+2",
+        "when": "editorTextFocus && resourcePath =~ /.*[/\\\\]lwc[/\\\\]/"
+      },
+      {
+        "command": "adure-sfx-toolkit.lwcGoToMeta",
+        "key": "alt+3",
+        "mac": "alt+3",
+        "when": "editorTextFocus && resourcePath =~ /.*[/\\\\]lwc[/\\\\]/"
+      },
+      {
+        "command": "adure-sfx-toolkit.lwcGoToCss",
+        "key": "alt+4",
+        "mac": "alt+4",
+        "when": "editorTextFocus && resourcePath =~ /.*[/\\\\]lwc[/\\\\]/"
       }
     ],
     "menus": {
@@ -492,6 +547,11 @@
           "command": "adure-sfx-toolkit.openPermissionSetUI",
           "when": "resourceFilename =~ /\\.permissionset-meta\\.xml$/",
           "group": "navigation@4"
+        },
+        {
+          "command": "adure-sfx-toolkit.lwcNavigate",
+          "when": "resourcePath =~ /.*[/\\\\]lwc[/\\\\][^/\\\\]+[/\\\\][^/\\\\]+$/",
+          "group": "navigation@5"
         }
       ],
       "commandPalette": [
@@ -509,6 +569,22 @@
         },
         {
           "command": "adure-sfx-toolkit.filterLogSOQLActive",
+          "when": "false"
+        },
+        {
+          "command": "adure-sfx-toolkit.lwcGoToJs",
+          "when": "false"
+        },
+        {
+          "command": "adure-sfx-toolkit.lwcGoToHtml",
+          "when": "false"
+        },
+        {
+          "command": "adure-sfx-toolkit.lwcGoToMeta",
+          "when": "false"
+        },
+        {
+          "command": "adure-sfx-toolkit.lwcGoToCss",
           "when": "false"
         }
       ]

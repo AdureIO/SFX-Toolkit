@@ -37,6 +37,7 @@ import { metadataDiff } from './commands/metadataDiff';
 import { OrgHealthProvider } from './commands/orgHealth';
 import { quickSoqlFromSelection } from './commands/quickSoql';
 import { DeployHistoryProvider } from './commands/deployHistory';
+import { lwcNavigate, lwcGoToJs, lwcGoToHtml, lwcGoToMeta, lwcGoToCss } from './commands/lwcNavigator';
 import { getPollingInterval } from './utils/constants';
 import { isSalesforceProject, updateSalesforceProjectContext, NOT_SFDX_PROJECT_MESSAGE } from "./utils/projectUtils";
 import { getSalesforceLogDirectory } from "./utils/logPaths";
@@ -276,6 +277,13 @@ export function activate(context: vscode.ExtensionContext) {
 		let quickSoqlCmd = register("adure-sfx-toolkit.quickSoql", () => quickSoqlFromSelection(context.extensionUri));
 		let deployHistoryCmd = register("adure-sfx-toolkit.deployHistory", () => DeployHistoryProvider.show());
 
+		// 16. LWC Navigator
+		let lwcNavCmd = register("adure-sfx-toolkit.lwcNavigate", lwcNavigate);
+		let lwcJsCmd = register("adure-sfx-toolkit.lwcGoToJs", lwcGoToJs);
+		let lwcHtmlCmd = register("adure-sfx-toolkit.lwcGoToHtml", lwcGoToHtml);
+		let lwcMetaCmd = register("adure-sfx-toolkit.lwcGoToMeta", lwcGoToMeta);
+		let lwcCssCmd = register("adure-sfx-toolkit.lwcGoToCss", lwcGoToCss);
+
 		context.subscriptions.push(
 			filterDebugCmd,
 			filterDebugActiveCmd,
@@ -318,7 +326,12 @@ export function activate(context: vscode.ExtensionContext) {
 			metadataDiffCmd,
 			orgHealthCmd,
 			quickSoqlCmd,
-			deployHistoryCmd
+			deployHistoryCmd,
+			lwcNavCmd,
+			lwcJsCmd,
+			lwcHtmlCmd,
+			lwcMetaCmd,
+			lwcCssCmd
 		);
 
 		Logger.info('Extension "adure-sfx-toolkit" activated successfully.');
