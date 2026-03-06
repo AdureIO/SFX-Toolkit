@@ -147,7 +147,8 @@ export function activate(context: vscode.ExtensionContext) {
 		// 7. Side Bar Log Provider (shows logs from .sfdx/tools/debug/logs, no own download)
 		vscode.window.registerTreeDataProvider("adure-sfx-toolkit.logs", logTreeProvider);
 
-		let refreshLogsCmd = register("adure-sfx-toolkit.refreshLogs", () => {
+		let refreshLogsCmd = register("adure-sfx-toolkit.refreshLogs", async () => {
+			await logTreeProvider.fetchNewLogsFromOrg();
 			logTreeProvider.refresh();
 		});
 
