@@ -255,22 +255,22 @@
       },
       {
         "command": "adure-sfx-toolkit.lwcGoToJs",
-        "title": "ASFXT: LWC → JavaScript",
+        "title": "LWC: Open JS",
         "icon": "$(file-code)"
       },
       {
         "command": "adure-sfx-toolkit.lwcGoToHtml",
-        "title": "ASFXT: LWC → HTML Template",
+        "title": "LWC: Open HTML",
         "icon": "$(code)"
       },
       {
         "command": "adure-sfx-toolkit.lwcGoToMeta",
-        "title": "ASFXT: LWC → Meta XML",
+        "title": "LWC: Open Meta XML",
         "icon": "$(settings-gear)"
       },
       {
         "command": "adure-sfx-toolkit.lwcGoToCss",
-        "title": "ASFXT: LWC → CSS",
+        "title": "LWC: Open CSS",
         "icon": "$(paintcan)"
       }
     ],
@@ -549,9 +549,24 @@
           "group": "navigation@4"
         },
         {
-          "command": "adure-sfx-toolkit.lwcNavigate",
+          "command": "adure-sfx-toolkit.lwcGoToJs",
           "when": "resourcePath =~ /.*[/\\\\]lwc[/\\\\][^/\\\\]+[/\\\\][^/\\\\]+$/",
-          "group": "navigation@5"
+          "group": "navigation@10"
+        },
+        {
+          "command": "adure-sfx-toolkit.lwcGoToHtml",
+          "when": "resourcePath =~ /.*[/\\\\]lwc[/\\\\][^/\\\\]+[/\\\\][^/\\\\]+$/",
+          "group": "navigation@11"
+        },
+        {
+          "command": "adure-sfx-toolkit.lwcGoToCss",
+          "when": "resourcePath =~ /.*[/\\\\]lwc[/\\\\][^/\\\\]+[/\\\\][^/\\\\]+$/",
+          "group": "navigation@12"
+        },
+        {
+          "command": "adure-sfx-toolkit.lwcGoToMeta",
+          "when": "resourcePath =~ /.*[/\\\\]lwc[/\\\\][^/\\\\]+[/\\\\][^/\\\\]+$/",
+          "group": "navigation@13"
         }
       ],
       "commandPalette": [
