@@ -107,7 +107,7 @@ function getDeployedCount(output: string): number {
 
 // Helper to reuse push logic
 async function pushSourceHelper(force: boolean) {
-	const title = "ASFXT: " + (force ? " F-" : " ") + "Push";
+	const title = force ? "Force Push" : "Push";
 
 	// Ensure active file is saved before pushing
 	if (getAutoSaveBeforePush()) {
@@ -293,7 +293,7 @@ async function pushSourceHelper(force: boolean) {
 						Logger.info(cleanDeployOutput(result));
 
 						const count = getDeployedCount(result);
-						vscode.window.showInformationMessage(`ASFXT: Push: Deployed ${count} components.`);
+						vscode.window.showInformationMessage(`Deployed ${count} components.`);
 					} else {
 						// No Source Tracking -> Full Sequential Deploy
 						if (packageDirs.length > 0) {

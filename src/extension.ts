@@ -38,6 +38,7 @@ import { OrgHealthProvider } from './commands/orgHealth';
 import { quickSoqlFromSelection } from './commands/quickSoql';
 import { DeployHistoryProvider } from './commands/deployHistory';
 import { lwcNavigate, lwcGoToJs, lwcGoToHtml, lwcGoToMeta, lwcGoToCss } from './commands/lwcNavigator';
+import { SnippetTreeProvider, runSnippet, addSnippet, deleteSnippet, editSnippetFile } from './commands/apexSnippets';
 import * as path from 'path';
 import * as fs from 'fs';
 import { getPollingInterval } from './utils/constants';
@@ -306,7 +307,16 @@ export function activate(context: vscode.ExtensionContext) {
 		let quickSoqlCmd = register("adure-sfx-toolkit.quickSoql", () => quickSoqlFromSelection(context.extensionUri));
 		let deployHistoryCmd = register("adure-sfx-toolkit.deployHistory", () => DeployHistoryProvider.show());
 
-		// 16. LWC Navigator
+		// 16. Apex Snippets
+		const snippetProvider = new SnippetTreeProvider();
+		vscode.window.registerTreeDataProvider('adure-sfx-toolkit.snippets', snippetProvider);
+		let runSnippetCmd = register('adure-sfx-toolkit.runSnippet', (snippet?: any) => runSnippet(snippet));
+		let addSnippetCmd = register('adure-sfx-toolkit.addSnippet', addSnippet);
+		let deleteSnippetCmd = register('adure-sfx-toolkit.deleteSnippet', deleteSnippet);
+		let editSnippetFileCmd = register('adure-sfx-toolkit.editSnippetFile', editSnippetFile);
+		let refreshSnippetsCmd = vscode.commands.registerCommand('adure-sfx-toolkit.refreshSnippets', () => snippetProvider.refresh());
+
+		// 17. LWC Navigator
 		let lwcNavCmd = register("adure-sfx-toolkit.lwcNavigate", lwcNavigate);
 		let lwcJsCmd = register("adure-sfx-toolkit.lwcGoToJs", lwcGoToJs);
 		let lwcHtmlCmd = register("adure-sfx-toolkit.lwcGoToHtml", lwcGoToHtml);
@@ -356,6 +366,11 @@ export function activate(context: vscode.ExtensionContext) {
 			orgHealthCmd,
 			quickSoqlCmd,
 			deployHistoryCmd,
+			runSnippetCmd,
+			addSnippetCmd,
+			deleteSnippetCmd,
+			editSnippetFileCmd,
+			refreshSnippetsCmd,
 			lwcNavCmd,
 			lwcJsCmd,
 			lwcHtmlCmd,

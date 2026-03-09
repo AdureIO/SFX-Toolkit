@@ -39,7 +39,7 @@
     "commands": [
       {
         "command": "adure-sfx-toolkit.filterLogDebug",
-        "title": "ASFXT: Filter Debug",
+        "title": "Filter Debug",
         "icon": {
           "light": "resources/light/debug-inactive.svg",
           "dark": "resources/dark/debug-inactive.svg"
@@ -47,7 +47,7 @@
       },
       {
         "command": "adure-sfx-toolkit.filterLogDebugActive",
-        "title": "ASFXT: Filter Debug (Active)",
+        "title": "Filter Debug (Active)",
         "icon": {
           "light": "resources/light/debug-active.svg",
           "dark": "resources/dark/debug-active.svg"
@@ -55,7 +55,7 @@
       },
       {
         "command": "adure-sfx-toolkit.filterLogSOQL",
-        "title": "ASFXT: Filter SOQL/DML",
+        "title": "Filter SOQL/DML",
         "icon": {
           "light": "resources/light/soql-inactive.svg",
           "dark": "resources/dark/soql-inactive.svg"
@@ -63,7 +63,7 @@
       },
       {
         "command": "adure-sfx-toolkit.filterLogSOQLActive",
-        "title": "ASFXT: Filter SOQL/DML (Active)",
+        "title": "Filter SOQL/DML (Active)",
         "icon": {
           "light": "resources/light/soql-active.svg",
           "dark": "resources/dark/soql-active.svg"
@@ -71,186 +71,211 @@
       },
       {
         "command": "adure-sfx-toolkit.refreshLogs",
-        "title": "ASFXT: Refresh Logs",
+        "title": "Refresh Logs",
         "icon": "$(refresh)"
       },
       {
         "command": "adure-sfx-toolkit.openLog",
-        "title": "ASFXT: Open Log"
+        "title": "Open Log"
       },
       {
         "command": "adure-sfx-toolkit.listLogs",
-        "title": "ASFXT: List and Open Logs"
+        "title": "List and Open Logs"
       },
       {
         "command": "adure-sfx-toolkit.addDebugTrace",
-        "title": "ASFXT: New Trace",
+        "title": "New Trace",
         "icon": "$(plus)"
       },
       {
         "command": "adure-sfx-toolkit.quickTrace",
-        "title": "ASFXT: Quick Trace (Current User)",
+        "title": "Quick Trace (Current User)",
         "icon": "$(zap)"
       },
       {
         "command": "adure-sfx-toolkit.deleteAllLogs",
-        "title": "ASFXT: Delete All Logs",
+        "title": "Delete All Logs",
         "icon": "$(trash)"
       },
       {
         "command": "adure-sfx-toolkit.startPolling",
-        "title": "ASFXT: Start Polling",
+        "title": "Start Polling",
         "icon": "$(play)"
       },
       {
         "command": "adure-sfx-toolkit.stopPolling",
-        "title": "ASFXT: Stop Polling",
+        "title": "Stop Polling",
         "icon": "$(debug-stop)"
       },
       {
         "command": "adure-sfx-toolkit.deleteTrace",
-        "title": "ASFXT: Delete Trace",
+        "title": "Delete Trace",
         "icon": "$(trash)"
       },
       {
         "command": "adure-sfx-toolkit.refreshTraces",
-        "title": "ASFXT: Refresh Traces",
+        "title": "Refresh Traces",
         "icon": "$(refresh)"
       },
       {
         "command": "adure-sfx-toolkit.deployClasses",
-        "title": "ASFXT: Deploy Classes"
+        "title": "Deploy Classes"
       },
       {
         "command": "adure-sfx-toolkit.executeAnonymous",
-        "title": "ASFXT: Execute Anonymous Apex",
+        "title": "Execute Anonymous Apex",
         "icon": "$(play)"
       },
       {
         "command": "adure-sfx-toolkit.rerunLastApex",
-        "title": "ASFXT: Rerun Last Apex",
+        "title": "Rerun Last Apex",
         "icon": "$(debug-restart)"
       },
       {
         "command": "adure-sfx-toolkit.executeSOQL",
-        "title": "ASFXT: Execute SOQL Query"
+        "title": "Execute SOQL Query"
       },
       {
         "command": "adure-sfx-toolkit.refreshOrgs",
-        "title": "ASFXT: Refresh Orgs",
+        "title": "Refresh Orgs",
         "icon": "$(refresh)"
       },
       {
         "command": "adure-sfx-toolkit.openOrg",
-        "title": "ASFXT: Open Org",
+        "title": "Open Org",
         "icon": "$(globe)"
       },
       {
         "command": "adure-sfx-toolkit.setAsDefaultOrg",
-        "title": "ASFXT: Set as Default",
+        "title": "Set as Default",
         "icon": "$(check)"
       },
       {
         "command": "adure-sfx-toolkit.setAsDefaultDevHub",
-        "title": "ASFXT: Set as Default Dev Hub",
+        "title": "Set as Default Dev Hub",
         "icon": "$(hub)"
       },
       {
         "command": "adure-sfx-toolkit.copyUsername",
-        "title": "ASFXT: Copy Username",
+        "title": "Copy Username",
         "icon": "$(copy)"
       },
       {
         "command": "adure-sfx-toolkit.renameAlias",
-        "title": "ASFXT: Rename Alias",
+        "title": "Rename Alias",
         "icon": "$(edit)"
       },
       {
         "command": "adure-sfx-toolkit.generatePassword",
-        "title": "ASFXT: Generate Password",
+        "title": "Generate Password",
         "icon": "$(key)"
       },
       {
         "command": "adure-sfx-toolkit.deleteOrg",
-        "title": "ASFXT: Delete/Logout",
+        "title": "Delete/Logout",
         "icon": "$(trash)"
       },
       {
         "command": "adure-sfx-toolkit.connectOrg",
-        "title": "ASFXT: Connect Org",
+        "title": "Connect Org",
         "icon": "$(plug)"
       },
       {
         "command": "adure-sfx-toolkit.openPermissionSetUI",
-        "title": "ASFXT: Open in Permission UI",
+        "title": "Open in Permission UI",
         "icon": "$(edit)"
       },
       {
         "command": "adure-sfx-toolkit.createScratch",
-        "title": "ASFXT: Create Scratch Org",
+        "title": "Create Scratch Org",
         "icon": "$(beaker)"
       },
       {
         "command": "adure-sfx-toolkit.quickScratch",
-        "title": "ASFXT: Quick Scratch (Defaults)",
+        "title": "Quick Scratch (Defaults)",
         "icon": "$(rocket)"
       },
       {
         "command": "adure-sfx-toolkit.pushSource",
-        "title": "ASFXT: Push Source",
+        "title": "Push Source",
         "icon": "$(cloud-upload)"
       },
       {
         "command": "adure-sfx-toolkit.pushSourceForce",
-        "title": "ASFXT: Push Source (Force/Override)",
+        "title": "Push Source (Force/Override)",
         "icon": "$(alert)"
       },
       {
         "command": "adure-sfx-toolkit.pullSource",
-        "title": "ASFXT: Pull Source",
+        "title": "Pull Source",
         "icon": "$(cloud-download)"
       },
       {
         "command": "adure-sfx-toolkit.deployCurrentFile",
-        "title": "ASFXT: Deploy Current File"
+        "title": "Deploy Current File"
       },
       {
         "command": "adure-sfx-toolkit.retrieveCurrentFile",
-        "title": "ASFXT: Retrieve Current File"
+        "title": "Retrieve Current File"
       },
       {
         "command": "adure-sfx-toolkit.runLocalTests",
-        "title": "ASFXT: Run Local Tests"
+        "title": "Run Local Tests"
       },
       {
         "command": "adure-sfx-toolkit.resetSourceTracking",
-        "title": "ASFXT: Reset Source Tracking",
+        "title": "Reset Source Tracking",
         "icon": "$(history)"
       },
       {
         "command": "adure-sfx-toolkit.openSOQLEditor",
-        "title": "ASFXT: Open SOQL Builder & Editor",
+        "title": "Open SOQL Builder & Editor",
         "icon": "$(database)"
       },
       {
         "command": "adure-sfx-toolkit.metadataDiff",
-        "title": "ASFXT: Compare with Org"
+        "title": "Compare with Org"
       },
       {
         "command": "adure-sfx-toolkit.orgHealth",
-        "title": "ASFXT: Org Health Dashboard"
+        "title": "Org Health Dashboard"
       },
       {
         "command": "adure-sfx-toolkit.quickSoql",
-        "title": "ASFXT: Quick SOQL from Selection"
+        "title": "Quick SOQL from Selection"
       },
       {
         "command": "adure-sfx-toolkit.deployHistory",
-        "title": "ASFXT: Deployment History"
+        "title": "Deployment History"
+      },
+      {
+        "command": "adure-sfx-toolkit.runSnippet",
+        "title": "Run Apex Snippet",
+        "icon": "$(play)"
+      },
+      {
+        "command": "adure-sfx-toolkit.addSnippet",
+        "title": "Add Apex Snippet",
+        "icon": "$(plus)"
+      },
+      {
+        "command": "adure-sfx-toolkit.deleteSnippet",
+        "title": "Delete Apex Snippet",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "adure-sfx-toolkit.editSnippetFile",
+        "title": "Edit Snippets File",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "adure-sfx-toolkit.refreshSnippets",
+        "title": "Refresh Snippets",
+        "icon": "$(refresh)"
       },
       {
         "command": "adure-sfx-toolkit.lwcNavigate",
-        "title": "ASFXT: LWC Navigate to Sibling",
+        "title": "LWC Navigate to Sibling",
         "icon": "$(files)"
       },
       {
@@ -331,6 +356,11 @@
           "id": "adure-sfx-toolkit.development",
           "name": "Development",
           "when": "adure-sfx-toolkit:isSalesforceProject"
+        },
+        {
+          "id": "adure-sfx-toolkit.snippets",
+          "name": "Apex Snippets",
+          "when": "adure-sfx-toolkit:isSalesforceProject"
         }
       ],
       "adure-sfx-toolkit-panel": [
@@ -390,6 +420,21 @@
     ],
     "menus": {
       "view/title": [
+        {
+          "command": "adure-sfx-toolkit.refreshSnippets",
+          "when": "view == adure-sfx-toolkit.snippets",
+          "group": "navigation"
+        },
+        {
+          "command": "adure-sfx-toolkit.addSnippet",
+          "when": "view == adure-sfx-toolkit.snippets",
+          "group": "navigation"
+        },
+        {
+          "command": "adure-sfx-toolkit.editSnippetFile",
+          "when": "view == adure-sfx-toolkit.snippets",
+          "group": "navigation"
+        },
         {
           "command": "adure-sfx-toolkit.refreshLogs",
           "when": "view == adure-sfx-toolkit.logs",
@@ -472,6 +517,16 @@
         }
       ],
       "view/item/context": [
+        {
+          "command": "adure-sfx-toolkit.runSnippet",
+          "when": "view == adure-sfx-toolkit.snippets && viewItem == snippetItem",
+          "group": "inline"
+        },
+        {
+          "command": "adure-sfx-toolkit.deleteSnippet",
+          "when": "view == adure-sfx-toolkit.snippets && viewItem == snippetItem",
+          "group": "1_modify"
+        },
         {
           "command": "adure-sfx-toolkit.deleteTrace",
           "when": "view == adure-sfx-toolkit.traces",
