@@ -81,6 +81,12 @@ export async function runCommandArgs(
 	});
 }
 
+/** On Unix, run via a login shell so PATH includes user's CLI (e.g. sf from Homebrew/nvm). */
+function runViaLoginShell(command: string): { argv0: string; args: string[] } {
+	const shellPath = process.env.SHELL || (process.platform === 'darwin' ? '/bin/zsh' : '/bin/bash');
+	return { argv0: shellPath, args: ['-l', '-c', command] };
+}
+
 export async function runCommand(
 	command: string,
 	cwd?: string,
@@ -91,12 +97,20 @@ export async function runCommand(
 ): Promise<string> {
 	Logger.info(`Executing Command: ${command}`);
 	return new Promise((resolve, reject) => {
-		const options: cp.SpawnOptions = {
-			shell: true,
-			cwd: cwd ? cwd : vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
-		};
-
-		const child = cp.spawn(command, options);
+		const cwdPath = cwd ? cwd : vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+		let child: cp.ChildProcess;
+		if (process.platform === 'win32') {
+			child = cp.spawn(command, {
+				shell: true,
+				cwd: cwdPath,
+			});
+		} else {
+			const { argv0, args } = runViaLoginShell(command);
+			child = cp.spawn(argv0, args, {
+				shell: false,
+				cwd: cwdPath,
+			});
+		}
 		let cancelledByUser = false;
 		let timedOut = false;
 
