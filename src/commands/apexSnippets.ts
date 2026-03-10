@@ -10,7 +10,6 @@ export interface ApexSnippet {
     name: string;
     code: string;
     description?: string;
-    targetOrg?: string;
 }
 
 function getSnippetsPath(): string | null {
@@ -88,7 +87,7 @@ export async function editSnippetFile(): Promise<void> {
     await vscode.window.showTextDocument(doc);
 }
 
-export async function runSnippet(snippet?: ApexSnippet | { code?: string; name?: string; targetOrg?: string }): Promise<void> {
+export async function runSnippet(snippet?: ApexSnippet | { code?: string; name?: string }): Promise<void> {
     if (!snippet || !snippet.code) {
         const snippets = await loadSnippets();
         if (snippets.length === 0) {
@@ -115,7 +114,7 @@ export async function runSnippet(snippet?: ApexSnippet | { code?: string; name?:
         snippet = picked.snippet;
     }
 
-    const result = await executeAnonymousApex(snippet.code!, { fromPanel: false, targetOrg: snippet.targetOrg });
+    const result = await executeAnonymousApex(snippet.code!, { fromPanel: false });
     if (!result.success) {
         Logger.error(`Snippet "${snippet.name || 'unnamed'}" failed`);
     }
