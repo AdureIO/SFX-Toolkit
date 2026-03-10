@@ -345,7 +345,8 @@
         {
           "id": "adure-sfx-toolkit.traces",
           "name": "Debug Traces",
-          "when": "adure-sfx-toolkit:isSalesforceProject"
+          "when": "adure-sfx-toolkit:isSalesforceProject",
+          "visibility": "collapsed"
         },
         {
           "id": "adure-sfx-toolkit.orgs",
@@ -360,7 +361,8 @@
         {
           "id": "adure-sfx-toolkit.snippets",
           "name": "Apex Snippets",
-          "when": "adure-sfx-toolkit:isSalesforceProject"
+          "when": "adure-sfx-toolkit:isSalesforceProject",
+          "visibility": "collapsed"
         }
       ],
       "adure-sfx-toolkit-panel": [
