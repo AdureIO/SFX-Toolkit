@@ -2,6 +2,9 @@ import * as vscode from 'vscode';
 import { XMLParser, XMLBuilder } from 'fast-xml-parser';
 import { isSalesforceProject, NOT_SFDX_PROJECT_MESSAGE } from '../utils/projectUtils';
 import { Logger } from '../utils/outputChannel';
+import { AuthInfo } from '../utils/authInfo';
+import { httpsGet } from '../utils/httpUtils';
+import { getToolingApiVersion } from '../utils/constants';
 
 export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvider {
 
@@ -103,53 +106,40 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
             if (!isSalesforceProject()) {
                 throw new Error(NOT_SFDX_PROJECT_MESSAGE);
             }
-            const { runCommand } = await import('../utils/commandRunner');
 
             Logger.info('Starting to fetch objects and fields...');
 
-            let orgResult;
-            try {
-                orgResult = await runCommand('sf org display --json');
-            } catch (e) {
+            const auth = await AuthInfo.getAuthInfo();
+            if (!auth) {
                 throw new Error('No default org set. Please run "sf org login" or set a default org.');
             }
+            Logger.info('Using org: ' + (auth.alias || auth.username));
 
-            const orgParsed = JSON.parse(orgResult);
-            if (orgParsed.status !== 0) {
-                throw new Error('No default org set. Please set a default org first.');
-            }
-            
-            const orgAlias = orgParsed.result?.alias || orgParsed.result?.username;
-            Logger.info('Using org: ' + orgAlias);
-            
-            // Single query to get all objects and their fields using EntityParticle
             const query = `SELECT EntityDefinition.QualifiedApiName, EntityDefinition.Label, QualifiedApiName, Label, DataType 
                           FROM EntityParticle 
                           WHERE EntityDefinition.IsCustomizable = true 
                           ORDER BY EntityDefinition.QualifiedApiName, QualifiedApiName`;
-            
+
             Logger.info('Executing Tooling API query...');
-            const result = await runCommand(`sf data query --query "${query}" --use-tooling-api --json`);
-            Logger.info('Query completed, parsing results...');
-            
-            const parsed = JSON.parse(result);
-            
-            if (parsed.status !== 0) {
-                Logger.error('Query failed: ' + parsed.message);
-                throw new Error(parsed.message || 'Query failed');
+            const baseUrl = auth.instanceUrl.replace(/\/$/, '');
+            const apiVersion = getToolingApiVersion();
+            const queryUrl = `${baseUrl}/services/data/${apiVersion}/tooling/query?q=${encodeURIComponent(query)}`;
+            const resultStr = await httpsGet(queryUrl, auth.accessToken);
+            const parsed = JSON.parse(resultStr);
+
+            if (parsed.records === undefined) {
+                const err = parsed[0] || parsed;
+                const msg = err.message || err.errorDescription || 'Query failed';
+                Logger.error('Query failed: ' + msg);
+                throw new Error(msg);
             }
-            
-            if (!parsed.result || !parsed.result.records) {
-                Logger.error('No records in result');
-                throw new Error('No records returned from query');
-            }
-            
-            Logger.info('Received ' + parsed.result.records.length + ' field records');
+
+            Logger.info('Received ' + parsed.records.length + ' field records');
             
             // Group fields by object
             const objectsMap = new Map<string, any>();
             
-            for (const record of parsed.result.records) {
+            for (const record of parsed.records) {
                 const objectName = record.EntityDefinition.QualifiedApiName;
                 const objectLabel = record.EntityDefinition.Label;
                 

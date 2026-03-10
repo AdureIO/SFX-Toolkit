@@ -4,6 +4,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { Logger, outputChannel } from "../utils/outputChannel";
 import { AuthInfo } from "../utils/authInfo";
+import { OrgMetadataCache } from "../utils/orgMetadataCache";
 import { getAutoSaveBeforePush, getTestRunTimeout } from '../utils/constants';
 
 // Helper to strip ANSI and progress lines
@@ -319,6 +320,8 @@ async function pushSourceHelper(force: boolean) {
 								Logger.info(cleanDeployOutput(result));
 								totalCount += getDeployedCount(result);
 							}
+							OrgMetadataCache.invalidate(null);
+							OrgMetadataCache.warmDefaultOrg();
 							vscode.window.showInformationMessage(
 								`Successfully pushed source for ${packageDirs.length} packages. Deployed ${totalCount} components.`
 							);
@@ -338,6 +341,8 @@ async function pushSourceHelper(force: boolean) {
 							Logger.info(cleanDeployOutput(result));
 
 							const count = getDeployedCount(result);
+							OrgMetadataCache.invalidate(null);
+							OrgMetadataCache.warmDefaultOrg();
 							vscode.window.showInformationMessage(
 								`Source pushed successfully. Deployed ${count} components.`
 							);
@@ -386,6 +391,8 @@ export async function pullSource() {
 		async (_progress, token) => {
 			try {
 				await runCommand("sf project retrieve start", undefined, undefined, true, token);
+				OrgMetadataCache.invalidate(null);
+				OrgMetadataCache.warmDefaultOrg();
 				vscode.window.showInformationMessage("Source pulled successfully.");
 			} catch (e: any) {
 				if (e.cancelled) { Logger.info("Pull cancelled by user."); return; }
@@ -443,6 +450,8 @@ export async function retrieveCurrentFile() {
 		async (_progress, token) => {
 			try {
 				await runCommand(`sf project retrieve start -d "${filePath}"`, undefined, undefined, true, token);
+				OrgMetadataCache.invalidate(null);
+				OrgMetadataCache.warmDefaultOrg();
 				vscode.window.showInformationMessage("File retrieved successfully.");
 			} catch (e: any) {
 				if (e.cancelled) { Logger.info("Retrieve cancelled by user."); return; }

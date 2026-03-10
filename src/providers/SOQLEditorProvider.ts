@@ -3,6 +3,10 @@ import * as path from "path";
 import * as fs from "fs";
 import { runCommand, runCommandArgs } from "../utils/commandRunner";
 import { Logger } from "../utils/outputChannel";
+import { AuthInfo } from "../utils/authInfo";
+import { httpsGet } from "../utils/httpUtils";
+import { getToolingApiVersion } from "../utils/constants";
+import { OrgMetadataCache } from "../utils/orgMetadataCache";
 
 const SOQL_HISTORY_MAX = 10;
 const SOQL_LAST_FILE = "soql-last.txt";
@@ -27,6 +31,8 @@ export class SOQLEditorProvider {
 
 		const { lastQuery, history } = await SOQLEditorProvider.loadSoqlState();
 		panel.webview.html = this._getHtmlForWebview(panel.webview, extensionUri, initialQuery || lastQuery, history);
+
+		OrgMetadataCache.warmDefaultOrg();
 
 		panel.webview.onDidReceiveMessage(
 			async (message) => {
@@ -129,15 +135,7 @@ export class SOQLEditorProvider {
 
 	private static async sendObjectList(panel: vscode.WebviewPanel) {
 		try {
-			const resultStr = await runCommandArgs("sf", ["sobject", "list", "--json"]);
-			const result = JSON.parse(resultStr);
-			const r = result.result;
-			let sobjects: string[] = [];
-			if (Array.isArray(r)) {
-				sobjects = r.map((x: any) => (typeof x === "string" ? x : x.name || x.apiName || "")).filter(Boolean);
-			} else if (r && Array.isArray(r.sobjects)) {
-				sobjects = r.sobjects.map((x: any) => x.name || x.apiName || "").filter(Boolean);
-			}
+			const sobjects = await OrgMetadataCache.getObjectList(null);
 			panel.webview.postMessage({ command: "completions", kind: "objects", items: sobjects });
 		} catch (e: any) {
 			panel.webview.postMessage({ command: "completions", kind: "objects", items: [] });
@@ -150,11 +148,7 @@ export class SOQLEditorProvider {
 			return;
 		}
 		try {
-			const resultStr = await runCommandArgs("sf", ["sobject", "describe", "--sobject", sobject, "--json"]);
-			const result = JSON.parse(resultStr);
-			const fields: string[] = (result.result && result.result.fields && Array.isArray(result.result.fields))
-				? result.result.fields.map((f: { name: string }) => f.name)
-				: [];
+			const fields = await OrgMetadataCache.getFieldNames(null, sobject);
 			panel.webview.postMessage({ command: "completions", kind: "fields", items: fields });
 		} catch (e: any) {
 			panel.webview.postMessage({ command: "completions", kind: "fields", items: [] });
@@ -168,19 +162,7 @@ export class SOQLEditorProvider {
 			return;
 		}
 		try {
-			const resultStr = await runCommandArgs("sf", ["sobject", "describe", "--sobject", parentSobject, "--json"]);
-			const result = JSON.parse(resultStr);
-			const childRels = result.result && result.result.childRelationships;
-			const items: { name: string; sobject: string }[] = [];
-			if (Array.isArray(childRels)) {
-				for (const cr of childRels) {
-					const name = cr.relationshipName;
-					const sobject = cr.childSObject;
-					if (name && typeof name === "string" && sobject && typeof sobject === "string") {
-						items.push({ name, sobject });
-					}
-				}
-			}
+			const items = await OrgMetadataCache.getChildRelationships(null, parentSobject);
 			panel.webview.postMessage({ command: "completions", kind: "relationships", parentSobject, items });
 		} catch (e: any) {
 			panel.webview.postMessage({ command: "completions", kind: "relationships", parentSobject: "", items: [] });
@@ -189,15 +171,7 @@ export class SOQLEditorProvider {
 
 	private static async sendBuilderObjectList(panel: vscode.WebviewPanel) {
 		try {
-			const resultStr = await runCommandArgs("sf", ["sobject", "list", "--json"]);
-			const result = JSON.parse(resultStr);
-			const r = result.result;
-			let sobjects: string[] = [];
-			if (Array.isArray(r)) {
-				sobjects = r.map((x: any) => (typeof x === "string" ? x : x.name || x.apiName || "")).filter(Boolean);
-			} else if (r && Array.isArray(r.sobjects)) {
-				sobjects = r.sobjects.map((x: any) => x.name || x.apiName || "").filter(Boolean);
-			}
+			const sobjects = await OrgMetadataCache.getObjectList(null);
 			panel.webview.postMessage({ command: "builderObjects", items: sobjects });
 		} catch (e: any) {
 			panel.webview.postMessage({ command: "builderObjects", items: [] });
@@ -210,11 +184,7 @@ export class SOQLEditorProvider {
 			return;
 		}
 		try {
-			const resultStr = await runCommandArgs("sf", ["sobject", "describe", "--sobject", sobject, "--json"]);
-			const result = JSON.parse(resultStr);
-			const fields: string[] = (result.result && result.result.fields && Array.isArray(result.result.fields))
-				? result.result.fields.map((f: { name: string }) => f.name)
-				: [];
+			const fields = await OrgMetadataCache.getFieldNames(null, sobject);
 			panel.webview.postMessage({ command: "builderFields", items: fields });
 		} catch (e: any) {
 			panel.webview.postMessage({ command: "builderFields", items: [] });
@@ -244,19 +214,8 @@ export class SOQLEditorProvider {
 		if (toFetch.length > 0) {
 			const results = await Promise.all(
 				toFetch.map(async (sobjectType) => {
-					try {
-						const resultStr = await runCommandArgs("sf", ["sobject", "describe", "--sobject", sobjectType, "--json"]);
-						const result = JSON.parse(resultStr);
-						const fields = result.result && result.result.fields;
-						if (!Array.isArray(fields)) return { sobjectType, edit: {} };
-						const edit: Record<string, boolean> = {};
-						for (const f of fields) {
-							if (f.updateable === true && f.calculated !== true) edit[f.name] = true;
-						}
-						return { sobjectType, edit };
-					} catch {
-						return { sobjectType, edit: {} };
-					}
+					const edit = await OrgMetadataCache.getEditableFields(null, sobjectType);
+					return { sobjectType, edit };
 				})
 			);
 			for (const { sobjectType, edit } of results) {
@@ -318,32 +277,41 @@ export class SOQLEditorProvider {
 		try {
 			panel.webview.postMessage({ command: "loading", value: true });
 
-			const args = ["data", "query", "--query", query, "--json"];
-			if (targetOrg) args.push("--target-org", targetOrg);
-			const resultStr = await runCommandArgs("sf", args);
+			const auth = await AuthInfo.getAuthInfoForOrg(targetOrg);
+			if (!auth) {
+				panel.webview.postMessage({
+					command: "error",
+					text: "Could not get org credentials. Set a default org or select one and try again.",
+				});
+				return;
+			}
+
+			const baseUrl = auth.instanceUrl.replace(/\/$/, "");
+			const apiVersion = getToolingApiVersion();
+			const queryUrl = `${baseUrl}/services/data/${apiVersion}/query?q=${encodeURIComponent(query)}`;
+			const resultStr = await httpsGet(queryUrl, auth.accessToken);
 			const result = JSON.parse(resultStr);
 
-			if (result.status === 0) {
-				const records = result.result.records as any[];
-				const [instanceUrl, editableFields] = await Promise.all([
-					SOQLEditorProvider.getInstanceUrl(targetOrg),
-					SOQLEditorProvider.getEditableFieldsByType(records),
-				]);
+			if (result.records !== undefined) {
+				const records = result.records as any[];
+				const editableFields = await SOQLEditorProvider.getEditableFieldsByType(records);
 				panel.webview.postMessage({
 					command: "results",
 					data: records,
-					totalSize: result.result.totalSize,
-					done: result.result.done,
-					instanceUrl: instanceUrl || undefined,
+					totalSize: result.totalSize ?? records.length,
+					done: result.done !== false,
+					instanceUrl: auth.instanceUrl,
 					editableFields: editableFields,
 				});
 				const history = await SOQLEditorProvider.saveSoqlOnExecute(query);
 				panel.webview.postMessage({ command: "historyUpdated", history });
 			} else {
-				panel.webview.postMessage({ command: "error", text: result.message || "Unknown Error" });
+				const err = result[0] || result;
+				const message = err.message || err.errorDescription || JSON.stringify(result);
+				panel.webview.postMessage({ command: "error", text: message });
 			}
 		} catch (e: any) {
-			const errorMsg = e.stderr || e.message || JSON.stringify(e);
+			const errorMsg = e.message || e.stderr || JSON.stringify(e);
 			panel.webview.postMessage({ command: "error", text: errorMsg });
 		} finally {
 			panel.webview.postMessage({ command: "loading", value: false });

@@ -4,6 +4,12 @@ import { Logger } from "./outputChannel";
 
 const DEFAULT_TIMEOUT_MS = 300000; // 5 minutes
 
+/** Escape one arg for safe use inside shell -c '...' (single-quoted). */
+function escapeArgForShell(arg: string): string {
+	if (!/[\s'\\]/.test(arg)) return arg;
+	return "'" + arg.replace(/\\/g, "\\\\").replace(/'/g, "'\\''") + "'";
+}
+
 export async function runCommandArgs(
 	command: string,
 	args: string[],
@@ -14,12 +20,22 @@ export async function runCommandArgs(
 ): Promise<string> {
 	Logger.info(`Executing Command: ${command} ${args.join(" ")}`);
 	return new Promise((resolve, reject) => {
-		const options: cp.SpawnOptions = {
-			shell: false,
-			cwd: cwd ? cwd : vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
-		};
+		const cwdPath = cwd ? cwd : vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+		let child: cp.ChildProcess;
 
-		const child = cp.spawn(command, args, options);
+		if (process.platform === "win32") {
+			child = cp.spawn(command, args, {
+				shell: true,
+				cwd: cwdPath,
+			});
+		} else {
+			const fullCommand = [command, ...args.map(escapeArgForShell)].join(" ");
+			const { argv0, args: shellArgs } = runViaLoginShell(fullCommand);
+			child = cp.spawn(argv0, shellArgs, {
+				shell: false,
+				cwd: cwdPath,
+			});
+		}
 		let stdout = "";
 		let stderr = "";
 		let timedOut = false;

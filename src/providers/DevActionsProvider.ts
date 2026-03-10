@@ -58,7 +58,15 @@ export class DevActionsProvider implements vscode.TreeDataProvider<vscode.TreeIt
 				"history",
 				"Reset source tracking for default org"
 			),
+			this.createItem(
+				"Refresh Org Metadata",
+				"adure-sfx-toolkit.refreshMetadata",
+				"refresh",
+				"Refresh sobject/field cache for SOQL and builders"
+			),
 			this.createItem("SOQL Builder & Editor", "adure-sfx-toolkit.openSOQLEditor", "database", "Build and run SOQL queries"),
+			this.createItem("Apex Snippets", "adure-sfx-toolkit.showSnippets", "play", "Run, add, edit or delete Apex snippets"),
+			this.createItem("Apex Snippets Overview", "adure-sfx-toolkit.openSnippetsPanel", "list-unordered", "Open panel with all snippets"),
 			this.createItem("Compare with Org", "adure-sfx-toolkit.metadataDiff", "diff", "Compare local file against org version"),
 			this.createItem("Org Health", "adure-sfx-toolkit.orgHealth", "dashboard", "View org limits and health metrics"),
 		];

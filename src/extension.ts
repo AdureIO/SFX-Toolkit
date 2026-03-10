@@ -38,12 +38,15 @@ import { OrgHealthProvider } from './commands/orgHealth';
 import { quickSoqlFromSelection } from './commands/quickSoql';
 import { DeployHistoryProvider } from './commands/deployHistory';
 import { lwcNavigate, lwcGoToJs, lwcGoToHtml, lwcGoToMeta, lwcGoToCss } from './commands/lwcNavigator';
-import { SnippetTreeProvider, runSnippet, addSnippet, deleteSnippet, editSnippetFile } from './commands/apexSnippets';
+import { showSnippets, runSnippet, addSnippet, deleteSnippet, editSnippetFile, deleteSnippetByIndex, openSnippetEditor, type ApexSnippet } from './commands/apexSnippets';
+import { ApexSnippetsPanelProvider } from './providers/ApexSnippetsPanelProvider';
+import { SnippetTreeProvider } from './providers/SnippetTreeProvider';
 import { addToGitignore, addToForceignore, addToIgnore } from './commands/addToIgnore';
 import * as path from 'path';
 import * as fs from 'fs';
 import { getPollingInterval } from './utils/constants';
 import { isSalesforceProject, updateSalesforceProjectContext, NOT_SFDX_PROJECT_MESSAGE } from "./utils/projectUtils";
+import { OrgMetadataCache } from "./utils/orgMetadataCache";
 import { getSalesforceLogDirectory } from "./utils/logPaths";
 
 function updateLwcContext(editor: vscode.TextEditor | undefined): void {
@@ -230,6 +233,13 @@ export function activate(context: vscode.ExtensionContext) {
 		let retrieveFileCmd = register("adure-sfx-toolkit.retrieveCurrentFile", retrieveCurrentFile);
 		let runTestsCmd = register("adure-sfx-toolkit.runLocalTests", runLocalTests);
 		let resetTrackingCmd = register("adure-sfx-toolkit.resetSourceTracking", resetSourceTracking);
+		let refreshMetadataCmd = register("adure-sfx-toolkit.refreshMetadata", async () => {
+			await vscode.window.withProgress(
+				{ location: vscode.ProgressLocation.Notification, title: "Refreshing org metadata cache...", cancellable: false },
+				() => OrgMetadataCache.refresh(null)
+			);
+			vscode.window.showInformationMessage("Org metadata cache refreshed.");
+		});
 
 		// 10. Permission Set Editor
 		context.subscriptions.push(PermissionSetEditorProvider.register(context));
@@ -308,14 +318,53 @@ export function activate(context: vscode.ExtensionContext) {
 		let quickSoqlCmd = register("adure-sfx-toolkit.quickSoql", () => quickSoqlFromSelection(context.extensionUri));
 		let deployHistoryCmd = register("adure-sfx-toolkit.deployHistory", () => DeployHistoryProvider.show());
 
-		// 16. Apex Snippets
+		// 16. Apex Snippets (sidebar view like Debug Traces + quick pick + overview panel)
 		const snippetProvider = new SnippetTreeProvider();
 		vscode.window.registerTreeDataProvider('adure-sfx-toolkit.snippets', snippetProvider);
+		let showSnippetsCmd = register('adure-sfx-toolkit.showSnippets', showSnippets);
+		let openSnippetsPanelCmd = register('adure-sfx-toolkit.openSnippetsPanel', () => ApexSnippetsPanelProvider.show());
 		let runSnippetCmd = register('adure-sfx-toolkit.runSnippet', (snippet?: any) => runSnippet(snippet));
-		let addSnippetCmd = register('adure-sfx-toolkit.addSnippet', addSnippet);
-		let deleteSnippetCmd = register('adure-sfx-toolkit.deleteSnippet', deleteSnippet);
-		let editSnippetFileCmd = register('adure-sfx-toolkit.editSnippetFile', editSnippetFile);
-		let refreshSnippetsCmd = vscode.commands.registerCommand('adure-sfx-toolkit.refreshSnippets', () => snippetProvider.refresh());
+		let addSnippetCmd = register('adure-sfx-toolkit.addSnippet', async () => {
+			await addSnippet();
+			snippetProvider.refresh();
+			ApexSnippetsPanelProvider.refreshPanel();
+		});
+		let deleteSnippetCmd = register('adure-sfx-toolkit.deleteSnippet', async (item?: { index?: number }) => {
+			if (item != null && typeof item.index === 'number' && item.index >= 0) {
+				await deleteSnippetByIndex(item.index);
+				snippetProvider.refresh();
+				ApexSnippetsPanelProvider.refreshPanel();
+			} else {
+				await deleteSnippet();
+				snippetProvider.refresh();
+			}
+		});
+		let editSnippetFileCmd = register('adure-sfx-toolkit.editSnippetFile', async () => {
+			await editSnippetFile();
+			snippetProvider.refresh();
+		});
+		let refreshSnippetsCmd = register('adure-sfx-toolkit.refreshSnippets', () => snippetProvider.refresh());
+		let editSnippetCmd = register('adure-sfx-toolkit.editSnippet', (snippetOrItem?: { snippet?: ApexSnippet; name?: string; code?: string }) => {
+			const s = (snippetOrItem?.snippet ?? snippetOrItem) as ApexSnippet | undefined;
+			if (s && typeof s.name === 'string') openSnippetEditor(s);
+		});
+		const snippetStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+		snippetStatusBarItem.text = '$(code) Apex Snippets';
+		snippetStatusBarItem.tooltip = 'Click for Apex Snippets menu';
+		snippetStatusBarItem.command = 'adure-sfx-toolkit.showSnippets';
+		if (isSalesforceProject()) snippetStatusBarItem.show();
+		context.subscriptions.push(snippetStatusBarItem);
+		const updateSnippetStatusBar = () => {
+			if (isSalesforceProject()) snippetStatusBarItem.show();
+			else snippetStatusBarItem.hide();
+		};
+		context.subscriptions.push(
+			vscode.workspace.onDidChangeWorkspaceFolders(() => {
+				updateSalesforceProjectContext();
+				updateSnippetStatusBar();
+			})
+		);
+		updateSnippetStatusBar();
 
 		// 17. Add to Ignore
 		let addToGitignoreCmd = register('adure-sfx-toolkit.addToGitignore', (uri?: vscode.Uri) => addToGitignore(uri));
@@ -366,6 +415,7 @@ export function activate(context: vscode.ExtensionContext) {
 			retrieveFileCmd,
 			runTestsCmd,
 			resetTrackingCmd,
+			refreshMetadataCmd,
 			openSOQLEditorCmd,
 			showOutputCmd,
 			metadataDiffCmd,
@@ -375,11 +425,14 @@ export function activate(context: vscode.ExtensionContext) {
 			addToGitignoreCmd,
 			addToForceignoreCmd,
 			addToIgnoreCmd,
+			showSnippetsCmd,
+			openSnippetsPanelCmd,
+			refreshSnippetsCmd,
 			runSnippetCmd,
 			addSnippetCmd,
 			deleteSnippetCmd,
 			editSnippetFileCmd,
-			refreshSnippetsCmd,
+			editSnippetCmd,
 			lwcNavCmd,
 			lwcJsCmd,
 			lwcHtmlCmd,

@@ -4,7 +4,7 @@
   "publisher": "AdureIO",
   "description": "Utilities for Salesforce development: Log filtering, Debug Traces, Deployment, and more.",
   "icon": "resources/icon.png",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "license": "BSD-3-Clause",
   "engines": {
     "vscode": "^1.80.0"
@@ -228,6 +228,11 @@
         "icon": "$(history)"
       },
       {
+        "command": "adure-sfx-toolkit.refreshMetadata",
+        "title": "ASFXT: Refresh Org Metadata Cache",
+        "icon": "$(refresh)"
+      },
+      {
         "command": "adure-sfx-toolkit.openSOQLEditor",
         "title": "ASFXT: Open SOQL Builder & Editor",
         "icon": "$(database)"
@@ -261,6 +266,16 @@
         "title": "ASFXT: Add to Ignore File..."
       },
       {
+        "command": "adure-sfx-toolkit.showSnippets",
+        "title": "ASFXT: Apex Snippets",
+        "icon": "$(play)"
+      },
+      {
+        "command": "adure-sfx-toolkit.openSnippetsPanel",
+        "title": "ASFXT: Open Apex Snippets Overview",
+        "icon": "$(list-unordered)"
+      },
+      {
         "command": "adure-sfx-toolkit.runSnippet",
         "title": "ASFXT: Run Apex Snippet",
         "icon": "$(play)"
@@ -277,7 +292,12 @@
       },
       {
         "command": "adure-sfx-toolkit.editSnippetFile",
-        "title": "ASFXT: Edit Snippets File",
+        "title": "ASFXT: Open Snippets Folder",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "adure-sfx-toolkit.editSnippet",
+        "title": "ASFXT: Edit Snippet in .apex File",
         "icon": "$(edit)"
       },
       {
@@ -373,8 +393,7 @@
         {
           "id": "adure-sfx-toolkit.snippets",
           "name": "Apex Snippets",
-          "when": "adure-sfx-toolkit:isSalesforceProject",
-          "visibility": "collapsed"
+          "when": "adure-sfx-toolkit:isSalesforceProject"
         }
       ],
       "adure-sfx-toolkit-panel": [
@@ -435,21 +454,6 @@
     "menus": {
       "view/title": [
         {
-          "command": "adure-sfx-toolkit.refreshSnippets",
-          "when": "view == adure-sfx-toolkit.snippets",
-          "group": "navigation"
-        },
-        {
-          "command": "adure-sfx-toolkit.addSnippet",
-          "when": "view == adure-sfx-toolkit.snippets",
-          "group": "navigation"
-        },
-        {
-          "command": "adure-sfx-toolkit.editSnippetFile",
-          "when": "view == adure-sfx-toolkit.snippets",
-          "group": "navigation"
-        },
-        {
           "command": "adure-sfx-toolkit.refreshLogs",
           "when": "view == adure-sfx-toolkit.logs",
           "group": "navigation"
@@ -482,6 +486,21 @@
         {
           "command": "adure-sfx-toolkit.addDebugTrace",
           "when": "view == adure-sfx-toolkit.traces",
+          "group": "navigation"
+        },
+        {
+          "command": "adure-sfx-toolkit.refreshSnippets",
+          "when": "view == adure-sfx-toolkit.snippets",
+          "group": "navigation"
+        },
+        {
+          "command": "adure-sfx-toolkit.addSnippet",
+          "when": "view == adure-sfx-toolkit.snippets",
+          "group": "navigation"
+        },
+        {
+          "command": "adure-sfx-toolkit.editSnippetFile",
+          "when": "view == adure-sfx-toolkit.snippets",
           "group": "navigation"
         },
         {
@@ -532,7 +551,17 @@
       ],
       "view/item/context": [
         {
+          "command": "adure-sfx-toolkit.deleteTrace",
+          "when": "view == adure-sfx-toolkit.traces",
+          "group": "inline"
+        },
+        {
           "command": "adure-sfx-toolkit.runSnippet",
+          "when": "view == adure-sfx-toolkit.snippets && viewItem == snippetItem",
+          "group": "inline"
+        },
+        {
+          "command": "adure-sfx-toolkit.editSnippet",
           "when": "view == adure-sfx-toolkit.snippets && viewItem == snippetItem",
           "group": "inline"
         },
@@ -540,11 +569,6 @@
           "command": "adure-sfx-toolkit.deleteSnippet",
           "when": "view == adure-sfx-toolkit.snippets && viewItem == snippetItem",
           "group": "1_modify"
-        },
-        {
-          "command": "adure-sfx-toolkit.deleteTrace",
-          "when": "view == adure-sfx-toolkit.traces",
-          "group": "inline"
         },
         {
           "command": "adure-sfx-toolkit.openOrg",
