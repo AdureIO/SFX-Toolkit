@@ -18,7 +18,7 @@
 
 ### Deploy
 
-- Deploy Classes: production-style deploy with Run All / Run Specified Tests / Validate only / No tests, cancel at any step, save presets — done
+- Deploy Metadata: deploy entire project or selected paths (all metadata types), with Run All / Run Specified Tests / Validate only / No tests, cancel at any step, save presets — done
 
 Improvements
 - permissionset viewer: 

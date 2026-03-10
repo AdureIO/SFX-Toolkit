@@ -1,79 +1,21 @@
-import { runCommand } from "./commandRunner";
+import { runCommandArgs } from "./commandRunner";
 import { outputChannel } from "./outputChannel";
 import { isSalesforceProject } from "./projectUtils";
 
 /** Default: consider token expired after 55 minutes so we refresh before typical 2h OAuth expiry. */
 const AUTH_VALID_MS = 55 * 60 * 1000;
 
-interface OrgAuth {
+const CACHE_KEY_DEFAULT = "__default__";
+
+export interface OrgAuth {
 	accessToken: string;
 	instanceUrl: string;
 	username: string;
 	orgId: string;
+	/** Optional alias used to fetch this org (for logging). */
+	alias?: string;
 	/** Timestamp (ms) after which this auth is considered expired and must be refreshed. */
 	expiresAt: number;
-}
-
-export class AuthInfo {
-	private static cachedAuth: OrgAuth | null = null;
-	private static isFetching = false;
-
-	/** Returns cached auth only if present and not expired. */
-	private static getValidCache(): OrgAuth | null {
-		const c = this.cachedAuth;
-		return c && Date.now() < c.expiresAt ? c : null;
-	}
-
-	/** True if we have valid (non-expired) cached auth ready to use. */
-	public static hasValidCache(): boolean {
-		return this.getValidCache() !== null;
-	}
-
-	public static async getAuthInfo(): Promise<OrgAuth | null> {
-		if (!isSalesforceProject()) {
-			return null;
-		}
-		const valid = this.getValidCache();
-		if (valid) return valid;
-
-		if (this.isFetching) {
-			await new Promise((r) => setTimeout(r, 1000));
-			const afterWait = this.getValidCache();
-			if (afterWait) return afterWait;
-		}
-
-		this.isFetching = true;
-		try {
-			outputChannel.appendLine("AuthInfo: Retrieving Org credentials for faster API access...");
-			const result = await runCommand("sf org display --json");
-			const parsed = JSON.parse(result);
-
-			if (parsed.status === 0 && parsed.result) {
-				const expiresAt = parseExpiration(parsed.result) ?? Date.now() + AUTH_VALID_MS;
-				this.cachedAuth = {
-					accessToken: parsed.result.accessToken,
-					instanceUrl: parsed.result.instanceUrl,
-					username: parsed.result.username,
-					orgId: parsed.result.id,
-					expiresAt,
-				};
-				outputChannel.appendLine(`AuthInfo: Connected to ${this.cachedAuth.instanceUrl} (cached until refresh)`);
-				return this.cachedAuth;
-			} else {
-				outputChannel.appendLine(`AuthInfo Failed: ${parsed.message}`);
-				return null;
-			}
-		} catch (e) {
-			outputChannel.appendLine(`AuthInfo Error: ${e}`);
-			return null;
-		} finally {
-			this.isFetching = false;
-		}
-	}
-
-	public static clearCache(): void {
-		this.cachedAuth = null;
-	}
 }
 
 /** If the CLI returns an expiration, use it; otherwise return undefined for default. */
@@ -83,4 +25,116 @@ function parseExpiration(result: { accessTokenExpiration?: string }): number | u
 	const t = new Date(exp).getTime();
 	if (!Number.isNaN(t)) return t;
 	return undefined;
+}
+
+function buildOrgAuth(parsed: any): OrgAuth {
+	const expiresAt = parseExpiration(parsed) ?? Date.now() + AUTH_VALID_MS;
+	return {
+		accessToken: parsed.accessToken,
+		instanceUrl: parsed.instanceUrl,
+		username: parsed.username,
+		orgId: parsed.id,
+		expiresAt,
+	};
+}
+
+/**
+ * Centralized org auth cache. All commands that need an access token or instance URL
+ * should use getAuthInfoForOrg(). Auth is cached per org; expired entries are refetched.
+ * Call clearCache() after login/set-default so the next access gets fresh credentials.
+ */
+export class AuthInfo {
+	private static cache = new Map<string, OrgAuth>();
+	private static fetchLocks = new Map<string, Promise<OrgAuth | null>>();
+
+	private static cacheKey(targetOrg: string | null): string {
+		return targetOrg === null || targetOrg === "" ? CACHE_KEY_DEFAULT : targetOrg;
+	}
+
+	/** Returns cached auth only if present and not expired. */
+	private static getValidFromCache(key: string): OrgAuth | null {
+		const entry = this.cache.get(key);
+		if (!entry) return null;
+		if (Date.now() >= entry.expiresAt) {
+			this.cache.delete(key);
+			return null;
+		}
+		return entry;
+	}
+
+	/** True if we have valid (non-expired) cached auth for the default org. */
+	public static hasValidCache(): boolean {
+		return this.getValidFromCache(CACHE_KEY_DEFAULT) !== null;
+	}
+
+	/**
+	 * Fetch org credentials from the CLI (one place for all auth retrieval).
+	 */
+	private static async fetchOrgAuth(targetOrg: string | null): Promise<OrgAuth | null> {
+		const args = ["org", "display", "--json"];
+		if (targetOrg) args.push("--target-org", targetOrg);
+		const result = await runCommandArgs("sf", args);
+		const parsed = JSON.parse(result);
+		if (parsed.status !== 0 || !parsed.result) {
+			outputChannel.appendLine(`AuthInfo: sf org display failed${targetOrg ? ` (${targetOrg})` : ""}: ${parsed.message || "Unknown"}`);
+			return null;
+		}
+		const auth = buildOrgAuth(parsed.result);
+		if (targetOrg) auth.alias = targetOrg;
+		return auth;
+	}
+
+	/**
+	 * Get auth for the default org (cached). Same as getAuthInfoForOrg(null).
+	 */
+	public static async getAuthInfo(): Promise<OrgAuth | null> {
+		return this.getAuthInfoForOrg(null);
+	}
+
+	/**
+	 * Get auth for an org: default when targetOrg is null/empty, otherwise that org by alias.
+	 * Uses a single per-org cache; expired or missing entries are fetched and cached.
+	 * Concurrent calls for the same org share one fetch.
+	 */
+	public static async getAuthInfoForOrg(targetOrg: string | null): Promise<OrgAuth | null> {
+		if (!isSalesforceProject()) return null;
+
+		const key = this.cacheKey(targetOrg);
+
+		const valid = this.getValidFromCache(key);
+		if (valid) return valid;
+
+		const existing = this.fetchLocks.get(key);
+		if (existing) return existing;
+
+		const doFetch = async (): Promise<OrgAuth | null> => {
+			try {
+				outputChannel.appendLine(`AuthInfo: Retrieving org credentials${targetOrg ? ` for ${targetOrg}` : " (default)"}...`);
+				const auth = await this.fetchOrgAuth(targetOrg);
+				if (auth) {
+					this.cache.set(key, auth);
+					outputChannel.appendLine(`AuthInfo: Cached ${auth.instanceUrl} (${auth.username})`);
+				}
+				return auth;
+			} finally {
+				this.fetchLocks.delete(key);
+			}
+		};
+
+		const promise = doFetch();
+		this.fetchLocks.set(key, promise);
+		return promise;
+	}
+
+	/** Clear all cached auth. Call after login, set default org, or when tokens may have changed. */
+	public static clearCache(): void {
+		this.cache.clear();
+		this.fetchLocks.clear();
+	}
+
+	/** Invalidate one org in the cache so the next getAuthInfoForOrg refetches. */
+	public static invalidateOrg(targetOrg: string | null): void {
+		const key = this.cacheKey(targetOrg);
+		this.cache.delete(key);
+	}
 }

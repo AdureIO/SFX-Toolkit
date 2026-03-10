@@ -5,6 +5,7 @@ import * as os from 'os';
 import { runCommand } from '../utils/commandRunner';
 import { openLogById } from './listLogs';
 import { AuthInfo } from '../utils/authInfo';
+import { getSalesforceLogDirectory } from '../utils/logPaths';
 
 // Track last executed file for Rerun capability
 let lastAnonymousContent: string = '';
@@ -94,8 +95,17 @@ export async function executeAnonymousApex(code: string, options?: { fromPanel?:
         await executeContent(code, options?.fromPanel === true, options?.targetOrg);
         return { success: true };
     } catch (e: any) {
-        const message = e?.message || e?.stderr || String(e);
-        if (options?.fromPanel) return { success: false, errorMessage: message };
+        let message = e?.message || e?.stderr || String(e);
+        if (options?.fromPanel) {
+            try {
+                const j = JSON.parse(message);
+                if (j.compileProblem) message = j.compileProblem;
+                else if (j.exceptionMessage) message = j.exceptionMessage;
+            } catch {
+                // use original message
+            }
+            return { success: false, errorMessage: message };
+        }
         throw e;
     }
 }
@@ -113,6 +123,79 @@ async function executeContent(text: string, fromPanel?: boolean, targetOrg?: str
         cancellable: true
     }, async (_progress, token) => {
         try {
+            // Execute Apex panel: run with --json, then same as Salesforce extension: download log to
+            // .sfdx/tools/debug/logs and save original script + JSON result alongside; open the log.
+            if (fromPanel) {
+                const runOut = await runCommand(`sf apex run -f "${tmpFile}" --json${orgFlag}`, undefined, undefined, true, token);
+                let runResult: { compiled?: boolean; success?: boolean; logs?: string; compileProblem?: string; exceptionMessage?: string };
+                try {
+                    runResult = JSON.parse(runOut);
+                } catch {
+                    runResult = {};
+                }
+                if (!runResult.compiled || !runResult.success) {
+                    const msg = !runResult.compiled
+                        ? (runResult.compileProblem ?? 'Compilation failed.')
+                        : (runResult.exceptionMessage ?? 'Execution failed.');
+                    throw new Error(msg);
+                }
+
+                let userId: string;
+                if (targetOrg) {
+                    try {
+                        const userRes = await runCommand(`sf org display user --json${orgFlag}`, undefined, undefined, true, token);
+                        const userJson = JSON.parse(userRes);
+                        userId = (userJson.status === 0 && userJson.result?.id) ? userJson.result.id : '';
+                    } catch {
+                        userId = '';
+                    }
+                } else {
+                    if (cachedUserId !== null) {
+                        userId = cachedUserId;
+                    } else {
+                        try {
+                            const userRes = await runCommand('sf org display user --json', undefined, undefined, true, token);
+                            const userJson = JSON.parse(userRes);
+                            userId = (userJson.status === 0 && userJson.result?.id) ? userJson.result.id : '';
+                            if (userId) cachedUserId = userId;
+                        } catch {
+                            userId = '';
+                        }
+                    }
+                }
+                const query = "SELECT Id FROM ApexLog" + (userId ? ` WHERE LogUserId = '${userId}'` : '') + " ORDER BY StartTime DESC LIMIT 1";
+                await new Promise((r) => setTimeout(r, 350));
+                let logId: string | null = null;
+                try {
+                    const logRes = await runCommand(`sf data query -q "${query}" -t --json${orgFlag}`, undefined, undefined, true, token);
+                    const logJson = JSON.parse(logRes);
+                    if (logJson.status === 0 && logJson.result.records?.length > 0) {
+                        logId = logJson.result.records[0].Id;
+                    }
+                } catch {
+                    // no log id; we still succeeded
+                }
+
+                if (logId) {
+                    const logDir = getSalesforceLogDirectory();
+                    if (logDir) {
+                        if (!fs.existsSync(logDir)) {
+                            fs.mkdirSync(logDir, { recursive: true });
+                        }
+                        // Reuse Salesforce extension behavior: download log to logs directory
+                        await runCommand(`sf apex get log -i ${logId} -d "${logDir}"${orgFlag}`, undefined, undefined, true, token);
+                        // Save original script and JSON result alongside (like Salesforce extension "log exec")
+                        const scriptPath = path.join(logDir, `${logId}.apex`);
+                        const resultPath = path.join(logDir, `${logId}-result.json`);
+                        fs.writeFileSync(scriptPath, text, 'utf8');
+                        fs.writeFileSync(resultPath, JSON.stringify(runResult, null, 2), 'utf8');
+                    }
+                    const targetColumn = vscode.ViewColumn.Beside;
+                    await openLogById(logId, targetColumn, 'sf-anon-log', true, targetOrg);
+                }
+                return;
+            }
+
             let userId: string;
             if (targetOrg) {
                 try {

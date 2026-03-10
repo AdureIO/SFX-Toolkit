@@ -153,6 +153,17 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 					const message = e?.message || e?.stderr || String(e);
 					this._showErrorInPanel(webviewView, message);
 				}
+			} else if (data.type === 'openInEditor') {
+				const bufferUri = this.getBufferUri();
+				if (bufferUri) {
+					await this.writeBuffer(data.code || (await this.readBuffer()));
+					try {
+						const doc = await vscode.workspace.openTextDocument(bufferUri);
+						await vscode.window.showTextDocument(doc, { preview: false });
+					} catch {
+						await vscode.commands.executeCommand('vscode.open', bufferUri);
+					}
+				}
 			} else if (data.type === 'contentChanged' && typeof data.code === 'string') {
 				await this.writeBuffer(data.code);
 			}
@@ -204,26 +215,55 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 			border: 1px solid var(--vscode-input-border, transparent);
 			border-radius: 4px;
 		}
-		#apex-editor {
+		.editor-wrap {
 			flex: 1;
 			min-height: 120px;
+			position: relative;
+			border: 1px solid var(--vscode-input-border, transparent);
+			border-radius: 4px;
+			overflow: hidden;
+		}
+		.editor-wrap:focus-within {
+			outline: 1px solid var(--vscode-focusBorder);
+		}
+		#highlight-layer {
+			position: absolute;
+			top: 0; left: 0; right: 0; bottom: 0;
+			padding: 8px;
+			font-family: var(--vscode-editor-font-family, 'Consolas', 'Monaco', monospace);
+			font-size: var(--vscode-editor-font-size, 13px);
+			line-height: 1.5;
+			white-space: pre-wrap;
+			word-wrap: break-word;
+			overflow: auto;
+			pointer-events: none;
+			color: transparent;
+			background: var(--vscode-input-background);
+		}
+		#apex-editor {
+			position: relative;
 			width: 100%;
+			height: 100%;
 			padding: 8px;
 			font-family: var(--vscode-editor-font-family, 'Consolas', 'Monaco', monospace);
 			font-size: var(--vscode-editor-font-size, 13px);
 			line-height: 1.5;
 			resize: none;
-			border: 1px solid var(--vscode-input-border, transparent);
-			background: var(--vscode-input-background);
+			border: none;
+			background: transparent;
 			color: var(--vscode-input-foreground);
-			border-radius: 4px;
+			caret-color: var(--vscode-editorCursor-foreground, var(--vscode-input-foreground));
+			z-index: 1;
 		}
-		#apex-editor:focus {
-			outline: 1px solid var(--vscode-focusBorder);
-		}
-		#apex-editor::placeholder {
-			color: var(--vscode-input-placeholderForeground);
-		}
+		#apex-editor:focus { outline: none; }
+		#apex-editor::placeholder { color: var(--vscode-input-placeholderForeground); }
+		.hl-kw { color: var(--vscode-symbolIcon-keywordForeground, #569cd6); }
+		.hl-type { color: var(--vscode-symbolIcon-classForeground, #4ec9b0); }
+		.hl-str { color: var(--vscode-symbolIcon-stringForeground, #ce9178); }
+		.hl-num { color: var(--vscode-symbolIcon-numberForeground, #b5cea8); }
+		.hl-cmt { color: var(--vscode-symbolIcon-enumeratorForeground, #6a9955); font-style: italic; }
+		.hl-ann { color: var(--vscode-symbolIcon-interfaceForeground, #dcdcaa); }
+		.hl-method { color: var(--vscode-symbolIcon-methodForeground, #dcdcaa); }
 		#error-box {
 			margin-top: 8px;
 			padding: 8px;
@@ -240,14 +280,13 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 			max-height: 120px;
 			overflow: auto;
 		}
-		#error-box.visible {
-			display: block;
-		}
+		#error-box.visible { display: block; }
 		.actions {
 			display: flex;
 			gap: 8px;
 			margin-top: 8px;
 			flex-shrink: 0;
+			flex-wrap: wrap;
 		}
 		button {
 			padding: 6px 14px;
@@ -258,16 +297,13 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 			background: var(--vscode-button-background);
 			color: var(--vscode-button-foreground);
 		}
-		button:hover {
-			background: var(--vscode-button-hoverBackground);
-		}
+		button:hover { background: var(--vscode-button-hoverBackground); }
 		button.secondary {
 			background: var(--vscode-button-secondaryBackground);
 			color: var(--vscode-button-secondaryForeground);
 		}
-		button.secondary:hover {
-			background: var(--vscode-button-secondaryHoverBackground);
-		}
+		button.secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
+		.shortcut-hint { font-size: 10px; opacity: 0.6; margin-left: 4px; }
 	</style>
 </head>
 <body>
@@ -285,19 +321,113 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 		</select>
 	</div>
 	<div class="label">Apex (anonymous execution)</div>
-	<textarea id="apex-editor" placeholder="System.debug('Hello');&#10;Integer i = 1 + 1;"></textarea>
+	<div class="editor-wrap">
+		<div id="highlight-layer" aria-hidden="true"></div>
+		<textarea id="apex-editor" placeholder="System.debug('Hello');&#10;Integer i = 1 + 1;" spellcheck="false"></textarea>
+	</div>
 	<div id="error-box" class="" role="alert"></div>
 	<div class="actions">
-		<button id="execute-btn" title="Execute against default org">Execute</button>
+		<button id="execute-btn" title="Execute (Ctrl+Enter)">Execute<span class="shortcut-hint">Ctrl+Enter</span></button>
+		<button id="open-editor-btn" class="secondary" title="Open in VS Code editor for full Apex language support">Open in Editor</button>
 		<button id="clear-btn" class="secondary">Clear</button>
 	</div>
 	<script>
 		const vscode = acquireVsCodeApi();
 		const editor = document.getElementById('apex-editor');
+		const highlightLayer = document.getElementById('highlight-layer');
 		const errorBox = document.getElementById('error-box');
 		const orgSelect = document.getElementById('org-select');
 		const historySelect = document.getElementById('history-select');
 		const initialEl = document.getElementById('apex-initial-data');
+
+		const APEX_KEYWORDS = /\\b(abstract|after|before|break|catch|class|continue|delete|do|else|enum|extends|final|finally|for|get|global|if|implements|import|in|insert|instanceof|interface|merge|new|null|on|override|private|protected|public|return|set|static|super|switch|testmethod|this|throw|transient|trigger|try|undelete|update|upsert|virtual|void|webservice|when|while|with|without|sharing)\\b/g;
+		const APEX_TYPES = /\\b(Boolean|Date|Datetime|Decimal|Double|Id|Integer|Long|Object|String|Blob|List|Map|Set|Account|Contact|Lead|Opportunity|Case|Task|System|Database|Test|Assert|UserInfo|Schema|Limits|ApexPages|Messaging)\\b/g;
+		const APEX_ANNOTATIONS = /@\\w+/g;
+
+		function escapeHtml(s) {
+			return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+		}
+
+		function highlightApex(code) {
+			let html = '';
+			let i = 0;
+			while (i < code.length) {
+				if (code[i] === '/' && code[i+1] === '/') {
+					const end = code.indexOf('\\n', i);
+					const slice = end === -1 ? code.slice(i) : code.slice(i, end);
+					html += '<span class="hl-cmt">' + escapeHtml(slice) + '</span>';
+					i += slice.length;
+				} else if (code[i] === '/' && code[i+1] === '*') {
+					const end = code.indexOf('*/', i + 2);
+					const slice = end === -1 ? code.slice(i) : code.slice(i, end + 2);
+					html += '<span class="hl-cmt">' + escapeHtml(slice) + '</span>';
+					i += slice.length;
+				} else if (code[i] === "'" ) {
+					let j = i + 1;
+					while (j < code.length && code[j] !== "'" && code[j] !== '\\n') {
+						if (code[j] === '\\\\') j++;
+						j++;
+					}
+					if (j < code.length && code[j] === "'") j++;
+					html += '<span class="hl-str">' + escapeHtml(code.slice(i, j)) + '</span>';
+					i = j;
+				} else if (code[i] === '@' && /[a-zA-Z]/.test(code[i+1] || '')) {
+					const m = code.slice(i).match(/^@\\w+/);
+					if (m) {
+						html += '<span class="hl-ann">' + escapeHtml(m[0]) + '</span>';
+						i += m[0].length;
+					} else {
+						html += escapeHtml(code[i]);
+						i++;
+					}
+				} else if (/[a-zA-Z_]/.test(code[i])) {
+					const m = code.slice(i).match(/^[a-zA-Z_]\\w*/);
+					if (m) {
+						const word = m[0];
+						const nextChar = code[i + word.length];
+						if (APEX_KEYWORDS.test(word)) {
+							APEX_KEYWORDS.lastIndex = 0;
+							html += '<span class="hl-kw">' + escapeHtml(word) + '</span>';
+						} else if (APEX_TYPES.test(word)) {
+							APEX_TYPES.lastIndex = 0;
+							html += '<span class="hl-type">' + escapeHtml(word) + '</span>';
+						} else if (nextChar === '(') {
+							html += '<span class="hl-method">' + escapeHtml(word) + '</span>';
+						} else {
+							html += escapeHtml(word);
+						}
+						i += word.length;
+					} else {
+						html += escapeHtml(code[i]);
+						i++;
+					}
+				} else if (/[0-9]/.test(code[i])) {
+					const m = code.slice(i).match(/^[0-9]+(\\.[0-9]+)?/);
+					if (m) {
+						html += '<span class="hl-num">' + escapeHtml(m[0]) + '</span>';
+						i += m[0].length;
+					} else {
+						html += escapeHtml(code[i]);
+						i++;
+					}
+				} else {
+					html += escapeHtml(code[i]);
+					i++;
+				}
+			}
+			return html + '\\n';
+		}
+
+		function syncHighlight() {
+			highlightLayer.innerHTML = highlightApex(editor.value);
+		}
+
+		editor.addEventListener('scroll', () => {
+			highlightLayer.scrollTop = editor.scrollTop;
+			highlightLayer.scrollLeft = editor.scrollLeft;
+		});
+		editor.addEventListener('input', () => { syncHighlight(); });
+		setTimeout(syncHighlight, 0);
 		if (initialEl && initialEl.textContent) {
 			try {
 				const data = JSON.parse(initialEl.textContent);
@@ -325,7 +455,7 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 			if (historySelect.value === '') return;
 			const opt = historySelect.options[historySelect.selectedIndex];
 			const code = opt ? opt.title : '';
-			if (code) { editor.value = code; editor.focus(); }
+			if (code) { editor.value = code; editor.focus(); syncHighlight(); }
 			historySelect.selectedIndex = 0;
 		});
 		vscode.postMessage({ type: 'getOrgs' });
@@ -350,16 +480,41 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 			errorBox.textContent = msg || '';
 			errorBox.classList.toggle('visible', !!msg);
 		}
-		editor.addEventListener('input', scheduleSave);
-		document.getElementById('execute-btn').onclick = () => {
+		editor.addEventListener('input', () => { scheduleSave(); syncHighlight(); });
+
+		function doExecute() {
 			showError('');
 			const targetOrg = (orgSelect.value || '').trim();
 			vscode.postMessage({ type: 'execute', code: editor.value, targetOrg: targetOrg || undefined });
+		}
+
+		document.getElementById('execute-btn').onclick = doExecute;
+
+		editor.addEventListener('keydown', (e) => {
+			if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+				e.preventDefault();
+				doExecute();
+			}
+			if (e.key === 'Tab') {
+				e.preventDefault();
+				const start = editor.selectionStart;
+				const end = editor.selectionEnd;
+				editor.value = editor.value.substring(0, start) + '    ' + editor.value.substring(end);
+				editor.selectionStart = editor.selectionEnd = start + 4;
+				syncHighlight();
+				scheduleSave();
+			}
+		});
+
+		document.getElementById('open-editor-btn').onclick = () => {
+			vscode.postMessage({ type: 'openInEditor' });
 		};
+
 		document.getElementById('clear-btn').onclick = () => {
 			editor.value = '';
 			editor.focus();
 			showError('');
+			syncHighlight();
 			vscode.postMessage({ type: 'contentChanged', code: '' });
 		};
 	</script>

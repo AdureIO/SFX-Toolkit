@@ -7,13 +7,11 @@ import { outputChannel } from '../utils/outputChannel';
 import { AuthInfo } from '../utils/authInfo';
 import { httpsGet, httpsDelete } from '../utils/httpUtils';
 import { runCommand } from '../utils/commandRunner';
-
-const TOOLING_VERSION = 'v60.0';
-const PARALLEL_DELETES = 8;
+import { getToolingApiVersion, getParallelDeletes } from '../utils/constants';
 
 /** Delete one ApexLog via Tooling API (used when REST is available). */
 async function deleteOneViaTooling(instanceUrl: string, accessToken: string, id: string): Promise<void> {
-    const deleteUrl = `${instanceUrl}/services/data/${TOOLING_VERSION}/tooling/sobjects/ApexLog/${id}`;
+    const deleteUrl = `${instanceUrl}/services/data/${getToolingApiVersion()}/tooling/sobjects/ApexLog/${id}`;
     await httpsDelete(deleteUrl, accessToken);
 }
 
@@ -76,7 +74,7 @@ export async function deleteAllLogs() {
             if (auth) {
                 try {
                     progress.report({ message: "Fetching log IDs..." });
-                    const queryUrl = `${auth.instanceUrl}/services/data/${TOOLING_VERSION}/tooling/query?q=${encodeURIComponent(query)}`;
+                    const queryUrl = `${auth.instanceUrl}/services/data/${getToolingApiVersion()}/tooling/query?q=${encodeURIComponent(query)}`;
                     const resultStr = await httpsGet(queryUrl, auth.accessToken);
                     const result = JSON.parse(resultStr);
                     const records = result.records || [];
@@ -116,9 +114,9 @@ export async function deleteAllLogs() {
             let deleted = 0;
             let useCli = false;
 
-            for (let i = 0; i < ids.length; i += PARALLEL_DELETES) {
-                const chunk = ids.slice(i, i + PARALLEL_DELETES);
-                progress.report({ message: `Deleting ${Math.min(i + PARALLEL_DELETES, ids.length)} / ${ids.length}...` });
+            for (let i = 0; i < ids.length; i += getParallelDeletes()) {
+                const chunk = ids.slice(i, i + getParallelDeletes());
+                progress.report({ message: `Deleting ${Math.min(i + getParallelDeletes(), ids.length)} / ${ids.length}...` });
 
                 if (useCli || !auth) {
                     for (const id of chunk) {

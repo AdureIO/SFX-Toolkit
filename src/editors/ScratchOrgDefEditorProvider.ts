@@ -124,6 +124,7 @@ export class ScratchOrgDefEditorProvider implements vscode.CustomTextEditorProvi
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
     <title>Scratch Org Definition Editor</title>
     <style>
         body {
@@ -433,7 +434,7 @@ export class ScratchOrgDefEditorProvider implements vscode.CustomTextEditorProvi
                 isUpdatingUI = false;
             } catch (e) {
                 // Invalid JSON, don't update
-                console.error('Invalid JSON:', e);
+                // invalid JSON during edit
             }
         }
         
@@ -713,7 +714,21 @@ export class ScratchOrgDefEditorProvider implements vscode.CustomTextEditorProvi
         });
         
         function handleValidationResult(errors) {
-            // TODO: Display validation errors
+            const container = document.getElementById('general-tab');
+            let errorDiv = document.getElementById('validation-errors');
+            if (!errorDiv) {
+                errorDiv = document.createElement('div');
+                errorDiv.id = 'validation-errors';
+                container.insertBefore(errorDiv, container.firstChild);
+            }
+            if (!errors || errors.length === 0) {
+                errorDiv.innerHTML = '';
+                errorDiv.style.display = 'none';
+                return;
+            }
+            errorDiv.style.display = 'block';
+            errorDiv.className = 'error';
+            errorDiv.innerHTML = '<strong>Validation Errors:</strong><br>' + errors.map(e => '• ' + e).join('<br>');
         }
     </script>
 </body>

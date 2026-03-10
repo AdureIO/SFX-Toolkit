@@ -4,6 +4,8 @@ import * as fs from "fs";
 import * as path from "path";
 import { Logger, outputChannel } from "../utils/outputChannel";
 import { AuthInfo } from "../utils/authInfo";
+import { OrgMetadataCache } from "../utils/orgMetadataCache";
+import { getAutoSaveBeforePush, getTestRunTimeout } from '../utils/constants';
 
 // Helper to strip ANSI and progress lines
 function cleanDeployOutput(output: string): string {
@@ -106,12 +108,16 @@ function getDeployedCount(output: string): number {
 
 // Helper to reuse push logic
 async function pushSourceHelper(force: boolean) {
-	const title = "ASFXT: " + (force ? " F-" : " ") + "Push";
+	const title = force ? "Force Push" : "Push";
 
 	// Ensure active file is saved before pushing
-	const activeEditor = vscode.window.activeTextEditor;
-	if (activeEditor) {
-		await activeEditor.document.save();
+	if (getAutoSaveBeforePush()) {
+		await vscode.workspace.saveAll(false);
+	} else {
+		const activeEditor = vscode.window.activeTextEditor;
+		if (activeEditor) {
+			await activeEditor.document.save();
+		}
 	}
 
 	// We want to stream output to the log so user sees progress.
@@ -288,7 +294,7 @@ async function pushSourceHelper(force: boolean) {
 						Logger.info(cleanDeployOutput(result));
 
 						const count = getDeployedCount(result);
-						vscode.window.showInformationMessage(`ASFXT: Push: Deployed ${count} components.`);
+						vscode.window.showInformationMessage(`Deployed ${count} components.`);
 					} else {
 						// No Source Tracking -> Full Sequential Deploy
 						if (packageDirs.length > 0) {
@@ -314,6 +320,8 @@ async function pushSourceHelper(force: boolean) {
 								Logger.info(cleanDeployOutput(result));
 								totalCount += getDeployedCount(result);
 							}
+							OrgMetadataCache.invalidate(null);
+							OrgMetadataCache.warmDefaultOrg();
 							vscode.window.showInformationMessage(
 								`Successfully pushed source for ${packageDirs.length} packages. Deployed ${totalCount} components.`
 							);
@@ -333,6 +341,8 @@ async function pushSourceHelper(force: boolean) {
 							Logger.info(cleanDeployOutput(result));
 
 							const count = getDeployedCount(result);
+							OrgMetadataCache.invalidate(null);
+							OrgMetadataCache.warmDefaultOrg();
 							vscode.window.showInformationMessage(
 								`Source pushed successfully. Deployed ${count} components.`
 							);
@@ -381,6 +391,8 @@ export async function pullSource() {
 		async (_progress, token) => {
 			try {
 				await runCommand("sf project retrieve start", undefined, undefined, true, token);
+				OrgMetadataCache.invalidate(null);
+				OrgMetadataCache.warmDefaultOrg();
 				vscode.window.showInformationMessage("Source pulled successfully.");
 			} catch (e: any) {
 				if (e.cancelled) { Logger.info("Pull cancelled by user."); return; }
@@ -438,6 +450,8 @@ export async function retrieveCurrentFile() {
 		async (_progress, token) => {
 			try {
 				await runCommand(`sf project retrieve start -d "${filePath}"`, undefined, undefined, true, token);
+				OrgMetadataCache.invalidate(null);
+				OrgMetadataCache.warmDefaultOrg();
 				vscode.window.showInformationMessage("File retrieved successfully.");
 			} catch (e: any) {
 				if (e.cancelled) { Logger.info("Retrieve cancelled by user."); return; }
@@ -457,7 +471,7 @@ export async function runLocalTests() {
 		async (progress, token) => {
 			try {
 				// -w 10 (wait 10 mins), -l RunLocalTests, -r human
-				const result = await runCommand("sf apex run test -l RunLocalTests -w 10 -r human", undefined, undefined, true, token);
+				const result = await runCommand(`sf apex run test -l RunLocalTests -w ${getTestRunTimeout()} -r human`, undefined, undefined, true, token);
 
 				const channel = vscode.window.createOutputChannel("Salesforce Test Results");
 				channel.clear();

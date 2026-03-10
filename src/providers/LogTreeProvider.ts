@@ -5,6 +5,7 @@ import { outputChannel } from '../utils/outputChannel';
 import { getSalesforceLogDirectory } from '../utils/logPaths';
 import { isSalesforceProject } from '../utils/projectUtils';
 import { runCommand } from '../utils/commandRunner';
+import { getMaxLogFiles } from '../utils/constants';
 
 /** Regex to derive a short label from log body (e.g. trigger or class name). */
 const CODE_UNIT_STARTED = /\|CODE_UNIT_STARTED\|\[.*?\]\|.*?\|(.*)$/m;
@@ -57,7 +58,7 @@ export class LogTreeProvider implements vscode.TreeDataProvider<LogItem> {
             async (progress) => {
                 try {
                     progress.report({ message: 'Querying org…' });
-                    const query = 'SELECT Id FROM ApexLog ORDER BY StartTime DESC LIMIT 20';
+                    const query = `SELECT Id FROM ApexLog ORDER BY StartTime DESC LIMIT ${getMaxLogFiles()}`;
                     const result = await runCommand(`sf data query -q "${query}" -t --json`);
                     const parsed = JSON.parse(result);
                     if (parsed.status !== 0 || !parsed.result?.records?.length) return;
@@ -85,7 +86,12 @@ export class LogTreeProvider implements vscode.TreeDataProvider<LogItem> {
                         this.refresh();
                     }
                 } catch (e: any) {
-                    outputChannel.appendLine(`LogTreeProvider: Polling query failed: ${e?.message ?? e}`);
+                    const msg = e?.message ?? String(e);
+                    if (msg.includes('not found') || msg.includes('ENOENT')) {
+                        outputChannel.appendLine('LogTreeProvider: Salesforce CLI (sf) not found — polling skipped.');
+                    } else {
+                        outputChannel.appendLine(`LogTreeProvider: Polling query failed: ${msg}`);
+                    }
                 }
             }
         );
@@ -147,7 +153,7 @@ export class LogTreeProvider implements vscode.TreeDataProvider<LogItem> {
                 } catch {
                     // keep label as logId
                 }
-                const description = `${this.formatBytes(f.size)} · ${new Date(f.mtime).toLocaleString()}`;
+                const description = `${this.formatBytes(f.size)} · ${this.formatRelativeTime(f.mtime)}`;
                 const item = new LogItem(
                     label,
                     description,
@@ -182,6 +188,19 @@ export class LogTreeProvider implements vscode.TreeDataProvider<LogItem> {
         const sizes = ['B', 'KB', 'MB', 'GB'];
         const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
         return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
+    }
+
+    private formatRelativeTime(mtime: number): string {
+        const diff = Date.now() - mtime;
+        const seconds = Math.floor(diff / 1000);
+        if (seconds < 60) return 'just now';
+        const minutes = Math.floor(seconds / 60);
+        if (minutes < 60) return `${minutes}m ago`;
+        const hours = Math.floor(minutes / 60);
+        if (hours < 24) return `${hours}h ago`;
+        const days = Math.floor(hours / 24);
+        if (days < 7) return `${days}d ago`;
+        return new Date(mtime).toLocaleDateString();
     }
 }
 

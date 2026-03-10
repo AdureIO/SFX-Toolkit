@@ -4,7 +4,7 @@
   "publisher": "AdureIO",
   "description": "Utilities for Salesforce development: Log filtering, Debug Traces, Deployment, and more.",
   "icon": "resources/icon.png",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "license": "BSD-3-Clause",
   "engines": {
     "vscode": "^1.80.0"
@@ -29,7 +29,11 @@
     "deployment",
     "toolkit"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "workspaceContains:sfdx-project.json",
+    "onCustomEditor:adure-sfx-toolkit.permissionSetEditor",
+    "onCustomEditor:adure-sfx-toolkit.scratchOrgDefEditor"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
@@ -114,8 +118,8 @@
         "icon": "$(refresh)"
       },
       {
-        "command": "adure-sfx-toolkit.deployClasses",
-        "title": "ASFXT: Deploy Classes"
+        "command": "adure-sfx-toolkit.deployMetadata",
+        "title": "ASFXT: Deploy Metadata"
       },
       {
         "command": "adure-sfx-toolkit.executeAnonymous",
@@ -224,9 +228,107 @@
         "icon": "$(history)"
       },
       {
+        "command": "adure-sfx-toolkit.refreshMetadata",
+        "title": "ASFXT: Refresh Org Metadata Cache",
+        "icon": "$(refresh)"
+      },
+      {
         "command": "adure-sfx-toolkit.openSOQLEditor",
         "title": "ASFXT: Open SOQL Builder & Editor",
         "icon": "$(database)"
+      },
+      {
+        "command": "adure-sfx-toolkit.metadataDiff",
+        "title": "ASFXT: Compare with Org"
+      },
+      {
+        "command": "adure-sfx-toolkit.orgHealth",
+        "title": "ASFXT: Org Health Dashboard"
+      },
+      {
+        "command": "adure-sfx-toolkit.quickSoql",
+        "title": "ASFXT: Quick SOQL from Selection"
+      },
+      {
+        "command": "adure-sfx-toolkit.deployHistory",
+        "title": "ASFXT: Deployment History"
+      },
+      {
+        "command": "adure-sfx-toolkit.addToGitignore",
+        "title": "ASFXT: Add to .gitignore"
+      },
+      {
+        "command": "adure-sfx-toolkit.addToForceignore",
+        "title": "ASFXT: Add to .forceignore"
+      },
+      {
+        "command": "adure-sfx-toolkit.addToIgnore",
+        "title": "ASFXT: Add to Ignore File..."
+      },
+      {
+        "command": "adure-sfx-toolkit.showSnippets",
+        "title": "ASFXT: Apex Snippets",
+        "icon": "$(play)"
+      },
+      {
+        "command": "adure-sfx-toolkit.openSnippetsPanel",
+        "title": "ASFXT: Open Apex Snippets Overview",
+        "icon": "$(list-unordered)"
+      },
+      {
+        "command": "adure-sfx-toolkit.runSnippet",
+        "title": "ASFXT: Run Apex Snippet",
+        "icon": "$(play)"
+      },
+      {
+        "command": "adure-sfx-toolkit.addSnippet",
+        "title": "ASFXT: Add Apex Snippet",
+        "icon": "$(plus)"
+      },
+      {
+        "command": "adure-sfx-toolkit.deleteSnippet",
+        "title": "ASFXT: Delete Apex Snippet",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "adure-sfx-toolkit.editSnippetFile",
+        "title": "ASFXT: Open Snippets Folder",
+        "icon": "$(folder-opened)"
+      },
+      {
+        "command": "adure-sfx-toolkit.editSnippet",
+        "title": "ASFXT: Edit Snippet in .apex File",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "adure-sfx-toolkit.refreshSnippets",
+        "title": "ASFXT: Refresh Snippets",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "adure-sfx-toolkit.lwcNavigate",
+        "title": "ASFXT: LWC Navigate to Sibling",
+        "icon": "$(files)"
+      },
+      {
+        "command": "adure-sfx-toolkit.lwcGoToJs",
+        "title": "ASFXT: LWC: Open JS",
+        "icon": "$(file-code)"
+      },
+      {
+        "command": "adure-sfx-toolkit.lwcGoToHtml",
+        "title": "ASFXT: LWC: Open HTML",
+        "icon": "$(code)"
+      },
+      {
+        "command": "adure-sfx-toolkit.lwcGoToMeta",
+        "title": "ASFXT: LWC: Open Meta XML",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "adure-sfx-toolkit.lwcGoToCss",
+        "title": "ASFXT: LWC: Open CSS",
+        "icon": "$(paintcan)"
       }
     ],
     "languages": [
@@ -269,30 +371,47 @@
       "adure-sfx-toolkit-activitybar": [
         {
           "id": "adure-sfx-toolkit.logs",
-          "name": "Logs"
+          "name": "Logs",
+          "when": "adure-sfx-toolkit:isSalesforceProject"
         },
         {
           "id": "adure-sfx-toolkit.traces",
-          "name": "Debug Traces"
+          "name": "Debug Traces",
+          "when": "adure-sfx-toolkit:isSalesforceProject",
+          "visibility": "collapsed"
         },
         {
           "id": "adure-sfx-toolkit.orgs",
-          "name": "Orgs"
+          "name": "Orgs",
+          "when": "adure-sfx-toolkit:isSalesforceProject"
         },
         {
           "id": "adure-sfx-toolkit.development",
-          "name": "Development"
+          "name": "Development",
+          "when": "adure-sfx-toolkit:isSalesforceProject"
+        },
+        {
+          "id": "adure-sfx-toolkit.snippets",
+          "name": "Apex Snippets",
+          "when": "adure-sfx-toolkit:isSalesforceProject"
         }
       ],
       "adure-sfx-toolkit-panel": [
         {
           "type": "webview",
           "id": "adure-sfx-toolkit.anonymousApexPanel",
-          "name": "Apex"
+          "name": "Apex",
+          "when": "adure-sfx-toolkit:isSalesforceProject"
         }
       ]
     },
     "keybindings": [
+      {
+        "command": "adure-sfx-toolkit.executeAnonymous",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "editorTextFocus && resourceExtname == .apex"
+      },
       {
         "command": "adure-sfx-toolkit.filterLogDebug",
         "key": "cmd+d",
@@ -300,6 +419,36 @@
         "win": "ctrl+d",
         "linux": "ctrl+d",
         "when": "editorTextFocus && adure-sfx-toolkit:isLogFile"
+      },
+      {
+        "command": "adure-sfx-toolkit.lwcNavigate",
+        "key": "alt+l",
+        "mac": "alt+l",
+        "when": "editorTextFocus && resourcePath =~ /.*[/\\\\]lwc[/\\\\]/"
+      },
+      {
+        "command": "adure-sfx-toolkit.lwcGoToJs",
+        "key": "alt+1",
+        "mac": "alt+1",
+        "when": "editorTextFocus && resourcePath =~ /.*[/\\\\]lwc[/\\\\]/"
+      },
+      {
+        "command": "adure-sfx-toolkit.lwcGoToHtml",
+        "key": "alt+2",
+        "mac": "alt+2",
+        "when": "editorTextFocus && resourcePath =~ /.*[/\\\\]lwc[/\\\\]/"
+      },
+      {
+        "command": "adure-sfx-toolkit.lwcGoToMeta",
+        "key": "alt+3",
+        "mac": "alt+3",
+        "when": "editorTextFocus && resourcePath =~ /.*[/\\\\]lwc[/\\\\]/"
+      },
+      {
+        "command": "adure-sfx-toolkit.lwcGoToCss",
+        "key": "alt+4",
+        "mac": "alt+4",
+        "when": "editorTextFocus && resourcePath =~ /.*[/\\\\]lwc[/\\\\]/"
       }
     ],
     "menus": {
@@ -340,6 +489,21 @@
           "group": "navigation"
         },
         {
+          "command": "adure-sfx-toolkit.refreshSnippets",
+          "when": "view == adure-sfx-toolkit.snippets",
+          "group": "navigation"
+        },
+        {
+          "command": "adure-sfx-toolkit.addSnippet",
+          "when": "view == adure-sfx-toolkit.snippets",
+          "group": "navigation"
+        },
+        {
+          "command": "adure-sfx-toolkit.editSnippetFile",
+          "when": "view == adure-sfx-toolkit.snippets",
+          "group": "navigation"
+        },
+        {
           "command": "adure-sfx-toolkit.refreshOrgs",
           "when": "view == adure-sfx-toolkit.orgs",
           "group": "navigation"
@@ -360,7 +524,7 @@
           "group": "navigation"
         },
         {
-          "command": "adure-sfx-toolkit.deployClasses",
+          "command": "adure-sfx-toolkit.deployMetadata",
           "when": "view == adure-sfx-toolkit.development",
           "group": "inline"
         },
@@ -390,6 +554,21 @@
           "command": "adure-sfx-toolkit.deleteTrace",
           "when": "view == adure-sfx-toolkit.traces",
           "group": "inline"
+        },
+        {
+          "command": "adure-sfx-toolkit.runSnippet",
+          "when": "view == adure-sfx-toolkit.snippets && viewItem == snippetItem",
+          "group": "inline"
+        },
+        {
+          "command": "adure-sfx-toolkit.editSnippet",
+          "when": "view == adure-sfx-toolkit.snippets && viewItem == snippetItem",
+          "group": "inline"
+        },
+        {
+          "command": "adure-sfx-toolkit.deleteSnippet",
+          "when": "view == adure-sfx-toolkit.snippets && viewItem == snippetItem",
+          "group": "1_modify"
         },
         {
           "command": "adure-sfx-toolkit.openOrg",
@@ -467,6 +646,38 @@
           "command": "adure-sfx-toolkit.openPermissionSetUI",
           "when": "resourceFilename =~ /\\.permissionset-meta\\.xml$/",
           "group": "navigation@4"
+        },
+        {
+          "command": "adure-sfx-toolkit.lwcGoToJs",
+          "when": "adure-sfx-toolkit:lwcHasJs",
+          "group": "navigation@10"
+        },
+        {
+          "command": "adure-sfx-toolkit.lwcGoToHtml",
+          "when": "adure-sfx-toolkit:lwcHasHtml",
+          "group": "navigation@11"
+        },
+        {
+          "command": "adure-sfx-toolkit.lwcGoToCss",
+          "when": "adure-sfx-toolkit:lwcHasCss",
+          "group": "navigation@12"
+        },
+        {
+          "command": "adure-sfx-toolkit.lwcGoToMeta",
+          "when": "adure-sfx-toolkit:lwcHasMeta",
+          "group": "navigation@13"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "adure-sfx-toolkit.addToGitignore",
+          "when": "adure-sfx-toolkit:isSalesforceProject",
+          "group": "7_modification@1"
+        },
+        {
+          "command": "adure-sfx-toolkit.addToForceignore",
+          "when": "adure-sfx-toolkit:isSalesforceProject",
+          "group": "7_modification@2"
         }
       ],
       "commandPalette": [
@@ -484,6 +695,22 @@
         },
         {
           "command": "adure-sfx-toolkit.filterLogSOQLActive",
+          "when": "false"
+        },
+        {
+          "command": "adure-sfx-toolkit.lwcGoToJs",
+          "when": "false"
+        },
+        {
+          "command": "adure-sfx-toolkit.lwcGoToHtml",
+          "when": "false"
+        },
+        {
+          "command": "adure-sfx-toolkit.lwcGoToMeta",
+          "when": "false"
+        },
+        {
+          "command": "adure-sfx-toolkit.lwcGoToCss",
           "when": "false"
         }
       ]
@@ -512,7 +739,69 @@
         ],
         "priority": "default"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Adure SFX Toolkit",
+      "properties": {
+        "adure-sfx-toolkit.pollingIntervalSeconds": {
+          "type": "number",
+          "default": 5,
+          "minimum": 1,
+          "maximum": 60,
+          "description": "Interval in seconds for polling new debug logs from the org."
+        },
+        "adure-sfx-toolkit.maxLogFiles": {
+          "type": "number",
+          "default": 20,
+          "minimum": 5,
+          "maximum": 200,
+          "description": "Maximum number of log files to fetch when polling."
+        },
+        "adure-sfx-toolkit.quickTraceDurationMinutes": {
+          "type": "number",
+          "default": 240,
+          "minimum": 1,
+          "maximum": 1440,
+          "description": "Duration in minutes for Quick Trace."
+        },
+        "adure-sfx-toolkit.quickTraceDebugLevel": {
+          "type": "string",
+          "default": "SFDC_DevConsole",
+          "description": "Debug level name for Quick Trace."
+        },
+        "adure-sfx-toolkit.toolingApiVersion": {
+          "type": "string",
+          "default": "v60.0",
+          "description": "Salesforce Tooling API version."
+        },
+        "adure-sfx-toolkit.parallelDeletes": {
+          "type": "number",
+          "default": 8,
+          "minimum": 1,
+          "maximum": 50,
+          "description": "Number of parallel API calls when deleting logs."
+        },
+        "adure-sfx-toolkit.testRunTimeoutMinutes": {
+          "type": "number",
+          "default": 10,
+          "minimum": 1,
+          "maximum": 120,
+          "description": "Timeout in minutes for running local tests."
+        },
+        "adure-sfx-toolkit.autoSaveBeforePush": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically save all files before pushing source."
+        },
+        "adure-sfx-toolkit.httpTimeoutMs": {
+          "type": "number",
+          "default": 30000,
+          "minimum": 5000,
+          "maximum": 120000,
+          "description": "HTTP request timeout in milliseconds."
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
@@ -523,6 +812,7 @@
     "test": "node ./out/test/runTest.js"
   },
   "devDependencies": {
+    "@types/glob": "^8.1.0",
     "@types/mocha": "^10.0.1",
     "@types/node": "^20.2.5",
     "@types/vscode": "^1.80.0",

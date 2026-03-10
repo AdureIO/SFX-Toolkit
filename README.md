@@ -53,7 +53,7 @@ Adure SFX Toolkit is an open-source VSCode extension designed to supercharge you
     -   **Pull Source**: Retrieve changes from the org.
     -   **Deploy/Retrieve**: Contextual commands to deploy or retrieve the currently open file.
     -   **Reset Source Tracking**: Quickly reset tracking for the default org (`sf project reset tracking`).
--   **Deploy Classes** (`ASFXT: Deploy Classes`): Production-style deployment with full control. Select classes to deploy, then choose test option: run all tests, run specified tests (pick test classes), validate only (dry-run), or no test run. You can cancel at any step, or save a **preset** (classes + test option) for repeat deployments.
+-   **Deploy Metadata** (`ASFXT: Deploy Metadata`): Deploy all or selected metadata with full control. Choose to deploy the entire project or specific path(s) (package dirs, custom paths, or browse for folders). Then select test option: run all tests, run specified tests (pick test classes), validate only (dry-run), or no test run. Save **presets** (paths + test option) for repeat deployments.
 -   **Test Runner**: Run local tests with ease.
 -   **Custom Editors**:
     -   **Permission Set Editor**: A dedicated, user-friendly UI for editing Permission Sets (`.permissionset-meta.xml`).
