@@ -39,6 +39,7 @@ import { quickSoqlFromSelection } from './commands/quickSoql';
 import { DeployHistoryProvider } from './commands/deployHistory';
 import { lwcNavigate, lwcGoToJs, lwcGoToHtml, lwcGoToMeta, lwcGoToCss } from './commands/lwcNavigator';
 import { SnippetTreeProvider, runSnippet, addSnippet, deleteSnippet, editSnippetFile } from './commands/apexSnippets';
+import { addToGitignore, addToForceignore, addToIgnore } from './commands/addToIgnore';
 import * as path from 'path';
 import * as fs from 'fs';
 import { getPollingInterval } from './utils/constants';
@@ -316,7 +317,12 @@ export function activate(context: vscode.ExtensionContext) {
 		let editSnippetFileCmd = register('adure-sfx-toolkit.editSnippetFile', editSnippetFile);
 		let refreshSnippetsCmd = vscode.commands.registerCommand('adure-sfx-toolkit.refreshSnippets', () => snippetProvider.refresh());
 
-		// 17. LWC Navigator
+		// 17. Add to Ignore
+		let addToGitignoreCmd = register('adure-sfx-toolkit.addToGitignore', (uri?: vscode.Uri) => addToGitignore(uri));
+		let addToForceignoreCmd = register('adure-sfx-toolkit.addToForceignore', (uri?: vscode.Uri) => addToForceignore(uri));
+		let addToIgnoreCmd = register('adure-sfx-toolkit.addToIgnore', (uri?: vscode.Uri) => addToIgnore(uri));
+
+		// 18. LWC Navigator
 		let lwcNavCmd = register("adure-sfx-toolkit.lwcNavigate", lwcNavigate);
 		let lwcJsCmd = register("adure-sfx-toolkit.lwcGoToJs", lwcGoToJs);
 		let lwcHtmlCmd = register("adure-sfx-toolkit.lwcGoToHtml", lwcGoToHtml);
@@ -366,6 +372,9 @@ export function activate(context: vscode.ExtensionContext) {
 			orgHealthCmd,
 			quickSoqlCmd,
 			deployHistoryCmd,
+			addToGitignoreCmd,
+			addToForceignoreCmd,
+			addToIgnoreCmd,
 			runSnippetCmd,
 			addSnippetCmd,
 			deleteSnippetCmd,

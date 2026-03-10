@@ -249,6 +249,18 @@
         "title": "ASFXT: Deployment History"
       },
       {
+        "command": "adure-sfx-toolkit.addToGitignore",
+        "title": "ASFXT: Add to .gitignore"
+      },
+      {
+        "command": "adure-sfx-toolkit.addToForceignore",
+        "title": "ASFXT: Add to .forceignore"
+      },
+      {
+        "command": "adure-sfx-toolkit.addToIgnore",
+        "title": "ASFXT: Add to Ignore File..."
+      },
+      {
         "command": "adure-sfx-toolkit.runSnippet",
         "title": "ASFXT: Run Apex Snippet",
         "icon": "$(play)"
@@ -630,6 +642,18 @@
           "command": "adure-sfx-toolkit.lwcGoToMeta",
           "when": "adure-sfx-toolkit:lwcHasMeta",
           "group": "navigation@13"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "adure-sfx-toolkit.addToGitignore",
+          "when": "adure-sfx-toolkit:isSalesforceProject",
+          "group": "7_modification@1"
+        },
+        {
+          "command": "adure-sfx-toolkit.addToForceignore",
+          "when": "adure-sfx-toolkit:isSalesforceProject",
+          "group": "7_modification@2"
         }
       ],
       "commandPalette": [
