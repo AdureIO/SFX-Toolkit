@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import { listLogs } from "./commands/listLogs";
 import { filterLogDebug, filterLogSOQL, updateContextForEditor } from "./commands/filterLogs"; // Updated imports
 import { addDebugTrace } from "./commands/addDebugTrace";
-import { deployClasses } from "./commands/deployClasses";
+import { deployMetadata } from "./commands/deployMetadata";
 import { executeAnonymous, rerunLastApex } from "./commands/executeAnonymous";
 import { executeSOQL } from "./commands/executeSOQL";
 import { LogTreeProvider, logTreeProvider } from "./providers/LogTreeProvider";
@@ -124,8 +124,8 @@ export function activate(context: vscode.ExtensionContext) {
 		// 3. Add Debug Trace
 		let addDebugTraceCmd = register("adure-sfx-toolkit.addDebugTrace", addDebugTrace);
 
-		// 4. Deploy Classes
-		let deployClassesCmd = register("adure-sfx-toolkit.deployClasses", deployClasses);
+		// 4. Deploy Metadata
+		let deployMetadataCmd = register("adure-sfx-toolkit.deployMetadata", deployMetadata);
 
 		// 5. Execute Anonymous Apex
 		let executeAnonCmd = register("adure-sfx-toolkit.executeAnonymous", executeAnonymous);
@@ -330,7 +330,7 @@ export function activate(context: vscode.ExtensionContext) {
 			filterSOQLActiveCmd,
 			listLogsCmd,
 			addDebugTraceCmd,
-			deployClassesCmd,
+			deployMetadataCmd,
 			executeAnonCmd,
 			rerunAnonCmd,
 			executeSOQLCmd,

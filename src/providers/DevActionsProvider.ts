@@ -34,10 +34,10 @@ export class DevActionsProvider implements vscode.TreeDataProvider<vscode.TreeIt
 				"Retrieve all source from default org"
 			),
 			this.createItem(
-				"Deploy Classes",
-				"adure-sfx-toolkit.deployClasses",
+				"Deploy Metadata",
+				"adure-sfx-toolkit.deployMetadata",
 				"package",
-				"Select classes and deploy with chosen test option"
+				"Deploy all or selected metadata with test options (Run All, Specified, Validate, No tests)"
 			),
 			this.createItem(
 				"Deploy Active File",

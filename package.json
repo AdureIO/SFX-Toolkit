@@ -118,8 +118,8 @@
         "icon": "$(refresh)"
       },
       {
-        "command": "adure-sfx-toolkit.deployClasses",
-        "title": "Deploy Classes"
+        "command": "adure-sfx-toolkit.deployMetadata",
+        "title": "ASFXT: Deploy Metadata"
       },
       {
         "command": "adure-sfx-toolkit.executeAnonymous",
@@ -491,7 +491,7 @@
           "group": "navigation"
         },
         {
-          "command": "adure-sfx-toolkit.deployClasses",
+          "command": "adure-sfx-toolkit.deployMetadata",
           "when": "view == adure-sfx-toolkit.development",
           "group": "inline"
         },

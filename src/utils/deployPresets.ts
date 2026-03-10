@@ -5,8 +5,10 @@ export type DeployTypeKey = "RunAllTestsInOrg" | "RunSpecifiedTests" | "Validate
 
 export interface DeployPreset {
 	name: string;
-	/** Relative paths to .cls files (e.g. force-app/main/default/classes/Foo.cls) */
-	classPaths: string[];
+	/** Paths to deploy: dirs (e.g. force-app/main/default) or files. Empty = entire project. */
+	sourcePaths: string[];
+	/** @deprecated Use sourcePaths. Migrated on load when present. */
+	classPaths?: string[];
 	deployType: DeployTypeKey;
 	/** Apex class names for RunSpecifiedTests (e.g. MyTestClass) */
 	testClassNames: string[];
@@ -26,8 +28,12 @@ export async function loadPresets(workspaceRoot: vscode.Uri): Promise<DeployPres
 	const uri = getPresetsUri(workspaceRoot);
 	try {
 		const data = await vscode.workspace.fs.readFile(uri);
-		const json = JSON.parse(new TextDecoder().decode(data)) as PresetsFile;
-		return Array.isArray(json.presets) ? json.presets : [];
+		const json = JSON.parse(new TextDecoder().decode(data)) as PresetsFile & { presets?: Array<DeployPreset & { classPaths?: string[] }> };
+		const raw = Array.isArray(json.presets) ? json.presets : [];
+		return raw.map((p) => {
+			const sourcePaths = Array.isArray(p.sourcePaths) ? p.sourcePaths : (Array.isArray((p as any).classPaths) ? (p as any).classPaths : []);
+			return { ...p, sourcePaths };
+		});
 	} catch {
 		return [];
 	}
