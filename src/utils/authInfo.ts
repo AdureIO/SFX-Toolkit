@@ -1,5 +1,5 @@
 import { runCommandArgs } from "./commandRunner";
-import { outputChannel } from "./outputChannel";
+import { Logger, outputChannel } from "./outputChannel";
 import { isSalesforceProject } from "./projectUtils";
 
 /** Default: consider token expired after 55 minutes so we refresh before typical 2h OAuth expiry. */
@@ -100,20 +100,30 @@ export class AuthInfo {
 		if (!isSalesforceProject()) return null;
 
 		const key = this.cacheKey(targetOrg);
+		Logger.info(`Deploy: getAuthInfoForOrg(org=${targetOrg ?? "default"})`);
 
 		const valid = this.getValidFromCache(key);
-		if (valid) return valid;
+		if (valid) {
+			Logger.info(`Deploy: auth from cache (${valid.username})`);
+			return valid;
+		}
 
 		const existing = this.fetchLocks.get(key);
-		if (existing) return existing;
+		if (existing) {
+			Logger.info(`Deploy: auth fetch already in progress, awaiting`);
+			return existing;
+		}
 
 		const doFetch = async (): Promise<OrgAuth | null> => {
 			try {
-				outputChannel.appendLine(`AuthInfo: Retrieving org credentials${targetOrg ? ` for ${targetOrg}` : " (default)"}...`);
+				Logger.info(`Deploy: sending auth request (sf org display${targetOrg ? ` -o ${targetOrg}` : ""})`);
 				const auth = await this.fetchOrgAuth(targetOrg);
 				if (auth) {
 					this.cache.set(key, auth);
+					Logger.info(`Deploy: auth answer received, cached (${auth.username})`);
 					outputChannel.appendLine(`AuthInfo: Cached ${auth.instanceUrl} (${auth.username})`);
+				} else {
+					Logger.info(`Deploy: auth answer failed (sf org display returned error)`);
 				}
 				return auth;
 			} finally {
@@ -124,6 +134,18 @@ export class AuthInfo {
 		const promise = doFetch();
 		this.fetchLocks.set(key, promise);
 		return promise;
+	}
+
+	/**
+	 * Start fetching and caching org auth in the background so deploy can use it without delay.
+	 * Call when the deploy panel is shown or when the user selects an org. No-op if already cached or already fetching.
+	 */
+	public static warmAuthForOrg(targetOrg: string | null): void {
+		if (!isSalesforceProject()) return;
+		const key = this.cacheKey(targetOrg);
+		if (this.getValidFromCache(key)) return;
+		if (this.fetchLocks.has(key)) return;
+		void this.getAuthInfoForOrg(targetOrg);
 	}
 
 	/** Clear all cached auth. Call after login, set default org, or when tokens may have changed. */

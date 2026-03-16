@@ -8,11 +8,13 @@ import {
 	type DeployPreset,
 	type DeployTypeKey,
 } from "../utils/deployPresets";
+import { runCommand } from "../utils/commandRunner";
 
-const DEPLOY_TYPE_RUN_ALL = "Run All Tests";
-const DEPLOY_TYPE_SPECIFIED = "Run Specified Tests";
-const DEPLOY_TYPE_VALIDATE = "Validate Only (dry-run)";
-const DEPLOY_TYPE_NO_TESTS = "No Test Run";
+export const DEPLOY_TYPE_RUN_ALL = "Run All Tests";
+export const DEPLOY_TYPE_RUN_RELEVANT = "Run Relevant Tests";
+export const DEPLOY_TYPE_SPECIFIED = "Run Specified Tests";
+export const DEPLOY_TYPE_VALIDATE = "Validate Only (dry-run)";
+export const DEPLOY_TYPE_NO_TESTS = "No Test Run";
 
 const LABEL_NEW = "New deployment";
 const LABEL_ENTER_PATH = "Enter path...";
@@ -51,13 +53,15 @@ const METADATA_TYPE_FOLDERS: { dirName: string; label: string }[] = [
 	{ dirName: "fieldSets", label: "Field Sets" },
 ];
 
-function runDeploy(
+export function buildDeployCommand(
 	sourcePaths: string[],
 	testLevel: string,
 	testFlags: string,
 	dryRun: boolean,
-	workspaceRoot: string
-): void {
+	workspaceRoot: string,
+	targetOrg?: string,
+	asyncJson?: boolean
+): string {
 	const sourceArgs = sourcePaths.length > 0
 		? sourcePaths.map((p) => `-d "${path.isAbsolute(p) ? p : path.join(workspaceRoot, p)}"`).join(" ")
 		: "";
@@ -66,22 +70,135 @@ function runDeploy(
 		sourceArgs,
 		`-l ${testLevel}`,
 		testFlags,
+		targetOrg ? `-o ${targetOrg}` : "",
 		dryRun ? "--dry-run" : "",
+		asyncJson ? "--async --json" : "",
 	];
-	const cmd = parts.filter(Boolean).join(" ");
+	return parts.filter(Boolean).join(" ");
+}
+
+/** Parse deploy request ID from CLI JSON output (sf project deploy start --async --json). Expects result.id or result.deployId. */
+export function parseDeployIdFromJson(stdout: string): string | null {
+	try {
+		const parsed = JSON.parse(stdout.trim()) as { result?: { id?: string; deployId?: string }; id?: string };
+		const id = parsed.result?.id ?? parsed.result?.deployId ?? parsed.id;
+		if (id && /^0Af\w+$/.test(String(id))) return String(id);
+		return null;
+	} catch {
+		return null;
+	}
+}
+
+export function runDeploy(
+	sourcePaths: string[],
+	testLevel: string,
+	testFlags: string,
+	dryRun: boolean,
+	workspaceRoot: string,
+	targetOrg?: string
+): void {
+	const cmd = buildDeployCommand(sourcePaths, testLevel, testFlags, dryRun, workspaceRoot, targetOrg);
 	const terminal = vscode.window.createTerminal("Salesforce Deploy");
 	terminal.show();
 	terminal.sendText(cmd);
 }
 
+export const DEPLOY_TIMEOUT_MS = 900000; // 15 minutes
+
+/** Strip ANSI codes from CLI output. */
+function stripAnsi(data: string): string {
+	return data.replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, "");
+}
+
+export interface DeployProgressHandlerOptions {
+	/** Called as soon as "Status: Failed" is seen in the stream. Receives accumulated output so far. Call once. */
+	onStatusFailed?: (outputSoFar: string) => void;
+}
+
+/** Create an onOutput callback that parses deploy CLI output and reports status (same as push command). */
+export function createDeployProgressHandler(
+	report: (message: string) => void,
+	options?: DeployProgressHandlerOptions
+): (data: string) => void {
+	let currentPhase = "";
+	let currentDetails = "";
+	let accumulated = "";
+	let failedNotified = false;
+	return (data: string) => {
+		accumulated += data;
+		const cleanData = stripAnsi(data);
+		const lines = cleanData.split(/[\r\n]+/);
+		for (const line of lines) {
+			const l = line.trim();
+			if (!l) continue;
+			const isSpinner = /[\u2800-\u28FF\u2026\u22EE]/.test(l);
+			const cleanLine = l.replace(/^[^\w\s]+/, "").trim();
+			if (isSpinner) {
+				if (l.includes("Deploying Metadata")) currentPhase = cleanLine;
+				else if (l.includes("Running Tests")) {
+					currentPhase = cleanLine;
+					currentDetails = "";
+				} else if (l.includes("Preparing")) currentPhase = cleanLine;
+				else if (l.includes("Waiting for the org to respond")) currentPhase = cleanLine;
+			} else {
+				if (l.includes("Components:")) currentDetails = l.replace(/^[^\w\s]+/, "").trim();
+				else if (l.startsWith("Status:")) {
+					if (!l.includes("In Progress") && !l.includes("Pending")) {
+						const s = l.replace("Status:", "").trim();
+						if (s.length > 0) {
+							if (currentPhase === "Running Tests" && !l.includes("Running Tests")) {
+								if (s === "Done" || s === "Failed" || s === "Succeeded") currentPhase = `Status: ${s}`;
+							} else currentPhase = `Status: ${s}`;
+						}
+						if (/Failed/i.test(s) && options?.onStatusFailed && !failedNotified) {
+							failedNotified = true;
+							options.onStatusFailed(accumulated);
+						}
+					}
+				}
+			}
+		}
+		const statusMsg = [currentPhase, currentDetails].filter(Boolean).join(" | ");
+		if (statusMsg) report(statusMsg);
+	};
+}
+
+/** Extract deployed component count from deploy CLI stdout or async result message (e.g. "Deployed 5 component(s)."). */
+export function getDeployedCountFromOutput(output: string): number {
+	const clean = stripAnsi(output);
+	const statusMatch = clean.match(/\|\s*(\d+)\/\d+\s*Components/);
+	if (statusMatch) return parseInt(statusMatch[1], 10);
+	const deployedMatch = clean.match(/Deployed\s+(\d+)\s+component/);
+	if (deployedMatch) return parseInt(deployedMatch[1], 10);
+	return 0;
+}
+
+/** Run deploy in background; supports cancellation and optional progress reporting (same as push). */
+export async function runDeployAsync(
+	sourcePaths: string[],
+	testLevel: string,
+	testFlags: string,
+	dryRun: boolean,
+	workspaceRoot: string,
+	targetOrg: string | undefined,
+	cancellationToken: vscode.CancellationToken,
+	onProgress?: (message: string) => void
+): Promise<string> {
+	const cmd = buildDeployCommand(sourcePaths, testLevel, testFlags, dryRun, workspaceRoot, targetOrg);
+	const onOutput = onProgress ? createDeployProgressHandler(onProgress) : undefined;
+	return runCommand(cmd, workspaceRoot, onOutput, true, cancellationToken, DEPLOY_TIMEOUT_MS);
+}
+
 function deployTypeToKey(label: string): DeployTypeKey {
 	if (label === DEPLOY_TYPE_RUN_ALL) return "RunAllTestsInOrg";
+	if (label === DEPLOY_TYPE_RUN_RELEVANT) return "RunRelevantTests";
 	if (label === DEPLOY_TYPE_SPECIFIED) return "RunSpecifiedTests";
 	if (label === DEPLOY_TYPE_VALIDATE) return "ValidateOnly";
 	return "NoTestRun";
 }
 
-function getPackageDirectories(workspaceRoot: string): string[] {
+/** Package directory paths from sfdx-project.json (e.g. ["force-app"]). Used for deploy tree and path resolution. */
+export function getPackageDirectories(workspaceRoot: string): string[] {
 	const projectPath = path.join(workspaceRoot, "sfdx-project.json");
 	if (!fs.existsSync(projectPath)) {
 		// Fallback: common roots if they exist
@@ -100,7 +217,114 @@ function getPackageDirectories(workspaceRoot: string): string[] {
 	return [];
 }
 
-function getTestClassItems(workspaceRoot: string): { label: string; description: string }[] {
+/** Recursive file/folder node under a package dir. Path is relative to workspace (forward slashes). */
+export interface DeployFileTreeNode {
+	label: string;
+	path: string;
+	children?: DeployFileTreeNode[];
+}
+
+/** Package root with its full filesystem tree (all files and subfolders under SFDX package dirs). */
+export interface DeployTreePackageNode {
+	label: string;
+	path: string;
+	children: DeployFileTreeNode[];
+}
+
+const IGNORE_DIRS = new Set(["node_modules", ".git", "__pycache__", "bin", ".sfdx"]);
+
+/** Recursively build a tree of all files and folders under dirRel (relative to workspaceRoot). Skip -meta.xml when a partner file exists, except under LWC. In staticresources, subdirs are treated as single deployable items (no recursion). */
+function buildFileTree(workspaceRoot: string, dirRel: string): DeployFileTreeNode[] {
+	const fullDir = path.join(workspaceRoot, dirRel);
+	if (!fs.existsSync(fullDir) || !fs.statSync(fullDir).isDirectory()) return [];
+	const result: DeployFileTreeNode[] = [];
+	const norm = (p: string) => p.replace(/\\/g, "/");
+	const dirNorm = norm(dirRel);
+	const segments = dirNorm.split("/").filter(Boolean);
+	const inStaticResources = segments[segments.length - 1] === "staticresources";
+	const inLwc = dirNorm.includes("/lwc/");
+	try {
+		const entries = fs.readdirSync(fullDir, { withFileTypes: true });
+		const namesSet = new Set(entries.map((e) => e.name));
+		for (const ent of entries) {
+			if (ent.name.startsWith(".")) continue;
+			if (ent.isFile() && ent.name.endsWith("-meta.xml")) {
+				const partnerName = ent.name.slice(0, -"-meta.xml".length);
+				if (namesSet.has(partnerName) && !inLwc) continue;
+			}
+			const childRel = norm(path.join(dirRel, ent.name));
+			if (ent.isDirectory()) {
+				if (IGNORE_DIRS.has(ent.name)) continue;
+				if (inLwc && (ent.name === "__tests__" || ent.name === "__tests")) continue;
+				if (inStaticResources) {
+					result.push({ label: ent.name, path: childRel });
+				} else {
+					const children = buildFileTree(workspaceRoot, path.join(dirRel, ent.name));
+					result.push({ label: ent.name, path: childRel, children });
+				}
+			} else {
+				result.push({ label: ent.name, path: childRel });
+			}
+		}
+	} catch {
+		// ignore
+	}
+	return collapseSingleChildFolders(filterEmptyFolders(result));
+}
+
+/** Remove folder nodes that have no file descendants (only empty subfolders). */
+function filterEmptyFolders(nodes: DeployFileTreeNode[]): DeployFileTreeNode[] {
+	return nodes
+		.map((node): DeployFileTreeNode | null => {
+			if (!node.children || node.children.length === 0) return node; // file or leaf
+			const filtered = filterEmptyFolders(node.children);
+			if (filtered.length === 0) return null;
+			return { ...node, children: filtered };
+		})
+		.filter((n): n is DeployFileTreeNode => n !== null);
+}
+
+/** Collapse directories that have only one child (and that child is a directory) into a single combined node to save space, e.g. force-app/main/default. */
+function collapseSingleChildFolders(nodes: DeployFileTreeNode[]): DeployFileTreeNode[] {
+	return nodes.map(collapseSingleChildChain);
+}
+
+function collapseSingleChildChain(node: DeployFileTreeNode): DeployFileTreeNode {
+	if (!node.children || node.children.length === 0) return node;
+	if (node.children.length > 1) {
+		return { ...node, children: node.children.map(collapseSingleChildChain) };
+	}
+	const only = node.children[0];
+	if (!only.children) return { ...node, children: [only] };
+	const collapsedChild = collapseSingleChildChain(only);
+	return {
+		label: node.label + "/" + collapsedChild.label,
+		path: collapsedChild.path,
+		children: collapsedChild.children ?? [],
+	};
+}
+
+/** Full filesystem tree under each SFDX package root from sfdx-project.json. */
+export function getMetadataTreeByPackage(workspaceRoot: string): DeployTreePackageNode[] {
+	const packageDirs = getPackageDirectories(workspaceRoot);
+	const norm = (p: string) => p.replace(/\\/g, "/");
+	return packageDirs.map((pkg) => {
+		const pkgNorm = norm(pkg);
+		let children = buildFileTree(workspaceRoot, pkg);
+		let label = pkg;
+		let pathVal = pkgNorm;
+		// Keep merging root with its single child folder until we have multiple children or a file (saves space: adser-utils + famkosoft-utility/.../tests -> one row)
+		while (children.length === 1 && children[0].children !== undefined) {
+			const only = children[0];
+			label = label + "/" + only.label;
+			pathVal = only.path;
+			children = only.children ?? [];
+		}
+		return { label, path: pathVal, children };
+	});
+}
+
+export function getTestClassItems(workspaceRoot: string): { label: string; description: string }[] {
 	const classFiles = glob.sync("**/*.cls", {
 		cwd: workspaceRoot,
 		ignore: ["**/node_modules/**", "**/bin/**"],
@@ -120,7 +344,7 @@ function getTestClassItems(workspaceRoot: string): { label: string; description:
 }
 
 /** Resolve selected paths to absolute paths; empty array = entire project. */
-function resolveSourcePaths(selected: string[], workspaceRoot: string): string[] {
+export function resolveSourcePaths(selected: string[], workspaceRoot: string): string[] {
 	if (selected.length === 0) return [];
 	return selected.map((p) => (path.isAbsolute(p) ? p : path.join(workspaceRoot, p)));
 }
@@ -258,6 +482,7 @@ export async function deployMetadata() {
 		let testFlags = "";
 		const dryRun = preset.deployType === "ValidateOnly";
 		if (preset.deployType === "RunAllTestsInOrg") testLevel = "RunAllTestsInOrg";
+		else if (preset.deployType === "RunRelevantTests") testLevel = "RunRelevantTests";
 		else if (preset.deployType === "RunSpecifiedTests") {
 			testLevel = "RunSpecifiedTests";
 			testFlags = (preset.testClassNames || []).map((t) => `-t ${t}`).join(" ");
@@ -439,6 +664,7 @@ export async function deployMetadata() {
 	// 2. Deploy / test option
 	const deployTypes = [
 		{ label: DEPLOY_TYPE_RUN_ALL, detail: "RunAllTestsInOrg" },
+		{ label: DEPLOY_TYPE_RUN_RELEVANT, detail: "RunRelevantTests" },
 		{ label: DEPLOY_TYPE_SPECIFIED, detail: "RunSpecifiedTests – choose test classes next" },
 		{ label: DEPLOY_TYPE_VALIDATE, detail: "Validate only (dry-run), no save to org" },
 		{ label: DEPLOY_TYPE_NO_TESTS, detail: "NoTestRun" },
@@ -457,6 +683,8 @@ export async function deployMetadata() {
 
 	if (chosenType.label === DEPLOY_TYPE_RUN_ALL) {
 		testLevel = "RunAllTestsInOrg";
+	} else if (chosenType.label === DEPLOY_TYPE_RUN_RELEVANT) {
+		testLevel = "RunRelevantTests";
 	} else if (chosenType.label === DEPLOY_TYPE_SPECIFIED) {
 		testLevel = "RunSpecifiedTests";
 		const testClassItems = getTestClassItems(workspaceRoot);

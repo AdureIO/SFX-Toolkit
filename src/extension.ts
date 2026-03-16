@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import { listLogs } from "./commands/listLogs";
 import { filterLogDebug, filterLogSOQL, updateContextForEditor } from "./commands/filterLogs"; // Updated imports
 import { addDebugTrace } from "./commands/addDebugTrace";
-import { deployMetadata } from "./commands/deployMetadata";
+import { DeployMetadataPanelProvider } from "./providers/DeployMetadataPanelProvider";
 import { executeAnonymous, rerunLastApex } from "./commands/executeAnonymous";
 import { executeSOQL } from "./commands/executeSOQL";
 import { LogTreeProvider, logTreeProvider } from "./providers/LogTreeProvider";
@@ -48,6 +48,7 @@ import { getPollingInterval } from './utils/constants';
 import { isSalesforceProject, updateSalesforceProjectContext, NOT_SFDX_PROJECT_MESSAGE } from "./utils/projectUtils";
 import { OrgMetadataCache } from "./utils/orgMetadataCache";
 import { getSalesforceLogDirectory } from "./utils/logPaths";
+import { getDeployDiagnosticCollection } from "./utils/deployDiagnostics";
 
 function updateLwcContext(editor: vscode.TextEditor | undefined): void {
 	if (!editor) {
@@ -128,8 +129,16 @@ export function activate(context: vscode.ExtensionContext) {
 		// 3. Add Debug Trace
 		let addDebugTraceCmd = register("adure-sfx-toolkit.addDebugTrace", addDebugTrace);
 
-		// 4. Deploy Metadata
-		let deployMetadataCmd = register("adure-sfx-toolkit.deployMetadata", deployMetadata);
+		// 4. Deploy Metadata (panel with tree, presets, org, test level)
+		context.subscriptions.push(getDeployDiagnosticCollection());
+		let deployMetadataCmd = register("adure-sfx-toolkit.deployMetadata", () => DeployMetadataPanelProvider.show());
+		context.subscriptions.push(
+			vscode.window.registerWebviewPanelSerializer(DeployMetadataPanelProvider.viewType, {
+				async deserializeWebviewPanel(panel: vscode.WebviewPanel): Promise<void> {
+					await DeployMetadataPanelProvider.revive(panel);
+				},
+			})
+		);
 
 		// 5. Execute Anonymous Apex
 		let executeAnonCmd = register("adure-sfx-toolkit.executeAnonymous", executeAnonymous);
