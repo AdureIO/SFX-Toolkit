@@ -3,6 +3,7 @@ import {
   getMetadataTreeByPackage,
   getTestClassItems,
   resolveSourcePaths,
+  filterPathsToPackageDirs,
   buildDeployCommand,
   createDeployProgressHandler,
   getDeployedCountFromOutput,
@@ -296,7 +297,8 @@ export class DeployMetadataPanelProvider {
         } else if (msg.testLevel === "ValidateOnly") {
           testLevel = "RunLocalTests";
         }
-        const absPaths = resolveSourcePaths(msg.sourcePaths, workspaceRoot);
+        const resolved = resolveSourcePaths(msg.sourcePaths, workspaceRoot);
+        const absPaths = filterPathsToPackageDirs(workspaceRoot, resolved);
         type DeployOutcome =
           | { done: true; success: true; result: string }
           | { done: true; success: false; error: string }

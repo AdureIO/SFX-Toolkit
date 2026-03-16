@@ -349,6 +349,27 @@ export function resolveSourcePaths(selected: string[], workspaceRoot: string): s
 	return selected.map((p) => (path.isAbsolute(p) ? p : path.join(workspaceRoot, p)));
 }
 
+/** True if the given absolute path is inside a package directory from sfdx-project.json. */
+function isPathInPackageDirs(workspaceRoot: string, absPath: string): boolean {
+	const packageDirs = getPackageDirectories(workspaceRoot);
+	const normalizedPath = path.normalize(absPath);
+	for (const dir of packageDirs) {
+		const packageRoot = path.normalize(path.join(workspaceRoot, dir));
+		if (normalizedPath === packageRoot || normalizedPath.startsWith(packageRoot + path.sep)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/** Keep only paths that lie inside an sfdx package root (from sfdx-project.json). */
+export function filterPathsToPackageDirs(workspaceRoot: string, absPaths: string[]): string[] {
+	if (absPaths.length === 0) return absPaths;
+	const packageDirs = getPackageDirectories(workspaceRoot);
+	if (packageDirs.length === 0) return absPaths;
+	return absPaths.filter((p) => isPathInPackageDirs(workspaceRoot, p));
+}
+
 /** Discover folders by metadata type. Returns list of { typeLabel, paths } for types that exist. */
 function getMetadataByType(workspaceRoot: string): { typeLabel: string; paths: string[] }[] {
 	const ignore = ["**/node_modules/**", "**/bin/**", "**/.git/**"];
@@ -495,7 +516,7 @@ export async function deployMetadata() {
 			{ placeHolder: `Preset: ${preset.name}` }
 		);
 		if (runChoice === undefined || runChoice.label === "Cancel") return;
-		const absPaths = resolveSourcePaths(sourcePaths, workspaceRoot);
+		const absPaths = filterPathsToPackageDirs(workspaceRoot, resolveSourcePaths(sourcePaths, workspaceRoot));
 		runDeploy(absPaths, testLevel, testFlags, dryRun, workspaceRoot);
 		return;
 	}
@@ -713,9 +734,10 @@ export async function deployMetadata() {
 		testLevel = "NoTestRun";
 	}
 
-	// Store relative paths for preset / display
-	const pathsForPreset = sourcePaths.map((p) => (path.isAbsolute(p) ? path.relative(workspaceRoot, p) : p));
-	const absPaths = resolveSourcePaths(sourcePaths, workspaceRoot);
+	// Store relative paths for preset / display; only include paths inside package dirs
+	const resolved = resolveSourcePaths(sourcePaths, workspaceRoot);
+	const absPaths = filterPathsToPackageDirs(workspaceRoot, resolved);
+	const pathsForPreset = absPaths.map((p) => path.relative(workspaceRoot, p));
 
 	// 3. Run or Save as preset
 	const actionChoice = await vscode.window.showQuickPick(

@@ -77,4 +77,4 @@ If you encounter any issues or have suggestions, please file an issue on our Git
 
 - vsce package
 - vsce publish
-
+- npx ovsx publish sfx-toolkit-0.6.0.vsix -p TOKEN
