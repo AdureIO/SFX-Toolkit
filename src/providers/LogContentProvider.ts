@@ -40,6 +40,14 @@ export class LogContentProvider implements vscode.TextDocumentContentProvider {
         // Fire change if it existed
         this._onDidChange.fire(uri);
     }
+
+    /** Remove cached content for a closed document to avoid unbounded memory growth. */
+    public clearContent(uri: vscode.Uri): void {
+        const key = this.getKey(uri);
+        if (this.logData.delete(key)) {
+            Logger.info(`LogContentProvider: Cleared content for ${key}`);
+        }
+    }
     
     public toggleFilter(uri: vscode.Uri, type: FilterType) {
         const key = this.getKey(uri);

@@ -19,6 +19,7 @@ import { loadPresets, addPreset, type DeployPreset, type DeployTypeKey } from ".
 import { getAnonymousApexOrgList } from "../commands/executeAnonymous";
 import { runCommand } from "../utils/commandRunner";
 import { Logger } from "../utils/outputChannel";
+import { cleanDeployOutput } from "../commands/devCommands";
 import { clearDeployDiagnostics, setDeployDiagnosticsFromFailure } from "../utils/deployDiagnostics";
 import { AuthInfo } from "../utils/authInfo";
 
@@ -49,6 +50,11 @@ export class DeployMetadataPanelProvider {
     orgs: { label: string; username: string }[];
     defaultOrg: string;
   } | null = null;
+
+  /** Per-panel message listener disposable; disposed when panel closes or before re-attach on revive to avoid leaks. */
+  private static messageListenerByPanel = new WeakMap<vscode.WebviewPanel, vscode.Disposable>();
+  /** Panels for which we already registered onDidDispose (one-time cleanup per panel). */
+  private static panelsWithDisposeRegistered = new WeakSet<vscode.WebviewPanel>();
 
   public static async show(initialPreset?: DeployPreset): Promise<void> {
     const folder = vscode.workspace.workspaceFolders?.[0];
@@ -161,7 +167,13 @@ export class DeployMetadataPanelProvider {
     folder: vscode.WorkspaceFolder,
     workspaceRoot: string
   ): void {
-    panel.webview.onDidReceiveMessage(
+    // Dispose previous listener when re-attaching (e.g. on revive) to avoid leaking listeners and large closures.
+    const existing = DeployMetadataPanelProvider.messageListenerByPanel.get(panel);
+    if (existing) {
+      existing.dispose();
+      DeployMetadataPanelProvider.messageListenerByPanel.delete(panel);
+    }
+    const listenerDisposable = panel.webview.onDidReceiveMessage(
       async (msg: {
         command: string;
         sourcePaths?: string[];
@@ -311,7 +323,7 @@ export class DeployMetadataPanelProvider {
         const outcome: DeployOutcome = await vscode.window.withProgress(
           {
             location: vscode.ProgressLocation.Notification,
-            title: dryRun ? "Validating deployment…" : "Deploying…",
+            title: dryRun ? "Validating deployment…" : "Deploying",
             cancellable: true
           },
           async (progress, token): Promise<DeployOutcome> => {
@@ -357,15 +369,14 @@ export class DeployMetadataPanelProvider {
         );
         if ("cancelled" in outcome && outcome.cancelled) return;
         if ("success" in outcome && outcome.success) {
-          const count = getDeployedCountFromOutput(outcome.result);
+          // Log a concise, cleaned summary of the successful deploy so users can see details like Status and components.
+          const cleaned = cleanDeployOutput(outcome.result);
+          Logger.info(`Deploy result (from CLI output):\n${cleaned}`);
+
           if (dryRun) {
-            vscode.window.showInformationMessage(
-              count > 0 ? `Validation completed. ${count} component(s).` : "Validation completed successfully."
-            );
+            vscode.window.showInformationMessage("Validation completed successfully.");
           } else {
-            vscode.window.showInformationMessage(
-              count > 0 ? `Deploy completed. Deployed ${count} component(s).` : "Deploy completed successfully."
-            );
+            vscode.window.showInformationMessage("Deploy completed successfully.");
           }
         } else if ("error" in outcome) {
           Logger.show();
@@ -401,6 +412,18 @@ export class DeployMetadataPanelProvider {
       null,
       []
     );
+    DeployMetadataPanelProvider.messageListenerByPanel.set(panel, listenerDisposable);
+    if (!DeployMetadataPanelProvider.panelsWithDisposeRegistered.has(panel)) {
+      DeployMetadataPanelProvider.panelsWithDisposeRegistered.add(panel);
+      panel.onDidDispose(() => {
+        const d = DeployMetadataPanelProvider.messageListenerByPanel.get(panel);
+        if (d) {
+          d.dispose();
+          DeployMetadataPanelProvider.messageListenerByPanel.delete(panel);
+        }
+        DeployMetadataPanelProvider.initCache = null;
+      });
+    }
   }
 
   private static getHtml(): string {

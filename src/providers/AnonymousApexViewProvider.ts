@@ -12,6 +12,7 @@ const APEX_HISTORY_MAX = 10;
 
 export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 	private _view?: vscode.WebviewView;
+	private _messageListener?: vscode.Disposable;
 
 	constructor(private readonly _extensionUri: vscode.Uri) {}
 
@@ -127,7 +128,10 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 		const { lastCode, history } = await this.loadApexState();
 		webviewView.webview.html = this._getHtmlForWebview(webviewView.webview, lastCode, history);
 
-		webviewView.webview.onDidReceiveMessage(async (data: { type: string; code?: string; targetOrg?: string }) => {
+		if (this._messageListener) {
+			this._messageListener.dispose();
+		}
+		this._messageListener = webviewView.webview.onDidReceiveMessage(async (data: { type: string; code?: string; targetOrg?: string }) => {
 			if (data.type === 'getOrgs') {
 				const orgs = await getAnonymousApexOrgList();
 				webviewView.webview.postMessage({ type: 'orgList', orgs });
@@ -166,6 +170,13 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 				}
 			} else if (data.type === 'contentChanged' && typeof data.code === 'string') {
 				await this.writeBuffer(data.code);
+			}
+		});
+
+		webviewView.onDidDispose(() => {
+			if (this._messageListener) {
+				this._messageListener.dispose();
+				this._messageListener = undefined;
 			}
 		});
 	}

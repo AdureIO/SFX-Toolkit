@@ -34,7 +34,7 @@ export class SOQLEditorProvider {
 
 		OrgMetadataCache.warmDefaultOrg();
 
-		panel.webview.onDidReceiveMessage(
+		const messageListener = panel.webview.onDidReceiveMessage(
 			async (message) => {
 				switch (message.command) {
 					case "execute":
@@ -71,6 +71,7 @@ export class SOQLEditorProvider {
 		);
 
 		panel.onDidDispose(() => {
+			messageListener.dispose();
 			SOQLEditorProvider.editableFieldsCache = {};
 		});
 	}

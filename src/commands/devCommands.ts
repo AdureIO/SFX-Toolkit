@@ -6,6 +6,7 @@ import { Logger, outputChannel } from "../utils/outputChannel";
 import { AuthInfo } from "../utils/authInfo";
 import { OrgMetadataCache } from "../utils/orgMetadataCache";
 import { getAutoSaveBeforePush, getTestRunTimeout } from "../utils/constants";
+import { DEPLOY_TIMEOUT_MS } from "./deployMetadata";
 
 // Helper to strip ANSI and progress lines
 export function cleanDeployOutput(output: string): string {
@@ -146,7 +147,14 @@ async function pushSourceHelper(force: boolean) {
             // Fallback
             const flag = force ? "--ignore-conflicts" : "";
             Logger.info(`Running: sf project deploy start ${flag}`);
-            const result = await runCommand(`sf project deploy start ${flag}`, undefined, undefined, true, token);
+            const result = await runCommand(
+              `sf project deploy start ${flag}`,
+              undefined,
+              undefined,
+              true,
+              token,
+              DEPLOY_TIMEOUT_MS
+            );
             Logger.info(result);
             vscode.window.showInformationMessage("Source pushed successfully (No workspace).");
             return;
@@ -289,12 +297,15 @@ async function pushSourceHelper(force: boolean) {
               undefined,
               (data) => handleOutput(data),
               false,
-              token
+              token,
+              DEPLOY_TIMEOUT_MS
             );
             Logger.info(cleanDeployOutput(result));
 
             const count = getDeployedCount(result);
-            vscode.window.showInformationMessage(`Deployed ${count} components.`);
+            vscode.window.showInformationMessage(
+              count > 0 ? `Deployed ${count} components.` : "Source pushed successfully."
+            );
           } else {
             // No Source Tracking -> Full Sequential Deploy
             if (packageDirs.length > 0) {
@@ -315,7 +326,8 @@ async function pushSourceHelper(force: boolean) {
                   undefined,
                   (data) => handleOutput(data, pkgDir),
                   false,
-                  token
+                  token,
+                  DEPLOY_TIMEOUT_MS
                 );
                 Logger.info(cleanDeployOutput(result));
                 totalCount += getDeployedCount(result);
@@ -323,7 +335,9 @@ async function pushSourceHelper(force: boolean) {
               OrgMetadataCache.invalidate(null);
               OrgMetadataCache.warmDefaultOrg();
               vscode.window.showInformationMessage(
-                `Successfully pushed source for ${packageDirs.length} packages. Deployed ${totalCount} components.`
+                totalCount > 0
+                  ? `Successfully pushed source for ${packageDirs.length} packages. Deployed ${totalCount} components.`
+                  : `Successfully pushed source for ${packageDirs.length} packages.`
               );
             } else {
               // Fallback if no packages found
@@ -336,14 +350,17 @@ async function pushSourceHelper(force: boolean) {
                 undefined,
                 (data) => handleOutput(data),
                 true,
-                token
+                token,
+                DEPLOY_TIMEOUT_MS
               );
               Logger.info(cleanDeployOutput(result));
 
               const count = getDeployedCount(result);
               OrgMetadataCache.invalidate(null);
               OrgMetadataCache.warmDefaultOrg();
-              vscode.window.showInformationMessage(`Source pushed successfully. Deployed ${count} components.`);
+              vscode.window.showInformationMessage(
+                count > 0 ? `Source pushed successfully. Deployed ${count} components.` : "Source pushed successfully."
+              );
             }
           }
         } catch (e: any) {
@@ -352,15 +369,24 @@ async function pushSourceHelper(force: boolean) {
             return;
           }
           // e.message contains combined stdout/stderr from commandRunner
-          const cleanError = cleanDeployOutput(e.message || e.stderr || "Unknown Error");
-          Logger.error(`Push failed:`, cleanError);
+          const raw = e.message || e.stderr || "Unknown Error";
+          const cleanError = cleanDeployOutput(raw);
+
+          // First log the high-level failure.
+          Logger.error("Push failed:", cleanError);
+
+          // Also log a structured summary so it mirrors the deploy panel behavior.
+          Logger.info(`Deploy result (from CLI output):\n${cleanError}`);
+
           outputChannel.show(); // Auto-open log on error
 
-          vscode.window.showErrorMessage(`Push failed. Check output log for details.`, "View Log").then((selection) => {
-            if (selection === "View Log") {
-              outputChannel.show();
-            }
-          });
+          vscode.window
+            .showErrorMessage(`Push failed. Check output log for details.`, "View Log")
+            .then((selection) => {
+              if (selection === "View Log") {
+                outputChannel.show();
+              }
+            });
         }
       }
     );
@@ -386,7 +412,9 @@ export async function pullSource() {
     },
     async (_progress, token) => {
       try {
-        await runCommand("sf project retrieve start", undefined, undefined, true, token);
+        const result = await runCommand("sf project retrieve start", undefined, undefined, true, token);
+        Logger.info("Pull completed successfully.");
+        Logger.info(cleanDeployOutput(result));
         OrgMetadataCache.invalidate(null);
         OrgMetadataCache.warmDefaultOrg();
         vscode.window.showInformationMessage("Source pulled successfully.");
@@ -395,7 +423,16 @@ export async function pullSource() {
           Logger.info("Pull cancelled by user.");
           return;
         }
-        vscode.window.showErrorMessage(`Pull failed: ${e.message}`);
+        const msg = e?.message || e?.stderr || String(e);
+        Logger.error("Pull failed", msg);
+        outputChannel.show();
+        vscode.window
+          .showErrorMessage('Pull failed. Check "Adure SFX Toolkit" output for details.', "View Log")
+          .then((selection) => {
+            if (selection === "View Log") {
+              outputChannel.show();
+            }
+          });
       }
     }
   );
@@ -422,13 +459,30 @@ export async function deployCurrentFile() {
       try {
         const result = await runCommand(`sf project deploy start -d "${filePath}"`, undefined, undefined, true, token);
         const count = getDeployedCount(result);
-        vscode.window.showInformationMessage(`File deployed successfully. Deployed ${count} components.`);
+        Logger.info(
+          count > 0
+            ? `File deploy succeeded for ${filePath}. Deployed ${count} components.`
+            : `File deploy succeeded for ${filePath}.`
+        );
+        Logger.info(cleanDeployOutput(result));
+        vscode.window.showInformationMessage(
+          count > 0 ? `File deployed successfully. Deployed ${count} components.` : "File deployed successfully."
+        );
       } catch (e: any) {
         if (e.cancelled) {
           Logger.info("Deploy cancelled by user.");
           return;
         }
-        vscode.window.showErrorMessage(`Deploy failed: ${e.message}`);
+        const msg = e?.message || e?.stderr || String(e);
+        Logger.error("Deploy current file failed", msg);
+        outputChannel.show();
+        vscode.window
+          .showErrorMessage('Deploy failed. Check "Adure SFX Toolkit" output for details.', "View Log")
+          .then((selection) => {
+            if (selection === "View Log") {
+              outputChannel.show();
+            }
+          });
       }
     }
   );
@@ -451,7 +505,9 @@ export async function retrieveCurrentFile() {
     },
     async (_progress, token) => {
       try {
-        await runCommand(`sf project retrieve start -d "${filePath}"`, undefined, undefined, true, token);
+        const result = await runCommand(`sf project retrieve start -d "${filePath}"`, undefined, undefined, true, token);
+        Logger.info(`Retrieve current file succeeded for ${filePath}.`);
+        Logger.info(cleanDeployOutput(result));
         OrgMetadataCache.invalidate(null);
         OrgMetadataCache.warmDefaultOrg();
         vscode.window.showInformationMessage("File retrieved successfully.");
@@ -460,7 +516,16 @@ export async function retrieveCurrentFile() {
           Logger.info("Retrieve cancelled by user.");
           return;
         }
-        vscode.window.showErrorMessage(`Retrieve failed: ${e.message}`);
+        const msg = e?.message || e?.stderr || String(e);
+        Logger.error("Retrieve current file failed", msg);
+        outputChannel.show();
+        vscode.window
+          .showErrorMessage('Retrieve failed. Check "Adure SFX Toolkit" output for details.', "View Log")
+          .then((selection) => {
+            if (selection === "View Log") {
+              outputChannel.show();
+            }
+          });
       }
     }
   );

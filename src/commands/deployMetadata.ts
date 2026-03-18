@@ -103,7 +103,9 @@ export function runDeploy(
 	terminal.sendText(cmd);
 }
 
-export const DEPLOY_TIMEOUT_MS = 900000; // 15 minutes
+// Max time to wait for a single deploy CLI invocation before treating it as timed out.
+// Large orgs or validate-all-tests runs can easily exceed 15 minutes, so use 45 minutes.
+export const DEPLOY_TIMEOUT_MS = 2700000; // 45 minutes
 
 /** Strip ANSI codes from CLI output. */
 function stripAnsi(data: string): string {

@@ -61,7 +61,7 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
             }
         }
 
-        webviewPanel.webview.onDidReceiveMessage(async (e) => {
+        const messageListener = webviewPanel.webview.onDidReceiveMessage(async (e) => {
             switch (e.type) {
                 case 'update':
                     await this.updateDocument(document, e.data);
@@ -70,6 +70,10 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
                     this.fetchObjects(webviewPanel.webview);
                     return;
             }
+        });
+
+        webviewPanel.onDidDispose(() => {
+            messageListener.dispose();
         });
 
         sendDataToWebview();

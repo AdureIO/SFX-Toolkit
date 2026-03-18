@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
-import { runCommand, runCommandArgs } from '../utils/commandRunner';
+import { runCommandArgs } from '../utils/commandRunner';
+import { Logger, outputChannel } from '../utils/outputChannel';
 
 export async function executeSOQL() {
     const editor = vscode.window.activeTextEditor;
@@ -26,7 +27,18 @@ export async function executeSOQL() {
         cancellable: true
     }, async (_progress, token) => {
         try {
-            const result = await runCommandArgs('sf', ['data', 'query', '--query', query], undefined, undefined, true);
+            outputChannel.clear();
+            Logger.info(`Running SOQL query: ${query}`);
+
+            const result = await runCommandArgs(
+                'sf',
+                ['data', 'query', '--query', query],
+                undefined,
+                (chunk) => outputChannel.append(chunk),
+                true
+            );
+
+            Logger.info('SOQL query executed successfully.');
 
             const doc = await vscode.workspace.openTextDocument({
                 content: result,
@@ -34,9 +46,19 @@ export async function executeSOQL() {
             });
             await vscode.window.showTextDocument(doc);
 
+            vscode.window.showInformationMessage('SOQL query executed. Results opened in a new document.');
         } catch (e: any) {
             if (e.cancelled) return;
-            vscode.window.showErrorMessage(`Query failed: ${e}`);
+            const message = e?.message || e?.stderr || String(e);
+            Logger.error('SOQL query failed', e);
+            outputChannel.show();
+            vscode.window
+                .showErrorMessage('SOQL query failed. Check "Adure SFX Toolkit" output for details.', 'View Log')
+                .then((choice) => {
+                    if (choice === 'View Log') {
+                        outputChannel.show();
+                    }
+                });
         }
     });
 }

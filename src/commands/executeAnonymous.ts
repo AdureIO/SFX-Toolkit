@@ -126,18 +126,43 @@ async function executeContent(text: string, fromPanel?: boolean, targetOrg?: str
             // Execute Apex panel: run with --json, then same as Salesforce extension: download log to
             // .sfdx/tools/debug/logs and save original script + JSON result alongside; open the log.
             if (fromPanel) {
-                const runOut = await runCommand(`sf apex run -f "${tmpFile}" --json${orgFlag}`, undefined, undefined, true, token);
-                let runResult: { compiled?: boolean; success?: boolean; logs?: string; compileProblem?: string; exceptionMessage?: string };
+                const runOut = await runCommand(
+                    `sf apex run -f "${tmpFile}" --json${orgFlag}`,
+                    undefined,
+                    undefined,
+                    true,
+                    token
+                );
+
+                /**
+                 * NOTE: `sf apex run --json` wraps the actual result under `result`.
+                 * We normalize that here so `compiled`/`success` checks work reliably.
+                 */
+                let raw: any;
                 try {
-                    runResult = JSON.parse(runOut);
+                    raw = JSON.parse(runOut);
                 } catch {
-                    runResult = {};
+                    raw = {};
                 }
+                const runResult: {
+                    compiled?: boolean;
+                    success?: boolean;
+                    logs?: string;
+                    compileProblem?: string;
+                    exceptionMessage?: string;
+                } = raw && typeof raw === 'object' && raw.result && typeof raw.result === 'object'
+                    ? raw.result
+                    : raw || {};
+
                 if (!runResult.compiled || !runResult.success) {
-                    const msg = !runResult.compiled
-                        ? (runResult.compileProblem ?? 'Compilation failed.')
-                        : (runResult.exceptionMessage ?? 'Execution failed.');
-                    throw new Error(msg);
+                    // Preserve full structured payload so the caller can extract a clean error message.
+                    const errorPayload = {
+                        ...(typeof raw === 'object' ? raw : {}),
+                        result: {
+                            ...(typeof runResult === 'object' ? runResult : {}),
+                        },
+                    };
+                    throw new Error(JSON.stringify(errorPayload));
                 }
 
                 let userId: string;
@@ -192,6 +217,9 @@ async function executeContent(text: string, fromPanel?: boolean, targetOrg?: str
                     }
                     const targetColumn = vscode.ViewColumn.Beside;
                     await openLogById(logId, targetColumn, 'sf-anon-log', true, targetOrg);
+                    vscode.window.showInformationMessage('Anonymous Apex executed successfully.');
+                } else {
+                    vscode.window.showInformationMessage('Anonymous Apex executed successfully, but no debug log was found.');
                 }
                 return;
             }
@@ -293,6 +321,7 @@ async function executeContent(text: string, fromPanel?: boolean, targetOrg?: str
                 }
                 
                 await openLogById(logId, targetColumn, 'sf-anon-log', true, targetOrg);
+                vscode.window.showInformationMessage('Anonymous Apex executed successfully.');
             } else {
                 const msg = "Code executed successfully, but NO NEW debug log was generated. Please check if a Trace Flag is active for your user.";
                 if (!fromPanel) {
@@ -309,11 +338,14 @@ async function executeContent(text: string, fromPanel?: boolean, targetOrg?: str
         } catch (e: any) {
             if (e.cancelled) return;
             if (fromPanel) throw e;
-            vscode.window.showErrorMessage(`Execution failed.`);
+            const details = e?.stderr || e?.message || String(e);
+            vscode.window.showErrorMessage(
+                'Anonymous Apex execution failed. See "Salesforce Apex Execution" output for details.'
+            );
             const channel = vscode.window.createOutputChannel("Salesforce Apex Execution");
             channel.clear();
             channel.appendLine("Error executing Anonymous Apex:");
-            channel.appendLine(e.stderr || e.message);
+            channel.appendLine(details);
             channel.show();
         } finally {
             if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
