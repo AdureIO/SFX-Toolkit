@@ -7,6 +7,7 @@ import { AuthInfo } from "../utils/authInfo";
 import { OrgMetadataCache } from "../utils/orgMetadataCache";
 import { getAutoSaveBeforePush, getTestRunTimeout } from "../utils/constants";
 import { DEPLOY_TIMEOUT_MS } from "./deployMetadata";
+import { getDefaultOrg } from '../utils/defaultOrg';
 
 // Helper to strip ANSI and progress lines
 export function cleanDeployOutput(output: string): string {
@@ -110,6 +111,8 @@ function getDeployedCount(output: string): number {
 // Helper to reuse push logic
 async function pushSourceHelper(force: boolean) {
   const title = force ? "Force Push" : "Push";
+	const defaultOrg = await getDefaultOrg();
+	const titleWithOrg = defaultOrg ? `${title} to ${defaultOrg.displayName}` : title;
 
   // Ensure active file is saved before pushing
   if (getAutoSaveBeforePush()) {
@@ -121,44 +124,37 @@ async function pushSourceHelper(force: boolean) {
     }
   }
 
-  // We want to stream output to the log so user sees progress.
-  outputChannel.clear();
-  // outputChannel.show(); // Only show on error or explicit request
-  Logger.info(`Starting Push Operation: ${title}`);
+	// We want to stream output to the log so user sees progress.
+	outputChannel.clear();
+	// outputChannel.show(); // Only show on error or explicit request
+	Logger.info(`Starting Push Operation: ${titleWithOrg}`);
 
-  const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, -100);
-  statusBar.command = "adure-sfx-toolkit.showOutput";
-  statusBar.text = "$(sync~spin) Deploying";
-  statusBar.tooltip = "Click to Show Deployment Logs";
-  statusBar.show();
+	const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, -100);
+	statusBar.command = "adure-sfx-toolkit.showOutput";
+	statusBar.text = defaultOrg ? `$(sync~spin) Deploying to ${defaultOrg.displayName}...` : "$(sync~spin) Deploying...";
+	statusBar.tooltip = "Click to Show Deployment Logs";
+	statusBar.show();
 
-  try {
-    await vscode.window.withProgress(
-      {
-        location: vscode.ProgressLocation.Notification,
-        title: title,
-        cancellable: true
-      },
-      async (progress, token) => {
-        try {
-          // 1. Detect sfdx-project.json
-          const workspaceFolders = vscode.workspace.workspaceFolders;
-          if (!workspaceFolders) {
-            // Fallback
-            const flag = force ? "--ignore-conflicts" : "";
-            Logger.info(`Running: sf project deploy start ${flag}`);
-            const result = await runCommand(
-              `sf project deploy start ${flag}`,
-              undefined,
-              undefined,
-              true,
-              token,
-              DEPLOY_TIMEOUT_MS
-            );
-            Logger.info(result);
-            vscode.window.showInformationMessage("Source pushed successfully (No workspace).");
-            return;
-          }
+	try {
+		await vscode.window.withProgress(
+			{
+				location: vscode.ProgressLocation.Notification,
+				title: titleWithOrg,
+				cancellable: true,
+			},
+			async (progress, token) => {
+				try {
+					// 1. Detect sfdx-project.json
+					const workspaceFolders = vscode.workspace.workspaceFolders;
+					if (!workspaceFolders) {
+						// Fallback
+						const flag = force ? "--ignore-conflicts" : "";
+						Logger.info(`Running: sf project deploy start ${flag}`);
+						const result = await runCommand(`sf project deploy start ${flag}`, undefined, undefined, true, token);
+						Logger.info(result);
+						vscode.window.showInformationMessage("Source pushed successfully (No workspace).");
+						return;
+					}
 
           const rootPath = workspaceFolders[0].uri.fsPath;
           const projectJsonPath = path.join(rootPath, "sfdx-project.json");
@@ -181,7 +177,6 @@ async function pushSourceHelper(force: boolean) {
           let lastPrefix = "";
           let currentPhase = "";
           let currentDetails = "";
-          const startTime = Date.now();
 
           // Common callback to stream output to log and update progress
           const handleOutput = (data: string, prefix?: string) => {

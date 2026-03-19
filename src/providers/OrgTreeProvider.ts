@@ -27,13 +27,13 @@ export class OrgItem extends vscode.TreeItem {
                  typeStr = 'Scratch Org';
             } else if (orgData.isSandbox) {
                  // Sandbox (Fork of Prod)
-                 this.iconPath = new vscode.ThemeIcon('repo-forked'); 
+                 this.iconPath = new vscode.ThemeIcon('repo-forked');
                  typeStr = 'Sandbox';
             } else {
                  // Production or Developer Edition
                  this.iconPath = new vscode.ThemeIcon('briefcase');
             }
-            
+
             // Description: Username + Status
             let desc = orgData.username;
             if (orgData.isDefaultDevHubUsername) {
@@ -42,8 +42,8 @@ export class OrgItem extends vscode.TreeItem {
             if (orgData.isDefaultUsername) {
                 desc += ' (Default Org)';
                 // Make label bold?
-                this.label = label; // VS Code doesn't natively support bold label easily without markdown, but we can highlight
-                this.description = desc; 
+                this.label = `● ${label}`;
+                this.description = desc;
             } else {
                  this.description = desc;
             }
@@ -118,19 +118,31 @@ export class OrgTreeProvider implements vscode.TreeDataProvider<OrgItem> {
 
             if (element.contextValue === 'group-devhub') {
                 const orgs = allNonScratch.filter((o: any) => o.isDevHub);
-                orgs.sort((a: any, b: any) => (a.alias || a.username).localeCompare(b.alias || b.username));
+                orgs.sort((a: any, b: any) => {
+                    if (a.isDefaultUsername && !b.isDefaultUsername) return -1;
+                    if (!a.isDefaultUsername && b.isDefaultUsername) return 1;
+                    return (a.alias || a.username).localeCompare(b.alias || b.username);
+                });
                 return orgs.map((org: any) => new OrgItem(org.alias || org.username.split('@')[0], vscode.TreeItemCollapsibleState.None, org, 'ORG', 'org-devhub'));
 
             } else if (element.contextValue === 'group-production') {
                 // Production = Not DevHub AND Not Sandbox
                 const orgs = allNonScratch.filter((o: any) => !o.isDevHub && !o.isSandbox);
-                orgs.sort((a: any, b: any) => (a.alias || a.username).localeCompare(b.alias || b.username));
+                orgs.sort((a: any, b: any) => {
+                    if (a.isDefaultUsername && !b.isDefaultUsername) return -1;
+                    if (!a.isDefaultUsername && b.isDefaultUsername) return 1;
+                    return (a.alias || a.username).localeCompare(b.alias || b.username);
+                });
                 return orgs.map((org: any) => new OrgItem(org.alias || org.username.split('@')[0], vscode.TreeItemCollapsibleState.None, org, 'ORG', 'org-connected'));
 
             } else if (element.contextValue === 'group-sandbox') {
                 // Sandbox = Not DevHub AND isSandbox
                 const orgs = allNonScratch.filter((o: any) => !o.isDevHub && o.isSandbox);
-                orgs.sort((a: any, b: any) => (a.alias || a.username).localeCompare(b.alias || b.username));
+                orgs.sort((a: any, b: any) => {
+                    if (a.isDefaultUsername && !b.isDefaultUsername) return -1;
+                    if (!a.isDefaultUsername && b.isDefaultUsername) return 1;
+                    return (a.alias || a.username).localeCompare(b.alias || b.username);
+                });
                 return orgs.map((org: any) => new OrgItem(org.alias || org.username.split('@')[0], vscode.TreeItemCollapsibleState.None, org, 'ORG', 'org-connected'));
 
             } else if (element.contextValue === 'group-scratch') {
