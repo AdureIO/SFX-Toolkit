@@ -72,9 +72,3 @@ Check out the [GitHub Repository](https://github.com/AdureIO/SFX-Toolkit).
 ## Feedback
 
 If you encounter any issues or have suggestions, please file an issue on our GitHub repository.
-
-## Build
-
-- vsce package
-- vsce publish
-- npx ovsx publish sfx-toolkit-0.7.0.vsix -p TOKEN

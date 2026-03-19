@@ -1,0 +1,53 @@
+name: Publish extension
+
+# Publishes the .vsix from the ref that triggered the workflow (release tag or chosen branch).
+# Bump `version` in package.json before tagging / creating a release.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+concurrency:
+  group: publish-vscode-extension
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      VSCE_PAT: ${{ secrets.VSCE_PAT }}
+      OVSX_PAT: ${{ secrets.OVSX_PAT }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compile
+        run: npm run compile
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Package .vsix
+        run: npx --yes @vscode/vsce@3 package --no-git-tag-version -o extension.vsix
+
+      - name: Publish to Visual Studio Marketplace
+        run: npx --yes @vscode/vsce@3 publish --packagePath extension.vsix
+
+      - name: Publish to Open VSX Registry
+        run: npx --yes ovsx publish extension.vsix -p "$OVSX_PAT"
+
+      - name: Upload .vsix artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: extension-vsix
+          path: extension.vsix

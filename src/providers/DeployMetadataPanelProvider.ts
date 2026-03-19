@@ -77,17 +77,25 @@ export class DeployMetadataPanelProvider {
 
     try {
       tree = getMetadataTreeByPackage(workspaceRoot);
-    } catch (e) {}
+    } catch {
+      /* non-fatal: empty tree */
+    }
     try {
       testClasses = getTestClassItems(workspaceRoot);
-    } catch (e) {}
+    } catch {
+      /* non-fatal: no test class list */
+    }
     try {
       presets = await loadPresets(folder.uri);
-    } catch (e) {}
+    } catch {
+      /* non-fatal: no presets */
+    }
     try {
       orgs = await getAnonymousApexOrgList();
       defaultOrg = orgs.length > 0 ? orgs[0].username : "";
-    } catch (e) {}
+    } catch {
+      /* non-fatal: no org list */
+    }
 
     DeployMetadataPanelProvider.initCache = { workspaceRoot, tree, testClasses, presets, orgs, defaultOrg };
     AuthInfo.warmAuthForOrg(defaultOrg || null);
@@ -133,17 +141,25 @@ export class DeployMetadataPanelProvider {
       defaultOrg = "";
       try {
         tree = getMetadataTreeByPackage(workspaceRoot);
-      } catch (e) {}
+      } catch {
+        /* non-fatal: empty tree */
+      }
       try {
         testClasses = getTestClassItems(workspaceRoot);
-      } catch (e) {}
+      } catch {
+        /* non-fatal: no test class list */
+      }
       try {
         presets = await loadPresets(folder.uri);
-      } catch (e) {}
+      } catch {
+        /* non-fatal: no presets */
+      }
       try {
         orgs = await getAnonymousApexOrgList();
         defaultOrg = orgs.length > 0 ? orgs[0].username : "";
-      } catch (e) {}
+      } catch {
+        /* non-fatal: no org list */
+      }
       DeployMetadataPanelProvider.initCache = { workspaceRoot, tree, testClasses, presets, orgs, defaultOrg };
     }
     const state = DeployMetadataPanelProvider.panelStateByWorkspace[workspaceRoot];
