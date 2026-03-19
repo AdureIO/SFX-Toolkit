@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import { listLogs } from "./commands/listLogs";
 import { filterLogDebug, filterLogSOQL, updateContextForEditor } from "./commands/filterLogs"; // Updated imports
 import { addDebugTrace } from "./commands/addDebugTrace";
-import { deployMetadata } from "./commands/deployMetadata";
+import { DeployMetadataPanelProvider } from "./providers/DeployMetadataPanelProvider";
 import { executeAnonymous, rerunLastApex } from "./commands/executeAnonymous";
 import { executeSOQL } from "./commands/executeSOQL";
 import { LogTreeProvider, logTreeProvider } from "./providers/LogTreeProvider";
@@ -48,6 +48,7 @@ import { getPollingInterval } from './utils/constants';
 import { isSalesforceProject, updateSalesforceProjectContext, NOT_SFDX_PROJECT_MESSAGE } from "./utils/projectUtils";
 import { OrgMetadataCache } from "./utils/orgMetadataCache";
 import { getSalesforceLogDirectory } from "./utils/logPaths";
+import { getDeployDiagnosticCollection } from "./utils/deployDiagnostics";
 
 function updateLwcContext(editor: vscode.TextEditor | undefined): void {
 	if (!editor) {
@@ -110,11 +111,13 @@ export function activate(context: vscode.ExtensionContext) {
 		let filterSOQLCmd = register("adure-sfx-toolkit.filterLogSOQL", filterLogSOQL);
 		let filterSOQLActiveCmd = register("adure-sfx-toolkit.filterLogSOQLActive", filterLogSOQL);
 
-		// Sync Context on Switch
-		vscode.window.onDidChangeActiveTextEditor((editor) => {
-			updateContextForEditor(editor);
-			updateLwcContext(editor);
-		});
+		// Sync Context on Switch (dispose on deactivate to avoid leak)
+		context.subscriptions.push(
+			vscode.window.onDidChangeActiveTextEditor((editor) => {
+				updateContextForEditor(editor);
+				updateLwcContext(editor);
+			})
+		);
 
         // Initialize context for current editor
         if (vscode.window.activeTextEditor) {
@@ -128,8 +131,16 @@ export function activate(context: vscode.ExtensionContext) {
 		// 3. Add Debug Trace
 		let addDebugTraceCmd = register("adure-sfx-toolkit.addDebugTrace", addDebugTrace);
 
-		// 4. Deploy Metadata
-		let deployMetadataCmd = register("adure-sfx-toolkit.deployMetadata", deployMetadata);
+		// 4. Deploy Metadata (panel with tree, presets, org, test level)
+		context.subscriptions.push(getDeployDiagnosticCollection());
+		let deployMetadataCmd = register("adure-sfx-toolkit.deployMetadata", () => DeployMetadataPanelProvider.show());
+		context.subscriptions.push(
+			vscode.window.registerWebviewPanelSerializer(DeployMetadataPanelProvider.viewType, {
+				async deserializeWebviewPanel(panel: vscode.WebviewPanel): Promise<void> {
+					await DeployMetadataPanelProvider.revive(panel);
+				},
+			})
+		);
 
 		// 5. Execute Anonymous Apex
 		let executeAnonCmd = register("adure-sfx-toolkit.executeAnonymous", executeAnonymous);
@@ -177,9 +188,10 @@ export function activate(context: vscode.ExtensionContext) {
 
 		let deleteAllLogsCmd = register("adure-sfx-toolkit.deleteAllLogs", deleteAllLogs);
 
-		// 8. Side Bar Trace Provider
+		// 8. Side Bar Trace Provider (clear timer on deactivate to avoid leak)
 		const traceProvider = new TraceTreeProvider();
 		vscode.window.registerTreeDataProvider("adure-sfx-toolkit.traces", traceProvider);
+		context.subscriptions.push(new vscode.Disposable(() => traceProvider.clearTimer()));
 
 		let refreshTracesCmd = register("adure-sfx-toolkit.refreshTraces", () => {
 			traceProvider.refresh();
@@ -260,14 +272,21 @@ export function activate(context: vscode.ExtensionContext) {
 		// Register Scratch Org Definition Editor
 		context.subscriptions.push(ScratchOrgDefEditorProvider.register(context));
 
-		// 11. Log Content Provider (sf-log and sf-anon-log scheme)
+		// 11. Log Content Provider (sf-log and sf-anon-log scheme); clear cache when log doc closed to avoid leak
 		context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider("sf-log", logContentProvider));
 		context.subscriptions.push(
 			vscode.workspace.registerTextDocumentContentProvider("sf-anon-log", logContentProvider)
 		);
+		context.subscriptions.push(
+			vscode.workspace.onDidCloseTextDocument((doc) => {
+				if (doc.uri.scheme === "sf-log" || doc.uri.scheme === "sf-anon-log") {
+					logContentProvider.clearContent(doc.uri);
+				}
+			})
+		);
 
-		// 12. Polling Logic
-		let pollingInterval: NodeJS.Timeout | undefined;
+		// 12. Polling Logic (clear interval on deactivate to avoid leak)
+		const pollingIntervalRef = { current: undefined as NodeJS.Timeout | undefined };
 		let isPolling = false;
 
 		let startPollingCmd = register("adure-sfx-toolkit.startPolling", async () => {
@@ -275,10 +294,10 @@ export function activate(context: vscode.ExtensionContext) {
 			logTreeProvider.isPolling = true;
 			await vscode.commands.executeCommand("setContext", "adure-sfx-toolkit:polling", true);
 
-			if (!pollingInterval) {
+			if (!pollingIntervalRef.current) {
 				// Immediate fetch from org, then every N seconds
 				logTreeProvider.fetchNewLogsFromOrg().then(() => logTreeProvider.refresh());
-				pollingInterval = setInterval(() => {
+				pollingIntervalRef.current = setInterval(() => {
 					if (logTreeProvider.isPolling) {
 						logTreeProvider.fetchNewLogsFromOrg();
 					}
@@ -292,12 +311,19 @@ export function activate(context: vscode.ExtensionContext) {
 			logTreeProvider.isPolling = false;
 			await vscode.commands.executeCommand("setContext", "adure-sfx-toolkit:polling", false);
 
-			if (pollingInterval) {
-				clearInterval(pollingInterval);
-				pollingInterval = undefined;
+			if (pollingIntervalRef.current) {
+				clearInterval(pollingIntervalRef.current);
+				pollingIntervalRef.current = undefined;
 			}
 			vscode.window.showInformationMessage("Log Polling Stopped");
 		});
+
+		context.subscriptions.push(new vscode.Disposable(() => {
+			if (pollingIntervalRef.current) {
+				clearInterval(pollingIntervalRef.current);
+				pollingIntervalRef.current = undefined;
+			}
+		}));
 
 		// Initialize context
 		vscode.commands.executeCommand("setContext", "adure-sfx-toolkit:polling", false);

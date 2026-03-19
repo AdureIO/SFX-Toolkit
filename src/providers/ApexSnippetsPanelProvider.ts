@@ -32,7 +32,7 @@ export class ApexSnippetsPanelProvider {
         ApexSnippetsPanelProvider._panel = panel;
         panel.webview.html = this.getHtml([]);
 
-        panel.webview.onDidReceiveMessage(
+        const messageListener = panel.webview.onDidReceiveMessage(
             async (msg: { command: string; index?: number }) => {
                 switch (msg.command) {
                     case 'run':
@@ -71,6 +71,7 @@ export class ApexSnippetsPanelProvider {
         );
 
         panel.onDidDispose(() => {
+            messageListener.dispose();
             ApexSnippetsPanelProvider._panel = undefined;
         });
 

@@ -55,7 +55,7 @@ export class ScratchOrgDefEditorProvider implements vscode.CustomTextEditorProvi
         });
 
         // Handle messages from webview
-        webviewPanel.webview.onDidReceiveMessage(
+        const messageListener = webviewPanel.webview.onDidReceiveMessage(
             message => {
                 switch (message.type) {
                     case 'update':
@@ -92,6 +92,7 @@ export class ScratchOrgDefEditorProvider implements vscode.CustomTextEditorProvi
         });
 
         webviewPanel.onDidDispose(() => {
+            messageListener.dispose();
             changeDocumentSubscription.dispose();
         });
     }

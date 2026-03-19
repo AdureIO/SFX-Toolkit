@@ -18,10 +18,11 @@
 
 ### Deploy
 
-- Deploy Metadata: deploy entire project or selected paths (all metadata types), with Run All / Run Specified Tests / Validate only / No tests, cancel at any step, save presets — done
+- Deploy Classes: production-style deploy with Run All / Run Specified Tests / Validate only / No tests, cancel at any step, save presets — done
 
 Improvements
-- permissionset viewer: 
+
+- permissionset viewer:
   - Add option to add extra permissions, but keep in mind restrictions like required fields, etc.
   - add button to open the permissionset in xml viewer
 
@@ -31,4 +32,4 @@ Improvements
 
 ## LWC
 
-LWC easily switch between html, css, 
+LWC easily switch between html, css,

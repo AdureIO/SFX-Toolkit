@@ -14,6 +14,14 @@ export class TraceTreeProvider implements vscode.TreeDataProvider<TraceItem> {
         this._onDidChangeTreeData.fire();
     }
 
+    /** Clear the expiration timer (e.g. on extension deactivate) to avoid leaking. */
+    clearTimer(): void {
+        if (this.timer) {
+            clearTimeout(this.timer);
+            this.timer = undefined;
+        }
+    }
+
     getTreeItem(element: TraceItem): vscode.TreeItem {
         return element;
     }
@@ -101,16 +109,62 @@ export class TraceTreeProvider implements vscode.TreeDataProvider<TraceItem> {
             return traceItems;
 
         } catch (e: any) {
-             const msg = e?.message || String(e);
-             if (msg.includes('not found') || msg.includes('ENOENT') || msg.includes('command not found')) {
-                 Logger.warn('Salesforce CLI (sf) not found — trace view unavailable');
-                 return [new TraceItem('Salesforce CLI not found', 'Install sf CLI to view traces', '', vscode.TreeItemCollapsibleState.None)];
-             }
-             if (msg.includes('No default') || msg.includes('target-org') || msg.includes('authenticate')) {
-                 return [new TraceItem('No default org set', 'Connect an org first', '', vscode.TreeItemCollapsibleState.None)];
-             }
-             Logger.error('Error fetching traces', e);
-             return [new TraceItem('Could not load traces', 'Check output log for details', '', vscode.TreeItemCollapsibleState.None)];
+            const msg = e?.message || String(e);
+
+            // Common CLI/installation issues
+            if (msg.includes('not found') || msg.includes('ENOENT') || msg.includes('command not found')) {
+                Logger.warn('Salesforce CLI (sf) not found — trace view unavailable');
+                return [
+                    new TraceItem(
+                        'Salesforce CLI not found',
+                        'Install sf CLI to view traces',
+                        '',
+                        vscode.TreeItemCollapsibleState.None
+                    ),
+                ];
+            }
+            if (msg.includes('No default') || msg.includes('target-org') || msg.includes('authenticate')) {
+                return [
+                    new TraceItem(
+                        'No default org set',
+                        'Connect an org first',
+                        '',
+                        vscode.TreeItemCollapsibleState.None
+                    ),
+                ];
+            }
+
+            // Handle Salesforce Edge / HTML error pages (HTTP 420 etc.) more cleanly.
+            if (
+                msg.includes('ERROR_HTTP_420') ||
+                msg.includes('HTTP response contains html content') ||
+                msg.includes('Status Codes and Error Responses')
+            ) {
+                const shortMessage =
+                    'Salesforce org is returning an HTML error page (HTTP 420). Check that the org is up and reachable.';
+                Logger.error('Error fetching traces (HTTP 420 / HTML response)', shortMessage);
+                vscode.window.showErrorMessage(
+                    'Could not load debug traces: org is not reachable or still being set up (HTTP 420).'
+                );
+                return [
+                    new TraceItem(
+                        'Org not reachable',
+                        'Salesforce returned an HTML error page (HTTP 420). Try again in a few minutes.',
+                        '',
+                        vscode.TreeItemCollapsibleState.None
+                    ),
+                ];
+            }
+
+            Logger.error('Error fetching traces', e);
+            return [
+                new TraceItem(
+                    'Could not load traces',
+                    'Check "Adure SFX Toolkit" output for details',
+                    '',
+                    vscode.TreeItemCollapsibleState.None
+                ),
+            ];
         }
     }
 

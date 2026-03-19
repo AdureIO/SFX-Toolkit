@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import * as path from "path";
 
-export type DeployTypeKey = "RunAllTestsInOrg" | "RunSpecifiedTests" | "ValidateOnly" | "NoTestRun";
+export type DeployTypeKey = "RunAllTestsInOrg" | "RunRelevantTests" | "RunSpecifiedTests" | "ValidateOnly" | "NoTestRun";
 
 export interface DeployPreset {
 	name: string;
@@ -12,16 +12,16 @@ export interface DeployPreset {
 	deployType: DeployTypeKey;
 	/** Apex class names for RunSpecifiedTests (e.g. MyTestClass) */
 	testClassNames: string[];
+	/** Target org username (e.g. for sf -o). Optional. */
+	targetOrg?: string;
 }
 
 interface PresetsFile {
 	presets: DeployPreset[];
 }
 
-const PRESETS_FILE = ".vscode/deploy-presets.json";
-
 function getPresetsUri(workspaceRoot: vscode.Uri): vscode.Uri {
-	return vscode.Uri.joinPath(workspaceRoot, PRESETS_FILE);
+	return vscode.Uri.joinPath(workspaceRoot, ".vscode", "deploy-presets.json");
 }
 
 export async function loadPresets(workspaceRoot: vscode.Uri): Promise<DeployPreset[]> {
@@ -45,19 +45,38 @@ export async function savePresets(
 ): Promise<void> {
 	const uri = getPresetsUri(workspaceRoot);
 	const dir = vscode.Uri.joinPath(workspaceRoot, ".vscode");
-	await vscode.workspace.fs.createDirectory(dir);
+	try {
+		await vscode.workspace.fs.createDirectory(dir);
+	} catch (e) {
+		throw new Error(`Cannot create .vscode directory: ${e instanceof Error ? e.message : String(e)}`);
+	}
 	const content = JSON.stringify({ presets }, null, 2);
-	await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(content));
+	const bytes = new TextEncoder().encode(content);
+	try {
+		await vscode.workspace.fs.writeFile(uri, bytes);
+	} catch (e) {
+		throw new Error(`Cannot write presets file: ${e instanceof Error ? e.message : String(e)}`);
+	}
 }
 
 export async function addPreset(
 	workspaceRoot: vscode.Uri,
 	preset: DeployPreset
 ): Promise<void> {
+	if (!preset?.name?.trim()) {
+		throw new Error("Preset name is required.");
+	}
+	const normalized: DeployPreset = {
+		name: preset.name.trim(),
+		sourcePaths: Array.isArray(preset.sourcePaths) ? preset.sourcePaths : [],
+		deployType: preset.deployType || "NoTestRun",
+		testClassNames: Array.isArray(preset.testClassNames) ? preset.testClassNames : [],
+		targetOrg: preset.targetOrg || undefined,
+	};
 	const presets = await loadPresets(workspaceRoot);
-	const existing = presets.findIndex((p) => p.name === preset.name);
-	if (existing >= 0) presets[existing] = preset;
-	else presets.push(preset);
+	const existing = presets.findIndex((p) => p.name === normalized.name);
+	if (existing >= 0) presets[existing] = normalized;
+	else presets.push(normalized);
 	await savePresets(workspaceRoot, presets);
 }
 
