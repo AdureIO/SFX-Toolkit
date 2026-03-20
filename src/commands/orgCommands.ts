@@ -34,6 +34,7 @@ export async function setAsDefault(item: OrgItem) {
             AuthInfo.clearCache();
             vscode.window.showInformationMessage(`Set ${item.label} as default org.`);
             orgTreeProvider.refresh();
+            vscode.commands.executeCommand('adure-sfx-toolkit.refreshDefaultOrgStatusBar');
             vscode.commands.executeCommand('adure-sfx-toolkit.refreshLogs');
             vscode.commands.executeCommand('adure-sfx-toolkit.refreshTraces');
         } catch (e: any) {
