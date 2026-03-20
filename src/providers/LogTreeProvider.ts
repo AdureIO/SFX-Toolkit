@@ -9,6 +9,19 @@ import { getMaxLogFiles } from '../utils/constants';
 
 /** Regex to derive a short label from log body (e.g. trigger or class name). */
 const CODE_UNIT_STARTED = /\|CODE_UNIT_STARTED\|\[.*?\]\|.*?\|(.*)$/m;
+const LOG_PREVIEW_BYTES = 64 * 1024;
+
+function readFilePreview(fullPath: string, maxBytes: number): string {
+    const fd = fs.openSync(fullPath, 'r');
+    try {
+        const buffer = new Uint8Array(maxBytes);
+        const bytesRead = fs.readSync(fd, buffer, 0, maxBytes, 0);
+        if (bytesRead <= 0) return '';
+        return Buffer.from(buffer.subarray(0, bytesRead)).toString('utf8');
+    } finally {
+        fs.closeSync(fd);
+    }
+}
 
 /** Returns true if the log body indicates execution failure (exception/fatal). */
 function isLogFailure(body: string): boolean {
@@ -21,6 +34,8 @@ export class LogTreeProvider implements vscode.TreeDataProvider<LogItem> {
 
     /** Set by polling commands so the view can show polling state. */
     public isPolling = false;
+
+    private fetchInProgress = false;
 
     constructor() {}
 
@@ -38,6 +53,9 @@ export class LogTreeProvider implements vscode.TreeDataProvider<LogItem> {
      * Shows a progress notification (loading bar) while retrieving.
      */
     async fetchNewLogsFromOrg(): Promise<void> {
+        if (this.fetchInProgress) return;
+        this.fetchInProgress = true;
+        try {
         const logDir = getSalesforceLogDirectory();
         if (!logDir || !isSalesforceProject()) return;
         if (!fs.existsSync(logDir)) {
@@ -95,6 +113,9 @@ export class LogTreeProvider implements vscode.TreeDataProvider<LogItem> {
                 }
             }
         );
+        } finally {
+            this.fetchInProgress = false;
+        }
     }
 
     getTreeItem(element: LogItem): vscode.TreeItem {
@@ -141,11 +162,11 @@ export class LogTreeProvider implements vscode.TreeDataProvider<LogItem> {
             const items: LogItem[] = logFiles.map((f) => {
                 const logId = f.name.replace(/\.log$/i, '');
                 let label = logId;
-                let body = '';
+                let preview = '';
                 let tooltip = `File: ${f.name}\nSize: ${this.formatBytes(f.size)}\nModified: ${new Date(f.mtime).toLocaleString()}`;
                 try {
-                    body = fs.readFileSync(f.full, 'utf8');
-                    const match = body.match(CODE_UNIT_STARTED);
+                    preview = readFilePreview(f.full, LOG_PREVIEW_BYTES);
+                    const match = preview.match(CODE_UNIT_STARTED);
                     if (match && match[1]) {
                         label = match[1].trim();
                     }
@@ -167,10 +188,17 @@ export class LogTreeProvider implements vscode.TreeDataProvider<LogItem> {
                     tooltip
                 );
                 item.resourceUri = vscode.Uri.file(f.full);
-                const failed = body ? isLogFailure(body) : false;
-                item.iconPath = failed
-                    ? new vscode.ThemeIcon('circle-slash', new vscode.ThemeColor('testing.iconFailed'))
-                    : new vscode.ThemeIcon('check', new vscode.ThemeColor('testing.iconPassed'));
+
+                let failed = false;
+                if (preview) {
+                    failed = isLogFailure(preview);
+                }
+
+                if (failed) {
+                    item.iconPath = new vscode.ThemeIcon('circle-slash', new vscode.ThemeColor('testing.iconFailed'));
+                } else {
+                    item.iconPath = new vscode.ThemeIcon('check', new vscode.ThemeColor('testing.iconPassed'));
+                }
                 return item;
             });
 

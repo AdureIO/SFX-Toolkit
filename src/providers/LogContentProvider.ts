@@ -7,6 +7,7 @@ export type FilterType = 'DEBUG' | 'SOQL';
 export class LogContentProvider implements vscode.TextDocumentContentProvider {
     // Map uri string -> { original: string, activeFilters: Set<FilterType> }
     private logData = new Map<string, { original: string, activeFilters: Set<FilterType> }>();
+    private readonly maxCachedLogs = 10;
     
     // Emitter for content changes
     private _onDidChange = new vscode.EventEmitter<vscode.Uri>();
@@ -37,6 +38,7 @@ export class LogContentProvider implements vscode.TextDocumentContentProvider {
         const key = this.getKey(uri);
         Logger.info(`LogContentProvider: Setting content for ${key}`);
         this.logData.set(key, { original: content, activeFilters: new Set() });
+        this.evictIfNeeded();
         // Fire change if it existed
         this._onDidChange.fire(uri);
     }
@@ -46,6 +48,21 @@ export class LogContentProvider implements vscode.TextDocumentContentProvider {
         const key = this.getKey(uri);
         if (this.logData.delete(key)) {
             Logger.info(`LogContentProvider: Cleared content for ${key}`);
+        }
+    }
+
+    private evictIfNeeded(): void {
+        while (this.logData.size > this.maxCachedLogs) {
+            const oldestKey = this.logData.keys().next().value as string | undefined;
+            if (!oldestKey) return;
+
+            const oldestUri = vscode.Uri.parse(oldestKey);
+            const isOpen = vscode.workspace.textDocuments.some(
+                (doc) => doc.uri.toString() === oldestUri.toString()
+            );
+            if (isOpen) return;
+
+            this.logData.delete(oldestKey);
         }
     }
     
