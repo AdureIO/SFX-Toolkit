@@ -1,17 +1,20 @@
 name: Publish extension
 
-# Version for stores comes from the release tag (e.g. v0.8.0 → 0.8.0), not from package.json on the branch.
-# package.json is updated only inside the job before pack/publish; commit bumps on main separately if you want them in sync.
+# Manual only: bump semver (major/minor/patch) from package.json, publish to stores, then create a GitHub Release with VSIX + generated notes.
+# fetch-depth: 0 helps gh release --generate-notes compare against prior releases.
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
-      version:
-        description: "Semver to publish (e.g. 0.8.0). Leave empty to use package.json as-is."
-        required: false
-        type: string
+      bump:
+        description: "Semver bump applied to version in package.json before build/publish"
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
 
 concurrency:
   group: publish-vscode-extension
@@ -21,12 +24,14 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
     env:
       VSCE_PAT: ${{ secrets.VSCE_PAT }}
       OVSX_PAT: ${{ secrets.OVSX_PAT }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -36,19 +41,10 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Set version from release tag
-        if: github.event_name == 'release'
+      - name: Bump semver from package.json
         run: |
-          TAG="${{ github.event.release.tag_name }}"
-          VERSION="${TAG#v}"
-          echo "Using version $VERSION from tag $TAG"
-          npm pkg set "version=$VERSION"
-
-      - name: Set version from workflow input
-        if: github.event_name == 'workflow_dispatch' && inputs.version != ''
-        run: |
-          echo "Using version ${{ inputs.version }} from workflow input"
-          npm pkg set "version=${{ inputs.version }}"
+          echo "Bumping ${{ inputs.bump }} from $(node -p "require('./package.json').version")"
+          npm version "${{ inputs.bump }}" --no-git-tag-version
 
       - name: Show published semver
         run: node -p "require('./package.json').version"
@@ -73,3 +69,23 @@ jobs:
         with:
           name: extension-vsix
           path: extension.vsix
+
+      # Remove an existing release for this tag first so `gh release create` always runs; the git tag is unchanged.
+      - name: Create GitHub release with VSIX and generated notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./package.json').version")
+          TAG="v${VERSION}"
+          ASSET="sfx-toolkit-${VERSION}.vsix"
+          cp extension.vsix "$ASSET"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release delete "$TAG" --yes
+          fi
+
+          gh release create "$TAG" "$ASSET" \
+            --title "$TAG" \
+            --generate-notes \
+            --target "${{ github.sha }}"
