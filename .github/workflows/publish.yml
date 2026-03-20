@@ -1,12 +1,17 @@
 name: Publish extension
 
-# Publishes the .vsix from the ref that triggered the workflow (release tag or chosen branch).
-# Bump `version` in package.json before tagging / creating a release.
+# Version for stores comes from the release tag (e.g. v0.8.0 → 0.8.0), not from package.json on the branch.
+# package.json is updated only inside the job before pack/publish; commit bumps on main separately if you want them in sync.
 
 on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Semver to publish (e.g. 0.8.0). Leave empty to use package.json as-is."
+        required: false
+        type: string
 
 concurrency:
   group: publish-vscode-extension
@@ -30,6 +35,23 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Set version from release tag
+        if: github.event_name == 'release'
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          VERSION="${TAG#v}"
+          echo "Using version $VERSION from tag $TAG"
+          npm pkg set "version=$VERSION"
+
+      - name: Set version from workflow input
+        if: github.event_name == 'workflow_dispatch' && inputs.version != ''
+        run: |
+          echo "Using version ${{ inputs.version }} from workflow input"
+          npm pkg set "version=${{ inputs.version }}"
+
+      - name: Show published semver
+        run: node -p "require('./package.json').version"
 
       - name: Compile
         run: npm run compile
