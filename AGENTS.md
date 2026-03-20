@@ -17,7 +17,7 @@ This is a VS Code extension project (Adure SFX Toolkit) for Salesforce developme
 ### CI/CD (GitHub Actions)
 
 - **CI** (`.github/workflows/ci.yml`): on push/PR to `main` or `master` — `npm ci`, compile, lint. Tests are not run (see Gotchas).
-- **Publish** (`.github/workflows/publish.yml`): on **published** GitHub Releases or **workflow_dispatch** — packages with `@vscode/vsce`, publishes to the [Visual Studio Marketplace](https://marketplace.visualstudio.com/) and [Open VSX](https://open-vsx.org/), uploads `extension.vsix` as a workflow artifact.
+- **Publish** (`.github/workflows/publish.yml`): **workflow_dispatch only** — choose **bump** `patch` | `minor` | `major`; runs `npm version <bump> --no-git-tag-version` on the checked-out `package.json`, then packages with `@vscode/vsce`, publishes to the [Visual Studio Marketplace](https://marketplace.visualstudio.com/) and [Open VSX](https://open-vsx.org/), uploads `extension.vsix` as a workflow artifact, then **`gh release create`** for `v<version>` with `--generate-notes` and the VSIX (deleting an existing release for that tag first if needed). Bumps apply only on the runner — commit the new `package.json` / `package-lock.json` on `main` after a run if you want the repo to match stores. Checkout uses **full history** (`fetch-depth: 0`); the job needs **`contents: write`** for releases.
 
 Repository **Secrets** (Settings → Secrets and variables → Actions):
 
@@ -26,7 +26,7 @@ Repository **Secrets** (Settings → Secrets and variables → Actions):
 | `VSCE_PAT` | [Azure DevOps PAT](https://learn.microsoft.com/azure/devops/organizations/accounts/use-personal-access-tokens-to-authenticate) with **Marketplace (Manage)** scope, for the publisher in `package.json` (`AdureIO`). |
 | `OVSX_PAT` | Personal access token from [open-vsx.org](https://open-vsx.org/) user settings, for the same publisher namespace. |
 
-Before publishing: bump `version` in `package.json`, commit, tag (e.g. `v0.8.0`), push tag, then create/publish a GitHub Release from that tag (or run **Publish extension** manually after merging the version bump).
+**Typical publish:** ensure `main`’s `package.json` `version` matches what you last shipped, pick branch (usually `main`), run **Publish extension** with **bump** patch/minor/major, then commit the version bump on `main` if you want git in sync with the marketplace.
 
 ### Gotchas
 
