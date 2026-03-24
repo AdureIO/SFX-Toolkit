@@ -100,3 +100,17 @@ jobs:
             --title "$TAG" \
             --generate-notes \
             --target "${{ github.sha }}"
+
+      - name: Commit and Push version bump
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Get the new version for the commit message
+          NEW_VERSION=$(node -p "require('./package.json').version")
+
+          git add package.json package-lock.json
+          git commit -m "chore: bump version to $NEW_VERSION [skip ci]"
+          git push origin HEAD:${{ github.ref_name }}
