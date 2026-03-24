@@ -1,5 +1,8 @@
 # Adure SFX Toolkit
 
+![Visual Studio Marketplace Installs](https://img.shields.io/visual-studio-marketplace/i/adureio.sfx-toolkit?style=flat-square&label=VS%20Marketplace&color=blue)
+![Open VSX Installs](https://img.shields.io/open-vsx/dt/adureio/sfx-toolkit?style=flat-square&label=Open%20VSX&color=orange)
+
 Adure SFX Toolkit is an open-source VSCode extension designed to supercharge your Salesforce development workflow. It provides a comprehensive set of utilities for log management, debugging, org management, source tracking, and more.
 
 ## Features
