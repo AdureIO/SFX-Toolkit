@@ -41,10 +41,21 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Use github.event.inputs for workflow_dispatch (inputs.* can be empty on some runners).
+      # Compute next version explicitly so logs show current → next and semver rules are consistent.
       - name: Bump semver from package.json
+        env:
+          BUMP: ${{ github.event.inputs.bump }}
         run: |
-          echo "Bumping ${{ inputs.bump }} from $(node -p "require('./package.json').version")"
-          npm version "${{ inputs.bump }}" --no-git-tag-version
+          set -euo pipefail
+          CURRENT=$(node -p "require('./package.json').version")
+          if [ -z "${BUMP:-}" ]; then
+            echo "ERROR: bump input is empty (expected patch | minor | major)."
+            exit 1
+          fi
+          NEXT=$(npx --yes semver@7 "$CURRENT" -i "$BUMP")
+          echo "Bumping $BUMP: $CURRENT → $NEXT"
+          npm version "$NEXT" --no-git-tag-version
 
       - name: Show published semver
         run: node -p "require('./package.json').version"
