@@ -1,5 +1,8 @@
 import * as vscode from 'vscode';
+import * as fs from 'fs';
+import * as path from 'path';
 import { Logger } from '../utils/outputChannel';
+import { getSalesforceLogDirectory } from '../utils/logPaths';
 
 // Filter Modes
 export type FilterType = 'DEBUG' | 'SOQL';
@@ -17,9 +20,44 @@ export class LogContentProvider implements vscode.TextDocumentContentProvider {
         return uri.toString();
     }
 
+    private parseLogId(uri: vscode.Uri): string | undefined {
+        // Expected shape: sf-log://log/<logId>
+        if (uri.scheme !== 'sf-log') return undefined;
+        const authority = (uri.authority || '').toLowerCase();
+        const logId = uri.path.replace(/^\/+/, '');
+        if (authority !== 'log' || !logId) return undefined;
+        return logId;
+    }
+
+    private tryRehydrateContent(uri: vscode.Uri): boolean {
+        const key = this.getKey(uri);
+        const logId = this.parseLogId(uri);
+        if (!logId) return false;
+
+        const logDir = getSalesforceLogDirectory();
+        if (!logDir) return false;
+
+        const logPath = path.join(logDir, `${logId}.log`);
+        if (!fs.existsSync(logPath)) return false;
+
+        try {
+            const content = fs.readFileSync(logPath, 'utf-8');
+            this.logData.set(key, { original: content, activeFilters: new Set() });
+            this.evictIfNeeded();
+            Logger.info(`LogContentProvider: Rehydrated content for ${key} from ${logPath}`);
+            return true;
+        } catch (error) {
+            Logger.warn(`LogContentProvider: Failed to rehydrate content for ${key}: ${error}`);
+            return false;
+        }
+    }
+
     provideTextDocumentContent(uri: vscode.Uri): string {
         const key = this.getKey(uri);
-        const data = this.logData.get(key);
+        let data = this.logData.get(key);
+        if (!data && this.tryRehydrateContent(uri)) {
+            data = this.logData.get(key);
+        }
         if (!data) {
             Logger.warn(`LogContentProvider: No content found for ${key}`);
             return "Log content not found or cleared.";
@@ -68,7 +106,10 @@ export class LogContentProvider implements vscode.TextDocumentContentProvider {
     
     public toggleFilter(uri: vscode.Uri, type: FilterType) {
         const key = this.getKey(uri);
-        const data = this.logData.get(key);
+        let data = this.logData.get(key);
+        if (!data && this.tryRehydrateContent(uri)) {
+            data = this.logData.get(key);
+        }
         
         if (!data) {
             Logger.error(`LogContentProvider: Failed to toggle filter ${type} for ${key} - Content not found`);
