@@ -1,56 +1,62 @@
-import * as vscode from 'vscode';
-import { runCommandArgs } from '../utils/commandRunner';
-import { Logger } from '../utils/outputChannel';
+import * as vscode from "vscode";
+import { runCommandArgs } from "../utils/commandRunner";
+import { Logger } from "../utils/outputChannel";
 
 export class OrgHealthProvider {
-    public static async show(extensionUri: vscode.Uri) {
-        const panel = vscode.window.createWebviewPanel(
-            'adure-sfx-toolkit.orgHealth',
-            'Org Health Dashboard',
-            vscode.ViewColumn.One,
-            { enableScripts: true }
-        );
+  public static async show(extensionUri: vscode.Uri) {
+    const panel = vscode.window.createWebviewPanel(
+      "adure-sfx-toolkit.orgHealth",
+      "Org Health Dashboard",
+      vscode.ViewColumn.One,
+      { enableScripts: true }
+    );
 
-        panel.webview.html = OrgHealthProvider.getLoadingHtml();
+    panel.webview.html = OrgHealthProvider.getLoadingHtml();
 
-        try {
-            const limitsStr = await runCommandArgs('sf', ['limits', 'api', 'display', '--json']);
-            const limitsJson = JSON.parse(limitsStr);
-            const limits = limitsJson.result || [];
+    try {
+      const limitsStr = await runCommandArgs("sf", ["limits", "api", "display", "--json"]);
+      const limitsJson = JSON.parse(limitsStr);
+      const limits = limitsJson.result || [];
 
-            panel.webview.html = OrgHealthProvider.getHtml(limits);
-        } catch (e: any) {
-            Logger.error('Failed to fetch org limits', e);
-            panel.webview.html = OrgHealthProvider.getErrorHtml(e.message || 'Failed to fetch org limits');
-        }
+      panel.webview.html = OrgHealthProvider.getHtml(limits);
+    } catch (e: any) {
+      Logger.error("Failed to fetch org limits", e);
+      panel.webview.html = OrgHealthProvider.getErrorHtml(e.message || "Failed to fetch org limits");
     }
+  }
 
-    private static getLoadingHtml(): string {
-        return `<!DOCTYPE html><html><head>
+  private static getLoadingHtml(): string {
+    return `<!DOCTYPE html><html><head>
             <meta charset="UTF-8">
             <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
             <style>body { font-family: var(--vscode-font-family); padding: 40px; color: var(--vscode-foreground); background: var(--vscode-editor-background); text-align: center; }</style>
             </head><body><h2>Loading org limits...</h2><p>Fetching data from Salesforce...</p></body></html>`;
-    }
+  }
 
-    private static getErrorHtml(message: string): string {
-        return `<!DOCTYPE html><html><head>
+  private static getErrorHtml(message: string): string {
+    return `<!DOCTYPE html><html><head>
             <meta charset="UTF-8">
             <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
             <style>body { font-family: var(--vscode-font-family); padding: 40px; color: var(--vscode-foreground); background: var(--vscode-editor-background); }
             .error { color: var(--vscode-errorForeground); padding: 16px; background: var(--vscode-inputValidation-errorBackground); border: 1px solid var(--vscode-inputValidation-errorBorder); border-radius: 4px; }</style>
             </head><body><h2>Org Health Dashboard</h2><div class="error">${message}</div></body></html>`;
-    }
+  }
 
-    private static getHtml(limits: any[]): string {
-        const rows = limits.map((l: any) => {
-            const name = l.name || '';
-            const max = l.max ?? 0;
-            const remaining = l.remaining ?? 0;
-            const used = max - remaining;
-            const pct = max > 0 ? Math.round((used / max) * 100) : 0;
-            const color = pct >= 90 ? 'var(--vscode-errorForeground)' : pct >= 70 ? 'var(--vscode-editorWarning-foreground)' : 'var(--vscode-testing-iconPassed)';
-            return `<tr>
+  private static getHtml(limits: any[]): string {
+    const rows = limits
+      .map((l: any) => {
+        const name = l.name || "";
+        const max = l.max ?? 0;
+        const remaining = l.remaining ?? 0;
+        const used = max - remaining;
+        const pct = max > 0 ? Math.round((used / max) * 100) : 0;
+        const color =
+          pct >= 90
+            ? "var(--vscode-errorForeground)"
+            : pct >= 70
+              ? "var(--vscode-editorWarning-foreground)"
+              : "var(--vscode-testing-iconPassed)";
+        return `<tr>
                 <td>${name}</td>
                 <td>${used.toLocaleString()} / ${max.toLocaleString()}</td>
                 <td>${remaining.toLocaleString()}</td>
@@ -59,9 +65,10 @@ export class OrgHealthProvider {
                     <span style="color: ${color}; font-weight: 600;">${pct}%</span>
                 </td>
             </tr>`;
-        }).join('');
+      })
+      .join("");
 
-        return `<!DOCTYPE html><html><head>
+    return `<!DOCTYPE html><html><head>
             <meta charset="UTF-8">
             <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
             <style>
@@ -93,5 +100,5 @@ export class OrgHealthProvider {
                 }
             </script>
         </body></html>`;
-    }
+  }
 }

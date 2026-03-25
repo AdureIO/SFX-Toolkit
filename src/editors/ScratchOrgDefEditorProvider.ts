@@ -1,126 +1,116 @@
-import * as vscode from 'vscode';
-import { ScratchOrgDefinition, validateDefinition, ALL_FEATURES } from './scratchOrgDefSchema';
-import * as scratchOrgDefSchema from './scratchOrgDefSchema';
+import * as vscode from "vscode";
+import { ScratchOrgDefinition, validateDefinition, ALL_FEATURES } from "./scratchOrgDefSchema";
+import * as scratchOrgDefSchema from "./scratchOrgDefSchema";
 
 /**
  * Provider for Scratch Org Definition file editor
  */
 export class ScratchOrgDefEditorProvider implements vscode.CustomTextEditorProvider {
-    
-    public static register(context: vscode.ExtensionContext): vscode.Disposable {
-        const provider = new ScratchOrgDefEditorProvider(context);
-        const providerRegistration = vscode.window.registerCustomEditorProvider(
-            'adure-sfx-toolkit.scratchOrgDefEditor',
-            provider
-        );
-        return providerRegistration;
+  public static register(context: vscode.ExtensionContext): vscode.Disposable {
+    const provider = new ScratchOrgDefEditorProvider(context);
+    const providerRegistration = vscode.window.registerCustomEditorProvider(
+      "adure-sfx-toolkit.scratchOrgDefEditor",
+      provider
+    );
+    return providerRegistration;
+  }
+
+  constructor(private readonly context: vscode.ExtensionContext) {}
+
+  /**
+   * Called when custom editor is opened
+   */
+  public async resolveCustomTextEditor(
+    document: vscode.TextDocument,
+    webviewPanel: vscode.WebviewPanel,
+    _token: vscode.CancellationToken
+  ): Promise<void> {
+    // Setup webview options
+    webviewPanel.webview.options = {
+      enableScripts: true
+    };
+
+    // Set webview HTML content
+    webviewPanel.webview.html = this.getHtmlForWebview(webviewPanel.webview);
+
+    // Parse current document
+    let currentDef: ScratchOrgDefinition = {};
+    try {
+      const text = document.getText();
+      if (text.trim()) {
+        currentDef = JSON.parse(text);
+      }
+    } catch (e) {
+      vscode.window.showErrorMessage("Failed to parse scratch org definition file");
     }
 
-    constructor(
-        private readonly context: vscode.ExtensionContext
-    ) { }
+    // Send initial data to webview
+    webviewPanel.webview.postMessage({
+      type: "init",
+      data: currentDef
+    });
 
-    /**
-     * Called when custom editor is opened
-     */
-    public async resolveCustomTextEditor(
-        document: vscode.TextDocument,
-        webviewPanel: vscode.WebviewPanel,
-        _token: vscode.CancellationToken
-    ): Promise<void> {
-        
-        // Setup webview options
-        webviewPanel.webview.options = {
-            enableScripts: true,
-        };
+    // Handle messages from webview
+    const messageListener = webviewPanel.webview.onDidReceiveMessage((message) => {
+      switch (message.type) {
+        case "update":
+          this.updateDocument(document, message.data);
+          break;
+        case "validate":
+          const errors = validateDefinition(message.data);
+          webviewPanel.webview.postMessage({
+            type: "validationResult",
+            errors
+          });
+          break;
+        case "openTextEditor":
+          // Open text editor alongside the custom editor (don't dispose)
+          vscode.commands.executeCommand("vscode.openWith", document.uri, "default");
+          break;
+      }
+    });
 
-        // Set webview HTML content
-        webviewPanel.webview.html = this.getHtmlForWebview(webviewPanel.webview);
-
-        // Parse current document
-        let currentDef: ScratchOrgDefinition = {};
+    // Update webview when document changes externally
+    const changeDocumentSubscription = vscode.workspace.onDidChangeTextDocument((e) => {
+      if (e.document.uri.toString() === document.uri.toString()) {
         try {
-            const text = document.getText();
-            if (text.trim()) {
-                currentDef = JSON.parse(text);
-            }
-        } catch (e) {
-            vscode.window.showErrorMessage('Failed to parse scratch org definition file');
+          const newDef = JSON.parse(e.document.getText());
+          webviewPanel.webview.postMessage({
+            type: "update",
+            data: newDef
+          });
+        } catch (err) {
+          // Ignore parse errors during editing
         }
+      }
+    });
 
-        // Send initial data to webview
-        webviewPanel.webview.postMessage({
-            type: 'init',
-            data: currentDef
-        });
+    webviewPanel.onDidDispose(() => {
+      messageListener.dispose();
+      changeDocumentSubscription.dispose();
+    });
+  }
 
-        // Handle messages from webview
-        const messageListener = webviewPanel.webview.onDidReceiveMessage(
-            message => {
-                switch (message.type) {
-                    case 'update':
-                        this.updateDocument(document, message.data);
-                        break;
-                    case 'validate':
-                        const errors = validateDefinition(message.data);
-                        webviewPanel.webview.postMessage({
-                            type: 'validationResult',
-                            errors
-                        });
-                        break;
-                    case 'openTextEditor':
-                        // Open text editor alongside the custom editor (don't dispose)
-                        vscode.commands.executeCommand('vscode.openWith', document.uri, 'default');
-                        break;
-                }
-            }
-        );
+  /**
+   * Update the document with new definition
+   */
+  private updateDocument(document: vscode.TextDocument, newData: ScratchOrgDefinition) {
+    const edit = new vscode.WorkspaceEdit();
 
-        // Update webview when document changes externally
-        const changeDocumentSubscription = vscode.workspace.onDidChangeTextDocument(e => {
-            if (e.document.uri.toString() === document.uri.toString()) {
-                try {
-                    const newDef = JSON.parse(e.document.getText());
-                    webviewPanel.webview.postMessage({
-                        type: 'update',
-                        data: newDef
-                    });
-                } catch (err) {
-                    // Ignore parse errors during editing
-                }
-            }
-        });
+    // Format JSON with 2-space indentation
+    const json = JSON.stringify(newData, null, 2);
 
-        webviewPanel.onDidDispose(() => {
-            messageListener.dispose();
-            changeDocumentSubscription.dispose();
-        });
-    }
+    // Replace entire document
+    edit.replace(document.uri, new vscode.Range(0, 0, document.lineCount, 0), json);
 
-    /**
-     * Update the document with new definition
-     */
-    private updateDocument(document: vscode.TextDocument, newData: ScratchOrgDefinition) {
-        const edit = new vscode.WorkspaceEdit();
-        
-        // Format JSON with 2-space indentation
-        const json = JSON.stringify(newData, null, 2);
-        
-        // Replace entire document
-        edit.replace(
-            document.uri,
-            new vscode.Range(0, 0, document.lineCount, 0),
-            json
-        );
+    return vscode.workspace.applyEdit(edit);
+  }
 
-        return vscode.workspace.applyEdit(edit);
-    }
-
-    /**
-     * Generate HTML for webview
-     */
-    private getHtmlForWebview(webview: vscode.Webview): string {
-        return `<!DOCTYPE html>
+  /**
+   * Generate HTML for webview
+   */
+  private getHtmlForWebview(webview: vscode.Webview): string {
+    return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -734,5 +724,5 @@ export class ScratchOrgDefEditorProvider implements vscode.CustomTextEditorProvi
     </script>
 </body>
 </html>`;
-    }
+  }
 }

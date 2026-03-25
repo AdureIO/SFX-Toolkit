@@ -1,190 +1,198 @@
-import * as vscode from 'vscode';
-import * as path from 'path';
-import * as fs from 'fs';
-import { executeAnonymousApex, getAnonymousApexOrgList } from '../commands/executeAnonymous';
-import { isSalesforceProject } from '../utils/projectUtils';
+import * as vscode from "vscode";
+import * as path from "path";
+import * as fs from "fs";
+import { executeAnonymousApex, getAnonymousApexOrgList } from "../commands/executeAnonymous";
+import { isSalesforceProject } from "../utils/projectUtils";
 
-const BUFFER_RELATIVE_PATH = '.vscode/anon-apex-buffer.apex';
-const ASFX_DIR = '.sfdx/asfx';
-const APEX_LAST_FILE = 'apex-last.txt';
-const APEX_HISTORY_FILE = 'apex-history.json';
+const BUFFER_RELATIVE_PATH = ".vscode/anon-apex-buffer.apex";
+const ASFX_DIR = ".sfdx/asfx";
+const APEX_LAST_FILE = "apex-last.txt";
+const APEX_HISTORY_FILE = "apex-history.json";
 const APEX_HISTORY_MAX = 10;
 
 export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
-	private _view?: vscode.WebviewView;
-	private _messageListener?: vscode.Disposable;
+  private _view?: vscode.WebviewView;
+  private _messageListener?: vscode.Disposable;
 
-	constructor(private readonly _extensionUri: vscode.Uri) {}
+  constructor(private readonly _extensionUri: vscode.Uri) {}
 
-	private getBufferUri(): vscode.Uri | undefined {
-		const root = vscode.workspace.workspaceFolders?.[0]?.uri;
-		if (!root) return undefined;
-		return vscode.Uri.joinPath(root, BUFFER_RELATIVE_PATH);
-	}
+  private getBufferUri(): vscode.Uri | undefined {
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri;
+    if (!root) return undefined;
+    return vscode.Uri.joinPath(root, BUFFER_RELATIVE_PATH);
+  }
 
-	private async readBuffer(): Promise<string> {
-		const uri = this.getBufferUri();
-		if (!uri) return '';
-		try {
-			const bytes = await vscode.workspace.fs.readFile(uri);
-			return new TextDecoder().decode(bytes);
-		} catch {
-			return '';
-		}
-	}
+  private async readBuffer(): Promise<string> {
+    const uri = this.getBufferUri();
+    if (!uri) return "";
+    try {
+      const bytes = await vscode.workspace.fs.readFile(uri);
+      return new TextDecoder().decode(bytes);
+    } catch {
+      return "";
+    }
+  }
 
-	private async writeBuffer(content: string): Promise<void> {
-		const uri = this.getBufferUri();
-		if (!uri) return;
-		try {
-			const dir = vscode.Uri.joinPath(uri, '..');
-			await vscode.workspace.fs.createDirectory(dir);
-			await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(content));
-		} catch (e) {
-			// best-effort persist
-		}
-	}
+  private async writeBuffer(content: string): Promise<void> {
+    const uri = this.getBufferUri();
+    if (!uri) return;
+    try {
+      const dir = vscode.Uri.joinPath(uri, "..");
+      await vscode.workspace.fs.createDirectory(dir);
+      await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(content));
+    } catch (e) {
+      // best-effort persist
+    }
+  }
 
-	private getApexStorageDir(): string | null {
-		const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-		if (!root) return null;
-		return path.join(root, ASFX_DIR);
-	}
+  private getApexStorageDir(): string | null {
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!root) return null;
+    return path.join(root, ASFX_DIR);
+  }
 
-	private async loadApexState(): Promise<{ lastCode: string; history: string[] }> {
-		let lastCode = '';
-		const history: string[] = [];
-		const dir = this.getApexStorageDir();
-		if (dir) {
-			try {
-				const lastPath = path.join(dir, APEX_LAST_FILE);
-				if (fs.existsSync(lastPath)) lastCode = fs.readFileSync(lastPath, 'utf8');
-			} catch {
-				// ignore
-			}
-			try {
-				const histPath = path.join(dir, APEX_HISTORY_FILE);
-				if (fs.existsSync(histPath)) {
-					const raw = fs.readFileSync(histPath, 'utf8');
-					const parsed = JSON.parse(raw);
-					if (Array.isArray(parsed)) history.push(...parsed);
-				}
-			} catch {
-				// ignore
-			}
-		}
-		if (!lastCode.trim()) {
-			lastCode = await this.readBuffer();
-		}
-		return { lastCode, history };
-	}
+  private async loadApexState(): Promise<{ lastCode: string; history: string[] }> {
+    let lastCode = "";
+    const history: string[] = [];
+    const dir = this.getApexStorageDir();
+    if (dir) {
+      try {
+        const lastPath = path.join(dir, APEX_LAST_FILE);
+        if (fs.existsSync(lastPath)) lastCode = fs.readFileSync(lastPath, "utf8");
+      } catch {
+        // ignore
+      }
+      try {
+        const histPath = path.join(dir, APEX_HISTORY_FILE);
+        if (fs.existsSync(histPath)) {
+          const raw = fs.readFileSync(histPath, "utf8");
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) history.push(...parsed);
+        }
+      } catch {
+        // ignore
+      }
+    }
+    if (!lastCode.trim()) {
+      lastCode = await this.readBuffer();
+    }
+    return { lastCode, history };
+  }
 
-	private async saveApexOnExecute(code: string): Promise<string[]> {
-		const dir = this.getApexStorageDir();
-		if (!dir) return [];
-		try {
-			if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-			const lastPath = path.join(dir, APEX_LAST_FILE);
-			fs.writeFileSync(lastPath, code, 'utf8');
-			let history: string[] = [];
-			const histPath = path.join(dir, APEX_HISTORY_FILE);
-			if (fs.existsSync(histPath)) {
-				try {
-					const raw = fs.readFileSync(histPath, 'utf8');
-					history = Array.isArray(JSON.parse(raw)) ? JSON.parse(raw) : [];
-				} catch {
-					// ignore
-				}
-			}
-			const trimmed = code.trim();
-			if (trimmed) {
-				history = [trimmed, ...history.filter((q) => q.trim() !== trimmed)].slice(0, APEX_HISTORY_MAX);
-				fs.writeFileSync(histPath, JSON.stringify(history, null, 0), 'utf8');
-			}
-			return history;
-		} catch {
-			return [];
-		}
-	}
+  private async saveApexOnExecute(code: string): Promise<string[]> {
+    const dir = this.getApexStorageDir();
+    if (!dir) return [];
+    try {
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      const lastPath = path.join(dir, APEX_LAST_FILE);
+      fs.writeFileSync(lastPath, code, "utf8");
+      let history: string[] = [];
+      const histPath = path.join(dir, APEX_HISTORY_FILE);
+      if (fs.existsSync(histPath)) {
+        try {
+          const raw = fs.readFileSync(histPath, "utf8");
+          history = Array.isArray(JSON.parse(raw)) ? JSON.parse(raw) : [];
+        } catch {
+          // ignore
+        }
+      }
+      const trimmed = code.trim();
+      if (trimmed) {
+        history = [trimmed, ...history.filter((q) => q.trim() !== trimmed)].slice(0, APEX_HISTORY_MAX);
+        fs.writeFileSync(histPath, JSON.stringify(history, null, 0), "utf8");
+      }
+      return history;
+    } catch {
+      return [];
+    }
+  }
 
-	private _showErrorInPanel(webviewView: vscode.WebviewView, message: string): void {
-		if (webviewView?.webview) {
-			webviewView.webview.postMessage({ type: 'showError', message });
-		}
-	}
+  private _showErrorInPanel(webviewView: vscode.WebviewView, message: string): void {
+    if (webviewView?.webview) {
+      webviewView.webview.postMessage({ type: "showError", message });
+    }
+  }
 
-	public async resolveWebviewView(
-		webviewView: vscode.WebviewView,
-		_context: vscode.WebviewViewResolveContext,
-		_token: vscode.CancellationToken
-	): Promise<void> {
-		this._view = webviewView;
+  public async resolveWebviewView(
+    webviewView: vscode.WebviewView,
+    _context: vscode.WebviewViewResolveContext,
+    _token: vscode.CancellationToken
+  ): Promise<void> {
+    this._view = webviewView;
 
-		webviewView.webview.options = {
-			enableScripts: true,
-			localResourceRoots: [this._extensionUri],
-		};
+    webviewView.webview.options = {
+      enableScripts: true,
+      localResourceRoots: [this._extensionUri]
+    };
 
-		const { lastCode, history } = await this.loadApexState();
-		webviewView.webview.html = this._getHtmlForWebview(webviewView.webview, lastCode, history);
+    const { lastCode, history } = await this.loadApexState();
+    webviewView.webview.html = this._getHtmlForWebview(webviewView.webview, lastCode, history);
 
-		if (this._messageListener) {
-			this._messageListener.dispose();
-		}
-		this._messageListener = webviewView.webview.onDidReceiveMessage(async (data: { type: string; code?: string; targetOrg?: string }) => {
-			if (data.type === 'getOrgs') {
-				const orgs = await getAnonymousApexOrgList();
-				webviewView.webview.postMessage({ type: 'orgList', orgs });
-			} else if (data.type === 'execute' && typeof data.code === 'string') {
-				if (!isSalesforceProject()) {
-					this._showErrorInPanel(webviewView, 'Open an SFDX project (folder containing sfdx-project.json) to use this feature.');
-					return;
-				}
-				await this.writeBuffer(data.code);
-				try {
-					const result = await executeAnonymousApex(data.code, {
-						fromPanel: true,
-						targetOrg: data.targetOrg || undefined
-					});
-					if (result.success) {
-						this._showErrorInPanel(webviewView, '');
-						const newHistory = await this.saveApexOnExecute(data.code);
-						webviewView.webview.postMessage({ type: 'historyUpdated', history: newHistory });
-					} else {
-						this._showErrorInPanel(webviewView, result.errorMessage);
-					}
-				} catch (e: any) {
-					const message = e?.message || e?.stderr || String(e);
-					this._showErrorInPanel(webviewView, message);
-				}
-			} else if (data.type === 'openInEditor') {
-				const bufferUri = this.getBufferUri();
-				if (bufferUri) {
-					await this.writeBuffer(data.code || (await this.readBuffer()));
-					try {
-						const doc = await vscode.workspace.openTextDocument(bufferUri);
-						await vscode.window.showTextDocument(doc, { preview: false });
-					} catch {
-						await vscode.commands.executeCommand('vscode.open', bufferUri);
-					}
-				}
-			} else if (data.type === 'contentChanged' && typeof data.code === 'string') {
-				await this.writeBuffer(data.code);
-			}
-		});
+    if (this._messageListener) {
+      this._messageListener.dispose();
+    }
+    this._messageListener = webviewView.webview.onDidReceiveMessage(
+      async (data: { type: string; code?: string; targetOrg?: string }) => {
+        if (data.type === "getOrgs") {
+          const orgs = await getAnonymousApexOrgList();
+          webviewView.webview.postMessage({ type: "orgList", orgs });
+        } else if (data.type === "execute" && typeof data.code === "string") {
+          if (!isSalesforceProject()) {
+            this._showErrorInPanel(
+              webviewView,
+              "Open an SFDX project (folder containing sfdx-project.json) to use this feature."
+            );
+            return;
+          }
+          await this.writeBuffer(data.code);
+          try {
+            const result = await executeAnonymousApex(data.code, {
+              fromPanel: true,
+              targetOrg: data.targetOrg || undefined
+            });
+            if (result.success) {
+              this._showErrorInPanel(webviewView, "");
+              const newHistory = await this.saveApexOnExecute(data.code);
+              webviewView.webview.postMessage({ type: "historyUpdated", history: newHistory });
+            } else {
+              this._showErrorInPanel(webviewView, result.errorMessage);
+            }
+          } catch (e: any) {
+            const message = e?.message || e?.stderr || String(e);
+            this._showErrorInPanel(webviewView, message);
+          }
+        } else if (data.type === "openInEditor") {
+          const bufferUri = this.getBufferUri();
+          if (bufferUri) {
+            await this.writeBuffer(data.code || (await this.readBuffer()));
+            try {
+              const doc = await vscode.workspace.openTextDocument(bufferUri);
+              await vscode.window.showTextDocument(doc, { preview: false });
+            } catch {
+              await vscode.commands.executeCommand("vscode.open", bufferUri);
+            }
+          }
+        } else if (data.type === "contentChanged" && typeof data.code === "string") {
+          await this.writeBuffer(data.code);
+        }
+      }
+    );
 
-		webviewView.onDidDispose(() => {
-			if (this._messageListener) {
-				this._messageListener.dispose();
-				this._messageListener = undefined;
-			}
-		});
-	}
+    webviewView.onDidDispose(() => {
+      if (this._messageListener) {
+        this._messageListener.dispose();
+        this._messageListener = undefined;
+      }
+    });
+  }
 
-	private _getHtmlForWebview(webview: vscode.Webview, initialContent: string = '', history: string[] = []): string {
-		const initialData = JSON.stringify({ lastCode: initialContent || '', history: Array.isArray(history) ? history : [] });
-		const initialDataEscaped = initialData.replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
-		return `<!DOCTYPE html>
+  private _getHtmlForWebview(webview: vscode.Webview, initialContent: string = "", history: string[] = []): string {
+    const initialData = JSON.stringify({
+      lastCode: initialContent || "",
+      history: Array.isArray(history) ? history : []
+    });
+    const initialDataEscaped = initialData.replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
+    return `<!DOCTYPE html>
 <html lang="en">
 <head>
 	<meta charset="UTF-8">
@@ -531,5 +539,5 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 	</script>
 </body>
 </html>`;
-	}
+  }
 }
