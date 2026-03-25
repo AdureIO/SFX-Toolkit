@@ -22,6 +22,10 @@ Adure SFX Toolkit is an open-source VSCode extension designed to supercharge you
   - **Quick Trace**: One-click setup of a debug trace for the current user.
   - View, manage, and delete existing trace flags.
 
+![Sidebar with logs, traces, orgs and tools](docs/screenshots/sidebar.png)
+![Log filtering for debug and SOQL/DML](docs/screenshots/filter-logs.png)
+![Create debug trace flow](docs/screenshots/create-trace.png)
+
 ### ⚡ Apex & SOQL
 
 - **Execute Anonymous**: Run Apex code directly from the editor (`.apex` files or selections). Output runs in the **Execute Apex** bottom panel for fast feedback and history.
@@ -33,6 +37,10 @@ Adure SFX Toolkit is an open-source VSCode extension designed to supercharge you
   - **Smart Save**: Commit changes back to Salesforce (`sf data update record`) with automatic quote escaping and error handling.
   - **Discard Changes**: Easily revert unsaved edits.
 - **Apex CodeLens**: Run specific test methods or entire test classes directly from your Apex code.
+- **Apex Snippets**: Save, organize, run, edit, and delete reusable Apex snippets from the dedicated sidebar view and overview panel.
+
+![SOQL builder and results table](docs/screenshots/soql-builder.png)
+![Apex snippets panel](docs/screenshots/apex-snippets.png)
 
 ### ☁️ Org Management
 
@@ -56,16 +64,28 @@ Adure SFX Toolkit is an open-source VSCode extension designed to supercharge you
   - **Pull Source**: Retrieve changes from the org.
   - **Deploy/Retrieve**: Contextual commands to deploy or retrieve the currently open file.
   - **Reset Source Tracking**: Quickly reset tracking for the default org (`sf project reset tracking`).
-- **Deploy Classes** (`ASFXT: Deploy Classes`): Production-style deployment with full control. Select classes to deploy, then choose test option: run all tests, run specified tests (pick test classes), validate only (dry-run), or no test run. You can cancel at any step, or save a **preset** (classes + test option) for repeat deployments.
+- **Flexible Metadata Deploy Flow** (`ASFXT: Deploy Metadata`): Production-style deployment with full control. Select metadata paths/files, choose test option (run all tests, run relevant tests, run specified tests, validate only, or no test run), and optionally save a **preset** for repeat deployments.
 - **Test Runner**: Run local tests with ease.
+- **Ignore Helpers**: Add files/folders to `.gitignore` or `.forceignore` directly from explorer context actions.
 - **Custom Editors**:
   - **Permission Set Editor**: A dedicated, user-friendly UI for editing Permission Sets (`.permissionset-meta.xml`).
   - **Scratch Org Definition Editor**: specialized UI for editing `project-scratch-def.json` files.
+
+![Deploy metadata flow](docs/screenshots/deploy-metadata.png)
 
 ### ⚙️ System & Setup
 
 - **Project Validation**: Automatically checks for `sfdx-project.json` to ensure you are working in a valid Salesforce project.
 - **Output Logging**: detailed logs are available in the "Adure SFX Toolkit" output channel. Logs are suppressed by default during deployments to keep the view clean, opening only on errors.
+- **Configurable Settings**:
+  - Polling interval, maximum fetched logs, quick trace defaults, API version, parallel delete count, test timeout, auto-save before push, and HTTP timeout.
+
+## Keyboard Shortcuts
+
+- `Cmd+Enter` / `Ctrl+Enter`: Execute anonymous Apex (when editing `.apex`).
+- `Cmd+D` / `Ctrl+D`: Toggle debug-focused log filter (when viewing logs).
+- `Alt+L`: LWC navigate to sibling picker.
+- `Alt+1` / `Alt+2` / `Alt+3` / `Alt+4`: Jump directly to LWC JS / HTML / Meta / CSS file.
 
 ## Open Source
 
