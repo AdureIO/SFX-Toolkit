@@ -55,7 +55,11 @@ export async function executeSOQL() {
         Logger.error("SOQL query failed", e);
         outputChannel.show();
         vscode.window
-          .showErrorMessage('SOQL query failed. Check "Adure SFX Toolkit" output for details.', "View Log")
+          .showErrorMessage(
+            'SOQL query failed. Check "Adure SFX Toolkit" output for details.',
+            { detail: message },
+            "View Log"
+          )
           .then((choice) => {
             if (choice === "View Log") {
               outputChannel.show();
