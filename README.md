@@ -107,9 +107,9 @@ Only the trailing `\n` / `\r\n` characters at the very end of the file are remov
 {
   "adure-sfx-toolkit.removeFinalNewline.enabled": true,
   "adure-sfx-toolkit.removeFinalNewline.patterns": [
-    "force-app/main/Polca/components/lwc/**/*.js",
-    "force-app/main/Polca/components/lwc/**/*.html",
-    "force-app/main/Polca/components/lwc/**/*.css"
+    "force-app/**/*.js",
+    "force-app/**/*.html",
+    "force-app/**/*.css"
   ]
 }
 ```
