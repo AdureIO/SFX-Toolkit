@@ -80,6 +80,42 @@ Adure SFX Toolkit is an open-source VSCode extension designed to supercharge you
 - **Configurable Settings**:
   - Polling interval, maximum fetched logs, quick trace defaults, API version, parallel delete count, test timeout, auto-save before push, and HTTP timeout.
 
+### 🧹 Remove Final Newline on Save
+
+Prettier always writes a final end-of-file newline for JS/CSS/HTML, and there is no Prettier core option to opt out. This setting lets you strip that trailing newline for specific files without touching the rest of the document. It runs as a post-format/save step (via `onWillSaveTextDocument`), so it executes after Prettier's `editor.formatOnSave` and just before VS Code writes to disk.
+
+The feature is **opt-in** and entirely workspace-driven. A document is only modified when:
+
+- `adure-sfx-toolkit.removeFinalNewline.enabled` is `true`, **and**
+- the document's language id is in `adure-sfx-toolkit.removeFinalNewline.languages`, **and**
+- its workspace-relative path matches at least one glob in `adure-sfx-toolkit.removeFinalNewline.patterns`.
+
+Only the trailing `\n` / `\r\n` characters at the very end of the file are removed; interior content (including blank lines) is left untouched. The operation is idempotent.
+
+#### Settings
+
+| Setting | Default | Description |
+| --- | --- | --- |
+| `adure-sfx-toolkit.removeFinalNewline.enabled` | `false` | Master switch for the feature. |
+| `adure-sfx-toolkit.removeFinalNewline.patterns` | `[]` | Workspace-relative globs (forward-slash). At least one must match for the strip to run. |
+| `adure-sfx-toolkit.removeFinalNewline.languages` | `["javascript", "javascriptreact", "html", "css"]` | Language ids eligible for stripping. |
+| `adure-sfx-toolkit.removeFinalNewline.runOnSave` | `true` | Run automatically as part of the save lifecycle. |
+
+#### Sample workspace configuration
+
+```json
+{
+  "adure-sfx-toolkit.removeFinalNewline.enabled": true,
+  "adure-sfx-toolkit.removeFinalNewline.patterns": [
+    "force-app/main/Polca/components/lwc/**/*.js",
+    "force-app/main/Polca/components/lwc/**/*.html",
+    "force-app/main/Polca/components/lwc/**/*.css"
+  ]
+}
+```
+
+Each applied strip emits a single `INFO` line to the **Adure SFX Toolkit** output channel for traceability.
+
 ## Keyboard Shortcuts
 
 - `Cmd+Enter` / `Ctrl+Enter`: Execute anonymous Apex (when editing `.apex`).
