@@ -1,6 +1,7 @@
 .vscode/**
 .vscode-test/**
 src/**
+out/test/**
 .gitignore
 .git/**
 tsconfig.json
@@ -11,5 +12,3 @@ settings.md
 features.md
 functions.md
 *.vsix
-
-
