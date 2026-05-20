@@ -1,6 +1,102 @@
 import { runCommand } from "./commandRunner";
+import { readTargetOrgFromSfdxConfig } from "./sfdxConfig";
 
 export type OrgOption = { label: string; username: string };
+
+/** Org metadata from `sf org list` for safety checks (production vs sandbox). */
+export type OrgRecord = {
+  username: string;
+  alias?: string;
+  isSandbox: boolean;
+  isDevHub: boolean;
+  isScratch: boolean;
+  isDefault: boolean;
+};
+
+let cachedRecords: OrgRecord[] = [];
+
+/** Session hint after set-as-default (until sfdx-config.json is read on next resolve). */
+let knownTargetOrgUsername: string | null = null;
+
+export function getKnownTargetOrgUsername(): string | null {
+  return knownTargetOrgUsername;
+}
+
+export function setKnownTargetOrg(username: string | null): void {
+  knownTargetOrgUsername = username?.trim() || null;
+}
+
+/** Username marked default in cached `sf org list` (may be stale — lowest-priority sync fallback). */
+export function getDefaultUsernameFromOrgCache(): string | null {
+  return cachedRecords.find((o) => o.isDefault)?.username ?? null;
+}
+
+function syncKnownTargetFromSfdxConfig(): void {
+  const fromFile = readTargetOrgFromSfdxConfig();
+  if (fromFile) {
+    knownTargetOrgUsername = fromFile;
+  }
+}
+
+export function getOrgByTarget(targetOrg?: string | null): OrgRecord | null {
+  const key = targetOrg?.trim();
+  if (!key) {
+    return cachedRecords.find((o) => o.isDefault) ?? null;
+  }
+  const lower = key.toLowerCase();
+  return (
+    cachedRecords.find((o) => o.username.toLowerCase() === lower || (o.alias && o.alias.toLowerCase() === lower)) ??
+    null
+  );
+}
+
+/** Current default target org from Salesforce CLI (not the cached isDefault flag). */
+export async function getTargetOrgUsernameFromCli(): Promise<string | null> {
+  try {
+    const result = await runCommand("sf config get target-org --json", undefined, undefined, true);
+    const parsed = JSON.parse(result);
+    const value = parsed.result?.value;
+    return typeof value === "string" && value.trim() ? value.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+function recordsFromSfListResult(result: {
+  nonScratchOrgs?: {
+    alias?: string;
+    username: string;
+    isDefaultUsername?: boolean;
+    isSandbox?: boolean;
+    isDevHub?: boolean;
+  }[];
+  scratchOrgs?: { alias?: string; username: string; isDefaultUsername?: boolean; isSandbox?: boolean }[];
+}): OrgRecord[] {
+  const records: OrgRecord[] = [];
+  for (const o of result.scratchOrgs ?? []) {
+    if (!o.username) continue;
+    records.push({
+      username: o.username,
+      alias: o.alias,
+      isSandbox: !!o.isSandbox,
+      isDevHub: false,
+      isScratch: true,
+      isDefault: !!o.isDefaultUsername
+    });
+  }
+  for (const o of result.nonScratchOrgs ?? []) {
+    if (!o.username) continue;
+    records.push({
+      username: o.username,
+      alias: o.alias,
+      isSandbox: !!o.isSandbox,
+      isDevHub: !!o.isDevHub,
+      isScratch: false,
+      isDefault: !!o.isDefaultUsername
+    });
+  }
+  return records;
+}
 
 /** Parse `sf org list --json` result into picker options (default org first). */
 export function orgOptionsFromSfListResult(result: {
@@ -48,10 +144,13 @@ export function setOrgListCacheFromSfResult(
     return;
   }
   cached = orgOptionsFromSfListResult(result);
+  cachedRecords = recordsFromSfListResult(result);
+  syncKnownTargetFromSfdxConfig();
 }
 
 export function invalidateOrgListCache(): void {
   cached = null;
+  cachedRecords = [];
 }
 
 async function fetchOrgList(): Promise<OrgOption[]> {
@@ -63,6 +162,8 @@ async function fetchOrgList(): Promise<OrgOption[]> {
   }
   const orgs = orgOptionsFromSfListResult(parsed.result);
   cached = orgs;
+  cachedRecords = recordsFromSfListResult(parsed.result);
+  syncKnownTargetFromSfdxConfig();
   return orgs;
 }
 

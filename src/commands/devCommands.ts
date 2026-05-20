@@ -7,7 +7,8 @@ import { AuthInfo } from "../utils/authInfo";
 import { OrgMetadataCache } from "../utils/orgMetadataCache";
 import { getAutoSaveBeforePush, getTestRunTimeout } from "../utils/constants";
 import { DEPLOY_TIMEOUT_MS } from "./deployMetadata";
-import { getDefaultOrg } from "../utils/defaultOrg";
+import { getDefaultOrg, getDefaultOrgSync } from "../utils/defaultOrg";
+import { confirmProductionOrgOperation } from "../utils/orgSafety";
 
 // Helper to strip ANSI and progress lines
 export function cleanDeployOutput(output: string): string {
@@ -111,10 +112,9 @@ function getDeployedCount(output: string): number {
 // Helper to reuse push logic
 async function pushSourceHelper(force: boolean) {
   const title = force ? "Force Push" : "Push";
-  const defaultOrg = await getDefaultOrg();
+  const defaultOrg = getDefaultOrgSync() ?? (await getDefaultOrg());
   const titleWithOrg = defaultOrg ? `${title} to ${defaultOrg.displayName}` : title;
 
-  // Ensure active file is saved before pushing
   if (getAutoSaveBeforePush()) {
     await vscode.workspace.saveAll(false);
   } else {
@@ -144,6 +144,9 @@ async function pushSourceHelper(force: boolean) {
       },
       async (progress, token) => {
         try {
+          if (!(await confirmProductionOrgOperation("push source to"))) {
+            return;
+          }
           // 1. Detect sfdx-project.json
           const workspaceFolders = vscode.workspace.workspaceFolders;
           if (!workspaceFolders) {
@@ -441,15 +444,20 @@ export async function deployCurrentFile() {
   await editor.document.save(); // Save the current file before deploying
 
   const filePath = editor.document.uri.fsPath;
+  const defaultOrg = getDefaultOrgSync() ?? (await getDefaultOrg());
+  const deployTitle = defaultOrg ? `Deploy file to ${defaultOrg.displayName}` : "Deploying current file...";
 
   await vscode.window.withProgress(
     {
       location: vscode.ProgressLocation.Notification,
-      title: "Deploying current file...",
+      title: deployTitle,
       cancellable: true
     },
     async (_progress, token) => {
       try {
+        if (!(await confirmProductionOrgOperation("deploy metadata to"))) {
+          return;
+        }
         const result = await runCommand(
           `sf project deploy start -d ${escapeShellArg(filePath)}`,
           undefined,

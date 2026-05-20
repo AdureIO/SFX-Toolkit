@@ -805,6 +805,11 @@
           "maximum": 120000,
           "description": "HTTP request timeout in milliseconds."
         },
+        "adure-sfx-toolkit.warnOnProductionOrg": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a confirmation dialog before deploying metadata, pushing source, or executing Apex against a non-sandbox org (production, Developer Edition, or Dev Hub)."
+        },
         "adure-sfx-toolkit.removeFinalNewline.enabled": {
           "type": "boolean",
           "default": false,

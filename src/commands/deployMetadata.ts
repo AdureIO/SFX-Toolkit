@@ -4,6 +4,7 @@ import * as path from "path";
 import * as fs from "fs";
 import { loadPresets, addPreset, type DeployPreset, type DeployTypeKey } from "../utils/deployPresets";
 import { escapeShellArg, runCommand } from "../utils/commandRunner";
+import { confirmProductionOrgOperation } from "../utils/orgSafety";
 
 export const DEPLOY_TYPE_RUN_ALL = "Run All Tests";
 export const DEPLOY_TYPE_RUN_RELEVANT = "Run Relevant Tests";
@@ -90,14 +91,18 @@ export function parseDeployIdFromJson(stdout: string): string | null {
   }
 }
 
-export function runDeploy(
+export async function runDeploy(
   sourcePaths: string[],
   testLevel: string,
   testFlags: string,
   dryRun: boolean,
   workspaceRoot: string,
   targetOrg?: string
-): void {
+): Promise<void> {
+  const action = dryRun ? "validate a deployment against" : "deploy metadata to";
+  if (!(await confirmProductionOrgOperation(action, targetOrg))) {
+    return;
+  }
   const cmd = buildDeployCommand(sourcePaths, testLevel, testFlags, dryRun, workspaceRoot, targetOrg);
   const terminal = vscode.window.createTerminal("Salesforce Deploy");
   terminal.show();
@@ -187,6 +192,12 @@ export async function runDeployAsync(
   cancellationToken: vscode.CancellationToken,
   onProgress?: (message: string) => void
 ): Promise<string> {
+  const action = dryRun ? "validate a deployment against" : "deploy metadata to";
+  if (!(await confirmProductionOrgOperation(action, targetOrg))) {
+    const err = new Error("Deploy cancelled.");
+    (err as { cancelled?: boolean }).cancelled = true;
+    throw err;
+  }
   const cmd = buildDeployCommand(sourcePaths, testLevel, testFlags, dryRun, workspaceRoot, targetOrg);
   const onOutput = onProgress ? createDeployProgressHandler(onProgress) : undefined;
   return runCommand(cmd, workspaceRoot, onOutput, true, cancellationToken, DEPLOY_TIMEOUT_MS);
@@ -523,7 +534,7 @@ export async function deployMetadata() {
     );
     if (runChoice === undefined || runChoice.label === "Cancel") return;
     const absPaths = filterPathsToPackageDirs(workspaceRoot, resolveSourcePaths(sourcePaths, workspaceRoot));
-    runDeploy(absPaths, testLevel, testFlags, dryRun, workspaceRoot);
+    await runDeploy(absPaths, testLevel, testFlags, dryRun, workspaceRoot);
     return;
   }
 
@@ -779,5 +790,5 @@ export async function deployMetadata() {
     if (runNow === undefined || runNow.label === "No") return;
   }
 
-  runDeploy(absPaths, testLevel, testFlags, dryRun, workspaceRoot);
+  await runDeploy(absPaths, testLevel, testFlags, dryRun, workspaceRoot);
 }

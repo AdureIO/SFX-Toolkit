@@ -3,6 +3,7 @@ import { runCommand } from "../utils/commandRunner";
 import { OrgItem, orgTreeProvider } from "../providers/OrgTreeProvider";
 import { AuthInfo } from "../utils/authInfo";
 import { Logger } from "../utils/outputChannel";
+import { invalidateOrgListCache, refreshOrgListCache, setKnownTargetOrg } from "../utils/orgListCache";
 
 export async function openOrg(item: OrgItem) {
   if (!item.orgData || !item.orgData.username) return;
@@ -37,9 +38,11 @@ export async function setAsDefault(item: OrgItem) {
       try {
         await runCommand(`sf config set target-org=${item.orgData.username}`, undefined, undefined, true, token);
         AuthInfo.clearCache();
+        setKnownTargetOrg(item.orgData.username);
+        invalidateOrgListCache();
+        void refreshOrgListCache();
         vscode.window.showInformationMessage(`Set ${item.label} as default org.`);
         orgTreeProvider.refresh();
-        vscode.commands.executeCommand("adure-sfx-toolkit.refreshDefaultOrgStatusBar");
         vscode.commands.executeCommand("adure-sfx-toolkit.refreshLogs");
         vscode.commands.executeCommand("adure-sfx-toolkit.refreshTraces");
       } catch (e: any) {

@@ -43,7 +43,6 @@ export class OrgItem extends vscode.TreeItem {
 
       if (orgData.isDefaultDevHubUsername) {
         desc += " · Default Hub";
-        displayLabel = `☆ ${displayLabel}`;
       }
       if (orgData.isDefaultUsername) {
         desc += " · Default Org";

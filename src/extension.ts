@@ -68,7 +68,6 @@ import { isSalesforceProject, updateSalesforceProjectContext, NOT_SFDX_PROJECT_M
 import { OrgMetadataCache } from "./utils/orgMetadataCache";
 import { getSalesforceLogDirectory } from "./utils/logPaths";
 import { getDeployDiagnosticCollection } from "./utils/deployDiagnostics";
-import { getDefaultOrg } from "./utils/defaultOrg";
 import { warmOrgListCache } from "./utils/orgListCache";
 import { registerRemoveFinalNewlineHook } from "./utils/removeFinalNewlineHook";
 
@@ -470,41 +469,13 @@ export function activate(context: vscode.ExtensionContext) {
       else snippetQuickRunStatusBarItem.hide();
     };
 
-    const defaultOrgStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 90);
-    defaultOrgStatusBarItem.command = "adure-sfx-toolkit.refreshDefaultOrgStatusBar";
-    context.subscriptions.push(defaultOrgStatusBarItem);
-    const updateDefaultOrgStatusBar = async () => {
-      if (!isSalesforceProject()) {
-        defaultOrgStatusBarItem.hide();
-        return;
-      }
-      const defaultOrg = await getDefaultOrg();
-      if (defaultOrg) {
-        defaultOrgStatusBarItem.text = `$(account) SF: ${defaultOrg.displayName}`;
-        defaultOrgStatusBarItem.tooltip = `Default org: ${defaultOrg.username}\nClick to refresh`;
-        defaultOrgStatusBarItem.show();
-      } else {
-        defaultOrgStatusBarItem.text = "$(account) SF: No default org";
-        defaultOrgStatusBarItem.tooltip = "Set a default org in the Orgs view. Click to refresh.";
-        defaultOrgStatusBarItem.show();
-      }
-    };
-    const refreshDefaultOrgStatusBarCmd = vscode.commands.registerCommand(
-      "adure-sfx-toolkit.refreshDefaultOrgStatusBar",
-      () => {
-        updateDefaultOrgStatusBar();
-      }
-    );
-    context.subscriptions.push(refreshDefaultOrgStatusBarCmd);
     context.subscriptions.push(
       vscode.workspace.onDidChangeWorkspaceFolders(() => {
         updateSalesforceProjectContext();
         updateSnippetStatusBar();
-        updateDefaultOrgStatusBar();
       })
     );
     updateSnippetStatusBar();
-    updateDefaultOrgStatusBar();
 
     // 17. Add to Ignore
     let addToGitignoreCmd = register("adure-sfx-toolkit.addToGitignore", (uri?: vscode.Uri) => addToGitignore(uri));

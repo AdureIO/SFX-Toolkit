@@ -15,6 +15,7 @@ import {
   DEPLOY_TYPE_NO_TESTS,
   type DeployTreePackageNode
 } from "../commands/deployMetadata";
+import { confirmProductionOrgOperation } from "../utils/orgSafety";
 import { loadPresets, addPreset, type DeployPreset, type DeployTypeKey } from "../utils/deployPresets";
 import { getAnonymousApexOrgList } from "../commands/executeAnonymous";
 import { runCommand } from "../utils/commandRunner";
@@ -314,6 +315,10 @@ export class DeployMetadataPanelProvider {
         }
         if (msg.command !== "deploy" || !msg.sourcePaths || !msg.testLevel) return;
         const dryRun = msg.dryRun === true;
+        const prodAction = dryRun ? "validate a deployment against" : "deploy metadata to";
+        if (!(await confirmProductionOrgOperation(prodAction, msg.targetOrg || undefined))) {
+          return;
+        }
         let testLevel = msg.testLevel;
         let testFlags = "";
         if (

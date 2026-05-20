@@ -4,6 +4,7 @@ import * as path from "path";
 import * as os from "os";
 import { runCommand } from "../utils/commandRunner";
 import { getOrgListForPicker, refreshOrgListCache, warmOrgListCache, type OrgOption } from "../utils/orgListCache";
+import { confirmProductionOrgOperation } from "../utils/orgSafety";
 
 export type { OrgOption };
 import { openLogById } from "./listLogs";
@@ -42,12 +43,18 @@ export async function executeAnonymous() {
   }
 
   lastAnonymousContent = text;
+  if (!(await confirmProductionOrgOperation("execute anonymous Apex against"))) {
+    return;
+  }
   await executeContent(text);
 }
 
 export async function rerunLastApex() {
   if (!lastAnonymousContent) {
     vscode.window.showInformationMessage("No previous Apex execution found to rerun.");
+    return;
+  }
+  if (!(await confirmProductionOrgOperation("execute anonymous Apex against"))) {
     return;
   }
   await executeContent(lastAnonymousContent);
@@ -80,6 +87,13 @@ export async function executeAnonymousApex(
     return { success: false, errorMessage: msg };
   }
   lastAnonymousContent = code;
+  if (!(await confirmProductionOrgOperation("execute anonymous Apex against", options?.targetOrg))) {
+    const msg = "Execution cancelled.";
+    if (!options?.fromPanel) {
+      vscode.window.showInformationMessage(msg);
+    }
+    return { success: false, errorMessage: msg };
+  }
   try {
     await executeContent(code, options?.fromPanel === true, options?.targetOrg);
     return { success: true };
