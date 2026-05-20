@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { executeAnonymousApex, getAnonymousApexOrgList } from '../commands/executeAnonymous';
 import { isSalesforceProject } from '../utils/projectUtils';
+import { ApexCompletionProvider } from './ApexCompletionProvider';
 
 const BUFFER_RELATIVE_PATH = '.vscode/anon-apex-buffer.apex';
 const ASFX_DIR = '.sfdx/asfx';
@@ -131,10 +132,22 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 		if (this._messageListener) {
 			this._messageListener.dispose();
 		}
-		this._messageListener = webviewView.webview.onDidReceiveMessage(async (data: { type: string; code?: string; targetOrg?: string }) => {
+		this._messageListener = webviewView.webview.onDidReceiveMessage(async (data: { type: string; code?: string; targetOrg?: string; textUpToCursor?: string; surroundingText?: string }) => {
 			if (data.type === 'getOrgs') {
 				const orgs = await getAnonymousApexOrgList();
 				webviewView.webview.postMessage({ type: 'orgList', orgs });
+			} else if (data.type === 'getCompletions') {
+				try {
+					const org = (data.targetOrg && data.targetOrg.trim()) ? data.targetOrg.trim() : null;
+					const items = await ApexCompletionProvider.getItems(
+						data.textUpToCursor || '',
+						data.surroundingText || '',
+						org
+					);
+					webviewView.webview.postMessage({ type: 'completionResult', items });
+				} catch {
+					webviewView.webview.postMessage({ type: 'completionResult', items: [] });
+				}
 			} else if (data.type === 'execute' && typeof data.code === 'string') {
 				if (!isSalesforceProject()) {
 					this._showErrorInPanel(webviewView, 'Open an SFDX project (folder containing sfdx-project.json) to use this feature.');
@@ -315,6 +328,37 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 		}
 		button.secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
 		.shortcut-hint { font-size: 10px; opacity: 0.6; margin-left: 4px; }
+		#completion-dropdown {
+			position: absolute;
+			z-index: 200;
+			background: var(--vscode-editorSuggestWidget-background, var(--vscode-editor-background));
+			border: 1px solid var(--vscode-editorSuggestWidget-border, var(--vscode-editorGroup-border));
+			border-radius: 3px;
+			box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+			max-height: 210px;
+			overflow-y: auto;
+			min-width: 220px;
+			max-width: 420px;
+			display: none;
+		}
+		#completion-dropdown.visible { display: block; }
+		.ci {
+			padding: 3px 10px;
+			cursor: pointer;
+			font-size: 12px;
+			font-family: var(--vscode-editor-font-family, monospace);
+			display: flex;
+			align-items: baseline;
+			gap: 6px;
+			white-space: nowrap;
+		}
+		.ci.sel, .ci:hover {
+			background: var(--vscode-list-activeSelectionBackground);
+			color: var(--vscode-list-activeSelectionForeground);
+		}
+		.ci-kind { font-size: 10px; opacity: 0.55; min-width: 22px; }
+		.ci-label { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+		.ci-detail { font-size: 10px; opacity: 0.55; overflow: hidden; text-overflow: ellipsis; max-width: 160px; }
 	</style>
 </head>
 <body>
@@ -335,6 +379,7 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 	<div class="editor-wrap">
 		<div id="highlight-layer" aria-hidden="true"></div>
 		<textarea id="apex-editor" placeholder="System.debug('Hello');&#10;Integer i = 1 + 1;" spellcheck="false"></textarea>
+		<div id="completion-dropdown"></div>
 	</div>
 	<div id="error-box" class="" role="alert"></div>
 	<div class="actions">
@@ -437,7 +482,6 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 			highlightLayer.scrollTop = editor.scrollTop;
 			highlightLayer.scrollLeft = editor.scrollLeft;
 		});
-		editor.addEventListener('input', () => { syncHighlight(); });
 		setTimeout(syncHighlight, 0);
 		if (initialEl && initialEl.textContent) {
 			try {
@@ -478,7 +522,115 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 				orgSelect.innerHTML = orgs.length ? orgs.map(o => '<option value="' + (o.username || '').replace(/"/g, '&quot;') + '">' + (o.label || o.username || '').replace(/</g, '&lt;') + '</option>').join('') : '<option value="">No orgs</option>';
 			}
 			if (e.data.type === 'historyUpdated') setHistoryDropdown(e.data.history || []);
+			if (e.data.type === 'completionResult') renderDropdown(e.data.items || []);
 		});
+
+		// ─── Completion dropdown ──────────────────────────────────────────────
+		const dropdown = document.getElementById('completion-dropdown');
+		let _completionItems = [];
+		let _selIdx = -1;
+
+		const KIND_LABEL = { 0:'txt', 1:'mtd', 4:'fld', 5:'var', 6:'cls', 13:'kwd' };
+
+		function getCaretCoords() {
+			const mirror = document.createElement('div');
+			const cs = window.getComputedStyle(editor);
+			['fontFamily','fontSize','fontWeight','lineHeight','letterSpacing',
+			 'paddingTop','paddingRight','paddingBottom','paddingLeft',
+			 'borderTopWidth','borderRightWidth','borderBottomWidth','borderLeftWidth',
+			 'boxSizing','whiteSpace','wordWrap','width'].forEach(p => { mirror.style[p] = cs[p]; });
+			mirror.style.cssText += ';position:absolute;visibility:hidden;height:auto;overflow:hidden;';
+			mirror.style.whiteSpace = 'pre-wrap';
+			mirror.style.wordWrap = 'break-word';
+			const textBefore = editor.value.substring(0, editor.selectionStart);
+			mirror.textContent = textBefore;
+			const span = document.createElement('span');
+			span.textContent = '\\u200b';
+			mirror.appendChild(span);
+			editor.parentElement.appendChild(mirror);
+			const sr = span.getBoundingClientRect();
+			const er = editor.getBoundingClientRect();
+			editor.parentElement.removeChild(mirror);
+			return { x: sr.left - er.left + editor.scrollLeft, y: sr.bottom - er.top + editor.scrollTop };
+		}
+
+		function renderDropdown(items) {
+			_completionItems = items;
+			_selIdx = items.length > 0 ? 0 : -1;
+			if (items.length === 0) { hideDropdown(); return; }
+			dropdown.innerHTML = '';
+			items.slice(0, 60).forEach((item, i) => {
+				const el = document.createElement('div');
+				el.className = 'ci' + (i === 0 ? ' sel' : '');
+				el.dataset.i = String(i);
+				const k = document.createElement('span'); k.className = 'ci-kind'; k.textContent = KIND_LABEL[item.kind] || '·';
+				const l = document.createElement('span'); l.className = 'ci-label'; l.textContent = item.label;
+				el.appendChild(k); el.appendChild(l);
+				if (item.detail) { const d = document.createElement('span'); d.className = 'ci-detail'; d.textContent = item.detail; el.appendChild(d); }
+				el.addEventListener('mousedown', ev => { ev.preventDefault(); applyCompletion(i); });
+				dropdown.appendChild(el);
+			});
+			const coords = getCaretCoords();
+			const dropH = 214;
+			let top = coords.y + 2;
+			if (top + dropH > editor.offsetHeight) top = coords.y - dropH - 2;
+			dropdown.style.left = Math.min(coords.x, Math.max(0, editor.offsetWidth - 240)) + 'px';
+			dropdown.style.top = Math.max(0, top) + 'px';
+			dropdown.classList.add('visible');
+		}
+
+		function hideDropdown() {
+			dropdown.classList.remove('visible');
+			_completionItems = [];
+			_selIdx = -1;
+		}
+
+		function moveSelection(delta) {
+			if (_completionItems.length === 0) return;
+			_selIdx = (_selIdx + delta + _completionItems.length) % _completionItems.length;
+			dropdown.querySelectorAll('.ci').forEach((el, i) => el.classList.toggle('sel', i === _selIdx));
+			const sel = dropdown.querySelector('.ci.sel');
+			if (sel) sel.scrollIntoView({ block: 'nearest' });
+		}
+
+		function applyCompletion(idx) {
+			if (idx < 0 || idx >= _completionItems.length) return;
+			const insertText = _completionItems[idx].insertText || _completionItems[idx].label;
+			const pos = editor.selectionStart;
+			const text = editor.value;
+			let wordStart = pos;
+			while (wordStart > 0 && /\\w/.test(text[wordStart - 1])) wordStart--;
+			editor.value = text.substring(0, wordStart) + insertText + text.substring(pos);
+			editor.selectionStart = editor.selectionEnd = wordStart + insertText.length;
+			editor.focus();
+			syncHighlight();
+			scheduleSave();
+			hideDropdown();
+		}
+
+		function requestCompletions(autoTrigger) {
+			const pos = editor.selectionStart;
+			const text = editor.value;
+			const lineStart = text.lastIndexOf('\\n', pos - 1) + 1;
+			const textUpToCursor = text.substring(lineStart, pos);
+			if (autoTrigger && !textUpToCursor.endsWith('.')) {
+				const m = textUpToCursor.match(/(\\w+)$/);
+				if (!m || m[1].length < 2) { hideDropdown(); return; }
+			}
+			const lines = text.split('\\n');
+			const curLine = text.substring(0, pos).split('\\n').length - 1;
+			const s = Math.max(0, curLine - 4), en = Math.min(lines.length - 1, curLine + 4);
+			const surroundingText = lines.slice(s, en + 1).join('\\n');
+			vscode.postMessage({ type: 'getCompletions', textUpToCursor, surroundingText, targetOrg: orgSelect.value || undefined });
+		}
+
+		// Close dropdown when clicking outside
+		document.addEventListener('mousedown', e => { if (!dropdown.contains(e.target) && e.target !== editor) hideDropdown(); });
+		let _hlRaf;
+		function scheduleHighlight() {
+			if (_hlRaf) cancelAnimationFrame(_hlRaf);
+			_hlRaf = requestAnimationFrame(() => { _hlRaf = null; syncHighlight(); });
+		}
 		let saveTimeout = null;
 		function scheduleSave() {
 			if (saveTimeout) clearTimeout(saveTimeout);
@@ -491,7 +643,7 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 			errorBox.textContent = msg || '';
 			errorBox.classList.toggle('visible', !!msg);
 		}
-		editor.addEventListener('input', () => { scheduleSave(); syncHighlight(); });
+		editor.addEventListener('input', () => { scheduleSave(); scheduleHighlight(); });
 
 		function doExecute() {
 			showError('');
@@ -502,11 +654,28 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 		document.getElementById('execute-btn').onclick = doExecute;
 
 		editor.addEventListener('keydown', (e) => {
+			// Completion dropdown navigation
+			if (dropdown.classList.contains('visible')) {
+				if (e.key === 'ArrowDown') { e.preventDefault(); moveSelection(1); return; }
+				if (e.key === 'ArrowUp')   { e.preventDefault(); moveSelection(-1); return; }
+				if (e.key === 'Escape')    { e.preventDefault(); hideDropdown(); return; }
+				if (e.key === 'Enter' || e.key === 'Tab') {
+					e.preventDefault();
+					applyCompletion(_selIdx);
+					return;
+				}
+			}
 			if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
 				e.preventDefault();
 				doExecute();
+				return;
 			}
-			if (e.key === 'Tab') {
+			if ((e.ctrlKey || e.metaKey) && e.key === ' ') {
+				e.preventDefault();
+				requestCompletions(false);
+				return;
+			}
+			if (e.key === 'Tab' && !dropdown.classList.contains('visible')) {
 				e.preventDefault();
 				const start = editor.selectionStart;
 				const end = editor.selectionEnd;
@@ -514,6 +683,17 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 				editor.selectionStart = editor.selectionEnd = start + 4;
 				syncHighlight();
 				scheduleSave();
+			}
+		});
+
+		editor.addEventListener('input', () => {
+			// Auto-trigger on dot or when continuing to type a word
+			const pos = editor.selectionStart;
+			const ch = editor.value[pos - 1];
+			if (ch === '.') {
+				requestCompletions(false);
+			} else {
+				requestCompletions(true);
 			}
 		});
 

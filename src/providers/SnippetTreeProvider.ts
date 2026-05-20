@@ -16,8 +16,8 @@ export class SnippetItem extends vscode.TreeItem {
         this.iconPath = new vscode.ThemeIcon(index >= 0 ? 'code' : 'info');
         if (index >= 0) {
             this.command = {
-                command: 'adure-sfx-toolkit.runSnippet',
-                title: 'Run Snippet',
+                command: 'adure-sfx-toolkit.editSnippet',
+                title: 'Open Snippet',
                 arguments: [snippet],
             };
         }

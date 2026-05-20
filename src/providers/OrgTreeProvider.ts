@@ -36,20 +36,25 @@ export class OrgItem extends vscode.TreeItem {
 
             // Description: Username + Status
             let desc = orgData.username;
+            let displayLabel = label;
+
             if (orgData.isDefaultDevHubUsername) {
-                desc += ' (Default Hub)';
+                desc += ' · Default Hub';
+                displayLabel = `● ${displayLabel}`;
             }
             if (orgData.isDefaultUsername) {
-                desc += ' (Default Org)';
-                // Make label bold?
-                this.label = `● ${label}`;
-                this.description = desc;
-            } else {
-                 this.description = desc;
+                desc += ' · Default Org';
+                displayLabel = `● ${displayLabel}`;
             }
 
-            // Toolkit for tooltip
-            this.tooltip = `Username: ${orgData.username}\nOrgId: ${orgData.orgId}\nStatus: ${orgData.status || 'Connected'}\nType: ${typeStr}`;
+            this.label = displayLabel;
+            this.description = desc;
+
+            // Tooltip
+            let tooltip = `Username: ${orgData.username}\nOrgId: ${orgData.orgId}\nStatus: ${orgData.status || 'Connected'}\nType: ${typeStr}`;
+            if (orgData.isDefaultDevHubUsername) tooltip += '\n★ Default Dev Hub';
+            if (orgData.isDefaultUsername) tooltip += '\n● Default Org';
+            this.tooltip = tooltip;
             if (isScratch && orgData.expirationDate) {
                 const expDate = new Date(orgData.expirationDate);
                 const daysLeft = Math.ceil((expDate.getTime() - Date.now()) / (1000 * 60 * 60 * 24));

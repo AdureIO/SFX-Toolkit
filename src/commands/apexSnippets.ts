@@ -184,6 +184,40 @@ export async function editSnippetFile(): Promise<void> {
     }
 }
 
+/** Run a specific snippet from the tree sidebar — shows an org selector first. */
+export async function runSnippetFromTree(snippet: ApexSnippet): Promise<void> {
+    const orgs = await getAnonymousApexOrgList();
+
+    let targetOrg: string | undefined;
+    if (orgs.length === 0) {
+        const action = await vscode.window.showWarningMessage(
+            'Could not load org list. Run against the default org?',
+            'Run',
+            'Cancel'
+        );
+        if (action !== 'Run') return;
+    } else {
+        type OrgPick = vscode.QuickPickItem & { username: string };
+        const items: OrgPick[] = orgs.map((o) => ({ label: o.label, username: o.username }));
+        const picked = await vscode.window.showQuickPick(items, {
+            placeHolder: `Select target org for "${snippet.name}"`,
+        });
+        if (!picked) return;
+        // If user picked the default org option, leave targetOrg undefined (no -o flag)
+        targetOrg = picked.label.endsWith('(default)') ? undefined : picked.username;
+    }
+
+    let codeToRun = snippet.code;
+    const filePath = getSnippetFilePath(snippet.name || '');
+    if (filePath && fs.existsSync(filePath)) {
+        try { codeToRun = fs.readFileSync(filePath, 'utf8'); } catch { }
+    }
+    const result = await executeAnonymousApex(codeToRun, { fromPanel: false, targetOrg });
+    if (!result.success) {
+        Logger.error(`Snippet "${snippet.name || 'unnamed'}" failed`);
+    }
+}
+
 export async function runSnippet(snippet?: ApexSnippet | { code?: string; name?: string }): Promise<void> {
     if (!snippet || !snippet.code) {
         const snippets = await loadSnippets();

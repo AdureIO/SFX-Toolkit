@@ -153,7 +153,7 @@
       {
         "command": "adure-sfx-toolkit.setAsDefaultDevHub",
         "title": "ASFXT: Set as Default Dev Hub",
-        "icon": "$(hub)"
+        "icon": "$(star-full)"
       },
       {
         "command": "adure-sfx-toolkit.copyUsername",
@@ -809,7 +809,8 @@
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src --ext ts",
-    "test": "node ./out/test/runTest.js"
+    "test": "node ./out/test/runTest.js",
+    "package": "vsce package"
   },
   "devDependencies": {
     "@types/glob": "^8.1.0",

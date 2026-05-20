@@ -26,6 +26,7 @@ import {
 } from "./commands/orgCommands";
 import { orgTreeProvider } from "./providers/OrgTreeProvider";
 import { ApexCodeLensProvider } from "./providers/ApexCodeLensProvider";
+import { ApexCompletionProvider } from "./providers/ApexCompletionProvider";
 import { DevActionsProvider } from "./providers/DevActionsProvider";
 import {
   pushSource,
@@ -186,6 +187,20 @@ export function activate(context: vscode.ExtensionContext) {
           { pattern: "**/*.apex", scheme: "file" }
         ],
         new ApexCodeLensProvider()
+      )
+    );
+
+    // Apex completion — covers .apex files, .cls files, and any editor with language "apex"
+    context.subscriptions.push(
+      vscode.languages.registerCompletionItemProvider(
+        [
+          { language: "apex",              scheme: "file" },
+          { pattern: "**/*.apex",          scheme: "file" },
+          { pattern: "**/*.cls",           scheme: "file" },
+          { pattern: "**/*.trigger",       scheme: "file" },
+        ],
+        new ApexCompletionProvider(),
+        "."   // also fires on dot for member completion
       )
     );
 

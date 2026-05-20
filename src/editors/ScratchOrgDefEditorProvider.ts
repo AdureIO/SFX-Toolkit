@@ -2,92 +2,64 @@ import * as vscode from 'vscode';
 import { ScratchOrgDefinition, validateDefinition, ALL_FEATURES } from './scratchOrgDefSchema';
 import * as scratchOrgDefSchema from './scratchOrgDefSchema';
 
-/**
- * Provider for Scratch Org Definition file editor
- */
 export class ScratchOrgDefEditorProvider implements vscode.CustomTextEditorProvider {
-    
+
+    private _isApplyingEdit = false;
+
     public static register(context: vscode.ExtensionContext): vscode.Disposable {
         const provider = new ScratchOrgDefEditorProvider(context);
-        const providerRegistration = vscode.window.registerCustomEditorProvider(
+        return vscode.window.registerCustomEditorProvider(
             'adure-sfx-toolkit.scratchOrgDefEditor',
-            provider
+            provider,
+            { webviewOptions: { retainContextWhenHidden: true } }
         );
-        return providerRegistration;
     }
 
-    constructor(
-        private readonly context: vscode.ExtensionContext
-    ) { }
+    constructor(private readonly context: vscode.ExtensionContext) {}
 
-    /**
-     * Called when custom editor is opened
-     */
     public async resolveCustomTextEditor(
         document: vscode.TextDocument,
         webviewPanel: vscode.WebviewPanel,
         _token: vscode.CancellationToken
     ): Promise<void> {
-        
-        // Setup webview options
-        webviewPanel.webview.options = {
-            enableScripts: true,
-        };
 
-        // Set webview HTML content
-        webviewPanel.webview.html = this.getHtmlForWebview(webviewPanel.webview);
+        webviewPanel.webview.options = { enableScripts: true };
 
-        // Parse current document
         let currentDef: ScratchOrgDefinition = {};
         try {
             const text = document.getText();
-            if (text.trim()) {
-                currentDef = JSON.parse(text);
-            }
+            if (text.trim()) currentDef = JSON.parse(text);
         } catch (e) {
             vscode.window.showErrorMessage('Failed to parse scratch org definition file');
         }
 
-        // Send initial data to webview
-        webviewPanel.webview.postMessage({
-            type: 'init',
-            data: currentDef
+        // Initial data is embedded in the HTML itself — no postMessage timing issues
+        webviewPanel.webview.html = this.getHtmlForWebview(currentDef);
+
+        const messageListener = webviewPanel.webview.onDidReceiveMessage(message => {
+            switch (message.type) {
+                case 'update':
+                    this.updateDocument(document, message.data);
+                    break;
+                case 'validate':
+                    const errors = validateDefinition(message.data);
+                    webviewPanel.webview.postMessage({ type: 'validationResult', errors });
+                    break;
+                case 'openTextEditor':
+                    vscode.commands.executeCommand('vscode.openWith', document.uri, 'default');
+                    break;
+            }
         });
 
-        // Handle messages from webview
-        const messageListener = webviewPanel.webview.onDidReceiveMessage(
-            message => {
-                switch (message.type) {
-                    case 'update':
-                        this.updateDocument(document, message.data);
-                        break;
-                    case 'validate':
-                        const errors = validateDefinition(message.data);
-                        webviewPanel.webview.postMessage({
-                            type: 'validationResult',
-                            errors
-                        });
-                        break;
-                    case 'openTextEditor':
-                        // Open text editor alongside the custom editor (don't dispose)
-                        vscode.commands.executeCommand('vscode.openWith', document.uri, 'default');
-                        break;
-                }
-            }
-        );
-
-        // Update webview when document changes externally
+        // Reflect external edits (e.g. from text editor) — skip changes we caused ourselves
         const changeDocumentSubscription = vscode.workspace.onDidChangeTextDocument(e => {
-            if (e.document.uri.toString() === document.uri.toString()) {
-                try {
-                    const newDef = JSON.parse(e.document.getText());
-                    webviewPanel.webview.postMessage({
-                        type: 'update',
-                        data: newDef
-                    });
-                } catch (err) {
-                    // Ignore parse errors during editing
-                }
+            if (this._isApplyingEdit) return;
+            if (e.document.uri.toString() !== document.uri.toString()) return;
+            try {
+                const newDef = JSON.parse(e.document.getText());
+                webviewPanel.webview.postMessage({ type: 'update', data: newDef });
+            } catch {
+                // ignore mid-edit parse errors
             }
         });
 
@@ -97,29 +69,26 @@ export class ScratchOrgDefEditorProvider implements vscode.CustomTextEditorProvi
         });
     }
 
-    /**
-     * Update the document with new definition
-     */
-    private updateDocument(document: vscode.TextDocument, newData: ScratchOrgDefinition) {
+    private async updateDocument(document: vscode.TextDocument, newData: ScratchOrgDefinition): Promise<void> {
         const edit = new vscode.WorkspaceEdit();
-        
-        // Format JSON with 2-space indentation
-        const json = JSON.stringify(newData, null, 2);
-        
-        // Replace entire document
         edit.replace(
             document.uri,
             new vscode.Range(0, 0, document.lineCount, 0),
-            json
+            JSON.stringify(newData, null, 2)
         );
-
-        return vscode.workspace.applyEdit(edit);
+        this._isApplyingEdit = true;
+        try {
+            await vscode.workspace.applyEdit(edit);
+        } finally {
+            this._isApplyingEdit = false;
+        }
     }
 
-    /**
-     * Generate HTML for webview
-     */
-    private getHtmlForWebview(webview: vscode.Webview): string {
+    private getHtmlForWebview(initialDef: ScratchOrgDefinition = {}): string {
+        const initialDataEscaped = JSON.stringify(initialDef)
+            .replace(/</g, '\\u003c')
+            .replace(/>/g, '\\u003e');
+
         return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -130,150 +99,113 @@ export class ScratchOrgDefEditorProvider implements vscode.CustomTextEditorProvi
     <style>
         body {
             font-family: var(--vscode-font-family);
-            padding: 0;
-            margin: 0;
+            padding: 0; margin: 0;
             color: var(--vscode-foreground);
             background-color: var(--vscode-editor-background);
         }
-        
         .toolbar {
             display: flex;
-            gap: 10px;
-            padding: 10px;
+            align-items: center;
+            gap: 8px;
+            padding: 7px 12px;
             background-color: var(--vscode-editorGroupHeader-tabsBackground);
             border-bottom: 1px solid var(--vscode-editorGroup-border);
         }
-        
+        .toolbar-title { font-size: 12px; opacity: 0.75; }
+        .toolbar-spacer { flex: 1; }
         .btn {
-            padding: 6px 14px;
+            padding: 4px 11px;
+            font-size: 12px;
             background-color: var(--vscode-button-background);
             color: var(--vscode-button-foreground);
-            border: none;
-            cursor: pointer;
-            border-radius: 2px;
+            border: none; cursor: pointer; border-radius: 2px;
         }
-        
-        .btn:hover {
-            background-color: var(--vscode-button-hoverBackground);
-        }
-        
-        .btn.active {
+        .btn:hover { background-color: var(--vscode-button-hoverBackground); }
+        .btn.secondary {
             background-color: var(--vscode-button-secondaryBackground);
             color: var(--vscode-button-secondaryForeground);
         }
-        
-        .container {
-            padding: 20px;
-            max-width: 900px;
-        }
-        
+        .btn.secondary:hover { background-color: var(--vscode-button-secondaryHoverBackground); }
+        .container { padding: 16px; max-width: 900px; }
         .tabs {
-            display: flex;
-            gap: 5px;
+            display: flex; gap: 5px;
             border-bottom: 1px solid var(--vscode-editorGroup-border);
             margin-bottom: 20px;
         }
-        
         .tab {
-            padding: 8px 16px;
-            cursor: pointer;
-            border: none;
-            background: transparent;
+            padding: 8px 16px; cursor: pointer;
+            border: none; background: transparent;
             color: var(--vscode-foreground);
             border-bottom: 2px solid transparent;
         }
-        
-        .tab:hover {
-            background-color: var(--vscode-list-hoverBackground);
-        }
-        
+        .tab:hover { background-color: var(--vscode-list-hoverBackground); }
         .tab.active {
             border-bottom-color: var(--vscode-focusBorder);
             color: var(--vscode-focusBorder);
         }
-        
-        .tab-content {
-            display: none;
-        }
-        
-        .tab-content.active {
-            display: block;
-        }
-        
-        .form-group {
-            margin-bottom: 20px;
-        }
-        
-        label {
-            display: block;
-            margin-bottom: 5px;
-            font-weight: 500;
-        }
-        
-        input[type="text"],
-        input[type="email"],
-        input[type="number"],
-        select,
-        textarea {
-            width: 100%;
-            padding: 6px;
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .form-group { margin-bottom: 18px; }
+        label { display: block; margin-bottom: 4px; font-weight: 500; }
+        input[type="text"], input[type="email"], input[type="number"], select, textarea {
+            width: 100%; padding: 6px;
             background-color: var(--vscode-input-background);
             color: var(--vscode-input-foreground);
             border: 1px solid var(--vscode-input-border);
             box-sizing: border-box;
         }
-        
-        input[type="checkbox"] {
-            margin-right: 8px;
-        }
-        
+        input[type="checkbox"] { margin-right: 8px; }
         .feature-item {
-            display: flex;
-            align-items: center;
-            padding: 8px;
-            margin: 4px 0;
+            display: flex; align-items: center;
+            padding: 6px 8px; margin: 3px 0;
             background-color: var(--vscode-list-inactiveSelectionBackground);
             border-radius: 3px;
         }
-        
-        .feature-item input[type="number"] {
-            width: 80px;
-            margin-left: 10px;
-        }
-        
+        .feature-item input[type="number"] { width: 80px; margin-left: 10px; }
         .feature-description {
-            font-size: 0.9em;
+            font-size: 0.85em;
             color: var(--vscode-descriptionForeground);
-            margin-left: auto;
-            padding-left: 10px;
+            margin-left: auto; padding-left: 10px;
         }
-        
+        .settings-category {
+            margin-bottom: 10px;
+            padding: 8px;
+            background-color: var(--vscode-list-inactiveSelectionBackground);
+            border-radius: 3px;
+        }
+        .settings-category-label { font-weight: 600; margin-bottom: 6px; }
+        .settings-option { margin-left: 16px; margin-top: 4px; }
         .error {
             color: var(--vscode-errorForeground);
-            padding: 10px;
-            margin: 10px 0;
+            padding: 10px; margin: 10px 0;
             background-color: var(--vscode-inputValidation-errorBackground);
             border: 1px solid var(--vscode-inputValidation-errorBorder);
         }
     </style>
 </head>
 <body>
+    <script type="application/json" id="initial-data">${initialDataEscaped}</script>
+
+    <div class="toolbar">
+        <span class="toolbar-title">Scratch Org Definition</span>
+        <div class="toolbar-spacer"></div>
+        <button class="btn secondary" id="open-text-btn" title="Open in standard JSON text editor">Edit as JSON</button>
+    </div>
+
     <div class="container">
         <div class="tabs">
             <button class="tab active" data-tab="general">General</button>
             <button class="tab" data-tab="features">Features</button>
             <button class="tab" data-tab="settings">Settings</button>
             <button class="tab" data-tab="advanced">Advanced</button>
-            <button class="tab" data-tab="json">JSON</button>
         </div>
-        
+
         <!-- General Tab -->
         <div class="tab-content active" id="general-tab">
             <div class="form-group">
                 <label for="orgName">Org Name</label>
                 <input type="text" id="orgName" placeholder="My Scratch Org">
             </div>
-            
             <div class="form-group">
                 <label for="edition">Edition *</label>
                 <select id="edition">
@@ -282,14 +214,14 @@ export class ScratchOrgDefEditorProvider implements vscode.CustomTextEditorProvi
                     <option value="Enterprise">Enterprise</option>
                     <option value="Group">Group</option>
                     <option value="Professional">Professional</option>
+                    <option value="Partner Developer">Partner Developer</option>
+                    <option value="Partner Enterprise">Partner Enterprise</option>
                 </select>
             </div>
-            
             <div class="form-group">
                 <label for="country">Country</label>
                 <input type="text" id="country" placeholder="US" maxlength="2">
             </div>
-            
             <div class="form-group">
                 <label for="language">Language</label>
                 <select id="language">
@@ -302,30 +234,26 @@ export class ScratchOrgDefEditorProvider implements vscode.CustomTextEditorProvi
                     <option value="ja">Japanese</option>
                 </select>
             </div>
-            
             <div class="form-group">
                 <label for="username">Username</label>
                 <input type="text" id="username" placeholder="admin@company.com">
             </div>
-            
             <div class="form-group">
                 <label for="adminEmail">Admin Email</label>
                 <input type="email" id="adminEmail" placeholder="admin@company.com">
             </div>
-            
             <div class="form-group">
                 <label for="description">Description</label>
                 <textarea id="description" rows="3"></textarea>
             </div>
-            
             <div class="form-group">
-                <label>
+                <label style="display:flex;align-items:center;font-weight:normal">
                     <input type="checkbox" id="hasSampleData">
                     Include Sample Data
                 </label>
             </div>
         </div>
-        
+
         <!-- Features Tab -->
         <div class="tab-content" id="features-tab">
             <div class="form-group">
@@ -333,20 +261,19 @@ export class ScratchOrgDefEditorProvider implements vscode.CustomTextEditorProvi
             </div>
             <div id="featuresList"></div>
         </div>
-        
+
         <!-- Settings Tab -->
         <div class="tab-content" id="settings-tab">
-            <p style="color: var(--vscode-descriptionForeground);">Configure org-specific settings...</p>
+            <p style="color: var(--vscode-descriptionForeground); margin-top:0">Configure org-specific settings.</p>
             <div id="settingsList"></div>
         </div>
-        
+
         <!-- Advanced Tab -->
         <div class="tab-content" id="advanced-tab">
             <div class="form-group">
                 <label for="snapshot">Snapshot Org ID</label>
                 <input type="text" id="snapshot" placeholder="00D...">
             </div>
-            
             <div class="form-group">
                 <label for="release">Release</label>
                 <select id="release">
@@ -356,113 +283,95 @@ export class ScratchOrgDefEditorProvider implements vscode.CustomTextEditorProvi
                 </select>
             </div>
         </div>
-        
-        <!-- JSON Tab -->
-        <div class="tab-content" id="json-tab">
-            <div class="form-group">
-                <label for="jsonEditor">Raw JSON</label>
-                <textarea id="jsonEditor" rows="20" style="font-family: 'Courier New', monospace; font-size: 12px;"></textarea>
-            </div>
-        </div>
     </div>
-    
+
     <script>
         const vscode = acquireVsCodeApi();
+
+        // Read initial data embedded in the HTML — no postMessage race condition
         let currentData = {};
-        let isUpdatingUI = false; // Flag to prevent collectData during UI updates
-        
-        // Feature definitions (all 200+ features)
+        try {
+            const el = document.getElementById('initial-data');
+            if (el) currentData = JSON.parse(el.textContent);
+        } catch(e) {}
+
+        let isUpdatingUI = false;
+
+        // Feature definitions from extension
         const features = ${JSON.stringify(ALL_FEATURES)};
         let filteredFeatures = features;
-        
-        // Settings categories (all 80+ categories)
-        const scratchOrgDefSchema = {
-            SETTINGS_CATEGORIES: ${JSON.stringify(scratchOrgDefSchema.SETTINGS_CATEGORIES)}
-        };
-        
-        // Initialize
+
+        // Settings schema
+        const settingsSchema = ${JSON.stringify(scratchOrgDefSchema.SETTINGS_CATEGORIES)};
+
+        // Authoritative enabled-features map: name → param string or null
+        // Decoupled from DOM so search filtering never drops enabled features
+        let enabledFeatures = new Map();
+
+        function syncEnabledFeaturesFromData(data) {
+            enabledFeatures.clear();
+            (data.features || []).forEach(f => {
+                const ci = f.indexOf(':');
+                if (ci > -1) {
+                    enabledFeatures.set(f.substring(0, ci), f.substring(ci + 1));
+                } else {
+                    enabledFeatures.set(f, null);
+                }
+            });
+        }
+
+        // Debounce for general field changes — avoids a write per keystroke
+        let _collectTimer;
+        function scheduleCollect() {
+            if (isUpdatingUI) return;
+            clearTimeout(_collectTimer);
+            _collectTimer = setTimeout(collectData, 200);
+        }
+
+        // External document change (e.g. user edited via text editor)
+        // Only updates field values and visible checkboxes — no DOM rebuild
         window.addEventListener('message', event => {
-            const message = event.data;
-            switch (message.type) {
-                case 'init':
-                case 'update':
-                    currentData = message.data || {};
-                    updateUI();
-                    break;
-                case 'validationResult':
-                    handleValidationResult(message.errors);
-                    break;
+            const msg = event.data;
+            if (msg.type === 'update') {
+                currentData = msg.data || {};
+                isUpdatingUI = true;
+                syncEnabledFeaturesFromData(currentData);
+                updateUIFields();
+                syncFeatureCheckboxes();
+                syncSettingCheckboxes();
+                isUpdatingUI = false;
+            } else if (msg.type === 'validationResult') {
+                handleValidationResult(msg.errors);
             }
         });
-        
-        // Tab switching with JSON sync
+
+        // Tab switching
         document.querySelectorAll('.tab').forEach(tab => {
             tab.addEventListener('click', () => {
-                const tabName = tab.dataset.tab;
-                
-                // Update JSON textarea when switching to JSON tab
-                if (tabName === 'json') {
-                    updateJsonEditor();
-                }
-                // Collect data from JSON editor when leaving JSON tab
-                else if (document.querySelector('.tab[data-tab="json"]').classList.contains('active')) {
-                    parseJsonEditor();
-                }
-                
                 document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
                 document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
                 tab.classList.add('active');
                 document.getElementById(tab.dataset.tab + '-tab').classList.add('active');
             });
         });
-        
-        // Update JSON editor textarea
-        function updateJsonEditor() {
-            const jsonEditor = document.getElementById('jsonEditor');
-            jsonEditor.value = JSON.stringify(currentData, null, 2);
-        }
-        
-        // Parse JSON from editor and update currentData
-        function parseJsonEditor() {
-            const jsonEditor = document.getElementById('jsonEditor');
-            try {
-                const parsed = JSON.parse(jsonEditor.value);
-                currentData = parsed;
-                vscode.postMessage({ type: 'update', data: parsed });
-                // Update UI with new data
-                isUpdatingUI = true;
-                updateUIFields();
-                isUpdatingUI = false;
-            } catch (e) {
-                // Invalid JSON, don't update
-                // invalid JSON during edit
-            }
-        }
-        
-        // JSON editor change listener
-        document.addEventListener('DOMContentLoaded', () => {
-            const jsonEditor = document.getElementById('jsonEditor');
-            if (jsonEditor) {
-                jsonEditor.addEventListener('blur', () => {
-                    if (document.querySelector('.tab[data-tab="json"]').classList.contains('active')) {
-                        parseJsonEditor();
-                    }
-                });
-            }
+
+        document.getElementById('open-text-btn').addEventListener('click', () => {
+            vscode.postMessage({ type: 'openTextEditor' });
         });
-        
-        // Update UI from data
+
+        // Full UI render — called once on init from embedded data
         function updateUI() {
             isUpdatingUI = true;
+            syncEnabledFeaturesFromData(currentData);
             updateUIFields();
-            // Reset filtered features to show all
             filteredFeatures = features;
+            const searchEl = document.getElementById('featureSearch');
+            if (searchEl) searchEl.value = '';
             renderFeatures();
             renderSettings();
             isUpdatingUI = false;
         }
-        
-        // Update just the input fields (helper for JSON tab sync)
+
         function updateUIFields() {
             document.getElementById('orgName').value = currentData.orgName || '';
             document.getElementById('edition').value = currentData.edition || '';
@@ -471,249 +380,206 @@ export class ScratchOrgDefEditorProvider implements vscode.CustomTextEditorProvi
             document.getElementById('username').value = currentData.username || '';
             document.getElementById('adminEmail').value = currentData.adminEmail || '';
             document.getElementById('description').value = currentData.description || '';
-            document.getElementById('hasSampleData').checked = currentData.hasSampleData || false;
+            document.getElementById('hasSampleData').checked = !!currentData.hasSampleData;
             document.getElementById('snapshot').value = currentData.snapshot || '';
             document.getElementById('release').value = currentData.release || '';
         }
-        
-        // Feature search
+
+        // Update only visible feature checkboxes without rebuilding the list
+        function syncFeatureCheckboxes() {
+            filteredFeatures.forEach(feature => {
+                const cb = document.getElementById('feature-' + feature.name);
+                if (!cb) return;
+                cb.checked = enabledFeatures.has(feature.name);
+                if (feature.hasParams) {
+                    const inp = document.getElementById('param-' + feature.name);
+                    if (inp) inp.value = enabledFeatures.get(feature.name) || '';
+                }
+            });
+        }
+
+        // Update visible settings checkboxes without rebuilding the list
+        function syncSettingCheckboxes() {
+            Object.keys(settingsSchema).forEach(category => {
+                const info = settingsSchema[category];
+                (info.commonOptions || []).forEach(option => {
+                    const cb = document.getElementById('setting-' + category + '-' + option);
+                    if (cb) cb.checked = getNestedValue(currentData.settings, category + '.' + option) || false;
+                });
+            });
+        }
+
         document.getElementById('featureSearch').addEventListener('input', (e) => {
-            const searchTerm = e.target.value.toLowerCase();
-            filteredFeatures = features.filter(f => 
-                f.name.toLowerCase().includes(searchTerm) || 
-                f.description.toLowerCase().includes(searchTerm)
-            );
+            const term = e.target.value.toLowerCase();
+            filteredFeatures = term
+                ? features.filter(f => f.name.toLowerCase().includes(term) || f.description.toLowerCase().includes(term))
+                : features;
             renderFeatures();
         });
-        
-        // Render features
+
         function renderFeatures() {
             const container = document.getElementById('featuresList');
             container.innerHTML = '';
-            
-            // Parse existing features into a map for easier lookup
-            const existingFeatures = new Map();
-            if (currentData.features) {
-                currentData.features.forEach(f => {
-                    const colonIdx = f.indexOf(':');
-                    if (colonIdx > -1) {
-                        const name = f.substring(0, colonIdx);
-                        const param = f.substring(colonIdx + 1);
-                        existingFeatures.set(name, param);
-                    } else {
-                        existingFeatures.set(f, null);
-                    }
-                });
-            }
-            
             filteredFeatures.forEach(feature => {
                 const div = document.createElement('div');
                 div.className = 'feature-item';
-                
-                const isChecked = existingFeatures.has(feature.name);
-                const paramValue = existingFeatures.get(feature.name);
-                
+
                 const checkbox = document.createElement('input');
                 checkbox.type = 'checkbox';
                 checkbox.id = 'feature-' + feature.name;
-                checkbox.checked = isChecked;
-                checkbox.addEventListener('change', collectData);
-                
+                checkbox.checked = enabledFeatures.has(feature.name);
+                checkbox.addEventListener('change', (e) => {
+                    if (e.target.checked) {
+                        enabledFeatures.set(feature.name, null);
+                    } else {
+                        enabledFeatures.delete(feature.name);
+                    }
+                    collectData();
+                });
+
                 const label = document.createElement('label');
                 label.htmlFor = checkbox.id;
                 label.textContent = feature.name;
                 label.style.cursor = 'pointer';
-                
-                const desc = document.createElement('span');
-                desc.className = 'feature-description';
-                desc.textContent = feature.description;
-                
+
                 div.appendChild(checkbox);
                 div.appendChild(label);
-                
+
                 if (feature.hasParams) {
                     const input = document.createElement('input');
                     input.type = 'number';
                     input.id = 'param-' + feature.name;
                     input.placeholder = 'Value';
-                    input.value = paramValue || '';
-                    if (feature.paramMax) {
-                        input.max = feature.paramMax;
-                        input.min = 0;
-                    }
-                    input.addEventListener('input', collectData);
+                    input.value = enabledFeatures.get(feature.name) || '';
+                    if (feature.paramMax) { input.max = feature.paramMax; input.min = 0; }
+                    input.addEventListener('input', (e) => {
+                        if (enabledFeatures.has(feature.name)) {
+                            enabledFeatures.set(feature.name, e.target.value);
+                        }
+                        collectData();
+                    });
                     div.appendChild(input);
                 }
-                
+
+                const desc = document.createElement('span');
+                desc.className = 'feature-description';
+                desc.textContent = feature.description;
                 div.appendChild(desc);
                 container.appendChild(div);
             });
         }
-        
-        // Render settings with all categories from schema
+
         function renderSettings() {
             const container = document.getElementById('settingsList');
             container.innerHTML = '';
-            
-            const settings = currentData.settings || {};
-            
-            // Import settings categories from schema
-            const settingsCategories = Object.keys(scratchOrgDefSchema.SETTINGS_CATEGORIES);
-            const categoryLabels = scratchOrgDefSchema.SETTINGS_CATEGORIES;
-            
-            // Filter to only show categories with common options (actual UI controls)
-            const categoriesToShow = settingsCategories.filter(category => {
-                const categoryInfo = categoryLabels[category];
-                return categoryInfo.commonOptions && categoryInfo.commonOptions.length > 0;
-            });
-            
-            categoriesToShow.forEach(category => {
-                const categoryInfo = categoryLabels[category];
+            Object.keys(settingsSchema).forEach(category => {
+                const info = settingsSchema[category];
+                if (!info.commonOptions || info.commonOptions.length === 0) return;
+
                 const div = document.createElement('div');
-                div.className = 'feature-item';
-                div.style.marginBottom = '8px';
-                
-                const categoryLabel = document.createElement('div');
-                categoryLabel.style.fontWeight = '600';
-                categoryLabel.style.marginBottom = '4px';
-                categoryLabel.textContent = categoryInfo.label;
-                div.appendChild(categoryLabel);
-                
-                // Render common options
-                categoryInfo.commonOptions.forEach(option => {
-                    const optionDiv = document.createElement('div');
-                    optionDiv.style.marginLeft = '16px';
-                    optionDiv.style.marginTop = '4px';
-                    
-                    const checkbox = document.createElement('input');
-                    checkbox.type = 'checkbox';
-                    checkbox.id = 'setting-' + category + '-' + option;
-                    // Handle nested options for checking
-                    const isChecked = getNestedValue(currentData.settings, category + '.' + option) || false;
-                    checkbox.checked = isChecked;
-                    checkbox.addEventListener('change', (e) => {
+                div.className = 'settings-category';
+
+                const catLabel = document.createElement('div');
+                catLabel.className = 'settings-category-label';
+                catLabel.textContent = info.label;
+                div.appendChild(catLabel);
+
+                info.commonOptions.forEach(option => {
+                    const row = document.createElement('div');
+                    row.className = 'settings-option';
+
+                    const cb = document.createElement('input');
+                    cb.type = 'checkbox';
+                    cb.id = 'setting-' + category + '-' + option;
+                    cb.checked = getNestedValue(currentData.settings, category + '.' + option) || false;
+                    cb.addEventListener('change', (e) => {
                         if (!currentData.settings) currentData.settings = {};
                         setNestedValue(currentData.settings, category + '.' + option, e.target.checked);
-                        sendUpdate();
+                        collectData();
                     });
-                    
-                    const label = document.createElement('label');
-                    label.htmlFor = checkbox.id;
-                    label.textContent = option;
-                    label.style.marginLeft = '4px';
-                    
-                    optionDiv.appendChild(checkbox);
-                    optionDiv.appendChild(label);
-                    div.appendChild(optionDiv);
+
+                    const lbl = document.createElement('label');
+                    lbl.htmlFor = cb.id;
+                    lbl.textContent = option;
+                    lbl.style.marginLeft = '4px';
+
+                    row.appendChild(cb);
+                    row.appendChild(lbl);
+                    div.appendChild(row);
                 });
-                
+
                 container.appendChild(div);
             });
         }
-        
+
         function getNestedValue(obj, path) {
+            if (!obj) return undefined;
             const keys = path.split('.');
-            let current = obj;
+            let cur = obj;
             for (const key of keys) {
-                if (current && typeof current === 'object' && key in current) {
-                    current = current[key];
-                } else {
-                    return undefined;
-                }
+                if (cur && typeof cur === 'object' && key in cur) cur = cur[key];
+                else return undefined;
             }
-            return current;
+            return cur;
         }
-        
+
         function setNestedValue(obj, path, value) {
             const keys = path.split('.');
             const lastKey = keys.pop();
-            let current = obj;
-            
+            let cur = obj;
             for (const key of keys) {
-                if (!current[key] || typeof current[key] !== 'object') {
-                    current[key] = {};
-                }
-                current = current[key];
+                if (!cur[key] || typeof cur[key] !== 'object') cur[key] = {};
+                cur = cur[key];
             }
-            
-            if (value !== undefined) {
-                current[lastKey] = value;
-            }
+            cur[lastKey] = value;
         }
-        
-        function sendUpdate() {
-            collectData();
-        }
-        
-        // Collect data from UI
+
         function collectData() {
-            // Don't collect data if we're programmatically updating the UI
             if (isUpdatingUI) return;
-            
-            const data = {
-                orgName: document.getElementById('orgName').value || undefined,
-                edition: document.getElementById('edition').value || undefined,
-                country: document.getElementById('country').value || undefined,
-                language: document.getElementById('language').value || undefined,
-                username: document.getElementById('username').value || undefined,
-                adminEmail: document.getElementById('adminEmail').value || undefined,
-                description: document.getElementById('description').value || undefined,
-                hasSampleData: document.getElementById('hasSampleData').checked || undefined,
-                snapshot: document.getElementById('snapshot').value || undefined,
-                release: document.getElementById('release').value || undefined,
-                features: [],
-                settings: {}
-            };
-            
-            // Collect features
-            features.forEach(feature => {
-                const checkbox = document.getElementById('feature-' + feature.name);
-                if (checkbox && checkbox.checked) {
-                    if (feature.hasParams) {
-                        const input = document.getElementById('param-' + feature.name);
-                        const param = input ? input.value : '';
-                        data.features.push(param ? feature.name + ':' + param : feature.name);
-                    } else {
-                        data.features.push(feature.name);
-                    }
-                }
-            });
-            
-            if (data.features.length === 0) {
+
+            // Spread currentData first to preserve any unknown/custom JSON fields
+            const data = Object.assign({}, currentData);
+
+            // Override known general fields from the form
+            const orgName = document.getElementById('orgName').value;
+            const edition = document.getElementById('edition').value;
+            const country = document.getElementById('country').value;
+            const language = document.getElementById('language').value;
+            const username = document.getElementById('username').value;
+            const adminEmail = document.getElementById('adminEmail').value;
+            const description = document.getElementById('description').value;
+            const hasSampleData = document.getElementById('hasSampleData').checked;
+            const snapshot = document.getElementById('snapshot').value;
+            const release = document.getElementById('release').value;
+
+            if (orgName) data.orgName = orgName; else delete data.orgName;
+            if (edition) data.edition = edition; else delete data.edition;
+            if (country) data.country = country; else delete data.country;
+            if (language) data.language = language; else delete data.language;
+            if (username) data.username = username; else delete data.username;
+            if (adminEmail) data.adminEmail = adminEmail; else delete data.adminEmail;
+            if (description) data.description = description; else delete data.description;
+            if (hasSampleData) data.hasSampleData = true; else delete data.hasSampleData;
+            if (snapshot) data.snapshot = snapshot; else delete data.snapshot;
+            if (release) data.release = release; else delete data.release;
+
+            // Features come from the Map — survives search filtering without data loss
+            if (enabledFeatures.size > 0) {
+                data.features = [];
+                enabledFeatures.forEach((val, name) => {
+                    data.features.push((val !== null && val !== '') ? name + ':' + val : name);
+                });
+            } else {
                 delete data.features;
             }
-            
-            // Collect settings dynamically from rendered checkboxes
-            // Settings are already saved in currentData.settings by the change event listeners
-            // Just ensure we keep the existing settings structure
-            data.settings = currentData.settings || {};
-            
-            // Remove settings if empty
-            if (Object.keys(data.settings).length === 0) {
-                delete data.settings;
-            }
-            
-            // Remove undefined top-level properties to avoid cluttering JSON
-            // But keep the values that matter
-            Object.keys(data).forEach(key => {
-                if (data[key] === undefined) {
-                    delete data[key];
-                }
-            });
-            
+
+            // Settings are mutated directly in currentData.settings by the setting checkboxes
+            if (data.settings && Object.keys(data.settings).length === 0) delete data.settings;
+
             currentData = data;
             vscode.postMessage({ type: 'update', data });
         }
-        
-        // Attach change listeners to general inputs
-        ['orgName', 'edition', 'country', 'language', 'username', 'adminEmail', 'description', 'hasSampleData', 'snapshot', 'release'].forEach(id => {
-            const el = document.getElementById(id);
-            if (el) {
-                el.addEventListener('change', collectData);
-                el.addEventListener('input', collectData);
-            }
-        });
-        
+
         function handleValidationResult(errors) {
             const container = document.getElementById('general-tab');
             let errorDiv = document.getElementById('validation-errors');
@@ -731,6 +597,18 @@ export class ScratchOrgDefEditorProvider implements vscode.CustomTextEditorProvi
             errorDiv.className = 'error';
             errorDiv.innerHTML = '<strong>Validation Errors:</strong><br>' + errors.map(e => '• ' + e).join('<br>');
         }
+
+        // Debounced listeners for general fields
+        ['orgName', 'edition', 'country', 'language', 'username', 'adminEmail', 'description', 'hasSampleData', 'snapshot', 'release'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) {
+                el.addEventListener('change', scheduleCollect);
+                el.addEventListener('input', scheduleCollect);
+            }
+        });
+
+        // Initial render from embedded data
+        updateUI();
     </script>
 </body>
 </html>`;
