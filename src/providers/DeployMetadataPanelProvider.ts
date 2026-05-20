@@ -6,7 +6,6 @@ import {
   filterPathsToPackageDirs,
   buildDeployCommand,
   createDeployProgressHandler,
-  getDeployedCountFromOutput,
   DEPLOY_TIMEOUT_MS,
   DEPLOY_TYPE_RUN_ALL,
   DEPLOY_TYPE_RUN_RELEVANT,
@@ -202,8 +201,7 @@ export class DeployMetadataPanelProvider {
         deployType?: DeployTypeKey;
         state?: DeployPanelState;
       }) => {
-        const cmd = msg?.command ?? "unknown";
-        if (msg.command === "persistPanelState" && msg.state != null) {
+        if (msg.command === "persistPanelState" && msg.state !== null && msg.state !== undefined) {
           DeployMetadataPanelProvider.panelStateByWorkspace[workspaceRoot] = msg.state;
           return;
         }

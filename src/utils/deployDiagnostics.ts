@@ -51,7 +51,10 @@ export function formatApiDeployResultForLog(
   if (apiResult.stateDetail) {
     lines.push(`  Detail: ${apiResult.stateDetail}`);
   }
-  if (apiResult.numberComponentsTotal != null || apiResult.numberComponentsDeployed != null) {
+  if (
+    (apiResult.numberComponentsTotal !== null && apiResult.numberComponentsTotal !== undefined) ||
+    (apiResult.numberComponentsDeployed !== null && apiResult.numberComponentsDeployed !== undefined)
+  ) {
     const err = apiResult.numberComponentErrors ?? getComponentFailuresList(apiResult).length;
     lines.push(
       `  Components: ${apiResult.numberComponentsDeployed ?? "?"}/${apiResult.numberComponentsTotal ?? "?"}` +
@@ -59,8 +62,10 @@ export function formatApiDeployResultForLog(
     );
   }
   if (
-    apiResult.numberTestsTotal != null &&
-    (apiResult.numberTestsCompleted != null || apiResult.numberTestErrors != null)
+    apiResult.numberTestsTotal !== null &&
+    apiResult.numberTestsTotal !== undefined &&
+    ((apiResult.numberTestsCompleted !== null && apiResult.numberTestsCompleted !== undefined) ||
+      (apiResult.numberTestErrors !== null && apiResult.numberTestErrors !== undefined))
   ) {
     lines.push(
       `  Tests: ${apiResult.numberTestsCompleted ?? "?"}/${apiResult.numberTestsTotal}` +
@@ -74,8 +79,8 @@ export function formatApiDeployResultForLog(
       const f = failures[i];
       const file = f.fileName?.trim() || [f.componentType, f.fullName].filter(Boolean).join(" ").trim() || "(no file)";
       const lineCol =
-        f.lineNumber != null
-          ? f.columnNumber != null
+        f.lineNumber !== null && f.lineNumber !== undefined
+          ? f.columnNumber !== null && f.columnNumber !== undefined
             ? ` ${f.lineNumber}:${f.columnNumber}`
             : ` line ${f.lineNumber}`
           : "";

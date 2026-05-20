@@ -1,95 +1,86 @@
-import * as vscode from 'vscode';
-import { ScratchOrgDefinition, validateDefinition, ALL_FEATURES } from './scratchOrgDefSchema';
-import * as scratchOrgDefSchema from './scratchOrgDefSchema';
+import * as vscode from "vscode";
+import { ScratchOrgDefinition, validateDefinition, ALL_FEATURES } from "./scratchOrgDefSchema";
+import * as scratchOrgDefSchema from "./scratchOrgDefSchema";
 
 export class ScratchOrgDefEditorProvider implements vscode.CustomTextEditorProvider {
+  private _isApplyingEdit = false;
 
-    private _isApplyingEdit = false;
+  public static register(context: vscode.ExtensionContext): vscode.Disposable {
+    const provider = new ScratchOrgDefEditorProvider(context);
+    return vscode.window.registerCustomEditorProvider("adure-sfx-toolkit.scratchOrgDefEditor", provider, {
+      webviewOptions: { retainContextWhenHidden: true }
+    });
+  }
 
-    public static register(context: vscode.ExtensionContext): vscode.Disposable {
-        const provider = new ScratchOrgDefEditorProvider(context);
-        return vscode.window.registerCustomEditorProvider(
-            'adure-sfx-toolkit.scratchOrgDefEditor',
-            provider,
-            { webviewOptions: { retainContextWhenHidden: true } }
-        );
+  constructor(private readonly context: vscode.ExtensionContext) {}
+
+  public async resolveCustomTextEditor(
+    document: vscode.TextDocument,
+    webviewPanel: vscode.WebviewPanel,
+    _token: vscode.CancellationToken
+  ): Promise<void> {
+    webviewPanel.webview.options = { enableScripts: true };
+
+    let currentDef: ScratchOrgDefinition = {};
+    try {
+      const text = document.getText();
+      if (text.trim()) currentDef = JSON.parse(text);
+    } catch (e) {
+      vscode.window.showErrorMessage("Failed to parse scratch org definition file");
     }
 
-    constructor(private readonly context: vscode.ExtensionContext) {}
+    // Initial data is embedded in the HTML itself — no postMessage timing issues
+    webviewPanel.webview.html = this.getHtmlForWebview(currentDef);
 
-    public async resolveCustomTextEditor(
-        document: vscode.TextDocument,
-        webviewPanel: vscode.WebviewPanel,
-        _token: vscode.CancellationToken
-    ): Promise<void> {
-
-        webviewPanel.webview.options = { enableScripts: true };
-
-        let currentDef: ScratchOrgDefinition = {};
-        try {
-            const text = document.getText();
-            if (text.trim()) currentDef = JSON.parse(text);
-        } catch (e) {
-            vscode.window.showErrorMessage('Failed to parse scratch org definition file');
+    const messageListener = webviewPanel.webview.onDidReceiveMessage((message) => {
+      switch (message.type) {
+        case "update":
+          this.updateDocument(document, message.data);
+          break;
+        case "validate": {
+          const errors = validateDefinition(message.data);
+          webviewPanel.webview.postMessage({ type: "validationResult", errors });
+          break;
         }
+        case "openTextEditor":
+          vscode.commands.executeCommand("vscode.openWith", document.uri, "default");
+          break;
+      }
+    });
 
-        // Initial data is embedded in the HTML itself — no postMessage timing issues
-        webviewPanel.webview.html = this.getHtmlForWebview(currentDef);
+    // Reflect external edits (e.g. from text editor) — skip changes we caused ourselves
+    const changeDocumentSubscription = vscode.workspace.onDidChangeTextDocument((e) => {
+      if (this._isApplyingEdit) return;
+      if (e.document.uri.toString() !== document.uri.toString()) return;
+      try {
+        const newDef = JSON.parse(e.document.getText());
+        webviewPanel.webview.postMessage({ type: "update", data: newDef });
+      } catch {
+        // ignore mid-edit parse errors
+      }
+    });
 
-        const messageListener = webviewPanel.webview.onDidReceiveMessage(message => {
-            switch (message.type) {
-                case 'update':
-                    this.updateDocument(document, message.data);
-                    break;
-                case 'validate':
-                    const errors = validateDefinition(message.data);
-                    webviewPanel.webview.postMessage({ type: 'validationResult', errors });
-                    break;
-                case 'openTextEditor':
-                    vscode.commands.executeCommand('vscode.openWith', document.uri, 'default');
-                    break;
-            }
-        });
+    webviewPanel.onDidDispose(() => {
+      messageListener.dispose();
+      changeDocumentSubscription.dispose();
+    });
+  }
 
-        // Reflect external edits (e.g. from text editor) — skip changes we caused ourselves
-        const changeDocumentSubscription = vscode.workspace.onDidChangeTextDocument(e => {
-            if (this._isApplyingEdit) return;
-            if (e.document.uri.toString() !== document.uri.toString()) return;
-            try {
-                const newDef = JSON.parse(e.document.getText());
-                webviewPanel.webview.postMessage({ type: 'update', data: newDef });
-            } catch {
-                // ignore mid-edit parse errors
-            }
-        });
-
-        webviewPanel.onDidDispose(() => {
-            messageListener.dispose();
-            changeDocumentSubscription.dispose();
-        });
+  private async updateDocument(document: vscode.TextDocument, newData: ScratchOrgDefinition): Promise<void> {
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(document.uri, new vscode.Range(0, 0, document.lineCount, 0), JSON.stringify(newData, null, 2));
+    this._isApplyingEdit = true;
+    try {
+      await vscode.workspace.applyEdit(edit);
+    } finally {
+      this._isApplyingEdit = false;
     }
+  }
 
-    private async updateDocument(document: vscode.TextDocument, newData: ScratchOrgDefinition): Promise<void> {
-        const edit = new vscode.WorkspaceEdit();
-        edit.replace(
-            document.uri,
-            new vscode.Range(0, 0, document.lineCount, 0),
-            JSON.stringify(newData, null, 2)
-        );
-        this._isApplyingEdit = true;
-        try {
-            await vscode.workspace.applyEdit(edit);
-        } finally {
-            this._isApplyingEdit = false;
-        }
-    }
+  private getHtmlForWebview(initialDef: ScratchOrgDefinition = {}): string {
+    const initialDataEscaped = JSON.stringify(initialDef).replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
 
-    private getHtmlForWebview(initialDef: ScratchOrgDefinition = {}): string {
-        const initialDataEscaped = JSON.stringify(initialDef)
-            .replace(/</g, '\\u003c')
-            .replace(/>/g, '\\u003e');
-
-        return `<!DOCTYPE html>
+    return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -612,5 +603,5 @@ export class ScratchOrgDefEditorProvider implements vscode.CustomTextEditorProvi
     </script>
 </body>
 </html>`;
-    }
+  }
 }

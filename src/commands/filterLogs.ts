@@ -25,7 +25,7 @@ export async function updateContextForEditor(editor: vscode.TextEditor | undefin
 async function toggleFilter(type: FilterType, uri?: vscode.Uri) {
     // If URI is passed (from context menu/title bar), use it. Otherwise use active editor.
     let targetUri = uri;
-    let editor = vscode.window.activeTextEditor;
+    const editor = vscode.window.activeTextEditor;
 
     if (!targetUri) {
         if (!editor) return;

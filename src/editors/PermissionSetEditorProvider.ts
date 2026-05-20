@@ -1,187 +1,194 @@
-import * as vscode from 'vscode';
-import { XMLParser, XMLBuilder } from 'fast-xml-parser';
-import { isSalesforceProject, NOT_SFDX_PROJECT_MESSAGE } from '../utils/projectUtils';
-import { Logger } from '../utils/outputChannel';
-import { AuthInfo } from '../utils/authInfo';
-import { httpsGet } from '../utils/httpUtils';
-import { getToolingApiVersion } from '../utils/constants';
+import * as vscode from "vscode";
+import { XMLParser, XMLBuilder } from "fast-xml-parser";
+import { isSalesforceProject, NOT_SFDX_PROJECT_MESSAGE } from "../utils/projectUtils";
+import { Logger } from "../utils/outputChannel";
+import { AuthInfo } from "../utils/authInfo";
+import { httpsGet } from "../utils/httpUtils";
+import { getToolingApiVersion } from "../utils/constants";
 
 export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvider {
+  public static readonly viewType = "adure-sfx-toolkit.permissionSetEditor";
 
-    public static readonly viewType = 'adure-sfx-toolkit.permissionSetEditor';
+  constructor(private readonly context: vscode.ExtensionContext) {}
 
-    constructor(
-        private readonly context: vscode.ExtensionContext
-    ) { }
+  public static register(context: vscode.ExtensionContext): vscode.Disposable {
+    const provider = new PermissionSetEditorProvider(context);
+    const providerRegistration = vscode.window.registerCustomEditorProvider(
+      PermissionSetEditorProvider.viewType,
+      provider
+    );
+    return providerRegistration;
+  }
 
-    public static register(context: vscode.ExtensionContext): vscode.Disposable {
-        const provider = new PermissionSetEditorProvider(context);
-        const providerRegistration = vscode.window.registerCustomEditorProvider(PermissionSetEditorProvider.viewType, provider);
-        return providerRegistration;
-    }
+  public async resolveCustomTextEditor(
+    document: vscode.TextDocument,
+    webviewPanel: vscode.WebviewPanel,
+    _token: vscode.CancellationToken
+  ): Promise<void> {
+    webviewPanel.webview.options = {
+      enableScripts: true
+    };
 
-    public async resolveCustomTextEditor(
-        document: vscode.TextDocument,
-        webviewPanel: vscode.WebviewPanel,
-        _token: vscode.CancellationToken
-    ): Promise<void> {
-        webviewPanel.webview.options = {
-            enableScripts: true,
-        };
+    webviewPanel.webview.html = this.getHtmlForWebview(webviewPanel.webview);
 
-        webviewPanel.webview.html = this.getHtmlForWebview(webviewPanel.webview);
-
-        const parser = new XMLParser({
-            ignoreAttributes: false,
-            parseAttributeValue: true,
-            isArray: (name: string) => { 
-                return [
-                    'classAccesses', 'fieldPermissions', 'objectPermissions', 'pageAccesses', 
-                    'recordTypeVisibilities', 'tabSettings', 'userPermissions', 'applicationVisibilities',
-                    'customPermissions', 'customMetadataTypeAccesses', 'flowAccesses',
-                    'externalDataSourceAccesses', 'customSettingAccesses'
-                ].indexOf(name) !== -1;
-            }
-        });
-
-        function sendDataToWebview() {
-            try {
-                const text = document.getText();
-                if (!text.trim()) {
-                    webviewPanel.webview.postMessage({ type: 'update', data: {} });
-                    return;
-                }
-                const jsonObj = parser.parse(text);
-                webviewPanel.webview.postMessage({
-                    type: 'update',
-                    data: jsonObj.PermissionSet || {}
-                });
-            } catch (e) {
-                Logger.error("Error parsing XML", e);
-            }
-        }
-
-        const messageListener = webviewPanel.webview.onDidReceiveMessage(async (e) => {
-            switch (e.type) {
-                case 'update':
-                    await this.updateDocument(document, e.data);
-                    return;
-                case 'fetchObjects':
-                    this.fetchObjects(webviewPanel.webview);
-                    return;
-            }
-        });
-
-        webviewPanel.onDidDispose(() => {
-            messageListener.dispose();
-        });
-
-        sendDataToWebview();
-    }
-
-    private async updateDocument(document: vscode.TextDocument, permissionSetData: any) {
-        const builder = new XMLBuilder({
-            ignoreAttributes: false,
-            format: true,
-            indentBy: '    '
-        });
-        
-        const obj = {
-            PermissionSet: {
-                ...permissionSetData,
-                '@_xmlns': 'http://soap.sforce.com/2006/04/metadata'
-            }
-        };
-
-        const xmlContent = builder.build(obj);
-
-        const edit = new vscode.WorkspaceEdit();
-        edit.replace(
-            document.uri,
-            new vscode.Range(0, 0, document.lineCount, 0),
-            xmlContent
+    const parser = new XMLParser({
+      ignoreAttributes: false,
+      parseAttributeValue: true,
+      isArray: (name: string) => {
+        return (
+          [
+            "classAccesses",
+            "fieldPermissions",
+            "objectPermissions",
+            "pageAccesses",
+            "recordTypeVisibilities",
+            "tabSettings",
+            "userPermissions",
+            "applicationVisibilities",
+            "customPermissions",
+            "customMetadataTypeAccesses",
+            "flowAccesses",
+            "externalDataSourceAccesses",
+            "customSettingAccesses"
+          ].indexOf(name) !== -1
         );
+      }
+    });
 
-        await vscode.workspace.applyEdit(edit);
+    function sendDataToWebview() {
+      try {
+        const text = document.getText();
+        if (!text.trim()) {
+          webviewPanel.webview.postMessage({ type: "update", data: {} });
+          return;
+        }
+        const jsonObj = parser.parse(text);
+        webviewPanel.webview.postMessage({
+          type: "update",
+          data: jsonObj.PermissionSet || {}
+        });
+      } catch (e) {
+        Logger.error("Error parsing XML", e);
+      }
     }
 
-    private async fetchObjects(webview: vscode.Webview) {
-        try {
-            if (!isSalesforceProject()) {
-                throw new Error(NOT_SFDX_PROJECT_MESSAGE);
-            }
+    const messageListener = webviewPanel.webview.onDidReceiveMessage(async (e) => {
+      switch (e.type) {
+        case "update":
+          await this.updateDocument(document, e.data);
+          return;
+        case "fetchObjects":
+          this.fetchObjects(webviewPanel.webview);
+          return;
+      }
+    });
 
-            Logger.info('Starting to fetch objects and fields...');
+    webviewPanel.onDidDispose(() => {
+      messageListener.dispose();
+    });
 
-            const auth = await AuthInfo.getAuthInfo();
-            if (!auth) {
-                throw new Error('No default org set. Please run "sf org login" or set a default org.');
-            }
-            Logger.info('Using org: ' + (auth.alias || auth.username));
+    sendDataToWebview();
+  }
 
-            const query = `SELECT EntityDefinition.QualifiedApiName, EntityDefinition.Label, QualifiedApiName, Label, DataType 
+  private async updateDocument(document: vscode.TextDocument, permissionSetData: any) {
+    const builder = new XMLBuilder({
+      ignoreAttributes: false,
+      format: true,
+      indentBy: "    "
+    });
+
+    const obj = {
+      PermissionSet: {
+        ...permissionSetData,
+        "@_xmlns": "http://soap.sforce.com/2006/04/metadata"
+      }
+    };
+
+    const xmlContent = builder.build(obj);
+
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(document.uri, new vscode.Range(0, 0, document.lineCount, 0), xmlContent);
+
+    await vscode.workspace.applyEdit(edit);
+  }
+
+  private async fetchObjects(webview: vscode.Webview) {
+    try {
+      if (!isSalesforceProject()) {
+        throw new Error(NOT_SFDX_PROJECT_MESSAGE);
+      }
+
+      Logger.info("Starting to fetch objects and fields...");
+
+      const auth = await AuthInfo.getAuthInfo();
+      if (!auth) {
+        throw new Error('No default org set. Please run "sf org login" or set a default org.');
+      }
+      Logger.info("Using org: " + (auth.alias || auth.username));
+
+      const query = `SELECT EntityDefinition.QualifiedApiName, EntityDefinition.Label, QualifiedApiName, Label, DataType 
                           FROM EntityParticle 
                           WHERE EntityDefinition.IsCustomizable = true 
                           ORDER BY EntityDefinition.QualifiedApiName, QualifiedApiName`;
 
-            Logger.info('Executing Tooling API query...');
-            const baseUrl = auth.instanceUrl.replace(/\/$/, '');
-            const apiVersion = getToolingApiVersion();
-            const queryUrl = `${baseUrl}/services/data/${apiVersion}/tooling/query?q=${encodeURIComponent(query)}`;
-            const resultStr = await httpsGet(queryUrl, auth.accessToken);
-            const parsed = JSON.parse(resultStr);
+      Logger.info("Executing Tooling API query...");
+      const baseUrl = auth.instanceUrl.replace(/\/$/, "");
+      const apiVersion = getToolingApiVersion();
+      const queryUrl = `${baseUrl}/services/data/${apiVersion}/tooling/query?q=${encodeURIComponent(query)}`;
+      const resultStr = await httpsGet(queryUrl, auth.accessToken);
+      const parsed = JSON.parse(resultStr);
 
-            if (parsed.records === undefined) {
-                const err = parsed[0] || parsed;
-                const msg = err.message || err.errorDescription || 'Query failed';
-                Logger.error('Query failed: ' + msg);
-                throw new Error(msg);
-            }
+      if (parsed.records === undefined) {
+        const err = parsed[0] || parsed;
+        const msg = err.message || err.errorDescription || "Query failed";
+        Logger.error("Query failed: " + msg);
+        throw new Error(msg);
+      }
 
-            Logger.info('Received ' + parsed.records.length + ' field records');
-            
-            // Group fields by object
-            const objectsMap = new Map<string, any>();
-            
-            for (const record of parsed.records) {
-                const objectName = record.EntityDefinition.QualifiedApiName;
-                const objectLabel = record.EntityDefinition.Label;
-                
-                if (!objectsMap.has(objectName)) {
-                    objectsMap.set(objectName, {
-                        name: objectName,
-                        label: objectLabel || objectName,
-                        fields: []
-                    });
-                }
-                
-                objectsMap.get(objectName)!.fields.push({
-                    name: record.QualifiedApiName,
-                    label: record.Label || record.QualifiedApiName,
-                    dataType: record.DataType
-                });
-            }
-            
-            const objectsWithFields = Array.from(objectsMap.values());
-            Logger.info('Prepared ' + objectsWithFields.length + ' objects with fields');
+      Logger.info("Received " + parsed.records.length + " field records");
 
-            webview.postMessage({
-                type: 'objectsTree',
-                data: objectsWithFields
-            });
-        } catch (error: any) {
-            Logger.error('Failed to fetch objects', error);
-            
-            webview.postMessage({
-                type: 'objectsTree',
-                data: [],
-                error: error.message || 'Failed to load objects and fields'
-            });
+      // Group fields by object
+      const objectsMap = new Map<string, any>();
+
+      for (const record of parsed.records) {
+        const objectName = record.EntityDefinition.QualifiedApiName;
+        const objectLabel = record.EntityDefinition.Label;
+
+        if (!objectsMap.has(objectName)) {
+          objectsMap.set(objectName, {
+            name: objectName,
+            label: objectLabel || objectName,
+            fields: []
+          });
         }
-    }
 
-    private getHtmlForWebview(webview: vscode.Webview): string {
-        return `
+        objectsMap.get(objectName)!.fields.push({
+          name: record.QualifiedApiName,
+          label: record.Label || record.QualifiedApiName,
+          dataType: record.DataType
+        });
+      }
+
+      const objectsWithFields = Array.from(objectsMap.values());
+      Logger.info("Prepared " + objectsWithFields.length + " objects with fields");
+
+      webview.postMessage({
+        type: "objectsTree",
+        data: objectsWithFields
+      });
+    } catch (error: any) {
+      Logger.error("Failed to fetch objects", error);
+
+      webview.postMessage({
+        type: "objectsTree",
+        data: [],
+        error: error.message || "Failed to load objects and fields"
+      });
+    }
+  }
+
+  private getHtmlForWebview(_webview: vscode.Webview): string {
+    return `
             <!DOCTYPE html>
             <html lang="en">
             <head>
@@ -445,7 +452,7 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
                             const header = document.createElement('div');
                             header.className = 'tree-object-header';
                             header.innerHTML = '<span class="tree-expand" data-object="' + obj.name + '">▶</span>' +
-                                '<input type="checkbox" id="obj_' + obj.name + '" onchange="toggleObjectPermissions(\'' + obj.name + '\', this.checked)">' +
+                                "<input type=\\"checkbox\\" id=\\"obj_" + obj.name + "\\" onchange=\\"toggleObjectPermissions('" + obj.name + "', this.checked)\\">" +
                                 '<label for="obj_' + obj.name + '" style="margin-left: 8px; cursor: pointer;">' + obj.name + ' (' + obj.label + ')</label>';
                             
                             header.querySelector('.tree-expand').addEventListener('click', (e) => {
@@ -461,7 +468,7 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
                             obj.fields.forEach(field => {
                                 const fieldDiv = document.createElement('div');
                                 fieldDiv.className = 'tree-field';
-                                fieldDiv.innerHTML = '<input type="checkbox" id="field_' + obj.name + '_' + field.name + '" onchange="toggleFieldPermission(\'' + obj.name + '\', \'' + field.name + '\', this.checked)">' +
+                                fieldDiv.innerHTML = "<input type=\\"checkbox\\" id=\\"field_" + obj.name + "_" + field.name + "\\" onchange=\\"toggleFieldPermission('" + obj.name + "', '" + field.name + "', this.checked)\\">" +
                                     '<label for="field_' + obj.name + '_' + field.name + '" style="margin-left: 8px; cursor: pointer;">' + field.name + ' (' + field.label + ') - ' + field.dataType + '</label>';
                                 fieldsDiv.appendChild(fieldDiv);
                             });
@@ -1002,5 +1009,5 @@ return;
             </body>
             </html>
         `;
-    }
+  }
 }

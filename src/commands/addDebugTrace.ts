@@ -8,7 +8,7 @@ export async function addDebugTrace() {
         let targetLevelId: string | null = null;
 
         // 1. Select User
-        let userItems: vscode.QuickPickItem[] = [];
+        const userItems: vscode.QuickPickItem[] = [];
         
         await vscode.window.withProgress({
             location: vscode.ProgressLocation.Notification,
@@ -46,7 +46,7 @@ export async function addDebugTrace() {
         }
 
         // 2. Select Debug Level
-        let levelItems: vscode.QuickPickItem[] = [];
+        const levelItems: vscode.QuickPickItem[] = [];
 
         await vscode.window.withProgress({
             location: vscode.ProgressLocation.Notification,

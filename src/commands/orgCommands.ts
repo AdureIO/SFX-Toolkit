@@ -293,7 +293,6 @@ export async function createScratch() {
 
     // 2. Definition File
     const configFiles = await vscode.workspace.findFiles("config/*.json", "**/node_modules/**");
-    let fileUri: vscode.Uri | undefined;
 
     if (configFiles.length === 0) {
       vscode.window.showErrorMessage("No scratch definition files found in config/.");
@@ -308,7 +307,7 @@ export async function createScratch() {
       { placeHolder: "Select Definition File" }
     );
     if (!filePick) return;
-    fileUri = filePick.uri;
+    const fileUri = filePick.uri;
 
     // READ JSON CONTENT for Defaults
     let defJson: any = {};
@@ -344,7 +343,7 @@ export async function createScratch() {
     if (!duration) return;
 
     // Command Construction
-    let cmd = `sf org create scratch -f "${fileUri.fsPath}" -a ${alias} --duration-days ${duration} -v ${targetDevHub} --set-default`;
+    const cmd = `sf org create scratch -f "${fileUri.fsPath}" -a ${alias} --duration-days ${duration} -v ${targetDevHub} --set-default`;
 
     await vscode.window.withProgress(
       {

@@ -220,7 +220,9 @@ export async function runSnippetFromTree(snippet: ApexSnippet): Promise<void> {
   if (filePath && fs.existsSync(filePath)) {
     try {
       codeToRun = fs.readFileSync(filePath, "utf8");
-    } catch {}
+    } catch {
+      // keep in-memory snippet code when the file cannot be read
+    }
   }
   const result = await executeAnonymousApex(codeToRun, { fromPanel: false, targetOrg });
   if (!result.success) {

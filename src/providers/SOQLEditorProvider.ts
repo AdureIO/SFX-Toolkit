@@ -1,8 +1,7 @@
 import * as vscode from "vscode";
 import * as path from "path";
 import * as fs from "fs";
-import { runCommand, runCommandArgs } from "../utils/commandRunner";
-import { Logger } from "../utils/outputChannel";
+import { runCommandArgs } from "../utils/commandRunner";
 import { AuthInfo } from "../utils/authInfo";
 import { httpsGet } from "../utils/httpUtils";
 import { getToolingApiVersion } from "../utils/constants";
@@ -14,392 +13,397 @@ const SOQL_HISTORY_FILE = "soql-history.json";
 const ASFX_DIR = ".sfdx/asfx";
 
 export class SOQLEditorProvider {
-	public static readonly viewType = "adure-sfx-toolkit.soqlEditor";
+  public static readonly viewType = "adure-sfx-toolkit.soqlEditor";
 
-	public static async show(extensionUri: vscode.Uri, initialQuery?: string) {
-		const column = vscode.window.activeTextEditor ? vscode.window.activeTextEditor.viewColumn : undefined;
+  public static async show(extensionUri: vscode.Uri, initialQuery?: string) {
+    const column = vscode.window.activeTextEditor ? vscode.window.activeTextEditor.viewColumn : undefined;
 
-		const panel = vscode.window.createWebviewPanel(
-			SOQLEditorProvider.viewType,
-			"SOQL Builder & Editor",
-			column || vscode.ViewColumn.One,
-			{
-				enableScripts: true,
-				localResourceRoots: [vscode.Uri.joinPath(extensionUri, "resources")],
-			}
-		);
+    const panel = vscode.window.createWebviewPanel(
+      SOQLEditorProvider.viewType,
+      "SOQL Builder & Editor",
+      column || vscode.ViewColumn.One,
+      {
+        enableScripts: true,
+        localResourceRoots: [vscode.Uri.joinPath(extensionUri, "resources")]
+      }
+    );
 
-		const { lastQuery, history } = await SOQLEditorProvider.loadSoqlState();
-		panel.webview.html = this._getHtmlForWebview(panel.webview, extensionUri, initialQuery || lastQuery, history);
+    const { lastQuery, history } = await SOQLEditorProvider.loadSoqlState();
+    panel.webview.html = this._getHtmlForWebview(panel.webview, extensionUri, initialQuery || lastQuery, history);
 
-		OrgMetadataCache.warmDefaultOrg();
+    OrgMetadataCache.warmDefaultOrg();
 
-		const messageListener = panel.webview.onDidReceiveMessage(
-			async (message) => {
-				switch (message.command) {
-					case "execute":
-						await this.executeQuery(panel, message.query, message.targetOrg || null);
-						break;
-					case "save":
-						await this.saveChanges(panel, message.changes);
-						break;
-					case "getObjectList":
-						await this.sendObjectList(panel);
-						break;
-					case "getFields":
-						await this.sendFields(panel, message.sobject);
-						break;
-					case "getRelationshipNames":
-						await this.sendRelationshipNames(panel, message.parentSobject);
-						break;
-					case "getBuilderObjectList":
-						await this.sendBuilderObjectList(panel);
-						break;
-					case "getBuilderFields":
-						await this.sendBuilderFields(panel, message.sobject);
-						break;
-					case "getOrgList":
-						await this.sendOrgList(panel);
-						break;
-					case "error":
-						vscode.window.showErrorMessage(message.text);
-						break;
-				}
-			},
-			null,
-			[]
-		);
+    const messageListener = panel.webview.onDidReceiveMessage(
+      async (message) => {
+        switch (message.command) {
+          case "execute":
+            await this.executeQuery(panel, message.query, message.targetOrg || null);
+            break;
+          case "save":
+            await this.saveChanges(panel, message.changes);
+            break;
+          case "getObjectList":
+            await this.sendObjectList(panel);
+            break;
+          case "getFields":
+            await this.sendFields(panel, message.sobject);
+            break;
+          case "getRelationshipNames":
+            await this.sendRelationshipNames(panel, message.parentSobject);
+            break;
+          case "getBuilderObjectList":
+            await this.sendBuilderObjectList(panel);
+            break;
+          case "getBuilderFields":
+            await this.sendBuilderFields(panel, message.sobject);
+            break;
+          case "getOrgList":
+            await this.sendOrgList(panel);
+            break;
+          case "error":
+            vscode.window.showErrorMessage(message.text);
+            break;
+        }
+      },
+      null,
+      []
+    );
 
-		panel.onDidDispose(() => {
-			messageListener.dispose();
-			SOQLEditorProvider.editableFieldsCache = {};
-		});
-	}
+    panel.onDidDispose(() => {
+      messageListener.dispose();
+      SOQLEditorProvider.editableFieldsCache = {};
+    });
+  }
 
-	private static getSoqlStorageDir(): string | null {
-		const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-		if (!root) return null;
-		return path.join(root, ASFX_DIR);
-	}
+  private static getSoqlStorageDir(): string | null {
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!root) return null;
+    return path.join(root, ASFX_DIR);
+  }
 
-	private static async loadSoqlState(): Promise<{ lastQuery: string; history: string[] }> {
-		const dir = SOQLEditorProvider.getSoqlStorageDir();
-		if (!dir) return { lastQuery: "", history: [] };
-		let lastQuery = "";
-		let history: string[] = [];
-		try {
-			const lastPath = path.join(dir, SOQL_LAST_FILE);
-			if (fs.existsSync(lastPath)) lastQuery = fs.readFileSync(lastPath, "utf8").trim();
-		} catch {
-			// ignore
-		}
-		try {
-			const histPath = path.join(dir, SOQL_HISTORY_FILE);
-			if (fs.existsSync(histPath)) {
-				const raw = fs.readFileSync(histPath, "utf8");
-				const parsed = JSON.parse(raw);
-				history = Array.isArray(parsed) ? parsed : [];
-			}
-		} catch {
-			// ignore
-		}
-		return { lastQuery, history };
-	}
+  private static async loadSoqlState(): Promise<{ lastQuery: string; history: string[] }> {
+    const dir = SOQLEditorProvider.getSoqlStorageDir();
+    if (!dir) return { lastQuery: "", history: [] };
+    let lastQuery = "";
+    let history: string[] = [];
+    try {
+      const lastPath = path.join(dir, SOQL_LAST_FILE);
+      if (fs.existsSync(lastPath)) lastQuery = fs.readFileSync(lastPath, "utf8").trim();
+    } catch {
+      // ignore
+    }
+    try {
+      const histPath = path.join(dir, SOQL_HISTORY_FILE);
+      if (fs.existsSync(histPath)) {
+        const raw = fs.readFileSync(histPath, "utf8");
+        const parsed = JSON.parse(raw);
+        history = Array.isArray(parsed) ? parsed : [];
+      }
+    } catch {
+      // ignore
+    }
+    return { lastQuery, history };
+  }
 
-	private static async saveSoqlOnExecute(query: string): Promise<string[]> {
-		const dir = SOQLEditorProvider.getSoqlStorageDir();
-		if (!dir) return [];
-		try {
-			if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-			const lastPath = path.join(dir, SOQL_LAST_FILE);
-			fs.writeFileSync(lastPath, query, "utf8");
-			const histPath = path.join(dir, SOQL_HISTORY_FILE);
-			let history: string[] = [];
-			if (fs.existsSync(histPath)) {
-				try {
-					const raw = fs.readFileSync(histPath, "utf8");
-					history = Array.isArray(JSON.parse(raw)) ? JSON.parse(raw) : [];
-				} catch {
-					// ignore
-				}
-			}
-			const trimmed = query.trim();
-			if (trimmed) {
-				history = [trimmed, ...history.filter((q) => q.trim() !== trimmed)].slice(0, SOQL_HISTORY_MAX);
-				fs.writeFileSync(histPath, JSON.stringify(history, null, 0), "utf8");
-			}
-			return history;
-		} catch {
-			return [];
-		}
-	}
+  private static async saveSoqlOnExecute(query: string): Promise<string[]> {
+    const dir = SOQLEditorProvider.getSoqlStorageDir();
+    if (!dir) return [];
+    try {
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      const lastPath = path.join(dir, SOQL_LAST_FILE);
+      fs.writeFileSync(lastPath, query, "utf8");
+      const histPath = path.join(dir, SOQL_HISTORY_FILE);
+      let history: string[] = [];
+      if (fs.existsSync(histPath)) {
+        try {
+          const raw = fs.readFileSync(histPath, "utf8");
+          history = Array.isArray(JSON.parse(raw)) ? JSON.parse(raw) : [];
+        } catch {
+          // ignore
+        }
+      }
+      const trimmed = query.trim();
+      if (trimmed) {
+        history = [trimmed, ...history.filter((q) => q.trim() !== trimmed)].slice(0, SOQL_HISTORY_MAX);
+        fs.writeFileSync(histPath, JSON.stringify(history, null, 0), "utf8");
+      }
+      return history;
+    } catch {
+      return [];
+    }
+  }
 
-	private static async sendObjectList(panel: vscode.WebviewPanel) {
-		try {
-			const sobjects = await OrgMetadataCache.getObjectList(null);
-			panel.webview.postMessage({ command: "completions", kind: "objects", items: sobjects });
-		} catch (e: any) {
-			panel.webview.postMessage({ command: "completions", kind: "objects", items: [] });
-		}
-	}
+  private static async sendObjectList(panel: vscode.WebviewPanel) {
+    try {
+      const sobjects = await OrgMetadataCache.getObjectList(null);
+      panel.webview.postMessage({ command: "completions", kind: "objects", items: sobjects });
+    } catch (e: any) {
+      panel.webview.postMessage({ command: "completions", kind: "objects", items: [] });
+    }
+  }
 
-	private static async sendFields(panel: vscode.WebviewPanel, sobject: string) {
-		if (!sobject) {
-			panel.webview.postMessage({ command: "completions", kind: "fields", items: [] });
-			return;
-		}
-		try {
-			const fields = await OrgMetadataCache.getFieldNames(null, sobject);
-			panel.webview.postMessage({ command: "completions", kind: "fields", items: fields });
-		} catch (e: any) {
-			panel.webview.postMessage({ command: "completions", kind: "fields", items: [] });
-		}
-	}
+  private static async sendFields(panel: vscode.WebviewPanel, sobject: string) {
+    if (!sobject) {
+      panel.webview.postMessage({ command: "completions", kind: "fields", items: [] });
+      return;
+    }
+    try {
+      const fields = await OrgMetadataCache.getFieldNames(null, sobject);
+      panel.webview.postMessage({ command: "completions", kind: "fields", items: fields });
+    } catch (e: any) {
+      panel.webview.postMessage({ command: "completions", kind: "fields", items: [] });
+    }
+  }
 
-	/** Child relationship names for subquery: (SELECT ... FROM <relationshipName>) FROM Parent. Returns name + childSObject for field completion. */
-	private static async sendRelationshipNames(panel: vscode.WebviewPanel, parentSobject: string) {
-		if (!parentSobject) {
-			panel.webview.postMessage({ command: "completions", kind: "relationships", parentSobject: "", items: [] });
-			return;
-		}
-		try {
-			const items = await OrgMetadataCache.getChildRelationships(null, parentSobject);
-			panel.webview.postMessage({ command: "completions", kind: "relationships", parentSobject, items });
-		} catch (e: any) {
-			panel.webview.postMessage({ command: "completions", kind: "relationships", parentSobject: "", items: [] });
-		}
-	}
+  /** Child relationship names for subquery: (SELECT ... FROM <relationshipName>) FROM Parent. Returns name + childSObject for field completion. */
+  private static async sendRelationshipNames(panel: vscode.WebviewPanel, parentSobject: string) {
+    if (!parentSobject) {
+      panel.webview.postMessage({ command: "completions", kind: "relationships", parentSobject: "", items: [] });
+      return;
+    }
+    try {
+      const items = await OrgMetadataCache.getChildRelationships(null, parentSobject);
+      panel.webview.postMessage({ command: "completions", kind: "relationships", parentSobject, items });
+    } catch (e: any) {
+      panel.webview.postMessage({ command: "completions", kind: "relationships", parentSobject: "", items: [] });
+    }
+  }
 
-	private static async sendBuilderObjectList(panel: vscode.WebviewPanel) {
-		try {
-			const sobjects = await OrgMetadataCache.getObjectList(null);
-			panel.webview.postMessage({ command: "builderObjects", items: sobjects });
-		} catch (e: any) {
-			panel.webview.postMessage({ command: "builderObjects", items: [] });
-		}
-	}
+  private static async sendBuilderObjectList(panel: vscode.WebviewPanel) {
+    try {
+      const sobjects = await OrgMetadataCache.getObjectList(null);
+      panel.webview.postMessage({ command: "builderObjects", items: sobjects });
+    } catch (e: any) {
+      panel.webview.postMessage({ command: "builderObjects", items: [] });
+    }
+  }
 
-	private static async sendBuilderFields(panel: vscode.WebviewPanel, sobject: string) {
-		if (!sobject) {
-			panel.webview.postMessage({ command: "builderFields", items: [] });
-			return;
-		}
-		try {
-			const fields = await OrgMetadataCache.getFieldNames(null, sobject);
-			panel.webview.postMessage({ command: "builderFields", items: fields });
-		} catch (e: any) {
-			panel.webview.postMessage({ command: "builderFields", items: [] });
-		}
-	}
+  private static async sendBuilderFields(panel: vscode.WebviewPanel, sobject: string) {
+    if (!sobject) {
+      panel.webview.postMessage({ command: "builderFields", items: [] });
+      return;
+    }
+    try {
+      const fields = await OrgMetadataCache.getFieldNames(null, sobject);
+      panel.webview.postMessage({ command: "builderFields", items: fields });
+    } catch (e: any) {
+      panel.webview.postMessage({ command: "builderFields", items: [] });
+    }
+  }
 
-	private static editableFieldsCache: Record<string, Record<string, boolean>> = {};
+  private static editableFieldsCache: Record<string, Record<string, boolean>> = {};
 
-	/** Build a map sobjectType -> { fieldName: true } for fields that are editable. Uses cache and parallel describes. */
-	private static async getEditableFieldsByType(records: any[]): Promise<Record<string, Record<string, boolean>>> {
-		const types = new Set<string>();
-		const collectTypes = (list: any[]) => {
-			for (const r of list || []) {
-				const t = r.attributes && r.attributes.type;
-				if (t) types.add(t);
-				// subquery records
-				for (const k of Object.keys(r)) {
-					if (k === "attributes") continue;
-					const v = r[k];
-					const sub = SOQLEditorProvider.getSubqueryRecordsStatic(v);
-					if (sub) collectTypes(sub);
-				}
-			}
-		};
-		collectTypes(records || []);
-		const toFetch = Array.from(types).filter((t) => !SOQLEditorProvider.editableFieldsCache[t]);
-		if (toFetch.length > 0) {
-			const results = await Promise.all(
-				toFetch.map(async (sobjectType) => {
-					const edit = await OrgMetadataCache.getEditableFields(null, sobjectType);
-					return { sobjectType, edit };
-				})
-			);
-			for (const { sobjectType, edit } of results) {
-				SOQLEditorProvider.editableFieldsCache[sobjectType] = edit;
-			}
-		}
-		const out: Record<string, Record<string, boolean>> = {};
-		for (const t of types) {
-			if (SOQLEditorProvider.editableFieldsCache[t]) out[t] = SOQLEditorProvider.editableFieldsCache[t];
-		}
-		return out;
-	}
+  /** Build a map sobjectType -> { fieldName: true } for fields that are editable. Uses cache and parallel describes. */
+  private static async getEditableFieldsByType(records: any[]): Promise<Record<string, Record<string, boolean>>> {
+    const types = new Set<string>();
+    const collectTypes = (list: any[]) => {
+      for (const r of list || []) {
+        const t = r.attributes && r.attributes.type;
+        if (t) types.add(t);
+        // subquery records
+        for (const k of Object.keys(r)) {
+          if (k === "attributes") continue;
+          const v = r[k];
+          const sub = SOQLEditorProvider.getSubqueryRecordsStatic(v);
+          if (sub) collectTypes(sub);
+        }
+      }
+    };
+    collectTypes(records || []);
+    const toFetch = Array.from(types).filter((t) => !SOQLEditorProvider.editableFieldsCache[t]);
+    if (toFetch.length > 0) {
+      const results = await Promise.all(
+        toFetch.map(async (sobjectType) => {
+          const edit = await OrgMetadataCache.getEditableFields(null, sobjectType);
+          return { sobjectType, edit };
+        })
+      );
+      for (const { sobjectType, edit } of results) {
+        SOQLEditorProvider.editableFieldsCache[sobjectType] = edit;
+      }
+    }
+    const out: Record<string, Record<string, boolean>> = {};
+    for (const t of types) {
+      if (SOQLEditorProvider.editableFieldsCache[t]) out[t] = SOQLEditorProvider.editableFieldsCache[t];
+    }
+    return out;
+  }
 
-	private static getSubqueryRecordsStatic(value: any): any[] | null {
-		if (value === null || value === undefined) return null;
-		if (Array.isArray(value)) return value;
-		if (typeof value === "object" && value.records && Array.isArray(value.records)) return value.records;
-		return null;
-	}
+  private static getSubqueryRecordsStatic(value: any): any[] | null {
+    if (value === null || value === undefined) return null;
+    if (Array.isArray(value)) return value;
+    if (typeof value === "object" && value.records && Array.isArray(value.records)) return value.records;
+    return null;
+  }
 
-	private static async getInstanceUrl(targetOrg: string | null): Promise<string | null> {
-		try {
-			const args = ["org", "display", "--json"];
-			if (targetOrg) args.push("--target-org", targetOrg);
-			const out = await runCommandArgs("sf", args);
-			const j = JSON.parse(out);
-			return (j.result && j.result.instanceUrl) ? j.result.instanceUrl : null;
-		} catch {
-			return null;
-		}
-	}
+  private static async getInstanceUrl(targetOrg: string | null): Promise<string | null> {
+    try {
+      const args = ["org", "display", "--json"];
+      if (targetOrg) args.push("--target-org", targetOrg);
+      const out = await runCommandArgs("sf", args);
+      const j = JSON.parse(out);
+      return j.result && j.result.instanceUrl ? j.result.instanceUrl : null;
+    } catch {
+      return null;
+    }
+  }
 
-	private static async sendOrgList(panel: vscode.WebviewPanel) {
-		try {
-			const out = await runCommandArgs("sf", ["org", "list", "--json"]);
-			const json = JSON.parse(out);
-			const result = json.result || {};
-			const all: { username: string; alias: string; instanceUrl?: string; isDefault: boolean }[] = [];
-			const add = (arr: any[]) => {
-				if (!Array.isArray(arr)) return;
-				arr.forEach((o: any) => {
-					all.push({
-						username: o.username || "",
-						alias: o.alias || o.username || "",
-						instanceUrl: o.instanceUrl,
-						isDefault: !!o.isDefaultUsername,
-					});
-				});
-			};
-			add(result.nonScratchOrgs);
-			add(result.scratchOrgs);
-			panel.webview.postMessage({ command: "orgList", orgs: all });
-		} catch (e: any) {
-			panel.webview.postMessage({ command: "orgList", orgs: [] });
-		}
-	}
+  private static async sendOrgList(panel: vscode.WebviewPanel) {
+    try {
+      const out = await runCommandArgs("sf", ["org", "list", "--json"]);
+      const json = JSON.parse(out);
+      const result = json.result || {};
+      const all: { username: string; alias: string; instanceUrl?: string; isDefault: boolean }[] = [];
+      const add = (arr: any[]) => {
+        if (!Array.isArray(arr)) return;
+        arr.forEach((o: any) => {
+          all.push({
+            username: o.username || "",
+            alias: o.alias || o.username || "",
+            instanceUrl: o.instanceUrl,
+            isDefault: !!o.isDefaultUsername
+          });
+        });
+      };
+      add(result.nonScratchOrgs);
+      add(result.scratchOrgs);
+      panel.webview.postMessage({ command: "orgList", orgs: all });
+    } catch (e: any) {
+      panel.webview.postMessage({ command: "orgList", orgs: [] });
+    }
+  }
 
-	private static async executeQuery(panel: vscode.WebviewPanel, query: string, targetOrg: string | null) {
-		try {
-			panel.webview.postMessage({ command: "loading", value: true });
+  private static async executeQuery(panel: vscode.WebviewPanel, query: string, targetOrg: string | null) {
+    try {
+      panel.webview.postMessage({ command: "loading", value: true });
 
-			const auth = await AuthInfo.getAuthInfoForOrg(targetOrg);
-			if (!auth) {
-				panel.webview.postMessage({
-					command: "error",
-					text: "Could not get org credentials. Set a default org or select one and try again.",
-				});
-				return;
-			}
+      const auth = await AuthInfo.getAuthInfoForOrg(targetOrg);
+      if (!auth) {
+        panel.webview.postMessage({
+          command: "error",
+          text: "Could not get org credentials. Set a default org or select one and try again."
+        });
+        return;
+      }
 
-			const baseUrl = auth.instanceUrl.replace(/\/$/, "");
-			const apiVersion = getToolingApiVersion();
-			const queryUrl = `${baseUrl}/services/data/${apiVersion}/query?q=${encodeURIComponent(query)}`;
-			const resultStr = await httpsGet(queryUrl, auth.accessToken);
-			const result = JSON.parse(resultStr);
+      const baseUrl = auth.instanceUrl.replace(/\/$/, "");
+      const apiVersion = getToolingApiVersion();
+      const queryUrl = `${baseUrl}/services/data/${apiVersion}/query?q=${encodeURIComponent(query)}`;
+      const resultStr = await httpsGet(queryUrl, auth.accessToken);
+      const result = JSON.parse(resultStr);
 
-			if (result.records !== undefined) {
-				const records = result.records as any[];
-				const editableFields = await SOQLEditorProvider.getEditableFieldsByType(records);
-				panel.webview.postMessage({
-					command: "results",
-					data: records,
-					totalSize: result.totalSize ?? records.length,
-					done: result.done !== false,
-					instanceUrl: auth.instanceUrl,
-					editableFields: editableFields,
-				});
-				const history = await SOQLEditorProvider.saveSoqlOnExecute(query);
-				panel.webview.postMessage({ command: "historyUpdated", history });
-			} else {
-				const err = result[0] || result;
-				const message = err.message || err.errorDescription || JSON.stringify(result);
-				panel.webview.postMessage({ command: "error", text: message });
-			}
-		} catch (e: any) {
-			const errorMsg = e.message || e.stderr || JSON.stringify(e);
-			panel.webview.postMessage({ command: "error", text: errorMsg });
-		} finally {
-			panel.webview.postMessage({ command: "loading", value: false });
-		}
-	}
+      if (result.records !== undefined) {
+        const records = result.records as any[];
+        const editableFields = await SOQLEditorProvider.getEditableFieldsByType(records);
+        panel.webview.postMessage({
+          command: "results",
+          data: records,
+          totalSize: result.totalSize ?? records.length,
+          done: result.done !== false,
+          instanceUrl: auth.instanceUrl,
+          editableFields: editableFields
+        });
+        const history = await SOQLEditorProvider.saveSoqlOnExecute(query);
+        panel.webview.postMessage({ command: "historyUpdated", history });
+      } else {
+        const err = result[0] || result;
+        const message = err.message || err.errorDescription || JSON.stringify(result);
+        panel.webview.postMessage({ command: "error", text: message });
+      }
+    } catch (e: any) {
+      const errorMsg = e.message || e.stderr || JSON.stringify(e);
+      panel.webview.postMessage({ command: "error", text: errorMsg });
+    } finally {
+      panel.webview.postMessage({ command: "loading", value: false });
+    }
+  }
 
-	/** Escape a string for use inside double-quoted key=value pair for sf data update record. */
-	private static escapeValue(value: string): string {
-		return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
-	}
+  /** Escape a string for use inside double-quoted key=value pair for sf data update record. */
+  private static escapeValue(value: string): string {
+    return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  }
 
-	private static async saveChanges(panel: vscode.WebviewPanel, changes: any) {
-		try {
-			panel.webview.postMessage({ command: "saving", value: true });
+  private static async saveChanges(panel: vscode.WebviewPanel, changes: any) {
+    try {
+      panel.webview.postMessage({ command: "saving", value: true });
 
-			let successCount = 0;
-			let errors: string[] = [];
+      let successCount = 0;
+      const errors: string[] = [];
 
-			for (const id of Object.keys(changes)) {
-				const recordChanges = changes[id];
-				const type = recordChanges._type;
-				const fieldsToUpdate: Record<string, string> = { ...recordChanges };
-				delete fieldsToUpdate._type;
+      for (const id of Object.keys(changes)) {
+        const recordChanges = changes[id];
+        const type = recordChanges._type;
+        const fieldsToUpdate: Record<string, string> = { ...recordChanges };
+        delete fieldsToUpdate._type;
 
-				if (!type) {
-					errors.push(`Missing object type for ID ${id}`);
-					continue;
-				}
+        if (!type) {
+          errors.push(`Missing object type for ID ${id}`);
+          continue;
+        }
 
-				// One update per field to avoid --values parsing issues with multiple fields
-				for (const field of Object.keys(fieldsToUpdate)) {
-					const value = fieldsToUpdate[field];
-					const pair = `${field}=${SOQLEditorProvider.escapeValue(value)}`;
-					try {
-						const resultStr = await runCommandArgs("sf", [
-							"data",
-							"update",
-							"record",
-							"--sobject",
-							type,
-							"--record-id",
-							id,
-							"--values",
-							`"${pair}"`,
-							"--json",
-						]);
+        // One update per field to avoid --values parsing issues with multiple fields
+        for (const field of Object.keys(fieldsToUpdate)) {
+          const value = fieldsToUpdate[field];
+          const pair = `${field}=${SOQLEditorProvider.escapeValue(value)}`;
+          try {
+            const resultStr = await runCommandArgs("sf", [
+              "data",
+              "update",
+              "record",
+              "--sobject",
+              type,
+              "--record-id",
+              id,
+              "--values",
+              `"${pair}"`,
+              "--json"
+            ]);
 
-						const result = JSON.parse(resultStr);
-						if (result.status !== 0) {
-							throw new Error(result.message || "Unknown SF Error");
-						}
-						successCount++;
-					} catch (e: any) {
-						let errMsg = e.message || String(e);
-						if (e.stdout) {
-							try {
-								const output = JSON.parse(e.stdout);
-								if (output.message) errMsg = output.message;
-								else if (Array.isArray(output) && output[0]?.message) errMsg = output[0].message;
-							} catch {
-								// ignore
-							}
-						}
-						errors.push(`Record ${id}, field ${field}: ${errMsg}`);
-					}
-				}
-			}
+            const result = JSON.parse(resultStr);
+            if (result.status !== 0) {
+              throw new Error(result.message || "Unknown SF Error");
+            }
+            successCount++;
+          } catch (e: any) {
+            let errMsg = e.message || String(e);
+            if (e.stdout) {
+              try {
+                const output = JSON.parse(e.stdout);
+                if (output.message) errMsg = output.message;
+                else if (Array.isArray(output) && output[0]?.message) errMsg = output[0].message;
+              } catch {
+                // ignore
+              }
+            }
+            errors.push(`Record ${id}, field ${field}: ${errMsg}`);
+          }
+        }
+      }
 
-			if (errors.length > 0) {
-				panel.webview.postMessage({ command: "saveErrors", errors });
-				vscode.window.showErrorMessage(`Some updates failed: ${errors.join("; ")}`);
-			} else if (successCount > 0) {
-				vscode.window.showInformationMessage(`Successfully saved ${successCount} change(s).`);
-			}
-			panel.webview.postMessage({ command: "saveComplete", success: errors.length === 0 });
-		} catch (e: any) {
-			vscode.window.showErrorMessage(`Save failed: ${e.message}`);
-			panel.webview.postMessage({ command: "saveComplete", success: false });
-		} finally {
-			panel.webview.postMessage({ command: "saving", value: false });
-		}
-	}
+      if (errors.length > 0) {
+        panel.webview.postMessage({ command: "saveErrors", errors });
+        vscode.window.showErrorMessage(`Some updates failed: ${errors.join("; ")}`);
+      } else if (successCount > 0) {
+        vscode.window.showInformationMessage(`Successfully saved ${successCount} change(s).`);
+      }
+      panel.webview.postMessage({ command: "saveComplete", success: errors.length === 0 });
+    } catch (e: any) {
+      vscode.window.showErrorMessage(`Save failed: ${e.message}`);
+      panel.webview.postMessage({ command: "saveComplete", success: false });
+    } finally {
+      panel.webview.postMessage({ command: "saving", value: false });
+    }
+  }
 
-	private static _getHtmlForWebview(webview: vscode.Webview, extensionUri: vscode.Uri, lastQuery: string = "", history: string[] = []) {
-		const initialData = JSON.stringify({ lastQuery: lastQuery || "", history: Array.isArray(history) ? history : [] });
-		const initialDataEscaped = initialData.replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
-		return `<!DOCTYPE html>
+  private static _getHtmlForWebview(
+    webview: vscode.Webview,
+    extensionUri: vscode.Uri,
+    lastQuery: string = "",
+    history: string[] = []
+  ) {
+    const initialData = JSON.stringify({ lastQuery: lastQuery || "", history: Array.isArray(history) ? history : [] });
+    const initialDataEscaped = initialData.replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
+    return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -1216,5 +1220,5 @@ export class SOQLEditorProvider {
     </script>
 </body>
 </html>`;
-	}
+  }
 }

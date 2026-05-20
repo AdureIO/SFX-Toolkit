@@ -645,7 +645,7 @@ export async function deployMetadata() {
     ];
 
     const pathChoice = await vscode.window.showQuickPick(pathOptions, {
-      canPickMany: pathOptions.filter((o) => o.value != null).length > 0,
+      canPickMany: pathOptions.filter((o) => o.value !== null && o.value !== undefined).length > 0,
       placeHolder: "Select folder(s) or choose Enter path / Browse",
       matchOnDescription: true
     });
@@ -657,7 +657,7 @@ export async function deployMetadata() {
     const hasEnter = chosenArray.some((c) => c.label === LABEL_ENTER_PATH);
     const hasBrowse = chosenArray.some((c) => c.label === LABEL_BROWSE);
     const selectedDirs = chosenArray
-      .filter((c) => (c as { value?: string }).value != null)
+      .filter((c) => (c as { value?: string }).value !== null && (c as { value?: string }).value !== undefined)
       .map((c) => (c as { value?: string }).value as string);
 
     if (hasEnter || hasBrowse) {

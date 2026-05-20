@@ -5,7 +5,7 @@ import { addDebugTrace } from "./commands/addDebugTrace";
 import { DeployMetadataPanelProvider } from "./providers/DeployMetadataPanelProvider";
 import { executeAnonymous, rerunLastApex } from "./commands/executeAnonymous";
 import { executeSOQL } from "./commands/executeSOQL";
-import { LogTreeProvider, logTreeProvider } from "./providers/LogTreeProvider";
+import { logTreeProvider } from "./providers/LogTreeProvider";
 import { openLogById } from "./commands/listLogs";
 import { deleteAllLogs } from "./commands/deleteAllLogs";
 import { TraceTreeProvider } from "./providers/TraceTreeProvider";
@@ -66,7 +66,6 @@ import * as fs from "fs";
 import { getPollingInterval } from "./utils/constants";
 import { isSalesforceProject, updateSalesforceProjectContext, NOT_SFDX_PROJECT_MESSAGE } from "./utils/projectUtils";
 import { OrgMetadataCache } from "./utils/orgMetadataCache";
-import { getSalesforceLogDirectory } from "./utils/logPaths";
 import { getDeployDiagnosticCollection } from "./utils/deployDiagnostics";
 import { warmOrgListCache } from "./utils/orgListCache";
 import { registerRemoveFinalNewlineHook } from "./utils/removeFinalNewlineHook";
@@ -143,11 +142,11 @@ export function activate(context: vscode.ExtensionContext) {
 
     // 1. Filter Logs Commands
     // 1. Filter Logs Commands (Normal and Active versions point to same handler)
-    let filterDebugCmd = register("adure-sfx-toolkit.filterLogDebug", filterLogDebug);
-    let filterDebugActiveCmd = register("adure-sfx-toolkit.filterLogDebugActive", filterLogDebug);
+    const filterDebugCmd = register("adure-sfx-toolkit.filterLogDebug", filterLogDebug);
+    const filterDebugActiveCmd = register("adure-sfx-toolkit.filterLogDebugActive", filterLogDebug);
 
-    let filterSOQLCmd = register("adure-sfx-toolkit.filterLogSOQL", filterLogSOQL);
-    let filterSOQLActiveCmd = register("adure-sfx-toolkit.filterLogSOQLActive", filterLogSOQL);
+    const filterSOQLCmd = register("adure-sfx-toolkit.filterLogSOQL", filterLogSOQL);
+    const filterSOQLActiveCmd = register("adure-sfx-toolkit.filterLogSOQLActive", filterLogSOQL);
 
     // Sync Context on Switch (dispose on deactivate to avoid leak)
     context.subscriptions.push(
@@ -164,14 +163,14 @@ export function activate(context: vscode.ExtensionContext) {
     }
 
     // 2. List Logs
-    let listLogsCmd = register("adure-sfx-toolkit.listLogs", listLogs);
+    const listLogsCmd = register("adure-sfx-toolkit.listLogs", listLogs);
 
     // 3. Add Debug Trace
-    let addDebugTraceCmd = register("adure-sfx-toolkit.addDebugTrace", addDebugTrace);
+    const addDebugTraceCmd = register("adure-sfx-toolkit.addDebugTrace", addDebugTrace);
 
     // 4. Deploy Metadata (panel with tree, presets, org, test level)
     context.subscriptions.push(getDeployDiagnosticCollection());
-    let deployMetadataCmd = register("adure-sfx-toolkit.deployMetadata", () => DeployMetadataPanelProvider.show());
+    const deployMetadataCmd = register("adure-sfx-toolkit.deployMetadata", () => DeployMetadataPanelProvider.show());
     context.subscriptions.push(
       vscode.window.registerWebviewPanelSerializer(DeployMetadataPanelProvider.viewType, {
         async deserializeWebviewPanel(panel: vscode.WebviewPanel): Promise<void> {
@@ -181,8 +180,8 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     // 5. Execute Anonymous Apex
-    let executeAnonCmd = register("adure-sfx-toolkit.executeAnonymous", executeAnonymous);
-    let rerunAnonCmd = register("adure-sfx-toolkit.rerunLastApex", rerunLastApex);
+    const executeAnonCmd = register("adure-sfx-toolkit.executeAnonymous", executeAnonymous);
+    const rerunAnonCmd = register("adure-sfx-toolkit.rerunLastApex", rerunLastApex);
 
     // CodeLens
     context.subscriptions.push(
@@ -210,12 +209,12 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     // 6. Execute SOQL
-    let executeSOQLCmd = register("adure-sfx-toolkit.executeSOQL", executeSOQL);
+    const executeSOQLCmd = register("adure-sfx-toolkit.executeSOQL", executeSOQL);
 
     // 7. Side Bar Log Provider (shows logs from .sfdx/tools/debug/logs, no own download)
     vscode.window.registerTreeDataProvider("adure-sfx-toolkit.logs", logTreeProvider);
 
-    let refreshLogsCmd = register("adure-sfx-toolkit.refreshLogs", async () => {
+    const refreshLogsCmd = register("adure-sfx-toolkit.refreshLogs", async () => {
       await logTreeProvider.fetchNewLogsFromOrg();
       logTreeProvider.refresh();
     });
@@ -232,27 +231,27 @@ export function activate(context: vscode.ExtensionContext) {
       context.subscriptions.push(logWatcher);
     }
 
-    let openLogCmd = register("adure-sfx-toolkit.openLog", async (logId: string) => {
+    const openLogCmd = register("adure-sfx-toolkit.openLog", async (logId: string) => {
       if (logId) {
         await openLogById(logId);
       }
     });
 
-    let deleteAllLogsCmd = register("adure-sfx-toolkit.deleteAllLogs", deleteAllLogs);
+    const deleteAllLogsCmd = register("adure-sfx-toolkit.deleteAllLogs", deleteAllLogs);
 
     // 8. Side Bar Trace Provider (clear timer on deactivate to avoid leak)
     const traceProvider = new TraceTreeProvider();
     vscode.window.registerTreeDataProvider("adure-sfx-toolkit.traces", traceProvider);
     context.subscriptions.push(new vscode.Disposable(() => traceProvider.clearTimer()));
 
-    let refreshTracesCmd = register("adure-sfx-toolkit.refreshTraces", () => {
+    const refreshTracesCmd = register("adure-sfx-toolkit.refreshTraces", () => {
       traceProvider.refresh();
     });
 
-    let quickTraceCmd = register("adure-sfx-toolkit.quickTrace", quickTrace);
+    const quickTraceCmd = register("adure-sfx-toolkit.quickTrace", quickTrace);
 
     // For deleteTrace, we expect a TraceItem which has a traceId, or a generic call.
-    let deleteTraceCmd = register("adure-sfx-toolkit.deleteTrace", async (item?: any) => {
+    const deleteTraceCmd = register("adure-sfx-toolkit.deleteTrace", async (item?: any) => {
       if (item && item.traceId) {
         await deleteTrace(item.traceId);
       } else {
@@ -274,18 +273,18 @@ export function activate(context: vscode.ExtensionContext) {
       })
     );
 
-    let refreshOrgsCmd = register("adure-sfx-toolkit.refreshOrgs", () => orgTreeProvider.refresh());
-    let openOrgCmd = register("adure-sfx-toolkit.openOrg", openOrg);
-    let setAsDefaultCmd = register("adure-sfx-toolkit.setAsDefaultOrg", setAsDefault);
-    let setAsDefaultDevHubCmd = register("adure-sfx-toolkit.setAsDefaultDevHub", setAsDefaultDevHub);
-    let copyUsernameCmd = register("adure-sfx-toolkit.copyUsername", copyUsername);
-    let renameAliasCmd = register("adure-sfx-toolkit.renameAlias", renameAlias);
-    let generatePasswordCmd = register("adure-sfx-toolkit.generatePassword", generatePassword);
-    let deleteOrgCmd = register("adure-sfx-toolkit.deleteOrg", deleteOrg);
+    const refreshOrgsCmd = register("adure-sfx-toolkit.refreshOrgs", () => orgTreeProvider.refresh());
+    const openOrgCmd = register("adure-sfx-toolkit.openOrg", openOrg);
+    const setAsDefaultCmd = register("adure-sfx-toolkit.setAsDefaultOrg", setAsDefault);
+    const setAsDefaultDevHubCmd = register("adure-sfx-toolkit.setAsDefaultDevHub", setAsDefaultDevHub);
+    const copyUsernameCmd = register("adure-sfx-toolkit.copyUsername", copyUsername);
+    const renameAliasCmd = register("adure-sfx-toolkit.renameAlias", renameAlias);
+    const generatePasswordCmd = register("adure-sfx-toolkit.generatePassword", generatePassword);
+    const deleteOrgCmd = register("adure-sfx-toolkit.deleteOrg", deleteOrg);
 
-    let connectOrgCmd = register("adure-sfx-toolkit.connectOrg", connectOrg);
-    let createScratchCmd = register("adure-sfx-toolkit.createScratch", createScratch);
-    let quickScratchCmd = register("adure-sfx-toolkit.quickScratch", quickScratch);
+    const connectOrgCmd = register("adure-sfx-toolkit.connectOrg", connectOrg);
+    const createScratchCmd = register("adure-sfx-toolkit.createScratch", createScratch);
+    const quickScratchCmd = register("adure-sfx-toolkit.quickScratch", quickScratch);
 
     // 8. Execute Apex panel (bottom panel only; content persisted in .vscode/anon-apex-buffer.apex)
     const anonymousApexProvider = new AnonymousApexViewProvider(context.extensionUri);
@@ -297,14 +296,14 @@ export function activate(context: vscode.ExtensionContext) {
     const devProvider = new DevActionsProvider();
     vscode.window.registerTreeDataProvider("adure-sfx-toolkit.development", devProvider);
 
-    let pushCmd = register("adure-sfx-toolkit.pushSource", pushSource);
-    let pushForceCmd = register("adure-sfx-toolkit.pushSourceForce", pushSourceForce);
-    let pullCmd = register("adure-sfx-toolkit.pullSource", pullSource);
-    let deployFileCmd = register("adure-sfx-toolkit.deployCurrentFile", deployCurrentFile);
-    let retrieveFileCmd = register("adure-sfx-toolkit.retrieveCurrentFile", retrieveCurrentFile);
-    let runTestsCmd = register("adure-sfx-toolkit.runLocalTests", runLocalTests);
-    let resetTrackingCmd = register("adure-sfx-toolkit.resetSourceTracking", resetSourceTracking);
-    let refreshMetadataCmd = register("adure-sfx-toolkit.refreshMetadata", async () => {
+    const pushCmd = register("adure-sfx-toolkit.pushSource", pushSource);
+    const pushForceCmd = register("adure-sfx-toolkit.pushSourceForce", pushSourceForce);
+    const pullCmd = register("adure-sfx-toolkit.pullSource", pullSource);
+    const deployFileCmd = register("adure-sfx-toolkit.deployCurrentFile", deployCurrentFile);
+    const retrieveFileCmd = register("adure-sfx-toolkit.retrieveCurrentFile", retrieveCurrentFile);
+    const runTestsCmd = register("adure-sfx-toolkit.runLocalTests", runLocalTests);
+    const resetTrackingCmd = register("adure-sfx-toolkit.resetSourceTracking", resetSourceTracking);
+    const refreshMetadataCmd = register("adure-sfx-toolkit.refreshMetadata", async () => {
       await vscode.window.withProgress(
         {
           location: vscode.ProgressLocation.Notification,
@@ -320,7 +319,7 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(PermissionSetEditorProvider.register(context));
 
     // Command to open permission set in UI mode
-    let openPermissionSetUICmd = register("adure-sfx-toolkit.openPermissionSetUI", async () => {
+    const openPermissionSetUICmd = register("adure-sfx-toolkit.openPermissionSetUI", async () => {
       const editor = vscode.window.activeTextEditor;
       if (editor && editor.document.fileName.endsWith(".permissionset-meta.xml")) {
         await vscode.commands.executeCommand(
@@ -348,10 +347,8 @@ export function activate(context: vscode.ExtensionContext) {
 
     // 12. Polling Logic (clear interval on deactivate to avoid leak)
     const pollingIntervalRef = { current: undefined as NodeJS.Timeout | undefined };
-    let isPolling = false;
 
-    let startPollingCmd = register("adure-sfx-toolkit.startPolling", async () => {
-      isPolling = true;
+    const startPollingCmd = register("adure-sfx-toolkit.startPolling", async () => {
       logTreeProvider.isPolling = true;
       await vscode.commands.executeCommand("setContext", "adure-sfx-toolkit:polling", true);
 
@@ -367,8 +364,7 @@ export function activate(context: vscode.ExtensionContext) {
       vscode.window.showInformationMessage(`Log polling started: retrieving logs every ${getPollingInterval()}s`);
     });
 
-    let stopPollingCmd = register("adure-sfx-toolkit.stopPolling", async () => {
-      isPolling = false;
+    const stopPollingCmd = register("adure-sfx-toolkit.stopPolling", async () => {
       logTreeProvider.isPolling = false;
       await vscode.commands.executeCommand("setContext", "adure-sfx-toolkit:polling", false);
 
@@ -392,20 +388,20 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.executeCommand("setContext", "adure-sfx-toolkit:polling", false);
 
     // 13. SOQL Editor
-    let openSOQLEditorCmd = register("adure-sfx-toolkit.openSOQLEditor", () => {
+    const openSOQLEditorCmd = register("adure-sfx-toolkit.openSOQLEditor", () => {
       SOQLEditorProvider.show(context.extensionUri);
     });
 
     // 14. Show Output
-    let showOutputCmd = register("adure-sfx-toolkit.showOutput", () => {
+    const showOutputCmd = register("adure-sfx-toolkit.showOutput", () => {
       outputChannel.show();
     });
 
     // 15. New Feature Commands
-    let metadataDiffCmd = register("adure-sfx-toolkit.metadataDiff", metadataDiff);
-    let orgHealthCmd = register("adure-sfx-toolkit.orgHealth", () => OrgHealthProvider.show(context.extensionUri));
-    let quickSoqlCmd = register("adure-sfx-toolkit.quickSoql", () => quickSoqlFromSelection(context.extensionUri));
-    let deployHistoryCmd = register("adure-sfx-toolkit.deployHistory", () => DeployHistoryProvider.show());
+    const metadataDiffCmd = register("adure-sfx-toolkit.metadataDiff", metadataDiff);
+    const orgHealthCmd = register("adure-sfx-toolkit.orgHealth", () => OrgHealthProvider.show(context.extensionUri));
+    const quickSoqlCmd = register("adure-sfx-toolkit.quickSoql", () => quickSoqlFromSelection(context.extensionUri));
+    const deployHistoryCmd = register("adure-sfx-toolkit.deployHistory", () => DeployHistoryProvider.show());
 
     // 16. Apex Snippets (sidebar view like Debug Traces + quick pick + overview panel)
     const snippetProvider = new SnippetTreeProvider();
@@ -419,10 +415,12 @@ export function activate(context: vscode.ExtensionContext) {
         }
       })
     );
-    let showSnippetsCmd = register("adure-sfx-toolkit.showSnippets", showSnippets);
-    let openSnippetsPanelCmd = register("adure-sfx-toolkit.openSnippetsPanel", () => ApexSnippetsPanelProvider.show());
-    let runSnippetCmd = register("adure-sfx-toolkit.runSnippet", (snippet?: any) => runSnippet(snippet));
-    let runSnippetFromTreeCmd = register(
+    const showSnippetsCmd = register("adure-sfx-toolkit.showSnippets", showSnippets);
+    const openSnippetsPanelCmd = register("adure-sfx-toolkit.openSnippetsPanel", () =>
+      ApexSnippetsPanelProvider.show()
+    );
+    const runSnippetCmd = register("adure-sfx-toolkit.runSnippet", (snippet?: any) => runSnippet(snippet));
+    const runSnippetFromTreeCmd = register(
       "adure-sfx-toolkit.runSnippetFromTree",
       (snippetOrItem?: { snippet?: ApexSnippet } | ApexSnippet) => {
         const s = (snippetOrItem && "snippet" in snippetOrItem ? snippetOrItem.snippet : snippetOrItem) as
@@ -431,13 +429,13 @@ export function activate(context: vscode.ExtensionContext) {
         if (s && typeof s.name === "string") runSnippetFromTree(s);
       }
     );
-    let addSnippetCmd = register("adure-sfx-toolkit.addSnippet", async () => {
+    const addSnippetCmd = register("adure-sfx-toolkit.addSnippet", async () => {
       await addSnippet();
       snippetProvider.refresh();
       ApexSnippetsPanelProvider.refreshPanel();
     });
-    let deleteSnippetCmd = register("adure-sfx-toolkit.deleteSnippet", async (item?: { index?: number }) => {
-      if (item != null && typeof item.index === "number" && item.index >= 0) {
+    const deleteSnippetCmd = register("adure-sfx-toolkit.deleteSnippet", async (item?: { index?: number }) => {
+      if (item !== null && item !== undefined && typeof item.index === "number" && item.index >= 0) {
         await deleteSnippetByIndex(item.index);
         snippetProvider.refresh();
         ApexSnippetsPanelProvider.refreshPanel();
@@ -446,12 +444,12 @@ export function activate(context: vscode.ExtensionContext) {
         snippetProvider.refresh();
       }
     });
-    let editSnippetFileCmd = register("adure-sfx-toolkit.editSnippetFile", async () => {
+    const editSnippetFileCmd = register("adure-sfx-toolkit.editSnippetFile", async () => {
       await editSnippetFile();
       snippetProvider.refresh();
     });
-    let refreshSnippetsCmd = register("adure-sfx-toolkit.refreshSnippets", () => snippetProvider.refresh());
-    let editSnippetCmd = register(
+    const refreshSnippetsCmd = register("adure-sfx-toolkit.refreshSnippets", () => snippetProvider.refresh());
+    const editSnippetCmd = register(
       "adure-sfx-toolkit.editSnippet",
       (snippetOrItem?: { snippet?: ApexSnippet; name?: string; code?: string }) => {
         const s = (snippetOrItem?.snippet ?? snippetOrItem) as ApexSnippet | undefined;
@@ -478,18 +476,18 @@ export function activate(context: vscode.ExtensionContext) {
     updateSnippetStatusBar();
 
     // 17. Add to Ignore
-    let addToGitignoreCmd = register("adure-sfx-toolkit.addToGitignore", (uri?: vscode.Uri) => addToGitignore(uri));
-    let addToForceignoreCmd = register("adure-sfx-toolkit.addToForceignore", (uri?: vscode.Uri) =>
+    const addToGitignoreCmd = register("adure-sfx-toolkit.addToGitignore", (uri?: vscode.Uri) => addToGitignore(uri));
+    const addToForceignoreCmd = register("adure-sfx-toolkit.addToForceignore", (uri?: vscode.Uri) =>
       addToForceignore(uri)
     );
-    let addToIgnoreCmd = register("adure-sfx-toolkit.addToIgnore", (uri?: vscode.Uri) => addToIgnore(uri));
+    const addToIgnoreCmd = register("adure-sfx-toolkit.addToIgnore", (uri?: vscode.Uri) => addToIgnore(uri));
 
     // 18. LWC Navigator
-    let lwcNavCmd = register("adure-sfx-toolkit.lwcNavigate", lwcNavigate);
-    let lwcJsCmd = register("adure-sfx-toolkit.lwcGoToJs", lwcGoToJs);
-    let lwcHtmlCmd = register("adure-sfx-toolkit.lwcGoToHtml", lwcGoToHtml);
-    let lwcMetaCmd = register("adure-sfx-toolkit.lwcGoToMeta", lwcGoToMeta);
-    let lwcCssCmd = register("adure-sfx-toolkit.lwcGoToCss", lwcGoToCss);
+    const lwcNavCmd = register("adure-sfx-toolkit.lwcNavigate", lwcNavigate);
+    const lwcJsCmd = register("adure-sfx-toolkit.lwcGoToJs", lwcGoToJs);
+    const lwcHtmlCmd = register("adure-sfx-toolkit.lwcGoToHtml", lwcGoToHtml);
+    const lwcMetaCmd = register("adure-sfx-toolkit.lwcGoToMeta", lwcGoToMeta);
+    const lwcCssCmd = register("adure-sfx-toolkit.lwcGoToCss", lwcGoToCss);
 
     context.subscriptions.push(
       filterDebugCmd,
