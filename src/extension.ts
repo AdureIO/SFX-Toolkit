@@ -70,6 +70,7 @@ import { getSalesforceLogDirectory } from "./utils/logPaths";
 import { getDeployDiagnosticCollection } from "./utils/deployDiagnostics";
 import { getDefaultOrg } from "./utils/defaultOrg";
 import { warmOrgListCache } from "./utils/orgListCache";
+import { registerRemoveFinalNewlineHook } from "./utils/removeFinalNewlineHook";
 
 function updateLwcContext(editor: vscode.TextEditor | undefined): void {
   if (!editor) {
@@ -137,6 +138,9 @@ export function activate(context: vscode.ExtensionContext) {
 
   try {
     Logger.info("Extension activation starting...");
+
+    // 0. Remove-final-newline save hook (config-gated; safe to register before SFDX checks)
+    registerRemoveFinalNewlineHook(context);
 
     // 1. Filter Logs Commands
     // 1. Filter Logs Commands (Normal and Active versions point to same handler)
