@@ -1,92 +1,92 @@
-import * as vscode from 'vscode';
+import * as vscode from "vscode";
 import {
-    loadSnippets,
-    runSnippet,
-    addSnippet,
-    editSnippetFile,
-    deleteSnippetByIndex,
-    openSnippetEditor,
-    ApexSnippet,
-} from '../commands/apexSnippets';
+  loadSnippets,
+  runSnippetFromTree,
+  addSnippet,
+  editSnippetFile,
+  deleteSnippetByIndex,
+  openSnippetEditor,
+  ApexSnippet
+} from "../commands/apexSnippets";
 
 export class ApexSnippetsPanelProvider {
-    public static readonly viewType = 'adure-sfx-toolkit.snippetsPanel';
-    private static _panel: vscode.WebviewPanel | undefined;
+  public static readonly viewType = "adure-sfx-toolkit.snippetsPanel";
+  private static _panel: vscode.WebviewPanel | undefined;
 
-    public static async show(): Promise<void> {
-        const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
+  public static async show(): Promise<void> {
+    const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
 
-        if (ApexSnippetsPanelProvider._panel) {
-            ApexSnippetsPanelProvider._panel.reveal(column);
+    if (ApexSnippetsPanelProvider._panel) {
+      ApexSnippetsPanelProvider._panel.reveal(column);
+      await this.refreshPanel();
+      return;
+    }
+
+    const panel = vscode.window.createWebviewPanel(
+      ApexSnippetsPanelProvider.viewType,
+      "Apex Snippets Overview",
+      column,
+      { enableScripts: true }
+    );
+
+    ApexSnippetsPanelProvider._panel = panel;
+    panel.webview.html = this.getHtml([]);
+
+    const messageListener = panel.webview.onDidReceiveMessage(
+      async (msg: { command: string; index?: number }) => {
+        switch (msg.command) {
+          case "run":
+            if (typeof msg.index === "number") {
+              const snippets = await loadSnippets();
+              if (snippets[msg.index]) await runSnippetFromTree(snippets[msg.index]);
+            }
+            break;
+          case "delete":
+            if (typeof msg.index === "number") {
+              const ok = await deleteSnippetByIndex(msg.index);
+              if (ok) await this.refreshPanel();
+            }
+            break;
+          case "add":
+            await addSnippet();
             await this.refreshPanel();
-            return;
+            break;
+          case "refresh":
+            await this.refreshPanel();
+            break;
+          case "openFile":
+            await editSnippetFile();
+            await this.refreshPanel();
+            break;
+          case "edit":
+            if (typeof msg.index === "number") {
+              const snippets = await loadSnippets();
+              if (snippets[msg.index]) await openSnippetEditor(snippets[msg.index]);
+            }
+            break;
         }
+      },
+      null,
+      []
+    );
 
-        const panel = vscode.window.createWebviewPanel(
-            ApexSnippetsPanelProvider.viewType,
-            'Apex Snippets Overview',
-            column,
-            { enableScripts: true }
-        );
+    panel.onDidDispose(() => {
+      messageListener.dispose();
+      ApexSnippetsPanelProvider._panel = undefined;
+    });
 
-        ApexSnippetsPanelProvider._panel = panel;
-        panel.webview.html = this.getHtml([]);
+    await this.refreshPanel();
+  }
 
-        const messageListener = panel.webview.onDidReceiveMessage(
-            async (msg: { command: string; index?: number }) => {
-                switch (msg.command) {
-                    case 'run':
-                        if (typeof msg.index === 'number') {
-                            const snippets = await loadSnippets();
-                            if (snippets[msg.index]) await runSnippet(snippets[msg.index]);
-                        }
-                        break;
-                    case 'delete':
-                        if (typeof msg.index === 'number') {
-                            const ok = await deleteSnippetByIndex(msg.index);
-                            if (ok) await this.refreshPanel();
-                        }
-                        break;
-                    case 'add':
-                        await addSnippet();
-                        await this.refreshPanel();
-                        break;
-                    case 'refresh':
-                        await this.refreshPanel();
-                        break;
-                    case 'openFile':
-                        await editSnippetFile();
-                        await this.refreshPanel();
-                        break;
-                    case 'edit':
-                        if (typeof msg.index === 'number') {
-                            const snippets = await loadSnippets();
-                            if (snippets[msg.index]) await openSnippetEditor(snippets[msg.index]);
-                        }
-                        break;
-                }
-            },
-            null,
-            []
-        );
+  public static async refreshPanel(): Promise<void> {
+    const panel = ApexSnippetsPanelProvider._panel;
+    if (!panel) return;
+    const snippets = await loadSnippets();
+    panel.webview.postMessage({ command: "setSnippets", snippets });
+  }
 
-        panel.onDidDispose(() => {
-            messageListener.dispose();
-            ApexSnippetsPanelProvider._panel = undefined;
-        });
-
-        await this.refreshPanel();
-    }
-
-    public static async refreshPanel(): Promise<void> {
-        const panel = ApexSnippetsPanelProvider._panel;
-        if (!panel) return;
-        const snippets = await loadSnippets();
-        panel.webview.postMessage({ command: 'setSnippets', snippets });
-    }
-
-    private static getHtml(_snippets: ApexSnippet[]): string {
-        return `<!DOCTYPE html>
+  private static getHtml(_snippets: ApexSnippet[]): string {
+    return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -216,5 +216,5 @@ export class ApexSnippetsPanelProvider {
     </script>
 </body>
 </html>`;
-    }
+  }
 }

@@ -50,6 +50,7 @@ import { lwcNavigate, lwcGoToJs, lwcGoToHtml, lwcGoToMeta, lwcGoToCss } from "./
 import {
   showSnippets,
   runSnippet,
+  runSnippetFromTree,
   addSnippet,
   deleteSnippet,
   editSnippetFile,
@@ -68,6 +69,7 @@ import { OrgMetadataCache } from "./utils/orgMetadataCache";
 import { getSalesforceLogDirectory } from "./utils/logPaths";
 import { getDeployDiagnosticCollection } from "./utils/deployDiagnostics";
 import { getDefaultOrg } from "./utils/defaultOrg";
+import { warmOrgListCache } from "./utils/orgListCache";
 
 function updateLwcContext(editor: vscode.TextEditor | undefined): void {
   if (!editor) {
@@ -194,13 +196,13 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(
       vscode.languages.registerCompletionItemProvider(
         [
-          { language: "apex",              scheme: "file" },
-          { pattern: "**/*.apex",          scheme: "file" },
-          { pattern: "**/*.cls",           scheme: "file" },
-          { pattern: "**/*.trigger",       scheme: "file" },
+          { language: "apex", scheme: "file" },
+          { pattern: "**/*.apex", scheme: "file" },
+          { pattern: "**/*.cls", scheme: "file" },
+          { pattern: "**/*.trigger", scheme: "file" }
         ],
         new ApexCompletionProvider(),
-        "."   // also fires on dot for member completion
+        "." // also fires on dot for member completion
       )
     );
 
@@ -261,6 +263,13 @@ export function activate(context: vscode.ExtensionContext) {
     const orgTreeView = vscode.window.createTreeView("adure-sfx-toolkit.orgs", {
       treeDataProvider: orgTreeProvider
     });
+    context.subscriptions.push(
+      orgTreeView.onDidChangeVisibility((e) => {
+        if (e.visible && isSalesforceProject()) {
+          warmOrgListCache();
+        }
+      })
+    );
 
     let refreshOrgsCmd = register("adure-sfx-toolkit.refreshOrgs", () => orgTreeProvider.refresh());
     let openOrgCmd = register("adure-sfx-toolkit.openOrg", openOrg);
@@ -397,10 +406,28 @@ export function activate(context: vscode.ExtensionContext) {
 
     // 16. Apex Snippets (sidebar view like Debug Traces + quick pick + overview panel)
     const snippetProvider = new SnippetTreeProvider();
-    vscode.window.registerTreeDataProvider("adure-sfx-toolkit.snippets", snippetProvider);
+    const snippetsTreeView = vscode.window.createTreeView("adure-sfx-toolkit.snippets", {
+      treeDataProvider: snippetProvider
+    });
+    context.subscriptions.push(
+      snippetsTreeView.onDidChangeVisibility((e) => {
+        if (e.visible && isSalesforceProject()) {
+          warmOrgListCache();
+        }
+      })
+    );
     let showSnippetsCmd = register("adure-sfx-toolkit.showSnippets", showSnippets);
     let openSnippetsPanelCmd = register("adure-sfx-toolkit.openSnippetsPanel", () => ApexSnippetsPanelProvider.show());
     let runSnippetCmd = register("adure-sfx-toolkit.runSnippet", (snippet?: any) => runSnippet(snippet));
+    let runSnippetFromTreeCmd = register(
+      "adure-sfx-toolkit.runSnippetFromTree",
+      (snippetOrItem?: { snippet?: ApexSnippet } | ApexSnippet) => {
+        const s = (snippetOrItem && "snippet" in snippetOrItem ? snippetOrItem.snippet : snippetOrItem) as
+          | ApexSnippet
+          | undefined;
+        if (s && typeof s.name === "string") runSnippetFromTree(s);
+      }
+    );
     let addSnippetCmd = register("adure-sfx-toolkit.addSnippet", async () => {
       await addSnippet();
       snippetProvider.refresh();
@@ -428,15 +455,15 @@ export function activate(context: vscode.ExtensionContext) {
         if (s && typeof s.name === "string") openSnippetEditor(s);
       }
     );
-    const snippetStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-    snippetStatusBarItem.text = "$(code) Apex Snippets";
-    snippetStatusBarItem.tooltip = "Click for Apex Snippets menu";
-    snippetStatusBarItem.command = "adure-sfx-toolkit.showSnippets";
-    if (isSalesforceProject()) snippetStatusBarItem.show();
-    context.subscriptions.push(snippetStatusBarItem);
+    const snippetQuickRunStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+    snippetQuickRunStatusBarItem.text = "$(play) Run Apex Snippet";
+    snippetQuickRunStatusBarItem.tooltip = "Quick run an Apex snippet against the default org";
+    snippetQuickRunStatusBarItem.command = "adure-sfx-toolkit.runSnippet";
+    if (isSalesforceProject()) snippetQuickRunStatusBarItem.show();
+    context.subscriptions.push(snippetQuickRunStatusBarItem);
     const updateSnippetStatusBar = () => {
-      if (isSalesforceProject()) snippetStatusBarItem.show();
-      else snippetStatusBarItem.hide();
+      if (isSalesforceProject()) snippetQuickRunStatusBarItem.show();
+      else snippetQuickRunStatusBarItem.hide();
     };
 
     const defaultOrgStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 90);
@@ -540,6 +567,7 @@ export function activate(context: vscode.ExtensionContext) {
       openSnippetsPanelCmd,
       refreshSnippetsCmd,
       runSnippetCmd,
+      runSnippetFromTreeCmd,
       addSnippetCmd,
       deleteSnippetCmd,
       editSnippetFileCmd,
@@ -549,6 +577,17 @@ export function activate(context: vscode.ExtensionContext) {
       lwcHtmlCmd,
       lwcMetaCmd,
       lwcCssCmd
+    );
+
+    if (isSalesforceProject()) {
+      warmOrgListCache();
+    }
+    context.subscriptions.push(
+      vscode.workspace.onDidChangeWorkspaceFolders(() => {
+        if (isSalesforceProject()) {
+          warmOrgListCache();
+        }
+      })
     );
 
     Logger.info('Extension "adure-sfx-toolkit" activated successfully.');
