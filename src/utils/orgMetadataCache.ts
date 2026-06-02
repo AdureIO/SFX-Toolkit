@@ -70,6 +70,8 @@ class OrgMetadataCacheImpl {
 		return sobjects.sort((a, b) => a.localeCompare(b));
 	}
 
+
+
 	private async fetchDescribe(org: string | null, sobject: string): Promise<SObjectDescribe | null> {
 		const version = getToolingApiVersion();
 		try {
@@ -108,12 +110,19 @@ class OrgMetadataCacheImpl {
 		}
 		const existing = this.fetchLocks.get(key);
 		if (existing) return existing;
-		const promise = this.fetchSObjectList(org).then((list) => {
-			entry.sobjects = list;
-			entry.sobjectsFetchedAt = now;
-			this.fetchLocks.delete(key);
-			return list;
-		});
+		const promise = this.fetchSObjectList(org)
+			.then((list) => {
+				entry.sobjects = list;
+				entry.sobjectsFetchedAt = now;
+				this.fetchLocks.delete(key);
+				return list;
+			})
+			.catch((err: any) => {
+				// Release the lock so the next call can retry instead of replaying this rejection forever.
+				this.fetchLocks.delete(key);
+				outputChannel.appendLine(`OrgMetadataCache: getObjectList failed: ${err?.message ?? err}`);
+				return [] as string[];
+			});
 		this.fetchLocks.set(key, promise);
 		return promise;
 	}

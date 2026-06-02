@@ -66,8 +66,9 @@ import * as fs from "fs";
 import { getPollingInterval } from "./utils/constants";
 import { isSalesforceProject, updateSalesforceProjectContext, NOT_SFDX_PROJECT_MESSAGE } from "./utils/projectUtils";
 import { OrgMetadataCache } from "./utils/orgMetadataCache";
+import { AuthInfo } from "./utils/authInfo";
 import { getDeployDiagnosticCollection } from "./utils/deployDiagnostics";
-import { warmOrgListCache } from "./utils/orgListCache";
+import { warmOrgListCache, invalidateOrgListCache } from "./utils/orgListCache";
 import { registerRemoveFinalNewlineHook } from "./utils/removeFinalNewlineHook";
 
 function updateLwcContext(editor: vscode.TextEditor | undefined): void {
@@ -273,7 +274,18 @@ export function activate(context: vscode.ExtensionContext) {
       })
     );
 
-    const refreshOrgsCmd = register("adure-sfx-toolkit.refreshOrgs", () => orgTreeProvider.refresh());
+    const refreshOrgsCmd = register("adure-sfx-toolkit.refreshOrgs", () => {
+      // Clear all caches so nothing stale is served
+      AuthInfo.clearCache();
+      OrgMetadataCache.invalidate(null);
+      invalidateOrgListCache();
+      // Redraw the tree
+      orgTreeProvider.refresh();
+      // Rebuild everything in background — auth first so API calls after this are ready
+      AuthInfo.warmAuthForOrg(null);
+      OrgMetadataCache.refresh(null, { background: true });
+      warmOrgListCache();
+    });
     const openOrgCmd = register("adure-sfx-toolkit.openOrg", openOrg);
     const setAsDefaultCmd = register("adure-sfx-toolkit.setAsDefaultOrg", setAsDefault);
     const setAsDefaultDevHubCmd = register("adure-sfx-toolkit.setAsDefaultDevHub", setAsDefaultDevHub);
@@ -554,11 +566,15 @@ export function activate(context: vscode.ExtensionContext) {
 
     if (isSalesforceProject()) {
       warmOrgListCache();
+      AuthInfo.warmAuthForOrg(null);       // pre-fetch token so first API call doesn't start cold
+      OrgMetadataCache.warmDefaultOrg();   // pre-load sobject list for SOQL completion
     }
     context.subscriptions.push(
       vscode.workspace.onDidChangeWorkspaceFolders(() => {
         if (isSalesforceProject()) {
           warmOrgListCache();
+          AuthInfo.warmAuthForOrg(null);
+          OrgMetadataCache.warmDefaultOrg();
         }
       })
     );

@@ -162,9 +162,33 @@ export class AuthInfo {
 	}
 
 	/**
-	 * Make an authenticated GET for an org. Fetches auth, makes the request; on 401 invalidates
-	 * the cache and retries once with fresh credentials. Prefer this over manually fetching auth
-	 * and calling httpsGet so that stale-token recovery is handled in one place.
+	 * Force the SF CLI to refresh the OAuth access token by running an authenticated
+	 * CLI command. Unlike `sf org display`, commands like `sf org display user` make
+	 * an actual authenticated API call through @salesforce/core. When that call returns
+	 * 401, the CLI automatically uses the stored refresh token to obtain a new access
+	 * token and writes it back to the SFDX auth store — regardless of the stored
+	 * accessTokenExpiration timestamp. After this returns, `sf org display` will serve
+	 * the newly-written token.
+	 */
+	private static async forceCliAuthRefresh(org: string | null): Promise<void> {
+		this.invalidateOrg(org);
+		const args = ["org", "display", "user", "--json"];
+		if (org) args.push("--target-org", org);
+		try {
+			await runCommandArgs("sf", args);
+		} catch {
+			// Ignore — if the CLI refresh fails the subsequent getAuthInfoForOrg will
+			// also fail, which is handled by the caller.
+		}
+		// Evict whatever was just stored so getAuthInfoForOrg re-reads the auth file.
+		this.invalidateOrg(org);
+	}
+
+	/**
+	 * Make an authenticated GET for an org. Fetches auth, makes the request; on 401
+	 * forces the CLI to refresh the token via its internal refresh-token flow, then
+	 * retries once. Prefer this over manually fetching auth and calling httpsGet so
+	 * that stale-token recovery is handled in one place for all callers.
 	 */
 	public static async get(
 		org: string | null,
@@ -177,14 +201,30 @@ export class AuthInfo {
 			const body = await httpsGet(buildUrl(auth), auth.accessToken);
 			return { body, auth };
 		} catch (e: any) {
-			if (/HTTP 401/i.test(String(e?.message ?? ""))) {
-				this.invalidateOrg(org);
-				auth = await this.getAuthInfoForOrg(org);
-				if (!auth) throw new Error(NO_CREDS);
+			if (!(/HTTP 401/i.test(String(e?.message ?? "")))) throw e;
+
+			// 401: run a CLI command that makes a real authenticated API call so that
+			// @salesforce/core triggers its refresh-token flow and updates the auth store,
+			// then re-fetch the now-fresh token and retry.
+			await this.forceCliAuthRefresh(org);
+			auth = await this.getAuthInfoForOrg(org);
+			if (!auth) throw new Error(NO_CREDS);
+
+			try {
 				const body = await httpsGet(buildUrl(auth), auth.accessToken);
 				return { body, auth };
+			} catch (retryErr: any) {
+				// Retry also failed — evict the bad token so the next call does not serve
+				// it from cache for the next 55 minutes.
+				this.invalidateOrg(org);
+				if (/HTTP 401/i.test(String(retryErr?.message ?? ""))) {
+					throw new Error(
+						"Salesforce session expired or revoked. Re-authenticate your org: sf org login web" +
+							(org ? ` --target-org ${org}` : "")
+					);
+				}
+				throw retryErr;
 			}
-			throw e;
 		}
 	}
 }
