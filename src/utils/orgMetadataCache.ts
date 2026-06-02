@@ -1,5 +1,4 @@
 import { AuthInfo } from "./authInfo";
-import { httpsGet } from "./httpUtils";
 import { getToolingApiVersion } from "./constants";
 import { outputChannel } from "./outputChannel";
 import { isSalesforceProject } from "./projectUtils";
@@ -7,7 +6,14 @@ import { isSalesforceProject } from "./projectUtils";
 const CACHE_KEY_DEFAULT = "__default__";
 
 export interface SObjectDescribe {
-	fields: { name: string; updateable?: boolean; calculated?: boolean }[];
+	fields: {
+		name: string;
+		type: string;
+		relationshipName?: string;
+		referenceTo?: string[];
+		updateable?: boolean;
+		calculated?: boolean;
+	}[];
 	childRelationships?: { relationshipName?: string; childSObject?: string }[];
 }
 
@@ -48,12 +54,10 @@ class OrgMetadataCacheImpl {
 	}
 
 	private async fetchSObjectList(org: string | null): Promise<string[]> {
-		const auth = await AuthInfo.getAuthInfoForOrg(org);
-		if (!auth) return [];
-		const base = auth.instanceUrl.replace(/\/$/, "");
 		const version = getToolingApiVersion();
-		const url = `${base}/services/data/${version}/sobjects/`;
-		const body = await httpsGet(url, auth.accessToken);
+		const { body } = await AuthInfo.get(org, (a) =>
+			`${a.instanceUrl.replace(/\/$/, "")}/services/data/${version}/sobjects/`
+		);
 		const data = JSON.parse(body);
 		const sobjects: string[] = [];
 		const arr = data.sobjects;
@@ -67,15 +71,22 @@ class OrgMetadataCacheImpl {
 	}
 
 	private async fetchDescribe(org: string | null, sobject: string): Promise<SObjectDescribe | null> {
-		const auth = await AuthInfo.getAuthInfoForOrg(org);
-		if (!auth) return null;
-		const base = auth.instanceUrl.replace(/\/$/, "");
 		const version = getToolingApiVersion();
-		const url = `${base}/services/data/${version}/sobjects/${encodeURIComponent(sobject)}/describe`;
 		try {
-			const body = await httpsGet(url, auth.accessToken);
+			const { body } = await AuthInfo.get(org, (a) =>
+				`${a.instanceUrl.replace(/\/$/, "")}/services/data/${version}/sobjects/${encodeURIComponent(sobject)}/describe`
+			);
 			const data = JSON.parse(body);
-			const fields = Array.isArray(data.fields) ? data.fields : [];
+			const fields = Array.isArray(data.fields)
+				? data.fields.map((f: any) => ({
+						name: f.name as string,
+						type: (f.type as string) || "string",
+						relationshipName: f.relationshipName || undefined,
+						referenceTo: Array.isArray(f.referenceTo) && f.referenceTo.length > 0 ? (f.referenceTo as string[]) : undefined,
+						updateable: f.updateable,
+						calculated: f.calculated,
+					}))
+				: [];
 			const childRelationships = Array.isArray(data.childRelationships) ? data.childRelationships : [];
 			return { fields, childRelationships };
 		} catch (e: any) {
@@ -127,6 +138,29 @@ class OrgMetadataCacheImpl {
 	async getFieldNames(org: string | null, sobject: string): Promise<string[]> {
 		const desc = await this.getDescribe(org, sobject);
 		return desc ? desc.fields.map((f) => f.name) : [];
+	}
+
+	/**
+	 * Get field names with their Salesforce type for an sobject. Used for typed completions.
+	 */
+	async getFieldsWithMeta(org: string | null, sobject: string): Promise<{ name: string; type: string }[]> {
+		const desc = await this.getDescribe(org, sobject);
+		return desc ? desc.fields.map((f) => ({ name: f.name, type: f.type })) : [];
+	}
+
+	/**
+	 * Resolve a relationship name (e.g. `Account__r`) on fromSobject to the target sobject API name.
+	 * Returns null if the relationship is not found in the describe.
+	 */
+	async getRelationshipTarget(org: string | null, fromSobject: string, relName: string): Promise<string | null> {
+		const desc = await this.getDescribe(org, fromSobject);
+		if (!desc) return null;
+		for (const f of desc.fields) {
+			if (f.relationshipName === relName && f.referenceTo && f.referenceTo.length > 0) {
+				return f.referenceTo[0];
+			}
+		}
+		return null;
 	}
 
 	/**

@@ -1,4 +1,5 @@
 import { runCommandArgs } from "./commandRunner";
+import { httpsGet } from "./httpUtils";
 import { Logger, outputChannel } from "./outputChannel";
 import { isSalesforceProject } from "./projectUtils";
 
@@ -158,5 +159,32 @@ export class AuthInfo {
 	public static invalidateOrg(targetOrg: string | null): void {
 		const key = this.cacheKey(targetOrg);
 		this.cache.delete(key);
+	}
+
+	/**
+	 * Make an authenticated GET for an org. Fetches auth, makes the request; on 401 invalidates
+	 * the cache and retries once with fresh credentials. Prefer this over manually fetching auth
+	 * and calling httpsGet so that stale-token recovery is handled in one place.
+	 */
+	public static async get(
+		org: string | null,
+		buildUrl: (auth: OrgAuth) => string
+	): Promise<{ body: string; auth: OrgAuth }> {
+		const NO_CREDS = "Could not get org credentials. Set a default org or select one and try again.";
+		let auth = await this.getAuthInfoForOrg(org);
+		if (!auth) throw new Error(NO_CREDS);
+		try {
+			const body = await httpsGet(buildUrl(auth), auth.accessToken);
+			return { body, auth };
+		} catch (e: any) {
+			if (/HTTP 401/i.test(String(e?.message ?? ""))) {
+				this.invalidateOrg(org);
+				auth = await this.getAuthInfoForOrg(org);
+				if (!auth) throw new Error(NO_CREDS);
+				const body = await httpsGet(buildUrl(auth), auth.accessToken);
+				return { body, auth };
+			}
+			throw e;
+		}
 	}
 }
