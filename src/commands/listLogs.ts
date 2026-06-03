@@ -3,7 +3,6 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { getSalesforceLogDirectory } from '../utils/logPaths';
 import { AuthInfo } from '../utils/authInfo';
-import { httpsGet } from '../utils/httpUtils';
 import { logContentProvider } from '../providers/LogContentProvider';
 
 /**
@@ -86,16 +85,13 @@ export async function openLogById(
             if (targetOrg) {
                 await runCommand(`sf apex get log -i ${logId} -d "${dir}"${orgFlag}`, undefined, undefined, true, token);
             } else {
-                const auth = await AuthInfo.getAuthInfo();
-                if (auth) {
-                    try {
-                        const url = `${auth.instanceUrl}/services/data/${getToolingApiVersion()}/tooling/sobjects/ApexLog/${logId}/Body`;
-                        const body = await httpsGet(url, auth.accessToken);
-                        fs.writeFileSync(logPath, body);
-                    } catch {
-                        await runCommand(`sf apex get log -i ${logId} -d "${dir}"`, undefined, undefined, true, token);
-                    }
-                } else {
+                try {
+                    const version = getToolingApiVersion();
+                    const { body } = await AuthInfo.get(null, (a) =>
+                        `${a.instanceUrl.replace(/\/$/, "")}/services/data/${version}/tooling/sobjects/ApexLog/${logId}/Body`
+                    );
+                    fs.writeFileSync(logPath, body);
+                } catch {
                     await runCommand(`sf apex get log -i ${logId} -d "${dir}"`, undefined, undefined, true, token);
                 }
             }

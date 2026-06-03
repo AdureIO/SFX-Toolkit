@@ -1,5 +1,5 @@
 import { runCommandArgs } from "./commandRunner";
-import { httpsGet } from "./httpUtils";
+import { httpsGet, httpsDelete } from "./httpUtils";
 import { Logger, outputChannel } from "./outputChannel";
 import { isSalesforceProject } from "./projectUtils";
 
@@ -34,7 +34,7 @@ function buildOrgAuth(parsed: any): OrgAuth {
 		accessToken: parsed.accessToken,
 		instanceUrl: parsed.instanceUrl,
 		username: parsed.username,
-		orgId: parsed.id,
+		orgId: parsed.id ?? parsed.orgId ?? "",
 		expiresAt,
 	};
 }
@@ -171,7 +171,11 @@ export class AuthInfo {
 	 * the newly-written token.
 	 */
 	private static async forceCliAuthRefresh(org: string | null): Promise<void> {
-		this.invalidateOrg(org);
+		const key = this.cacheKey(org);
+		// Clear both cache and any in-flight dedup fetch so getAuthInfoForOrg always
+		// starts a fresh sf org display call after the CLI refresh completes.
+		this.cache.delete(key);
+		this.fetchLocks.delete(key);
 		const args = ["org", "display", "user", "--json"];
 		if (org) args.push("--target-org", org);
 		try {
@@ -180,26 +184,29 @@ export class AuthInfo {
 			// Ignore — if the CLI refresh fails the subsequent getAuthInfoForOrg will
 			// also fail, which is handled by the caller.
 		}
-		// Evict whatever was just stored so getAuthInfoForOrg re-reads the auth file.
-		this.invalidateOrg(org);
+		// Evict whatever was written to cache during the CLI call so getAuthInfoForOrg
+		// re-reads the auth file with the token the CLI just refreshed.
+		this.cache.delete(key);
+		this.fetchLocks.delete(key);
 	}
 
 	/**
-	 * Make an authenticated GET for an org. Fetches auth, makes the request; on 401
-	 * forces the CLI to refresh the token via its internal refresh-token flow, then
-	 * retries once. Prefer this over manually fetching auth and calling httpsGet so
-	 * that stale-token recovery is handled in one place for all callers.
+	 * Shared retry core for all authenticated HTTP calls. On 401, forces the CLI to
+	 * refresh the token via its refresh-token flow, then re-fetches auth and retries
+	 * the request once. If the retry also 401s, evicts the bad token and throws a
+	 * user-friendly message. Callers pass an `execute` function that receives the
+	 * current OrgAuth and performs the actual HTTP request.
 	 */
-	public static async get(
+	private static async withRetry<T>(
 		org: string | null,
-		buildUrl: (auth: OrgAuth) => string
-	): Promise<{ body: string; auth: OrgAuth }> {
+		execute: (auth: OrgAuth) => Promise<T>
+	): Promise<{ result: T; auth: OrgAuth }> {
 		const NO_CREDS = "Could not get org credentials. Set a default org or select one and try again.";
 		let auth = await this.getAuthInfoForOrg(org);
 		if (!auth) throw new Error(NO_CREDS);
 		try {
-			const body = await httpsGet(buildUrl(auth), auth.accessToken);
-			return { body, auth };
+			const result = await execute(auth);
+			return { result, auth };
 		} catch (e: any) {
 			if (!(/HTTP 401/i.test(String(e?.message ?? "")))) throw e;
 
@@ -211,8 +218,8 @@ export class AuthInfo {
 			if (!auth) throw new Error(NO_CREDS);
 
 			try {
-				const body = await httpsGet(buildUrl(auth), auth.accessToken);
-				return { body, auth };
+				const result = await execute(auth);
+				return { result, auth };
 			} catch (retryErr: any) {
 				// Retry also failed — evict the bad token so the next call does not serve
 				// it from cache for the next 55 minutes.
@@ -226,5 +233,30 @@ export class AuthInfo {
 				throw retryErr;
 			}
 		}
+	}
+
+	/**
+	 * Authenticated GET. On 401, forces CLI token refresh and retries once.
+	 * Use this for all Salesforce REST/Tooling API GET calls.
+	 */
+	public static async get(
+		org: string | null,
+		buildUrl: (auth: OrgAuth) => string
+	): Promise<{ body: string; auth: OrgAuth }> {
+		const { result: body, auth } = await this.withRetry(org, (a) =>
+			httpsGet(buildUrl(a), a.accessToken)
+		);
+		return { body, auth };
+	}
+
+	/**
+	 * Authenticated DELETE. On 401, forces CLI token refresh and retries once.
+	 * Use this for all Salesforce REST/Tooling API DELETE calls.
+	 */
+	public static async delete(
+		org: string | null,
+		buildUrl: (auth: OrgAuth) => string
+	): Promise<void> {
+		await this.withRetry(org, (a) => httpsDelete(buildUrl(a), a.accessToken));
 	}
 }

@@ -5,14 +5,15 @@ import { logTreeProvider } from "../providers/LogTreeProvider";
 import { getSalesforceLogDirectory } from "../utils/logPaths";
 import { outputChannel } from "../utils/outputChannel";
 import { AuthInfo } from "../utils/authInfo";
-import { httpsGet, httpsDelete } from "../utils/httpUtils";
 import { runCommand } from "../utils/commandRunner";
 import { getToolingApiVersion, getParallelDeletes } from "../utils/constants";
 
-/** Delete one ApexLog via Tooling API (used when REST is available). */
-async function deleteOneViaTooling(instanceUrl: string, accessToken: string, id: string): Promise<void> {
-  const deleteUrl = `${instanceUrl}/services/data/${getToolingApiVersion()}/tooling/sobjects/ApexLog/${id}`;
-  await httpsDelete(deleteUrl, accessToken);
+/** Delete one ApexLog via Tooling API with automatic 401 token refresh. */
+async function deleteOneViaTooling(id: string): Promise<void> {
+  const version = getToolingApiVersion();
+  await AuthInfo.delete(null, (a) =>
+    `${a.instanceUrl.replace(/\/$/, "")}/services/data/${version}/tooling/sobjects/ApexLog/${id}`
+  );
 }
 
 /** Delete one ApexLog via CLI (fallback when at log limit or 401). */
@@ -65,25 +66,21 @@ export async function deleteAllLogs() {
       try {
         outputChannel.appendLine("deleteAllLogs: Fetching log IDs (Tooling API)...");
 
-        // 1. Get a fresh token to reduce 401s (clear cache then fetch)
-        AuthInfo.clearCache();
-        const auth = await AuthInfo.getAuthInfo();
-
-        // 2. Get log IDs: prefer Tooling query; if no auth or query fails, use CLI (works when org at limit)
+        // 1. Get log IDs: prefer Tooling API (AuthInfo.get handles 401/token refresh automatically);
+        //    fall back to CLI if auth unavailable or API fails (e.g. org at log limit).
         let ids: string[] = [];
         const query = "SELECT Id FROM ApexLog LIMIT 5000";
+        const version = getToolingApiVersion();
 
-        if (auth) {
-          try {
-            progress.report({ message: "Fetching log IDs..." });
-            const queryUrl = `${auth.instanceUrl}/services/data/${getToolingApiVersion()}/tooling/query?q=${encodeURIComponent(query)}`;
-            const resultStr = await httpsGet(queryUrl, auth.accessToken);
-            const result = JSON.parse(resultStr);
-            const records = result.records || [];
-            ids = records.map((r: any) => r.Id);
-          } catch (e: any) {
-            outputChannel.appendLine(`deleteAllLogs: Tooling query failed (${e.message}), trying CLI...`);
-          }
+        try {
+          progress.report({ message: "Fetching log IDs..." });
+          const { body } = await AuthInfo.get(null, (a) =>
+            `${a.instanceUrl.replace(/\/$/, "")}/services/data/${version}/tooling/query?q=${encodeURIComponent(query)}`
+          );
+          const result = JSON.parse(body);
+          ids = (result.records || []).map((r: any) => r.Id);
+        } catch (e: any) {
+          outputChannel.appendLine(`deleteAllLogs: Tooling query failed (${e.message}), trying CLI...`);
         }
 
         if (ids.length === 0) {
@@ -113,6 +110,8 @@ export async function deleteAllLogs() {
         outputChannel.appendLine(`deleteAllLogs: Found ${ids.length} log(s). Deleting via Tooling API...`);
 
         // 3. Delete in org: try Tooling API first; on 401/403 or repeated failures, switch to CLI
+        // 3. Delete via Tooling API (AuthInfo.delete handles 401/token refresh automatically).
+        //    Fall back to CLI only for persistent failures (e.g. session fully dead, at log limit).
         let deleted = 0;
         let failed = 0;
         let useCli = false;
@@ -121,32 +120,27 @@ export async function deleteAllLogs() {
           const chunk = ids.slice(i, i + getParallelDeletes());
           progress.report({ message: `Deleting ${Math.min(i + getParallelDeletes(), ids.length)} / ${ids.length}...` });
 
-          if (useCli || !auth) {
+          if (useCli) {
             for (const id of chunk) {
-              try {
-                await deleteOneViaCli(id);
-                deleted++;
-              } catch (e: any) {
-                if (!e.message?.includes("does not exist")) {
+              try { await deleteOneViaCli(id); deleted++; }
+              catch (e: any) {
+                if (!e.message?.includes("does not exist"))
                   outputChannel.appendLine(`deleteAllLogs: CLI delete failed for ${id}: ${e.message}`);
-                }
               }
             }
             continue;
           }
 
-          const results = await Promise.allSettled(
-            chunk.map((id) => deleteOneViaTooling(auth!.instanceUrl, auth!.accessToken, id))
-          );
+          const results = await Promise.allSettled(chunk.map((id) => deleteOneViaTooling(id)));
           for (let j = 0; j < results.length; j++) {
             if (results[j].status === "fulfilled") {
               deleted++;
             } else {
               failed++;
               const err = (results[j] as PromiseRejectedResult).reason;
-              const msg = err?.message ?? String(err);
-              if (msg.includes("401") || msg.includes("403")) {
-                outputChannel.appendLine(`deleteAllLogs: Got 401/403, switching to CLI for remaining deletes.`);
+              const msg = String(err?.message ?? err);
+              if (msg.includes("401") || msg.includes("403") || msg.includes("expired") || msg.includes("revoked")) {
+                outputChannel.appendLine(`deleteAllLogs: Auth failure after retry, switching to CLI for remaining deletes.`);
                 useCli = true;
               } else {
                 outputChannel.appendLine(`deleteAllLogs: Tooling delete failed for ${chunk[j]}: ${msg}`);
@@ -156,13 +150,10 @@ export async function deleteAllLogs() {
           if (useCli) {
             for (let j = 0; j < results.length; j++) {
               if (results[j].status === "rejected") {
-                try {
-                  await deleteOneViaCli(chunk[j]);
-                  deleted++;
-                } catch (e: any) {
-                  if (!e.message?.includes("does not exist")) {
+                try { await deleteOneViaCli(chunk[j]); deleted++; }
+                catch (e: any) {
+                  if (!e.message?.includes("does not exist"))
                     outputChannel.appendLine(`deleteAllLogs: CLI delete failed for ${chunk[j]}: ${e.message}`);
-                  }
                 }
               }
             }

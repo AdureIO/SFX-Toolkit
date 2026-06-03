@@ -68,7 +68,7 @@ import { isSalesforceProject, updateSalesforceProjectContext, NOT_SFDX_PROJECT_M
 import { OrgMetadataCache } from "./utils/orgMetadataCache";
 import { AuthInfo } from "./utils/authInfo";
 import { getDeployDiagnosticCollection } from "./utils/deployDiagnostics";
-import { warmOrgListCache, invalidateOrgListCache } from "./utils/orgListCache";
+import { warmOrgListCache, invalidateOrgListCache, refreshOrgListCache } from "./utils/orgListCache";
 import { registerRemoveFinalNewlineHook } from "./utils/removeFinalNewlineHook";
 
 function updateLwcContext(editor: vscode.TextEditor | undefined): void {
@@ -275,16 +275,24 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     const refreshOrgsCmd = register("adure-sfx-toolkit.refreshOrgs", () => {
-      // Clear all caches so nothing stale is served
+      // 1. Evict everything synchronously so nothing stale is served
       AuthInfo.clearCache();
       OrgMetadataCache.invalidate(null);
       invalidateOrgListCache();
-      // Redraw the tree
+      // 2. Redraw tree immediately (user sees spinner, not stale data)
       orgTreeProvider.refresh();
-      // Rebuild everything in background — auth first so API calls after this are ready
+      // 3. Default org: warm auth + metadata right away (most-used, highest priority)
       AuthInfo.warmAuthForOrg(null);
       OrgMetadataCache.refresh(null, { background: true });
-      warmOrgListCache();
+      // 4. All orgs: rebuild the org list, then warm auth for every connected org so
+      //    stale tokens for non-default orgs are also refreshed proactively.
+      void refreshOrgListCache()
+        .then((orgs) => {
+          for (const org of orgs) {
+            AuthInfo.warmAuthForOrg(org.username);
+          }
+        })
+        .catch(() => { /* non-fatal — orgs warmed lazily on next use */ });
     });
     const openOrgCmd = register("adure-sfx-toolkit.openOrg", openOrg);
     const setAsDefaultCmd = register("adure-sfx-toolkit.setAsDefaultOrg", setAsDefault);

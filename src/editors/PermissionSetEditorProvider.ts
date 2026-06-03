@@ -3,7 +3,6 @@ import { XMLParser, XMLBuilder } from "fast-xml-parser";
 import { isSalesforceProject, NOT_SFDX_PROJECT_MESSAGE } from "../utils/projectUtils";
 import { Logger } from "../utils/outputChannel";
 import { AuthInfo } from "../utils/authInfo";
-import { httpsGet } from "../utils/httpUtils";
 import { getToolingApiVersion } from "../utils/constants";
 
 export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvider {
@@ -120,22 +119,17 @@ export class PermissionSetEditorProvider implements vscode.CustomTextEditorProvi
 
       Logger.info("Starting to fetch objects and fields...");
 
-      const auth = await AuthInfo.getAuthInfo();
-      if (!auth) {
-        throw new Error('No default org set. Please run "sf org login" or set a default org.');
-      }
-      Logger.info("Using org: " + (auth.alias || auth.username));
-
-      const query = `SELECT EntityDefinition.QualifiedApiName, EntityDefinition.Label, QualifiedApiName, Label, DataType 
-                          FROM EntityParticle 
-                          WHERE EntityDefinition.IsCustomizable = true 
+      const query = `SELECT EntityDefinition.QualifiedApiName, EntityDefinition.Label, QualifiedApiName, Label, DataType
+                          FROM EntityParticle
+                          WHERE EntityDefinition.IsCustomizable = true
                           ORDER BY EntityDefinition.QualifiedApiName, QualifiedApiName`;
 
       Logger.info("Executing Tooling API query...");
-      const baseUrl = auth.instanceUrl.replace(/\/$/, "");
       const apiVersion = getToolingApiVersion();
-      const queryUrl = `${baseUrl}/services/data/${apiVersion}/tooling/query?q=${encodeURIComponent(query)}`;
-      const resultStr = await httpsGet(queryUrl, auth.accessToken);
+      const { body: resultStr } = await AuthInfo.get(null, (a) => {
+        Logger.info("Using org: " + (a.alias || a.username));
+        return `${a.instanceUrl.replace(/\/$/, "")}/services/data/${apiVersion}/tooling/query?q=${encodeURIComponent(query)}`;
+      });
       const parsed = JSON.parse(resultStr);
 
       if (parsed.records === undefined) {
