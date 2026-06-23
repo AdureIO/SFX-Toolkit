@@ -22,11 +22,28 @@ async function main() {
     minify: production,
     logLevel: "info"
   });
+
+  // Webview bundle: the Object Visualizer's graph script (Cytoscape + dagre + svg)
+  // is bundled to a single self-contained IIFE loaded via webview.asWebviewUri.
+  // This is NOT externalized — the browser context has no module loader. The
+  // extension bundle never imports cytoscape, so out/extension.js stays small.
+  const webviewCtx = await esbuild.context({
+    entryPoints: ["src/webview/objectVisualizer.ts"],
+    bundle: true,
+    format: "iife",
+    platform: "browser",
+    target: "es2020",
+    outfile: "resources/webview/objectVisualizer.js",
+    sourcemap: !production,
+    minify: production,
+    logLevel: "info"
+  });
+
   if (watch) {
-    await ctx.watch();
+    await Promise.all([ctx.watch(), webviewCtx.watch()]);
   } else {
-    await ctx.rebuild();
-    await ctx.dispose();
+    await Promise.all([ctx.rebuild(), webviewCtx.rebuild()]);
+    await Promise.all([ctx.dispose(), webviewCtx.dispose()]);
   }
 }
 
