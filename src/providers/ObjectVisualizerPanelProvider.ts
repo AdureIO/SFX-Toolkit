@@ -10,7 +10,7 @@ import {
   getDefaultUsernameFromOrgCache,
   OrgOption
 } from "../utils/orgListCache";
-import { buildObjectGraph } from "../utils/objectGraph";
+import { buildObjectGraph, GraphDirection } from "../utils/objectGraph";
 
 /** Max concurrent describe requests when fanning out over neighbours. */
 const DESCRIBE_CONCURRENCY = 6;
@@ -82,7 +82,11 @@ export class ObjectVisualizerPanelProvider {
           await this.sendProjectObjects(panel);
           break;
         case "buildGraph":
-          await this.buildGraph(panel, message.seeds || [], message.targetOrg || null, message.cap);
+          await this.buildGraph(panel, message.seeds || [], message.targetOrg || null, {
+            cap: message.cap,
+            direction: message.direction,
+            includePolymorphic: !!message.includePolymorphic
+          });
           break;
         case "refreshCache":
           OrgMetadataCache.invalidate(message.targetOrg || null);
@@ -147,10 +151,15 @@ export class ObjectVisualizerPanelProvider {
     panel: vscode.WebviewPanel,
     seeds: string[],
     targetOrg: string | null,
-    cap: number | undefined
+    opts: { cap?: number; direction?: GraphDirection; includePolymorphic?: boolean }
   ) {
     try {
       panel.webview.postMessage({ command: "loading", value: true });
+
+      // cap === 0 means "no children"; a positive number caps per seed.
+      const effectiveCap = typeof opts.cap === "number" && opts.cap >= 0 ? opts.cap : 25;
+      const direction: GraphDirection = opts.direction ?? "both";
+      const includePolymorphic = !!opts.includePolymorphic;
 
       // 1. Describe the seeds first.
       const describes = new Map<string, SObjectDescribe>();
@@ -160,23 +169,26 @@ export class ObjectVisualizerPanelProvider {
         if (d) describes.set(s, d);
       });
 
-      // 2. Collect the 1-hop neighbour set (capped children + all parents).
-      // cap === 0 means "no children", a positive number caps per seed.
-      const effectiveCap = typeof cap === "number" && cap >= 0 ? cap : 25;
+      // 2. Collect neighbours to describe, mirroring the builder's direction +
+      //    polymorphic rules (so we only fetch what the graph will actually use).
       const neighbours = new Set<string>();
-      for (const s of seeds) {
-        const d = describes.get(s);
-        if (!d) continue;
-        for (const f of d.fields) {
-          if (f.type === "reference" && Array.isArray(f.referenceTo)) {
+      if (direction !== "self") {
+        for (const s of seeds) {
+          const d = describes.get(s);
+          if (!d) continue;
+          for (const f of d.fields) {
+            if (f.type !== "reference" || !Array.isArray(f.referenceTo)) continue;
+            if (f.referenceTo.length > 1 && !includePolymorphic) continue; // skip polymorphic
             for (const t of f.referenceTo) if (!describes.has(t)) neighbours.add(t);
           }
+          if (direction === "both") {
+            const children = (d.childRelationships || [])
+              .map((cr) => cr.childSObject)
+              .filter((c): c is string => !!c);
+            const uniqueChildren = Array.from(new Set(children)).sort((a, b) => a.localeCompare(b)).slice(0, effectiveCap);
+            for (const c of uniqueChildren) if (!describes.has(c)) neighbours.add(c);
+          }
         }
-        const children = (d.childRelationships || [])
-          .map((cr) => cr.childSObject)
-          .filter((c): c is string => !!c);
-        const uniqueChildren = Array.from(new Set(children)).sort((a, b) => a.localeCompare(b)).slice(0, effectiveCap);
-        for (const c of uniqueChildren) if (!describes.has(c)) neighbours.add(c);
       }
 
       // 3. Describe the neighbours (bounded concurrency, cached/deduped) with progress.
@@ -191,7 +203,7 @@ export class ObjectVisualizerPanelProvider {
       });
 
       // 4. Build the graph (pure) and send it.
-      const graph = buildObjectGraph(seeds, describes, { childCap: effectiveCap });
+      const graph = buildObjectGraph(seeds, describes, { childCap: effectiveCap, direction, includePolymorphic });
       panel.webview.postMessage({
         command: "graph",
         nodes: graph.nodes,
@@ -298,6 +310,12 @@ export class ObjectVisualizerPanelProvider {
     <button id="ov-refresh" class="btn-secondary" title="Refresh org & schema cache">↻</button>
     <button id="ov-pick">⊕ Pick objects</button>
     <button id="ov-project" class="btn-secondary" title="Auto-select the objects defined in this project's source">★ Project objects</button>
+    <span class="tb-label">Related</span>
+    <select id="ov-direction" title="How far out to pull related objects">
+      <option value="self">Selected only</option>
+      <option value="parents">+ Parents (lookups)</option>
+      <option value="both" selected>+ Parents &amp; children</option>
+    </select>
     <span class="tb-label">Max children</span>
     <select id="ov-childcap" title="Max child relationships pulled in per object">
       <option value="0">None</option>
@@ -306,6 +324,7 @@ export class ObjectVisualizerPanelProvider {
       <option value="50">50</option>
       <option value="all">All</option>
     </select>
+    <label class="inline" title="Include polymorphic lookups (OwnerId, WhatId, …) that point at many object types"><input type="checkbox" id="ov-poly"> Polymorphic</label>
     <span class="tb-label">Layout</span>
     <select id="ov-layout" title="Graph layout">
       <option value="dagre-lr" selected>Hierarchical →</option>

@@ -50,12 +50,34 @@ export interface ObjectGraph {
   truncated: string[];
 }
 
+/** How far out from the seeds to pull related objects. */
+export type GraphDirection = "self" | "parents" | "both";
+
 export interface BuildOptions {
   /** Max child relationships pulled in per seed (default 25). Use Infinity for "All". */
   childCap?: number;
+  /**
+   * "self"    — only the selected objects (+ edges among them);
+   * "parents" — selected + objects they reference (lookups out);
+   * "both"    — selected + parents + children (default, full 1-hop).
+   */
+  direction?: GraphDirection;
+  /**
+   * Include polymorphic lookups (referenceTo length > 1, e.g. OwnerId, WhatId).
+   * Off by default — these native fields point at many object types and otherwise
+   * drag dozens of objects (and huge label text) into the graph.
+   */
+  includePolymorphic?: boolean;
 }
 
 const DEFAULT_CHILD_CAP = 25;
+
+/** A reference field counts for traversal/edges unless it's a skipped polymorphic one. */
+function refCounts(referenceTo: string[] | undefined, includePolymorphic: boolean): referenceTo is string[] {
+  if (!Array.isArray(referenceTo) || referenceTo.length === 0) return false;
+  if (referenceTo.length > 1 && !includePolymorphic) return false;
+  return true;
+}
 
 function referenceFieldsOf(desc: SObjectDescribe): GraphNodeField[] {
   return desc.fields
@@ -100,23 +122,28 @@ export function buildObjectGraph(
   opts: BuildOptions = {}
 ): ObjectGraph {
   const cap = opts.childCap ?? DEFAULT_CHILD_CAP;
+  const direction = opts.direction ?? "both";
+  const includePolymorphic = opts.includePolymorphic ?? false;
   const seedSet = new Set(seeds.filter((s) => describes.has(s)));
 
-  // ── 1. Node set: seeds ∪ parents(seed) ∪ children(seed) ──────────────────────
+  // ── 1. Node set: seeds (+ parents) (+ children) per the direction option ─────
   const nodeIds = new Set<string>(seedSet);
   const truncated: string[] = [];
 
   for (const seed of seedSet) {
     const desc = describes.get(seed)!;
-    // parents: every target of every reference field (handles polymorphic).
-    for (const f of desc.fields) {
-      if (f.type !== "reference" || !Array.isArray(f.referenceTo)) continue;
-      for (const target of f.referenceTo) nodeIds.add(target);
+    if (direction === "parents" || direction === "both") {
+      // parents: targets of reference fields (skipping polymorphic unless asked).
+      for (const f of desc.fields) {
+        if (f.type !== "reference" || !refCounts(f.referenceTo, includePolymorphic)) continue;
+        for (const target of f.referenceTo) nodeIds.add(target);
+      }
     }
-    // children: capped, recording what was dropped.
-    const { kept, dropped } = cappedChildren(desc, cap);
-    for (const child of kept) nodeIds.add(child);
-    if (dropped.length > 0) truncated.push(`${seed}: ${dropped.join(", ")}`);
+    if (direction === "both") {
+      const { kept, dropped } = cappedChildren(desc, cap);
+      for (const child of kept) nodeIds.add(child);
+      if (dropped.length > 0) truncated.push(`${seed}: ${dropped.join(", ")}`);
+    }
   }
 
   // ── 2. Nodes (only those we actually have a describe for can show fields) ─────
@@ -139,7 +166,7 @@ export function buildObjectGraph(
     const desc = describes.get(o);
     if (!desc) continue;
     for (const f of desc.fields) {
-      if (f.type !== "reference" || !Array.isArray(f.referenceTo)) continue;
+      if (f.type !== "reference" || !refCounts(f.referenceTo, includePolymorphic)) continue;
       const polymorphic = f.referenceTo.length > 1;
       for (const t of f.referenceTo) {
         if (!nodeIds.has(t)) continue; // edge only if the target is in scope

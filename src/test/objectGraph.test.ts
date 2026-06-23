@@ -57,17 +57,49 @@ describe("objectGraph.buildObjectGraph", () => {
     assert.ok(!g.edges.some((e) => e.target === "User"));
   });
 
-  it("handles polymorphic references (all targets, flagged)", () => {
+  it("skips polymorphic references by default, includes them when asked", () => {
     const describes = new Map<string, SObjectDescribe>([
       ["Case", describe_([["OwnerId", ["User", "Group"]]], [])],
       ["User", describe_()],
       ["Group", describe_()]
     ]);
-    const g = buildObjectGraph(["Case"], describes);
+    // Default: polymorphic OwnerId is skipped → no User/Group nodes, no edges.
+    const def = buildObjectGraph(["Case"], describes);
+    assert.deepStrictEqual(def.nodes.map((n) => n.id), ["Case"]);
+    assert.strictEqual(def.edges.length, 0);
+
+    // Opt in: both targets become nodes + edges, flagged polymorphic.
+    const g = buildObjectGraph(["Case"], describes, { includePolymorphic: true });
     assert.deepStrictEqual(g.nodes.map((n) => n.id).sort(), ["Case", "Group", "User"]);
     const owner = g.edges.filter((e) => e.via === "OwnerId");
     assert.strictEqual(owner.length, 2);
     assert.ok(owner.every((e) => e.polymorphic === true));
+  });
+
+  it("respects direction: self / parents / both", () => {
+    const describes = new Map<string, SObjectDescribe>([
+      ["Case", describe_([["AccountId", ["Account"]]], ["CaseComment"])],
+      ["Account", describe_()],
+      ["CaseComment", describe_()]
+    ]);
+    const self = buildObjectGraph(["Case"], describes, { direction: "self" });
+    assert.deepStrictEqual(self.nodes.map((n) => n.id), ["Case"]);
+
+    const parents = buildObjectGraph(["Case"], describes, { direction: "parents" });
+    assert.deepStrictEqual(parents.nodes.map((n) => n.id).sort(), ["Account", "Case"]);
+
+    const both = buildObjectGraph(["Case"], describes, { direction: "both" });
+    assert.deepStrictEqual(both.nodes.map((n) => n.id).sort(), ["Account", "Case", "CaseComment"]);
+  });
+
+  it("draws edges among selected seeds in 'self' direction without pulling neighbours", () => {
+    const describes = new Map<string, SObjectDescribe>([
+      ["Case", describe_([["AccountId", ["Account"]]], [])],
+      ["Account", describe_([["ParentId", ["Account"]]], [])]
+    ]);
+    const g = buildObjectGraph(["Case", "Account"], describes, { direction: "self" });
+    assert.deepStrictEqual(g.nodes.map((n) => n.id).sort(), ["Account", "Case"]);
+    assert.ok(g.edges.some((e) => e.source === "Case" && e.target === "Account"));
   });
 
   it("handles self references", () => {

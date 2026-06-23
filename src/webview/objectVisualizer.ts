@@ -166,8 +166,11 @@ function nodeLabel(n: GraphNode): string {
   const fields = n.fields;
   if (fields.length === 0) return header;
   const lines = fields.slice(0, 40).map((f) => {
-    const arrow = f.isReference && f.referenceTo && f.referenceTo.length ? " → " + f.referenceTo.join("/") : "";
-    return f.name + arrow;
+    if (!f.isReference || !f.referenceTo || !f.referenceTo.length) return f.name;
+    // Cap target list so polymorphic fields (OwnerId, WhatId, …) don't blow up the box.
+    const targets =
+      f.referenceTo.length > 3 ? f.referenceTo.slice(0, 3).join("/") + "/…+" + (f.referenceTo.length - 3) : f.referenceTo.join("/");
+    return f.name + " → " + targets;
   });
   const more = fields.length > lines.length ? "\n… +" + (fields.length - lines.length) + " more" : "";
   return header + "\n───\n" + lines.join("\n") + more;
@@ -322,6 +325,8 @@ $("ov-export-svg").addEventListener("click", () => {
   post({ command: "saveFile", encoding: "utf8", content, suggestedName: "object-diagram.svg" });
 });
 
+const directionSelect = $("ov-direction") as HTMLSelectElement;
+const polyToggle = $("ov-poly") as HTMLInputElement;
 function childCap(): number {
   const v = childCapSelect.value;
   return v === "all" ? Number.MAX_SAFE_INTEGER : parseInt(v, 10);
@@ -331,7 +336,14 @@ function build() {
     setStatus("Pick at least one object to visualize.");
     return;
   }
-  post({ command: "buildGraph", seeds: Array.from(selectedSeeds), targetOrg: orgSelect.value || null, cap: childCap() });
+  post({
+    command: "buildGraph",
+    seeds: Array.from(selectedSeeds),
+    targetOrg: orgSelect.value || null,
+    cap: childCap(),
+    direction: directionSelect.value,
+    includePolymorphic: polyToggle.checked
+  });
 }
 
 // ── Host -> webview ──────────────────────────────────────────────────────────
