@@ -78,6 +78,9 @@ export class ObjectVisualizerPanelProvider {
         case "getObjectList":
           await this.sendObjectList(panel, message.targetOrg || null);
           break;
+        case "getProjectObjects":
+          await this.sendProjectObjects(panel);
+          break;
         case "buildGraph":
           await this.buildGraph(panel, message.seeds || [], message.targetOrg || null, message.cap);
           break;
@@ -124,6 +127,22 @@ export class ObjectVisualizerPanelProvider {
     }
   }
 
+  /** Object API names defined in this project's SFDX source (objects/<Name>/<Name>.object-meta.xml). */
+  private static async sendProjectObjects(panel: vscode.WebviewPanel) {
+    try {
+      const files = await vscode.workspace.findFiles("**/objects/*/*.object-meta.xml", "**/node_modules/**", 5000);
+      const names = new Set<string>();
+      for (const f of files) {
+        const m = f.path.match(/\/objects\/([^/]+)\/[^/]+\.object-meta\.xml$/);
+        if (m) names.add(m[1]);
+      }
+      panel.webview.postMessage({ command: "projectObjects", objects: Array.from(names).sort((a, b) => a.localeCompare(b)) });
+    } catch (e: any) {
+      panel.webview.postMessage({ command: "projectObjects", objects: [] });
+      panel.webview.postMessage({ command: "error", text: e?.message || String(e) });
+    }
+  }
+
   private static async buildGraph(
     panel: vscode.WebviewPanel,
     seeds: string[],
@@ -142,7 +161,8 @@ export class ObjectVisualizerPanelProvider {
       });
 
       // 2. Collect the 1-hop neighbour set (capped children + all parents).
-      const effectiveCap = cap && cap > 0 ? cap : 25;
+      // cap === 0 means "no children", a positive number caps per seed.
+      const effectiveCap = typeof cap === "number" && cap >= 0 ? cap : 25;
       const neighbours = new Set<string>();
       for (const s of seeds) {
         const d = describes.get(s);
@@ -277,13 +297,25 @@ export class ObjectVisualizerPanelProvider {
     <select id="ov-org" title="Org to visualize"><option value="">Default org</option></select>
     <button id="ov-refresh" class="btn-secondary" title="Refresh org & schema cache">↻</button>
     <button id="ov-pick">⊕ Pick objects</button>
+    <button id="ov-project" class="btn-secondary" title="Auto-select the objects defined in this project's source">★ Project objects</button>
     <span class="tb-label">Max children</span>
     <select id="ov-childcap" title="Max child relationships pulled in per object">
+      <option value="0">None</option>
       <option value="10">10</option>
       <option value="25" selected>25</option>
       <option value="50">50</option>
       <option value="all">All</option>
     </select>
+    <span class="tb-label">Layout</span>
+    <select id="ov-layout" title="Graph layout">
+      <option value="dagre-lr" selected>Hierarchical →</option>
+      <option value="dagre-tb">Hierarchical ↓</option>
+      <option value="breadthfirst">Tree</option>
+      <option value="concentric">Concentric</option>
+      <option value="grid">Grid</option>
+      <option value="cose">Force</option>
+    </select>
+    <button id="ov-fit" class="btn-secondary" title="Fit graph to view">⤢ Fit</button>
     <label class="inline"><input type="checkbox" id="ov-fullfields"> Full fields</label>
     <span class="tb-spacer"></span>
     <button id="ov-export-png" class="btn-secondary">⬇ PNG</button>

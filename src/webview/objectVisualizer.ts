@@ -66,11 +66,16 @@ function cssVar(name: string, fallback: string): string {
   return v || fallback;
 }
 
+const accent = cssVar("--vscode-focusBorder", "#007fd4");
+const fg = cssVar("--vscode-editor-foreground", "#ccc");
+const lineColor = cssVar("--vscode-descriptionForeground", "#888");
+const bg = cssVar("--vscode-editor-background", "#1e1e1e");
+
 const cy = cytoscape({
   container: $("cy"),
-  wheelSensitivity: 0.2,
-  minZoom: 0.2,
-  maxZoom: 2.5,
+  wheelSensitivity: 0.25,
+  minZoom: 0.02,
+  maxZoom: 3,
   style: [
     {
       selector: "node",
@@ -80,66 +85,122 @@ const cy = cytoscape({
         "border-width": 1,
         "border-color": cssVar("--vscode-widget-border", "#454545"),
         label: "data(label)",
-        color: cssVar("--vscode-editor-foreground", "#ccc"),
+        color: fg,
         "font-family": "var(--vscode-editor-font-family, monospace)",
-        "font-size": 11,
+        "font-size": 12,
         "text-wrap": "wrap",
         "text-valign": "center",
         "text-halign": "center",
-        "text-margin-y": 0,
-        padding: "8px",
+        padding: "7px",
         width: "label",
         height: "label",
-        "text-max-width": "260px"
+        "text-max-width": "320px"
       } as cytoscape.Css.Node
     },
     {
       selector: "node[?seed]",
       style: {
-        "border-width": 2,
-        "border-color": cssVar("--vscode-focusBorder", "#007fd4"),
-        "background-color": cssVar("--vscode-editor-inactiveSelectionBackground", "#2d3640")
+        "border-width": 3,
+        "border-color": accent,
+        "background-color": cssVar("--vscode-editor-inactiveSelectionBackground", "#2d3640"),
+        "font-weight": "bold"
       } as cytoscape.Css.Node
     },
     {
       selector: "edge",
       style: {
-        width: 1.4,
-        "line-color": cssVar("--vscode-descriptionForeground", "#888"),
-        "target-arrow-color": cssVar("--vscode-descriptionForeground", "#888"),
+        width: 1,
+        opacity: 0.22,
+        "line-color": lineColor,
+        "target-arrow-color": lineColor,
         "target-arrow-shape": "triangle",
         "curve-style": "bezier",
-        "arrow-scale": 0.9,
-        label: "data(via)",
-        "font-size": 8,
-        color: cssVar("--vscode-descriptionForeground", "#888"),
-        "text-rotation": "autorotate",
-        "text-background-color": cssVar("--vscode-editor-background", "#1e1e1e"),
-        "text-background-opacity": 1,
-        "text-background-padding": "1px"
+        "arrow-scale": 0.7
       } as cytoscape.Css.Edge
     },
-    {
-      selector: "edge[?polymorphic]",
-      style: { "line-style": "dashed" } as cytoscape.Css.Edge
-    },
+    { selector: "edge[?polymorphic]", style: { "line-style": "dashed" } as cytoscape.Css.Edge },
     {
       selector: "edge[?selfRef]",
       style: { "line-color": cssVar("--vscode-charts-orange", "#d18616"), "target-arrow-color": cssVar("--vscode-charts-orange", "#d18616") } as cytoscape.Css.Edge
+    },
+    // Focus interaction: dim everything except the tapped node's neighbourhood.
+    { selector: ".faded", style: { opacity: 0.06, "text-opacity": 0.06 } as cytoscape.Css.Node },
+    { selector: "node.hl", style: { "border-color": accent, "border-width": 3 } as cytoscape.Css.Node },
+    {
+      selector: "edge.hl",
+      style: {
+        opacity: 1,
+        width: 2,
+        "line-color": accent,
+        "target-arrow-color": accent,
+        label: "data(via)",
+        "font-size": 10,
+        color: fg,
+        "text-rotation": "autorotate",
+        "text-background-color": bg,
+        "text-background-opacity": 1,
+        "text-background-padding": "2px"
+      } as cytoscape.Css.Edge
     }
   ]
 });
 
+// Tap a node → spotlight its direct relationships; tap empty space → reset.
+cy.on("tap", "node", (evt) => {
+  const n = evt.target;
+  const hood = n.outgoers().union(n.incomers()).union(n);
+  cy.elements().addClass("faded");
+  hood.removeClass("faded");
+  hood.nodes().addClass("hl");
+  hood.edges().addClass("hl");
+  n.addClass("hl");
+});
+cy.on("tap", (evt) => {
+  if (evt.target === cy) cy.elements().removeClass("faded hl");
+});
+
 function nodeLabel(n: GraphNode): string {
-  const fields = showFullFields ? n.fields : n.referenceFields;
+  // Default: compact name-only box (relationships are shown by the edges).
+  if (!showFullFields) return (n.isSeed ? "◉ " : "") + n.id;
   const header = (n.isSeed ? "◉ " : "") + n.id;
+  const fields = n.fields;
   if (fields.length === 0) return header;
-  const lines = fields.slice(0, showFullFields ? 40 : 20).map((f) => {
+  const lines = fields.slice(0, 40).map((f) => {
     const arrow = f.isReference && f.referenceTo && f.referenceTo.length ? " → " + f.referenceTo.join("/") : "";
     return f.name + arrow;
   });
   const more = fields.length > lines.length ? "\n… +" + (fields.length - lines.length) + " more" : "";
   return header + "\n───\n" + lines.join("\n") + more;
+}
+
+function layoutConfig(name: string): cytoscape.LayoutOptions {
+  const base = { padding: 40, animate: false, nodeDimensionsIncludeLabels: true };
+  switch (name) {
+    case "dagre-tb":
+      return { name: "dagre", rankDir: "TB", nodeSep: 35, rankSep: 110, edgeSep: 10, ...base } as cytoscape.LayoutOptions;
+    case "grid":
+      return { name: "grid", avoidOverlap: true, ...base } as cytoscape.LayoutOptions;
+    case "concentric":
+      return {
+        name: "concentric",
+        minNodeSpacing: 30,
+        concentric: (n: cytoscape.NodeSingular) => (n.data("seed") ? 2 : 1),
+        levelWidth: () => 1,
+        ...base
+      } as unknown as cytoscape.LayoutOptions;
+    case "cose":
+      return { name: "cose", idealEdgeLength: () => 120, nodeRepulsion: () => 9000, ...base } as unknown as cytoscape.LayoutOptions;
+    case "breadthfirst":
+      return { name: "breadthfirst", directed: true, spacingFactor: 1.3, ...base } as cytoscape.LayoutOptions;
+    default:
+      return { name: "dagre", rankDir: "LR", nodeSep: 35, rankSep: 130, edgeSep: 10, ...base } as cytoscape.LayoutOptions;
+  }
+}
+
+let currentLayout = "dagre-lr";
+function runLayout() {
+  cy.layout(layoutConfig(currentLayout)).run();
+  cy.fit(undefined, 40);
 }
 
 function renderGraph(nodes: GraphNode[], edges: GraphEdge[]) {
@@ -156,14 +217,14 @@ function renderGraph(nodes: GraphNode[], edges: GraphEdge[]) {
         data: { id: e.id, source: e.source, target: e.target, via: e.via, polymorphic: e.polymorphic ? 1 : 0, selfRef: e.selfRef ? 1 : 0 }
       }))
   );
-  cy.layout({ name: "dagre", rankDir: "LR", nodeSep: 30, rankSep: 90, edgeSep: 10 } as cytoscape.LayoutOptions).run();
-  cy.fit(undefined, 30);
+  runLayout();
 }
 
 function relabelNodes() {
   cy.batch(() => {
     for (const n of currentNodes) cy.getElementById(n.id).data("label", nodeLabel(n));
   });
+  runLayout();
 }
 
 // ── Object picker ────────────────────────────────────────────────────────────
@@ -244,6 +305,13 @@ orgSelect.addEventListener("change", () => {
   selectedSeeds.clear();
 });
 
+const layoutSelect = $("ov-layout") as HTMLSelectElement;
+layoutSelect.addEventListener("change", () => {
+  currentLayout = layoutSelect.value;
+  if (currentNodes.length) runLayout();
+});
+$("ov-fit").addEventListener("click", () => cy.fit(undefined, 40));
+$("ov-project").addEventListener("click", () => post({ command: "getProjectObjects" }));
 $("ov-refresh").addEventListener("click", () => post({ command: "refreshCache", targetOrg: orgSelect.value || null }));
 $("ov-export-png").addEventListener("click", () => {
   const data = cy.png({ full: true, scale: 2, bg: cssVar("--vscode-editor-background", "#1e1e1e") });
@@ -298,8 +366,22 @@ window.addEventListener("message", (event: MessageEvent) => {
       const edges = (msg.edges as GraphEdge[]) || [];
       renderGraph(nodes, edges);
       const trunc = (msg.truncated as string[]) || [];
-      const warn = nodes.length > 60 ? " ⚠ large graph (" + nodes.length + " nodes)" : "";
+      const warn = nodes.length > 60 ? " ⚠ large — tap a node to focus its relationships" : "";
       setStatus(nodes.length + " objects, " + edges.length + " relationships" + (trunc.length ? " · some children hidden (cap)" : "") + warn);
+      break;
+    }
+    case "projectObjects": {
+      // Auto-select the project's own objects (those defined in the SFDX source).
+      const projObjects = (msg.objects as string[]) || [];
+      const available = new Set(objectList.map((o) => o.name));
+      const usable = projObjects.filter((n) => available.size === 0 || available.has(n));
+      if (usable.length === 0) {
+        setStatus("No project objects found in the workspace source.");
+        break;
+      }
+      selectedSeeds = new Set(usable);
+      setStatus("Selected " + usable.length + " project object(s).");
+      build();
       break;
     }
     case "cacheRefreshed":
