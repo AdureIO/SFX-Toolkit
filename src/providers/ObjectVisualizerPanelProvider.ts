@@ -285,7 +285,7 @@ export class ObjectVisualizerPanelProvider {
   .btn-secondary { background: var(--vscode-button-secondaryBackground, var(--vscode-input-background));
     color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); border: 1px solid var(--asfx-border); }
   label.inline { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--vscode-foreground); cursor: pointer; }
-  #cy { flex: 1; min-height: 0; width: 100%; background: var(--vscode-editor-background); }
+  #cy { flex: 1; min-height: 0; width: 100%; background: var(--vscode-editor-background); position: relative; }
   .status { padding: 5px 12px; font-size: 11px; color: var(--vscode-descriptionForeground);
     border-top: 1px solid var(--asfx-border); flex-shrink: 0; }
   /* Picker overlay */
@@ -305,6 +305,29 @@ export class ObjectVisualizerPanelProvider {
   .picker-foot { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--asfx-border); }
   .picker-foot .tb-spacer { flex: 1; }
   #ov-picker-search { flex: 1; }
+
+  /* ── dbdiagram-style object cards (HTML overlaid on graph nodes) ── */
+  .ov-card { box-sizing: border-box; font-family: var(--vscode-font-family); font-size: 11px;
+    border: 1px solid var(--asfx-border); border-radius: 8px; overflow: hidden; pointer-events: none;
+    background: var(--vscode-editorWidget-background, #252526); color: var(--vscode-editor-foreground);
+    box-shadow: 0 3px 10px rgba(0,0,0,0.40); transition: opacity .12s ease; }
+  .ov-card--seed { border-color: var(--vscode-focusBorder); }
+  .ov-card.is-dim { opacity: 0.12; }
+  .ov-card.is-focus { box-shadow: 0 0 0 2px var(--vscode-focusBorder), 0 6px 20px rgba(0,0,0,0.55); }
+  .ov-head { display: flex; align-items: center; gap: 8px; padding: 6px 10px; font-weight: 700; font-size: 12px;
+    background: var(--vscode-sideBarSectionHeader-background, rgba(127,127,127,0.14)); border-bottom: 1px solid var(--asfx-border); }
+  .ov-card--seed .ov-head { background: var(--vscode-focusBorder); color: var(--vscode-button-foreground, #ffffff); border-bottom-color: transparent; }
+  .ov-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ov-fcount { margin-left: auto; font-weight: 400; font-size: 9px; opacity: .75; white-space: nowrap; }
+  .ov-row { display: flex; align-items: center; gap: 6px; padding: 0 10px; height: 19px; }
+  .ov-row:nth-child(even) { background: rgba(127,127,127,0.06); }
+  .ov-fname { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ov-row.is-ref .ov-fname { color: var(--vscode-textLink-foreground); font-weight: 600; }
+  .ov-ftype { font-size: 10px; color: var(--vscode-descriptionForeground); white-space: nowrap; max-width: 120px; overflow: hidden; text-overflow: ellipsis; }
+  .ov-pk, .ov-fk { font-size: 8px; font-weight: 700; padding: 0 4px; border-radius: 5px; line-height: 14px; }
+  .ov-pk { background: var(--vscode-charts-yellow, #d7ba00); color: #000; }
+  .ov-fk { background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); }
+  .ov-more { padding: 2px 10px; font-style: italic; font-size: 10px; color: var(--vscode-descriptionForeground); }
 </style>
 </head>
 <body>

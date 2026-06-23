@@ -10,6 +10,12 @@ declare module "cytoscape-svg" {
   export = ext;
 }
 
+declare module "cytoscape-node-html-label" {
+  // Registers a cy.nodeHtmlLabel([...]) method; called as nodeHtmlLabel(cytoscape).
+  function register(cy: unknown): void;
+  export = register;
+}
+
 declare function acquireVsCodeApi(): {
   postMessage(message: unknown): void;
   getState(): unknown;

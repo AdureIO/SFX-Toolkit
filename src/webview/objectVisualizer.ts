@@ -1,9 +1,11 @@
 import cytoscape = require("cytoscape");
 import dagre = require("cytoscape-dagre");
 import svg = require("cytoscape-svg");
+import nodeHtmlLabel = require("cytoscape-node-html-label");
 
 cytoscape.use(dagre);
 cytoscape.use(svg);
+nodeHtmlLabel(cytoscape);
 
 // ── Message shapes (kept inline so this browser bundle never imports host/
 //    vscode-dependent modules). Must match ObjectVisualizerPanelProvider. ──────
@@ -78,44 +80,26 @@ const cy = cytoscape({
   maxZoom: 3,
   style: [
     {
+      // The node itself is an invisible bounding box; the HTML card draws on top.
       selector: "node",
       style: {
         shape: "round-rectangle",
-        "background-color": cssVar("--vscode-editorWidget-background", "#252526"),
-        "border-width": 1,
-        "border-color": cssVar("--vscode-widget-border", "#454545"),
-        label: "data(label)",
-        color: fg,
-        "font-family": "var(--vscode-editor-font-family, monospace)",
-        "font-size": 12,
-        "text-wrap": "wrap",
-        "text-valign": "center",
-        "text-halign": "center",
-        padding: "7px",
-        width: "label",
-        height: "label",
-        "text-max-width": "320px"
-      } as cytoscape.Css.Node
-    },
-    {
-      selector: "node[?seed]",
-      style: {
-        "border-width": 3,
-        "border-color": accent,
-        "background-color": cssVar("--vscode-editor-inactiveSelectionBackground", "#2d3640"),
-        "font-weight": "bold"
+        "background-opacity": 0,
+        "border-width": 0,
+        width: "data(w)",
+        height: "data(h)"
       } as cytoscape.Css.Node
     },
     {
       selector: "edge",
       style: {
         width: 1,
-        opacity: 0.22,
+        opacity: 0.28,
         "line-color": lineColor,
         "target-arrow-color": lineColor,
         "target-arrow-shape": "triangle",
         "curve-style": "bezier",
-        "arrow-scale": 0.7
+        "arrow-scale": 0.8
       } as cytoscape.Css.Edge
     },
     { selector: "edge[?polymorphic]", style: { "line-style": "dashed" } as cytoscape.Css.Edge },
@@ -123,9 +107,7 @@ const cy = cytoscape({
       selector: "edge[?selfRef]",
       style: { "line-color": cssVar("--vscode-charts-orange", "#d18616"), "target-arrow-color": cssVar("--vscode-charts-orange", "#d18616") } as cytoscape.Css.Edge
     },
-    // Focus interaction: dim everything except the tapped node's neighbourhood.
-    { selector: ".faded", style: { opacity: 0.06, "text-opacity": 0.06 } as cytoscape.Css.Node },
-    { selector: "node.hl", style: { "border-color": accent, "border-width": 3 } as cytoscape.Css.Node },
+    { selector: "edge.faded", style: { opacity: 0.05 } as cytoscape.Css.Edge },
     {
       selector: "edge.hl",
       style: {
@@ -145,41 +127,121 @@ const cy = cytoscape({
   ]
 });
 
+// ── dbdiagram-style HTML cards ───────────────────────────────────────────────
+function esc(s: string): string {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+function capTargets(arr: string[]): string {
+  return arr.length > 2 ? arr.slice(0, 2).join(", ") + " +" + (arr.length - 2) : arr.join(", ");
+}
+
+const CARD_W = 244;
+const HEAD_H = 30;
+const ROW_H = 19;
+const MORE_H = 18;
+const MAX_ROWS = 24;
+
+/** Which fields a card shows: neighbours → none; seeds → key+ref, or all when Full fields. */
+function visibleFields(n: GraphNode): { rows: GraphNodeField[]; hidden: number } {
+  if (!n.isSeed) return { rows: [], hidden: 0 };
+  const source = showFullFields ? n.fields : n.fields.filter((f) => f.name === "Id" || f.name === "Name" || f.isReference);
+  if (source.length <= MAX_ROWS) return { rows: source, hidden: 0 };
+  return { rows: source.slice(0, MAX_ROWS), hidden: source.length - MAX_ROWS };
+}
+
+function rowHtml(f: GraphNodeField): string {
+  const badge =
+    f.name === "Id"
+      ? '<span class="ov-pk">PK</span>'
+      : f.isReference
+      ? '<span class="ov-fk">FK</span>'
+      : "";
+  const type = f.isReference && f.referenceTo && f.referenceTo.length ? "→ " + capTargets(f.referenceTo) : f.type;
+  return (
+    '<div class="ov-row' +
+    (f.isReference ? " is-ref" : "") +
+    '"><span class="ov-fname">' +
+    esc(f.name) +
+    "</span>" +
+    badge +
+    '<span class="ov-ftype">' +
+    esc(type) +
+    "</span></div>"
+  );
+}
+
+function cardInner(n: GraphNode): string {
+  const { rows, hidden } = visibleFields(n);
+  const head =
+    '<div class="ov-head"><span class="ov-title">' +
+    esc(n.id) +
+    '</span><span class="ov-fcount">' +
+    n.fields.length +
+    " fields</span></div>";
+  if (rows.length === 0 && hidden === 0) return head;
+  const body = rows.map(rowHtml).join("") + (hidden > 0 ? '<div class="ov-more">… +' + hidden + " more</div>" : "");
+  return head + '<div class="ov-body">' + body + "</div>";
+}
+
+function nodeData(n: GraphNode) {
+  const { rows, hidden } = visibleFields(n);
+  const bodyH = rows.length === 0 && hidden === 0 ? 0 : rows.length * ROW_H + (hidden > 0 ? MORE_H : 0) + 6;
+  return {
+    id: n.id,
+    seed: n.isSeed ? 1 : 0,
+    w: CARD_W,
+    h: HEAD_H + bodyH,
+    inner: cardInner(n),
+    dim: 0,
+    focus: 0
+  };
+}
+
+(cy as unknown as { nodeHtmlLabel: (opts: unknown[]) => void }).nodeHtmlLabel([
+  {
+    query: "node",
+    halign: "center",
+    valign: "center",
+    halignBox: "center",
+    valignBox: "center",
+    tpl: (d: { w: number; seed: number; dim: number; focus: number; inner: string }) => {
+      const cls =
+        "ov-card" + (d.seed ? " ov-card--seed" : "") + (d.dim ? " is-dim" : "") + (d.focus ? " is-focus" : "");
+      return '<div class="' + cls + '" style="width:' + d.w + 'px">' + d.inner + "</div>";
+    }
+  }
+]);
+
 // Tap a node → spotlight its direct relationships; tap empty space → reset.
+function clearFocus() {
+  cy.batch(() => {
+    cy.nodes().forEach((x) => {
+      x.data("dim", 0);
+      x.data("focus", 0);
+    });
+  });
+  cy.elements().removeClass("faded hl");
+}
 cy.on("tap", "node", (evt) => {
   const n = evt.target;
   const hood = n.outgoers().union(n.incomers()).union(n);
+  const keep = new Set(hood.nodes().map((x: cytoscape.NodeSingular) => x.id()));
+  cy.batch(() => {
+    cy.nodes().forEach((x) => {
+      x.data("dim", keep.has(x.id()) ? 0 : 1);
+      x.data("focus", x.id() === n.id() ? 1 : 0);
+    });
+  });
   cy.elements().addClass("faded");
   hood.removeClass("faded");
-  hood.nodes().addClass("hl");
   hood.edges().addClass("hl");
-  n.addClass("hl");
 });
 cy.on("tap", (evt) => {
-  if (evt.target === cy) cy.elements().removeClass("faded hl");
+  if (evt.target === cy) clearFocus();
 });
 
-function nodeLabel(n: GraphNode): string {
-  // Compact name-only box, except: selected (seed) objects show their fields
-  // when "Full fields" is on. Neighbours stay compact so hubs like User don't
-  // balloon into a 180-field block.
-  if (!showFullFields || !n.isSeed) return (n.isSeed ? "◉ " : "") + n.id;
-  const header = (n.isSeed ? "◉ " : "") + n.id;
-  const fields = n.fields;
-  if (fields.length === 0) return header;
-  const lines = fields.slice(0, 40).map((f) => {
-    if (!f.isReference || !f.referenceTo || !f.referenceTo.length) return f.name;
-    // Cap target list so polymorphic fields (OwnerId, WhatId, …) don't blow up the box.
-    const targets =
-      f.referenceTo.length > 3 ? f.referenceTo.slice(0, 3).join("/") + "/…+" + (f.referenceTo.length - 3) : f.referenceTo.join("/");
-    return f.name + " → " + targets;
-  });
-  const more = fields.length > lines.length ? "\n… +" + (fields.length - lines.length) + " more" : "";
-  return header + "\n───\n" + lines.join("\n") + more;
-}
-
 function layoutConfig(name: string): cytoscape.LayoutOptions {
-  const base = { padding: 40, animate: false, nodeDimensionsIncludeLabels: true };
+  const base = { padding: 40, animate: false, nodeDimensionsIncludeLabels: false };
   switch (name) {
     case "dagre-tb":
       return { name: "dagre", rankDir: "TB", nodeSep: 35, rankSep: 110, edgeSep: 10, ...base } as cytoscape.LayoutOptions;
@@ -211,9 +273,7 @@ function runLayout() {
 function renderGraph(nodes: GraphNode[], edges: GraphEdge[]) {
   currentNodes = nodes;
   cy.elements().remove();
-  cy.add(
-    nodes.map((n) => ({ group: "nodes" as const, data: { id: n.id, label: nodeLabel(n), seed: n.isSeed ? 1 : 0 } }))
-  );
+  cy.add(nodes.map((n) => ({ group: "nodes" as const, data: nodeData(n) })));
   cy.add(
     edges
       .filter((e) => cy.getElementById(e.source).nonempty() && cy.getElementById(e.target).nonempty())
@@ -226,8 +286,14 @@ function renderGraph(nodes: GraphNode[], edges: GraphEdge[]) {
 }
 
 function relabelNodes() {
+  // Full-fields toggle changes card content + height → recompute and re-lay out.
   cy.batch(() => {
-    for (const n of currentNodes) cy.getElementById(n.id).data("label", nodeLabel(n));
+    for (const n of currentNodes) {
+      const d = nodeData(n);
+      const node = cy.getElementById(n.id);
+      node.data("inner", d.inner);
+      node.data("h", d.h);
+    }
   });
   runLayout();
 }
