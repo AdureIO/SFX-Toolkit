@@ -141,12 +141,16 @@ const ROW_H = 19;
 const MORE_H = 18;
 const MAX_ROWS = 24;
 
-/** Which fields a card shows: neighbours → none; seeds → key+ref, or all when Full fields. */
+/**
+ * Which fields a card shows. "Full fields" → every field on every card (no cap).
+ * Otherwise the relationship-relevant subset (Id, Name, and reference fields),
+ * which keeps non-selected cards readable while still showing every card's fields.
+ */
 function visibleFields(n: GraphNode): { rows: GraphNodeField[]; hidden: number } {
-  if (!n.isSeed) return { rows: [], hidden: 0 };
   const source = showFullFields ? n.fields : n.fields.filter((f) => f.name === "Id" || f.name === "Name" || f.isReference);
-  if (source.length <= MAX_ROWS) return { rows: source, hidden: 0 };
-  return { rows: source.slice(0, MAX_ROWS), hidden: source.length - MAX_ROWS };
+  const cap = showFullFields ? Number.MAX_SAFE_INTEGER : MAX_ROWS;
+  if (source.length <= cap) return { rows: source, hidden: 0 };
+  return { rows: source.slice(0, cap), hidden: source.length - cap };
 }
 
 function rowHtml(f: GraphNodeField): string {
