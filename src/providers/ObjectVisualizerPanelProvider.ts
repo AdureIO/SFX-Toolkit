@@ -85,7 +85,8 @@ export class ObjectVisualizerPanelProvider {
           await this.buildGraph(panel, message.seeds || [], message.targetOrg || null, {
             cap: message.cap,
             direction: message.direction,
-            includePolymorphic: !!message.includePolymorphic
+            includePolymorphic: !!message.includePolymorphic,
+            includeAudit: !!message.includeAudit
           });
           break;
         case "refreshCache":
@@ -151,7 +152,7 @@ export class ObjectVisualizerPanelProvider {
     panel: vscode.WebviewPanel,
     seeds: string[],
     targetOrg: string | null,
-    opts: { cap?: number; direction?: GraphDirection; includePolymorphic?: boolean }
+    opts: { cap?: number; direction?: GraphDirection; includePolymorphic?: boolean; includeAudit?: boolean }
   ) {
     try {
       panel.webview.postMessage({ command: "loading", value: true });
@@ -160,6 +161,8 @@ export class ObjectVisualizerPanelProvider {
       const effectiveCap = typeof opts.cap === "number" && opts.cap >= 0 ? opts.cap : 25;
       const direction: GraphDirection = opts.direction ?? "both";
       const includePolymorphic = !!opts.includePolymorphic;
+      const includeAudit = !!opts.includeAudit;
+      const AUDIT = new Set(["CreatedById", "LastModifiedById"]);
 
       // 1. Describe the seeds first.
       const describes = new Map<string, SObjectDescribe>();
@@ -178,6 +181,7 @@ export class ObjectVisualizerPanelProvider {
           if (!d) continue;
           for (const f of d.fields) {
             if (f.type !== "reference" || !Array.isArray(f.referenceTo)) continue;
+            if (!includeAudit && AUDIT.has(f.name)) continue; // skip audit lookups
             if (f.referenceTo.length > 1 && !includePolymorphic) continue; // skip polymorphic
             for (const t of f.referenceTo) if (!describes.has(t)) neighbours.add(t);
           }
@@ -203,7 +207,7 @@ export class ObjectVisualizerPanelProvider {
       });
 
       // 4. Build the graph (pure) and send it.
-      const graph = buildObjectGraph(seeds, describes, { childCap: effectiveCap, direction, includePolymorphic });
+      const graph = buildObjectGraph(seeds, describes, { childCap: effectiveCap, direction, includePolymorphic, includeAudit });
       panel.webview.postMessage({
         command: "graph",
         nodes: graph.nodes,
@@ -325,6 +329,7 @@ export class ObjectVisualizerPanelProvider {
       <option value="all">All</option>
     </select>
     <label class="inline" title="Include polymorphic lookups (OwnerId, WhatId, …) that point at many object types"><input type="checkbox" id="ov-poly"> Polymorphic</label>
+    <label class="inline" title="Include audit lookups (CreatedById / LastModifiedById → User)"><input type="checkbox" id="ov-audit"> Audit</label>
     <span class="tb-label">Layout</span>
     <select id="ov-layout" title="Graph layout">
       <option value="dagre-lr" selected>Hierarchical →</option>

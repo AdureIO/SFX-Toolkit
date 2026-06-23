@@ -160,8 +160,10 @@ cy.on("tap", (evt) => {
 });
 
 function nodeLabel(n: GraphNode): string {
-  // Default: compact name-only box (relationships are shown by the edges).
-  if (!showFullFields) return (n.isSeed ? "◉ " : "") + n.id;
+  // Compact name-only box, except: selected (seed) objects show their fields
+  // when "Full fields" is on. Neighbours stay compact so hubs like User don't
+  // balloon into a 180-field block.
+  if (!showFullFields || !n.isSeed) return (n.isSeed ? "◉ " : "") + n.id;
   const header = (n.isSeed ? "◉ " : "") + n.id;
   const fields = n.fields;
   if (fields.length === 0) return header;
@@ -327,6 +329,7 @@ $("ov-export-svg").addEventListener("click", () => {
 
 const directionSelect = $("ov-direction") as HTMLSelectElement;
 const polyToggle = $("ov-poly") as HTMLInputElement;
+const auditToggle = $("ov-audit") as HTMLInputElement;
 function childCap(): number {
   const v = childCapSelect.value;
   return v === "all" ? Number.MAX_SAFE_INTEGER : parseInt(v, 10);
@@ -342,7 +345,8 @@ function build() {
     targetOrg: orgSelect.value || null,
     cap: childCap(),
     direction: directionSelect.value,
-    includePolymorphic: polyToggle.checked
+    includePolymorphic: polyToggle.checked,
+    includeAudit: auditToggle.checked
   });
 }
 

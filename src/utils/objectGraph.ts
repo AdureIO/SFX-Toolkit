@@ -68,14 +68,29 @@ export interface BuildOptions {
    * drag dozens of objects (and huge label text) into the graph.
    */
   includePolymorphic?: boolean;
+  /**
+   * Include audit lookups (CreatedById / LastModifiedById → User). Off by default —
+   * they're on virtually every object and turn User into a noisy hub.
+   */
+  includeAudit?: boolean;
 }
 
 const DEFAULT_CHILD_CAP = 25;
 
-/** A reference field counts for traversal/edges unless it's a skipped polymorphic one. */
-function refCounts(referenceTo: string[] | undefined, includePolymorphic: boolean): referenceTo is string[] {
-  if (!Array.isArray(referenceTo) || referenceTo.length === 0) return false;
-  if (referenceTo.length > 1 && !includePolymorphic) return false;
+/** Standard audit lookups present on (almost) every object — User hub-makers. */
+const AUDIT_REF_FIELDS = new Set(["CreatedById", "LastModifiedById"]);
+
+interface RefFieldLike {
+  name: string;
+  type: string;
+  referenceTo?: string[];
+}
+
+/** Whether a reference field should be traversed / drawn, given the filter options. */
+function includeRefField(f: RefFieldLike, includePolymorphic: boolean, includeAudit: boolean): boolean {
+  if (f.type !== "reference" || !Array.isArray(f.referenceTo) || f.referenceTo.length === 0) return false;
+  if (!includeAudit && AUDIT_REF_FIELDS.has(f.name)) return false;
+  if (f.referenceTo.length > 1 && !includePolymorphic) return false;
   return true;
 }
 
@@ -124,6 +139,7 @@ export function buildObjectGraph(
   const cap = opts.childCap ?? DEFAULT_CHILD_CAP;
   const direction = opts.direction ?? "both";
   const includePolymorphic = opts.includePolymorphic ?? false;
+  const includeAudit = opts.includeAudit ?? false;
   const seedSet = new Set(seeds.filter((s) => describes.has(s)));
 
   // ── 1. Node set: seeds (+ parents) (+ children) per the direction option ─────
@@ -135,8 +151,8 @@ export function buildObjectGraph(
     if (direction === "parents" || direction === "both") {
       // parents: targets of reference fields (skipping polymorphic unless asked).
       for (const f of desc.fields) {
-        if (f.type !== "reference" || !refCounts(f.referenceTo, includePolymorphic)) continue;
-        for (const target of f.referenceTo) nodeIds.add(target);
+        if (!includeRefField(f, includePolymorphic, includeAudit)) continue;
+        for (const target of f.referenceTo!) nodeIds.add(target);
       }
     }
     if (direction === "both") {
@@ -166,9 +182,10 @@ export function buildObjectGraph(
     const desc = describes.get(o);
     if (!desc) continue;
     for (const f of desc.fields) {
-      if (f.type !== "reference" || !refCounts(f.referenceTo, includePolymorphic)) continue;
-      const polymorphic = f.referenceTo.length > 1;
-      for (const t of f.referenceTo) {
+      if (!includeRefField(f, includePolymorphic, includeAudit)) continue;
+      const refTo = f.referenceTo!;
+      const polymorphic = refTo.length > 1;
+      for (const t of refTo) {
         if (!nodeIds.has(t)) continue; // edge only if the target is in scope
         const id = `${o}->${t}::${f.name}`;
         if (seenEdge.has(id)) continue;

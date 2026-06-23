@@ -76,6 +76,23 @@ describe("objectGraph.buildObjectGraph", () => {
     assert.ok(owner.every((e) => e.polymorphic === true));
   });
 
+  it("skips audit lookups (CreatedById/LastModifiedById) by default", () => {
+    const describes = new Map<string, SObjectDescribe>([
+      ["Invoice__c", describe_([["CreatedById", ["User"]], ["AccountId", ["Account"]]], [])],
+      ["User", describe_()],
+      ["Account", describe_()]
+    ]);
+    // Default: CreatedById → User is skipped; AccountId → Account stays.
+    const def = buildObjectGraph(["Invoice__c"], describes);
+    assert.deepStrictEqual(def.nodes.map((n) => n.id).sort(), ["Account", "Invoice__c"]);
+    assert.ok(!def.edges.some((e) => e.target === "User"));
+
+    // Opt in: User comes back via the audit lookup.
+    const withAudit = buildObjectGraph(["Invoice__c"], describes, { includeAudit: true });
+    assert.ok(withAudit.nodes.some((n) => n.id === "User"));
+    assert.ok(withAudit.edges.some((e) => e.via === "CreatedById" && e.target === "User"));
+  });
+
   it("respects direction: self / parents / both", () => {
     const describes = new Map<string, SObjectDescribe>([
       ["Case", describe_([["AccountId", ["Account"]]], ["CaseComment"])],
