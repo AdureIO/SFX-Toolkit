@@ -149,11 +149,14 @@ const SYSTEM_FIELD_NAMES = new Set([
   "IsDeleted", "CreatedById", "CreatedDate", "LastModifiedById", "LastModifiedDate", "SystemModstamp",
   "LastActivityDate", "LastViewedDate", "LastReferencedDate", "MayEdit", "IsLocked", "UserRecordAccessId"
 ]);
+// Standard noisy flag groups (e.g. User has hundreds of these editable booleans).
+const SYSTEM_FIELD_PREFIXES = ["UserPermissions", "UserPreferences", "EmailPreferences"];
 let hideSystem = true;
 
-/** A field counts as "system": known audit fields, or read-only non-formula fields. */
+/** A field counts as "system": audit fields, standard flag groups, or read-only non-formula fields. */
 function isSystemField(f: GraphNodeField): boolean {
   if (SYSTEM_FIELD_NAMES.has(f.name)) return true;
+  if (SYSTEM_FIELD_PREFIXES.some((p) => f.name.startsWith(p))) return true;
   if (f.name === "Id" || f.name === "Name" || f.isReference) return false;
   if (f.calculated) return false; // keep formula fields — they're business logic
   return f.updateable === false; // read-only, system-maintained
@@ -269,7 +272,7 @@ cyContainer.addEventListener(
   (e: WheelEvent) => {
     e.preventDefault();
     if (e.ctrlKey || e.metaKey) {
-      const factor = Math.pow(1.0015, -e.deltaY);
+      const factor = Math.pow(1.01, -e.deltaY);
       const level = Math.min(3, Math.max(0.02, cy.zoom() * factor));
       cy.zoom({ level, renderedPosition: { x: e.offsetX, y: e.offsetY } });
     } else {
