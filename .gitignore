@@ -10,3 +10,5 @@ functions.md
 settings.md
 
 *.vsix
+# Object Visualizer webview bundle (built by esbuild)
+resources/webview/

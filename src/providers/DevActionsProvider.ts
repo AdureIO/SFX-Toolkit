@@ -46,7 +46,8 @@ export class DevActionsProvider implements vscode.TreeDataProvider<vscode.TreeIt
 			]),
 			new DevGroupItem("Query & API", "database", [
 				this.createItem("SOQL Builder & Editor", "adure-sfx-toolkit.openSOQLEditor", "database", "Build and run SOQL queries"),
-				this.createItem("REST / API Explorer", "adure-sfx-toolkit.restExplorer", "globe", "Send REST/Tooling API requests to an org"),
+				this.createItem("Object Visualizer", "adure-sfx-toolkit.objectVisualizer", "type-hierarchy", "Render an ERD of objects and their 1-hop relationships"),
+					this.createItem("REST / API Explorer", "adure-sfx-toolkit.restExplorer", "globe", "Send REST/Tooling API requests to an org"),
 			]),
 			new DevGroupItem("Tools", "tools", [
 				this.createItem("Refresh Org Metadata", "adure-sfx-toolkit.refreshMetadata", "refresh", "Refresh sobject/field cache for SOQL and builders"),

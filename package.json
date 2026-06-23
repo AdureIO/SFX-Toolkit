@@ -238,6 +238,11 @@
         "icon": "$(database)"
       },
       {
+        "command": "adure-sfx-toolkit.objectVisualizer",
+        "title": "ASFXT: Object Visualizer",
+        "icon": "$(type-hierarchy)"
+      },
+      {
         "command": "adure-sfx-toolkit.metadataDiff",
         "title": "ASFXT: Compare with Org"
       },
