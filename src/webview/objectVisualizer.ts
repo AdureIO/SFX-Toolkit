@@ -15,6 +15,8 @@ interface GraphNodeField {
   isReference: boolean;
   referenceTo?: string[];
   relationshipName?: string;
+  updateable?: boolean;
+  calculated?: boolean;
 }
 interface GraphNode {
   id: string;
@@ -73,9 +75,10 @@ const fg = cssVar("--vscode-editor-foreground", "#ccc");
 const lineColor = cssVar("--vscode-descriptionForeground", "#888");
 const bg = cssVar("--vscode-editor-background", "#1e1e1e");
 
+const cyContainer = $("cy");
 const cy = cytoscape({
-  container: $("cy"),
-  wheelSensitivity: 0.25,
+  container: cyContainer,
+  userZoomingEnabled: false, // we handle wheel ourselves: scroll = pan, pinch = zoom
   minZoom: 0.02,
   maxZoom: 3,
   style: [
@@ -141,13 +144,29 @@ const ROW_H = 19;
 const MORE_H = 18;
 const MAX_ROWS = 24;
 
+// Well-known system / audit fields, always treated as system.
+const SYSTEM_FIELD_NAMES = new Set([
+  "IsDeleted", "CreatedById", "CreatedDate", "LastModifiedById", "LastModifiedDate", "SystemModstamp",
+  "LastActivityDate", "LastViewedDate", "LastReferencedDate", "MayEdit", "IsLocked", "UserRecordAccessId"
+]);
+let hideSystem = true;
+
+/** A field counts as "system": known audit fields, or read-only non-formula fields. */
+function isSystemField(f: GraphNodeField): boolean {
+  if (SYSTEM_FIELD_NAMES.has(f.name)) return true;
+  if (f.name === "Id" || f.name === "Name" || f.isReference) return false;
+  if (f.calculated) return false; // keep formula fields — they're business logic
+  return f.updateable === false; // read-only, system-maintained
+}
+
 /**
  * Which fields a card shows. "Full fields" → every field on every card (no cap).
- * Otherwise the relationship-relevant subset (Id, Name, and reference fields),
- * which keeps non-selected cards readable while still showing every card's fields.
+ * Otherwise the relationship-relevant subset (Id, Name, and reference fields).
+ * System/read-only fields are hidden unless the "System" toggle is on.
  */
 function visibleFields(n: GraphNode): { rows: GraphNodeField[]; hidden: number } {
-  const source = showFullFields ? n.fields : n.fields.filter((f) => f.name === "Id" || f.name === "Name" || f.isReference);
+  let source = showFullFields ? n.fields : n.fields.filter((f) => f.name === "Id" || f.name === "Name" || f.isReference);
+  if (hideSystem) source = source.filter((f) => !isSystemField(f));
   const cap = showFullFields ? Number.MAX_SAFE_INTEGER : MAX_ROWS;
   if (source.length <= cap) return { rows: source, hidden: 0 };
   return { rows: source.slice(0, cap), hidden: source.length - cap };
@@ -243,6 +262,22 @@ cy.on("tap", "node", (evt) => {
 cy.on("tap", (evt) => {
   if (evt.target === cy) clearFocus();
 });
+
+// Trackpad-modern input: two-finger scroll pans, pinch (ctrl/⌘ + wheel) zooms.
+cyContainer.addEventListener(
+  "wheel",
+  (e: WheelEvent) => {
+    e.preventDefault();
+    if (e.ctrlKey || e.metaKey) {
+      const factor = Math.pow(1.0015, -e.deltaY);
+      const level = Math.min(3, Math.max(0.02, cy.zoom() * factor));
+      cy.zoom({ level, renderedPosition: { x: e.offsetX, y: e.offsetY } });
+    } else {
+      cy.panBy({ x: -e.deltaX, y: -e.deltaY });
+    }
+  },
+  { passive: false }
+);
 
 function layoutConfig(name: string): cytoscape.LayoutOptions {
   const base = { padding: 40, animate: false, nodeDimensionsIncludeLabels: false };
@@ -372,6 +407,13 @@ document.querySelectorAll('input[name="ov-filter"]').forEach((r) =>
 
 fullFieldsToggle.addEventListener("change", () => {
   showFullFields = fullFieldsToggle.checked;
+  relabelNodes();
+});
+
+const systemToggle = $("ov-system") as HTMLInputElement;
+hideSystem = !systemToggle.checked; // default: unchecked → system hidden
+systemToggle.addEventListener("change", () => {
+  hideSystem = !systemToggle.checked;
   relabelNodes();
 });
 

@@ -18,6 +18,9 @@ export interface GraphNodeField {
   isReference: boolean;
   referenceTo?: string[];
   relationshipName?: string;
+  /** From describe — used by the UI to hide read-only/system fields. */
+  updateable?: boolean;
+  calculated?: boolean;
 }
 
 export interface GraphNode {
@@ -112,7 +115,9 @@ function allFieldsOf(desc: SObjectDescribe): GraphNodeField[] {
     type: f.type,
     isReference: f.type === "reference" && Array.isArray(f.referenceTo) && f.referenceTo.length > 0,
     referenceTo: f.referenceTo,
-    relationshipName: f.relationshipName
+    relationshipName: f.relationshipName,
+    updateable: f.updateable,
+    calculated: f.calculated
   }));
 }
 

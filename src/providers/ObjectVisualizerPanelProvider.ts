@@ -364,6 +364,7 @@ export class ObjectVisualizerPanelProvider {
     </select>
     <button id="ov-fit" class="btn-secondary" title="Fit graph to view">⤢ Fit</button>
     <label class="inline"><input type="checkbox" id="ov-fullfields"> Full fields</label>
+    <label class="inline" title="Show system / read-only fields (CreatedDate, SystemModstamp, …)"><input type="checkbox" id="ov-system"> System</label>
     <span class="tb-spacer"></span>
     <button id="ov-export-png" class="btn-secondary">⬇ PNG</button>
     <button id="ov-export-svg" class="btn-secondary">⬇ SVG</button>
