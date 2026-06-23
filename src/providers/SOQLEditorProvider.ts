@@ -660,6 +660,7 @@ export class SOQLEditorProvider {
 
       let successCount = 0;
       const errors: string[] = [];
+      const savedIds: string[] = [];
 
       for (const id of Object.keys(changes)) {
         const recordChanges = changes[id];
@@ -688,6 +689,7 @@ export class SOQLEditorProvider {
           );
           if (resp.status >= 200 && resp.status < 300) {
             successCount++;
+            savedIds.push(id);
           } else {
             let errMsg = `HTTP ${resp.status}`;
             try {
@@ -710,7 +712,7 @@ export class SOQLEditorProvider {
       } else if (successCount > 0) {
         vscode.window.showInformationMessage(`Successfully saved ${successCount} record(s).`);
       }
-      panel.webview.postMessage({ command: "saveComplete", success: errors.length === 0 });
+      panel.webview.postMessage({ command: "saveComplete", success: errors.length === 0, savedIds });
     } catch (e: any) {
       vscode.window.showErrorMessage(`Save failed: ${e.message}`);
       panel.webview.postMessage({ command: "saveComplete", success: false });
@@ -863,7 +865,7 @@ export class SOQLEditorProvider {
         .error:not(:empty) { display: block; }
 
         /* ── Results card ── */
-        .results-card { flex: 1; min-height: 120px; display: flex; flex-direction: column; }
+        .results-card { flex: 1 0 auto; min-height: 340px; display: flex; flex-direction: column; }
         .results-toolbar { display: flex; align-items: center; gap: 6px; }
         .results-count { font-size: 11px; color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; font-weight: 600; }
         .results-wrap { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; padding: 0; }
@@ -1982,14 +1984,23 @@ export class SOQLEditorProvider {
                 case 'saveErrors':
                     errorMsg.textContent = 'Save errors:\\n' + (message.errors || []).join('\\n');
                     break;
-                case 'saveComplete':
-                    if (message.success) {
-                        changes = {};
-                        updateSaveButton();
-                        document.querySelectorAll('.changed').forEach(el => el.classList.remove('changed'));
-                        errorMsg.textContent = '';
-                    }
+                case 'saveComplete': {
+                    // Bake successfully-saved values into the baseline (currentRecords)
+                    // so a later Discard reverts only still-unsaved edits, not saved ones.
+                    const savedIds = message.savedIds || [];
+                    savedIds.forEach(id => {
+                        const rec = findRecordDeep(currentRecords, id);
+                        const ch = changes[id];
+                        if (rec && ch) {
+                            Object.keys(ch).forEach(f => { if (f !== '_type') rec[f] = ch[f]; });
+                        }
+                        delete changes[id];
+                        document.querySelectorAll('td.changed[data-rec-id="' + id + '"]').forEach(el => el.classList.remove('changed'));
+                    });
+                    updateSaveButton();
+                    if (message.success) errorMsg.textContent = '';
                     break;
+                }
                 case 'completions':
                     const ctx = getQueryContext();
                     if (message.kind === 'relationships' && message.parentSobject) {
@@ -2081,6 +2092,27 @@ export class SOQLEditorProvider {
             return null;
         }
 
+        // Flatten a parent-relationship object (e.g. Parent.Name -> { attributes, Name })
+        // to its leaf scalar values, so the cell shows the queried value(s), not raw JSON.
+        // Nested relationships recurse (Parent.Owner.Name -> "Owner.Name"); child subqueries
+        // collapse to a "N record(s)" summary.
+        function relationshipLeaves(obj, prefix) {
+            const out = [];
+            Object.keys(obj || {}).forEach(k => {
+                if (k === 'attributes') return;
+                const v = obj[k];
+                const label = prefix ? prefix + '.' + k : k;
+                if (v !== null && typeof v === 'object') {
+                    const sub = getSubqueryRecords(v);
+                    if (sub !== null) out.push([label, sub.length + ' record(s)']);
+                    else out.push.apply(out, relationshipLeaves(v, label));
+                } else {
+                    out.push([label, v === null ? '' : v]);
+                }
+            });
+            return out;
+        }
+
         function renderCellValue(value, recId, type, fieldName, changesRef) {
             if (value === null || value === undefined) return '';
             if (typeof value === 'object') {
@@ -2106,7 +2138,7 @@ export class SOQLEditorProvider {
                     const tbody = document.createElement('tbody');
                     subqueryRecords.forEach(rec => {
                         const tr = document.createElement('tr');
-                        const recId = rec.Id;
+                        const recId = recordIdOf(rec);
                         const recType = (rec.attributes && rec.attributes.type) ? rec.attributes.type : null;
                         nHeaders.forEach(h => {
                             const td = document.createElement('td');
@@ -2123,6 +2155,7 @@ export class SOQLEditorProvider {
                             if (isEditableNested) {
                                 td.contentEditable = true;
                                 td.classList.add('editable-cell');
+                                td.dataset.recId = recId;
                                 td.title = 'Editable — click to change, then Save edits';
                                 td.addEventListener('input', () => {
                                     const newValue = td.textContent.trim();
@@ -2149,6 +2182,26 @@ export class SOQLEditorProvider {
                     div.appendChild(inner);
                     return div;
                 }
+                // Parent relationship object → show the queried value(s) inline, not JSON.
+                if (value.attributes) {
+                    const leaves = relationshipLeaves(value, '');
+                    if (leaves.length === 1) {
+                        const v = leaves[0][1];
+                        if (currentInstanceUrl && isSalesforceId(v)) {
+                            const link = makeRecordLink(String(v), currentInstanceUrl);
+                            if (link) return link;
+                        }
+                        const span = document.createElement('span');
+                        span.textContent = v === null ? '' : String(v);
+                        return span;
+                    }
+                    if (leaves.length > 1) {
+                        const span = document.createElement('span');
+                        span.textContent = leaves.map(p => p[0] + ': ' + p[1]).join(' · ');
+                        span.title = JSON.stringify(value, null, 2);
+                        return span;
+                    }
+                }
                 const summary = document.createElement('span');
                 summary.className = 'expandable';
                 const keys = Object.keys(value).filter(k => k !== 'attributes');
@@ -2169,6 +2222,31 @@ export class SOQLEditorProvider {
                 return wrap;
             }
             return document.createTextNode(value);
+        }
+
+        // The record Id is needed to save an edit. Prefer the selected Id column, but
+        // fall back to the Id embedded in attributes.url (e.g. ".../Account/001...") so
+        // editing still works when the query didn't SELECT Id.
+        function recordIdOf(rec) {
+            if (rec && rec.Id) return rec.Id;
+            const url = rec && rec.attributes && rec.attributes.url;
+            if (url) { const parts = String(url).split('/'); const last = parts[parts.length - 1]; if (isSalesforceId(last)) return last; }
+            return null;
+        }
+
+        // Find a record by Id anywhere in the result set, including inside subquery
+        // (child relationship) records — so saved edits to related-object rows bake
+        // into the baseline too.
+        function findRecordDeep(records, id) {
+            for (const r of records || []) {
+                if (recordIdOf(r) === id) return r;
+                for (const k of Object.keys(r)) {
+                    if (k === 'attributes') continue;
+                    const sub = getSubqueryRecords(r[k]);
+                    if (sub) { const found = findRecordDeep(sub, id); if (found) return found; }
+                }
+            }
+            return null;
         }
 
         // A cell is editable if describe says the field is updateable. When describe
@@ -2208,7 +2286,7 @@ export class SOQLEditorProvider {
             const tbody = document.createElement('tbody');
             records.forEach(r => {
                 const tr = document.createElement('tr');
-                const recId = r.Id;
+                const recId = recordIdOf(r);
                 const type = (r.attributes && r.attributes.type) ? r.attributes.type : null;
 
                 headers.forEach(h => {
@@ -2228,6 +2306,7 @@ export class SOQLEditorProvider {
                     if (isEditable) {
                         td.contentEditable = true;
                         td.classList.add('editable-cell');
+                        td.dataset.recId = recId;
                         td.title = 'Editable — click to change, then Save edits';
                         td.addEventListener('input', () => {
                             const newValue = td.textContent.trim();
