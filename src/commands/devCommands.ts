@@ -72,6 +72,91 @@ export function cleanDeployOutput(output: string): string {
   return result;
 }
 
+/** Parse component/test counts from deploy CLI output (text mode, ANSI-stripped). */
+export function parseDeployStats(output: string): {
+  components: number;
+  componentErrors: number;
+  testsPassed: number;
+  testsFailed: number;
+} {
+  const clean = output.replace(/[][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><~]/g, "");
+  let components = 0, componentErrors = 0, testsPassed = 0, testsFailed = 0;
+
+  // Progress line: "| 45/60 Components"
+  const compProg = clean.match(/\|\s*(\d+)\/\d+\s*Components/);
+  if (compProg) {
+    components = parseInt(compProg[1], 10);
+  } else {
+    const compStatus = clean.match(/Components:\s*(\d+)/);
+    if (compStatus) components = parseInt(compStatus[1], 10);
+  }
+
+  // "Component Failures [N]" or "Component Errors: N"
+  const errMatch = clean.match(/Component Failures\s*\[(\d+)\]/) ?? clean.match(/Component Errors:\s*(\d+)/);
+  if (errMatch) componentErrors = parseInt(errMatch[1], 10);
+
+  // "N Passed  M Failed" (SF CLI test summary line)
+  const testLine = clean.match(/(\d+)\s+Passed[^\n]*?(\d+)\s+Failed/);
+  if (testLine) {
+    testsPassed = parseInt(testLine[1], 10);
+    testsFailed = parseInt(testLine[2], 10);
+  } else {
+    // Alternate: "Passing: N / Failing: M"
+    const passing = clean.match(/Passing:\s*(\d+)/);
+    const failing = clean.match(/Failing:\s*(\d+)/);
+    if (passing) testsPassed = parseInt(passing[1], 10);
+    if (failing) testsFailed = parseInt(failing[1], 10);
+  }
+
+  return { components, componentErrors, testsPassed, testsFailed };
+}
+
+/** Single coverage row returned by parseCoverageData. */
+export interface CoverageEntry {
+  name: string;
+  covered: number;
+  total: number;
+  pct: number;
+}
+
+/** Parse Apex code-coverage table from deploy CLI text output (multiple format variants). */
+export function parseCoverageData(output: string): CoverageEntry[] {
+  const clean = output.replace(/[][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, "");
+  const entries: CoverageEntry[] = [];
+  const lines = clean.split(/\r?\n/);
+  let inSection = false;
+  let headerSeen = false;
+
+  for (const raw of lines) {
+    const line = raw.trim();
+    // Detect coverage section
+    if (/apex.{0,30}coverage|coverage.{0,30}class/i.test(line)) {
+      inSection = true;
+      headerSeen = false;
+      continue;
+    }
+    // Exit section on blank line (once we have at least one entry)
+    if (inSection && !line && entries.length > 0) { inSection = false; continue; }
+    if (!inSection) continue;
+    // Skip separator / column header lines
+    if (/^[─═\-=▸]+$/.test(line) || /^NAME\s+/i.test(line) || /^CLASSES\s+/i.test(line)) {
+      headerSeen = true;
+      continue;
+    }
+    if (!headerSeen) continue;
+    // Pattern A: "ClassName  87%  [uncovered lines]"
+    const patA = line.match(/^(\S+)\s+(\d+)%/);
+    if (patA) { entries.push({ name: patA[1], covered: 0, total: 0, pct: parseInt(patA[2], 10) }); continue; }
+    // Pattern B: "ClassName  39  45  86.67%"
+    const patB = line.match(/^(\S+)\s+(\d+)\s+(\d+)\s+([\d.]+)%/);
+    if (patB) {
+      entries.push({ name: patB[1], covered: parseInt(patB[2], 10), total: parseInt(patB[3], 10), pct: Math.round(parseFloat(patB[4])) });
+      continue;
+    }
+  }
+  return entries;
+}
+
 // Helper to extract deployed component count from output
 function getDeployedCount(output: string): number {
   const clean = output.replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, "");

@@ -10,7 +10,13 @@ import { getCachedOrgList, refreshOrgListCache, warmOrgListCache } from "../util
 const SOQL_HISTORY_MAX = 50;
 const SOQL_LAST_FILE = "soql-last.txt";
 const SOQL_HISTORY_FILE = "soql-history.json";
+const SOQL_SAVED_FILE = "soql-saved.json";
 const ASFX_DIR = ".sfdx/asfx";
+
+interface SavedQuery {
+  name: string;
+  query: string;
+}
 
 export class SOQLEditorProvider {
   public static readonly viewType = "adure-sfx-toolkit.soqlEditor";
@@ -20,6 +26,19 @@ export class SOQLEditorProvider {
     const { body, auth } = await AuthInfo.get(
       targetOrg,
       (a) => `${a.instanceUrl.replace(/\/$/, "")}/services/data/${apiVersion}/query?q=${encodeURIComponent(query)}`
+    );
+    const result = JSON.parse(body);
+    return { auth, result };
+  }
+
+  /** Fetch the next page of a query via its `nextRecordsUrl` (a server-relative path). */
+  private static async fetchNextRecords(nextRecordsUrl: string, targetOrg: string | null) {
+    const { body, auth } = await AuthInfo.get(
+      targetOrg,
+      (a) =>
+        /^https?:\/\//i.test(nextRecordsUrl)
+          ? nextRecordsUrl
+          : `${a.instanceUrl.replace(/\/$/, "")}${nextRecordsUrl}`
     );
     const result = JSON.parse(body);
     return { auth, result };
@@ -39,8 +58,27 @@ export class SOQLEditorProvider {
       }
     );
 
+    await SOQLEditorProvider.attach(panel, extensionUri, initialQuery);
+  }
+
+  /**
+   * Restore the panel after a window reload. VS Code hands us the already-created
+   * webview panel (via the registered WebviewPanelSerializer); we just re-wire its
+   * HTML and message handler — the same setup `show()` performs.
+   */
+  public static async revive(panel: vscode.WebviewPanel, extensionUri: vscode.Uri) {
+    panel.webview.options = {
+      enableScripts: true,
+      localResourceRoots: [vscode.Uri.joinPath(extensionUri, "resources")]
+    };
+    await SOQLEditorProvider.attach(panel, extensionUri);
+  }
+
+  /** Wire HTML + message handling onto a (new or restored) panel. */
+  private static async attach(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, initialQuery?: string) {
     const { lastQuery, history } = await SOQLEditorProvider.loadSoqlState();
-    panel.webview.html = this._getHtmlForWebview(panel.webview, extensionUri, initialQuery || lastQuery, history);
+    const saved = SOQLEditorProvider.loadSavedQueries();
+    panel.webview.html = this._getHtmlForWebview(panel.webview, extensionUri, initialQuery || lastQuery, history, saved);
 
     AuthInfo.warmAuthForOrg(null);
     OrgMetadataCache.warmDefaultOrg();
@@ -51,6 +89,15 @@ export class SOQLEditorProvider {
         switch (message.command) {
           case "execute":
             await this.executeQuery(panel, message.query, message.targetOrg || null);
+            break;
+          case "queryMore":
+            await this.queryMore(panel, message.nextRecordsUrl, message.targetOrg || null);
+            break;
+          case "saveQuery":
+            await this.promptSaveQuery(panel, message.query, message.suggestedName || "");
+            break;
+          case "deleteSavedQuery":
+            await this.promptDeleteSavedQuery(panel, message.name);
             break;
           case "save":
             await this.saveChanges(panel, message.changes);
@@ -68,13 +115,27 @@ export class SOQLEditorProvider {
             await this.sendBuilderObjectList(panel, message.targetOrg || null);
             break;
           case "getBuilderFields":
-            await this.sendBuilderFields(panel, message.sobject, message.targetOrg || null);
+            await this.sendBuilderFields(panel, message.sobject, message.targetOrg || null, message.relName);
+            break;
+          case "getBuilderChildren":
+            await this.sendBuilderChildren(panel, message.sobject, message.targetOrg || null);
+            break;
+          case "getBuilderChildFields":
+            await this.sendBuilderChildFields(panel, message.childSobject, message.childRel, message.targetOrg || null);
             break;
           case "getFieldsForRelationship":
             await this.sendFieldsForRelationship(
               panel,
               message.relName,
               message.fromSobject,
+              message.targetOrg || null
+            );
+            break;
+          case "getFieldsForPath":
+            await this.sendFieldsForPath(
+              panel,
+              message.fromSobject,
+              Array.isArray(message.path) ? message.path : [],
               message.targetOrg || null
             );
             break;
@@ -85,6 +146,31 @@ export class SOQLEditorProvider {
             await this.clearSoqlHistory();
             panel.webview.postMessage({ command: "historyUpdated", history: [] });
             break;
+          case "refreshCache": {
+            const refreshOrg = (message.targetOrg as string | null) || null;
+            OrgMetadataCache.invalidate(refreshOrg);
+            AuthInfo.invalidateOrg(refreshOrg);
+            const freshOrgs = await refreshOrgListCache();
+            panel.webview.postMessage({ command: "orgList", orgs: freshOrgs });
+            panel.webview.postMessage({ command: "cacheRefreshed" });
+            break;
+          }
+          case "saveFile": {
+            const suggested = (message.suggestedName as string) || "soql-export.csv";
+            const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            const uri = await vscode.window.showSaveDialog({
+              defaultUri: ws ? vscode.Uri.file(path.join(ws, suggested)) : undefined,
+              filters: suggested.endsWith(".json") ? { JSON: ["json"] } : { CSV: ["csv"], "All files": ["*"] }
+            });
+            if (!uri) break;
+            try {
+              fs.writeFileSync(uri.fsPath, String(message.content ?? ""), "utf8");
+              vscode.window.showInformationMessage(`Exported ${path.basename(uri.fsPath)}`);
+            } catch (e: any) {
+              vscode.window.showErrorMessage(`Export failed: ${e?.message ?? e}`);
+            }
+            break;
+          }
           case "error":
             vscode.window.showErrorMessage(message.text);
             break;
@@ -184,10 +270,38 @@ export class SOQLEditorProvider {
       return;
     }
     try {
-      const fields = await OrgMetadataCache.getFieldsWithMeta(targetOrg, sobject);
+      const fields = await OrgMetadataCache.getFieldsAndRelations(targetOrg, sobject);
       panel.webview.postMessage({ command: "completions", kind: "fields", items: fields });
     } catch (e: any) {
       panel.webview.postMessage({ command: "completions", kind: "fields", items: [] });
+    }
+  }
+
+  /**
+   * Resolve a chain of parent-relationship names from a root sobject and return
+   * the fields of the final target. Handles BOTH standard ("Owner", "CreatedBy",
+   * "Account") and custom ("MyLookup__r") relationships, multiple hops deep
+   * (e.g. Owner.Manager.Profile.<field>). 100% schema-driven — no guessing.
+   */
+  private static async sendFieldsForPath(
+    panel: vscode.WebviewPanel,
+    fromSobject: string,
+    path: string[],
+    targetOrg: string | null
+  ) {
+    const empty = () => panel.webview.postMessage({ command: "completions", kind: "fields", items: [] });
+    if (!fromSobject) { empty(); return; }
+    try {
+      let current: string | null = fromSobject;
+      for (const rel of path) {
+        if (!current || !rel) { empty(); return; }
+        current = await OrgMetadataCache.getRelationshipTarget(targetOrg, current, rel);
+        if (!current) { empty(); return; } // relationship not found in schema → suggest nothing
+      }
+      const fields = await OrgMetadataCache.getFieldsAndRelations(targetOrg, current);
+      panel.webview.postMessage({ command: "completions", kind: "fields", items: fields });
+    } catch {
+      empty();
     }
   }
 
@@ -242,16 +356,49 @@ export class SOQLEditorProvider {
     }
   }
 
-  private static async sendBuilderFields(panel: vscode.WebviewPanel, sobject: string, targetOrg: string | null) {
+  private static async sendBuilderFields(panel: vscode.WebviewPanel, sobject: string, targetOrg: string | null, relName?: string) {
     if (!sobject) {
-      panel.webview.postMessage({ command: "builderFields", items: [] });
+      panel.webview.postMessage({ command: "builderFields", items: [], relName });
       return;
     }
     try {
-      const fields = await OrgMetadataCache.getFieldsWithMeta(targetOrg, sobject);
-      panel.webview.postMessage({ command: "builderFields", items: fields });
+      // For the object itself: include relationships so the UI can offer parent-field
+      // traversal. For a relationship target (relName set): just its direct fields.
+      const items = relName
+        ? await OrgMetadataCache.getFieldsWithMeta(targetOrg, sobject)
+        : await OrgMetadataCache.getFieldsAndRelations(targetOrg, sobject);
+      panel.webview.postMessage({ command: "builderFields", items, relName });
     } catch (e: any) {
-      panel.webview.postMessage({ command: "builderFields", items: [] });
+      panel.webview.postMessage({ command: "builderFields", items: [], relName });
+    }
+  }
+
+  /** Child relationships of an object, for the builder's subquery picker. */
+  private static async sendBuilderChildren(panel: vscode.WebviewPanel, sobject: string, targetOrg: string | null) {
+    if (!sobject) {
+      panel.webview.postMessage({ command: "builderChildren", items: [] });
+      return;
+    }
+    try {
+      const items = await OrgMetadataCache.getChildRelationships(targetOrg, sobject);
+      panel.webview.postMessage({ command: "builderChildren", items });
+    } catch {
+      panel.webview.postMessage({ command: "builderChildren", items: [] });
+    }
+  }
+
+  /** Fields of a child relationship's sObject, for the builder's subquery field picker. */
+  private static async sendBuilderChildFields(
+    panel: vscode.WebviewPanel,
+    childSobject: string,
+    childRel: string,
+    targetOrg: string | null
+  ) {
+    try {
+      const items = childSobject ? await OrgMetadataCache.getFieldsWithMeta(targetOrg, childSobject) : [];
+      panel.webview.postMessage({ command: "builderChildFields", childRel, items });
+    } catch {
+      panel.webview.postMessage({ command: "builderChildFields", childRel, items: [] });
     }
   }
 
@@ -339,6 +486,7 @@ export class SOQLEditorProvider {
           data: records,
           totalSize: result.totalSize ?? records.length,
           done: result.done !== false,
+          nextRecordsUrl: result.nextRecordsUrl || null,
           instanceUrl: auth.instanceUrl,
           editableFields: editableFields
         });
@@ -355,6 +503,133 @@ export class SOQLEditorProvider {
     } finally {
       panel.webview.postMessage({ command: "loading", value: false });
     }
+  }
+
+  /** Load the next page of records for the current result set (pagination). */
+  private static async queryMore(panel: vscode.WebviewPanel, nextRecordsUrl: string, targetOrg: string | null) {
+    try {
+      panel.webview.postMessage({ command: "loadingMore", value: true });
+      const { auth, result } = await SOQLEditorProvider.fetchNextRecords(nextRecordsUrl, targetOrg);
+      if (result.records !== undefined) {
+        const records = result.records as any[];
+        const editableFields = await SOQLEditorProvider.getEditableFieldsByType(records, targetOrg);
+        panel.webview.postMessage({
+          command: "moreResults",
+          data: records,
+          totalSize: result.totalSize ?? records.length,
+          done: result.done !== false,
+          nextRecordsUrl: result.nextRecordsUrl || null,
+          instanceUrl: auth.instanceUrl,
+          editableFields: editableFields
+        });
+      } else {
+        const err = result[0] || result;
+        panel.webview.postMessage({ command: "error", text: err.message || JSON.stringify(result) });
+      }
+    } catch (e: any) {
+      panel.webview.postMessage({ command: "error", text: e.message || e.stderr || JSON.stringify(e) });
+    } finally {
+      panel.webview.postMessage({ command: "loadingMore", value: false });
+    }
+  }
+
+  // ── Saved queries ──────────────────────────────────────────────────────────
+  private static loadSavedQueries(): SavedQuery[] {
+    const dir = SOQLEditorProvider.getSoqlStorageDir();
+    if (!dir) return [];
+    try {
+      const p = path.join(dir, SOQL_SAVED_FILE);
+      if (fs.existsSync(p)) {
+        const parsed = JSON.parse(fs.readFileSync(p, "utf8"));
+        if (Array.isArray(parsed)) {
+          return parsed.filter((q) => q && typeof q.name === "string" && typeof q.query === "string");
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+    return [];
+  }
+
+  private static writeSavedQueries(list: SavedQuery[]): void {
+    const dir = SOQLEditorProvider.getSoqlStorageDir();
+    if (!dir) return;
+    try {
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, SOQL_SAVED_FILE), JSON.stringify(list, null, 2), "utf8");
+    } catch {
+      /* ignore */
+    }
+  }
+
+  private static async saveNamedQuery(panel: vscode.WebviewPanel, name: string, query: string) {
+    const trimmedName = (name || "").trim();
+    const trimmedQuery = (query || "").trim();
+    if (!trimmedName || !trimmedQuery) return;
+    if (!SOQLEditorProvider.getSoqlStorageDir()) {
+      panel.webview.postMessage({ command: "error", text: "Open a workspace folder to save queries." });
+      return;
+    }
+    const list = SOQLEditorProvider.loadSavedQueries();
+    const existing = list.findIndex((q) => q.name.toLowerCase() === trimmedName.toLowerCase());
+    if (existing >= 0) list[existing] = { name: trimmedName, query: trimmedQuery };
+    else list.unshift({ name: trimmedName, query: trimmedQuery });
+    list.sort((a, b) => a.name.localeCompare(b.name));
+    SOQLEditorProvider.writeSavedQueries(list);
+    panel.webview.postMessage({ command: "savedQueries", items: list });
+  }
+
+  private static async deleteSavedQuery(panel: vscode.WebviewPanel, name: string) {
+    const list = SOQLEditorProvider.loadSavedQueries().filter((q) => q.name !== name);
+    SOQLEditorProvider.writeSavedQueries(list);
+    panel.webview.postMessage({ command: "savedQueries", items: list });
+  }
+
+  /** Ask for a name (webview can't use window.prompt) then persist the query. */
+  private static async promptSaveQuery(panel: vscode.WebviewPanel, query: string, suggestedName: string) {
+    const trimmedQuery = (query || "").trim();
+    if (!trimmedQuery) {
+      vscode.window.showWarningMessage("Nothing to save — the query is empty.");
+      return;
+    }
+    if (!SOQLEditorProvider.getSoqlStorageDir()) {
+      vscode.window.showWarningMessage("Open a workspace folder to save queries.");
+      return;
+    }
+    const existing = SOQLEditorProvider.loadSavedQueries();
+    const name = await vscode.window.showInputBox({
+      title: "Save SOQL query",
+      prompt: "Name this query so you can recognise it later",
+      value: (suggestedName || "").trim(),
+      ignoreFocusOut: true,
+      validateInput: (v) => (v && v.trim() ? undefined : "Enter a name")
+    });
+    if (name === undefined) return; // user cancelled
+    const trimmedName = name.trim();
+    if (!trimmedName) return;
+    const clash = existing.find((q) => q.name.toLowerCase() === trimmedName.toLowerCase());
+    if (clash) {
+      const choice = await vscode.window.showWarningMessage(
+        `A saved query named "${clash.name}" already exists. Overwrite it?`,
+        { modal: true },
+        "Overwrite"
+      );
+      if (choice !== "Overwrite") return;
+    }
+    await SOQLEditorProvider.saveNamedQuery(panel, trimmedName, trimmedQuery);
+    vscode.window.showInformationMessage(`Saved query "${trimmedName}".`);
+  }
+
+  /** Confirm (host-side modal) before deleting a saved query. */
+  private static async promptDeleteSavedQuery(panel: vscode.WebviewPanel, name: string) {
+    if (!name) return;
+    const choice = await vscode.window.showWarningMessage(
+      `Delete saved query "${name}"?`,
+      { modal: true },
+      "Delete"
+    );
+    if (choice !== "Delete") return;
+    await SOQLEditorProvider.deleteSavedQuery(panel, name);
   }
 
   /** Escape a string for use inside double-quoted key=value pair for sf data update record. */
@@ -438,9 +713,14 @@ export class SOQLEditorProvider {
     webview: vscode.Webview,
     extensionUri: vscode.Uri,
     lastQuery: string = "",
-    history: string[] = []
+    history: string[] = [],
+    saved: SavedQuery[] = []
   ) {
-    const initialData = JSON.stringify({ lastQuery: lastQuery || "", history: Array.isArray(history) ? history : [] });
+    const initialData = JSON.stringify({
+      lastQuery: lastQuery || "",
+      history: Array.isArray(history) ? history : [],
+      saved: Array.isArray(saved) ? saved : []
+    });
     const initialDataEscaped = initialData.replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
     return `<!DOCTYPE html>
 <html lang="en">
@@ -449,134 +729,287 @@ export class SOQLEditorProvider {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SOQL Builder &amp; Editor</title>
     <style>
-        body { font-family: var(--vscode-font-family); padding: 20px; color: var(--vscode-editor-foreground); background-color: var(--vscode-editor-background); }
-        .builder-toggle { margin-bottom: 12px; }
-        .builder-toggle button { font-size: 12px; padding: 4px 10px; }
-        .builder-panel { border: 1px solid var(--vscode-panel-border); border-radius: 4px; padding: 12px; margin-bottom: 16px; background: var(--vscode-editor-inactiveSelectionBackground); display: none; }
+        *, *::before, *::after { box-sizing: border-box; }
+        :root {
+            --asfx-radius: 6px; --asfx-radius-sm: 4px;
+            --asfx-border: var(--vscode-widget-border, var(--vscode-panel-border, rgba(128,128,128,0.28)));
+            --asfx-border-strong: var(--vscode-contrastBorder, var(--vscode-widget-border, rgba(128,128,128,0.45)));
+            --asfx-card-bg: var(--vscode-editorWidget-background, var(--vscode-editor-inactiveSelectionBackground));
+            --asfx-accent: var(--vscode-button-background);
+        }
+        ::-webkit-scrollbar { width: 9px; height: 9px; }
+        ::-webkit-scrollbar-thumb { background: var(--vscode-scrollbarSlider-background); border-radius: 6px; border: 2px solid transparent; background-clip: padding-box; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--vscode-scrollbarSlider-hoverBackground); background-clip: padding-box; }
+        body {
+            font-family: var(--vscode-font-family); font-size: 13px;
+            color: var(--vscode-editor-foreground); background: var(--vscode-editor-background);
+            margin: 0; height: 100vh; display: flex; flex-direction: column; overflow: hidden;
+        }
+
+        /* ── Header ── */
+        .page-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 16px; background: var(--vscode-sideBarSectionHeader-background, var(--asfx-card-bg)); border-bottom: 1px solid var(--asfx-border); flex-shrink: 0; }
+        .page-title { font-size: 13px; font-weight: 700; letter-spacing: .02em; display: flex; align-items: center; gap: 8px; }
+        .header-actions { display: flex; align-items: center; gap: 6px; }
+
+        /* ── Run bar (Postman-style) ── */
+        .run-bar { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border: 1px solid var(--asfx-border); border-radius: var(--asfx-radius); background: var(--asfx-card-bg); flex-shrink: 0; flex-wrap: wrap; }
+        .rb-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--vscode-descriptionForeground); }
+        .rb-spacer { flex: 1; min-width: 12px; }
+        .rb-sep { width: 1px; align-self: stretch; margin: 2px 4px; background: var(--asfx-border); }
+        #saved-select { padding: 6px 8px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, var(--asfx-border)); border-radius: var(--asfx-radius-sm); font-size: 12px; min-width: 130px; max-width: 220px; outline: none; cursor: pointer; }
+        #org-select { padding: 6px 8px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, var(--asfx-border)); border-radius: var(--asfx-radius-sm); font-size: 12px; min-width: 160px; outline: none; cursor: pointer; }
+        #org-select:focus { border-color: var(--vscode-focusBorder); }
+        #history-select { padding: 6px 8px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, var(--asfx-border)); border-radius: var(--asfx-radius-sm); font-size: 12px; min-width: 150px; max-width: 260px; outline: none; cursor: pointer; }
+        #cache-status-row { font-size: 10px; color: var(--vscode-descriptionForeground); }
+
+        /* ── Buttons ── */
+        button { background: var(--asfx-accent); color: var(--vscode-button-foreground); border: none; padding: 6px 14px; cursor: pointer; border-radius: var(--asfx-radius-sm); font-size: 12px; font-family: inherit; }
+        button:hover { filter: brightness(1.1); }
+        button:disabled { opacity: .5; cursor: default; filter: none; }
+        #execute-btn { font-weight: 700; padding: 7px 18px; }
+        .btn-secondary { background: var(--vscode-button-secondaryBackground, var(--vscode-input-background)); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); border: 1px solid var(--asfx-border-strong); }
+        .btn-secondary:hover { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground)); filter: none; border-color: var(--vscode-focusBorder); }
+        .btn-sm { padding: 3px 9px; font-size: 11px; }
+        .btn-mini { font-size: 11px; padding: 3px 9px; cursor: pointer; font-family: inherit; background: var(--vscode-button-secondaryBackground, transparent); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); border: 1px solid var(--asfx-border-strong); border-radius: var(--asfx-radius-sm); }
+        .btn-mini:hover { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground)); border-color: var(--vscode-focusBorder); }
+        .btn-refresh { background: transparent; border: 1px solid var(--asfx-border); color: var(--vscode-icon-foreground); padding: 4px 8px; font-size: 13px; border-radius: var(--asfx-radius-sm); cursor: pointer; flex-shrink: 0; line-height: 1.2; }
+        .btn-refresh:hover { background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); border-color: var(--vscode-focusBorder); }
+        #save-btn { background: var(--vscode-statusBarItem-warningBackground); color: var(--vscode-statusBarItem-warningForeground); }
+
+        /* ── Content scroll ── */
+        .content-wrap { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 14px 16px; display: flex; flex-direction: column; gap: 14px; min-height: 0; }
+
+        /* ── Cards ── */
+        .card { background: var(--asfx-card-bg); border: 1px solid var(--asfx-border); border-radius: var(--asfx-radius); overflow: hidden; flex-shrink: 0; }
+        .card-head { display: flex; align-items: center; gap: 8px; padding: 9px 14px; cursor: pointer; user-select: none; }
+        .card-head:hover { background: var(--vscode-list-hoverBackground); }
+        .card-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--vscode-foreground); flex: 1; }
+        .card-chevron { font-size: 10px; color: var(--vscode-descriptionForeground); }
+        .card-actions { display: flex; align-items: center; gap: 6px; }
+        .card-body { padding: 14px; display: flex; flex-direction: column; gap: 14px; }
+        .card.collapsed .card-body { display: none; }
+        /* The query card must NOT clip — the completion popup overflows it. */
+        .card-query { overflow: visible; }
+        .card-query .card-body { overflow: visible; }
+        /* Builder card is toggled from the header button (.visible). */
+        .builder-panel { display: none; }
         .builder-panel.visible { display: block; }
-        .builder-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 10px; }
-        .builder-row label { min-width: 70px; font-size: 12px; }
-        .builder-row select, .builder-row input[type="number"], .builder-row input[type="text"] { min-width: 120px; padding: 4px 6px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); }
-        .builder-fields { max-height: 160px; overflow-y: auto; border: 1px solid var(--vscode-input-border); padding: 6px; background: var(--vscode-input-background); display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 2px 12px; font-size: 12px; }
-        .builder-fields label { display: flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; }
-        .builder-fields input { margin: 0; }
-        .builder-actions { margin-top: 10px; }
-        .controls { display: flex; gap: 10px; margin-bottom: 20px; align-items: flex-start; position: relative; }
-        .query-wrap { flex-grow: 1; position: relative; }
-        .query-label { font-size: 11px; color: var(--vscode-descriptionForeground); margin-bottom: 4px; }
-        textarea { width: 100%; box-sizing: border-box; height: 80px; font-family: monospace; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); padding: 5px; }
-        #completion-list { position: absolute; left: 0; top: 100%; margin-top: 2px; max-height: 200px; overflow-y: auto; background: var(--vscode-dropdown-background); border: 1px solid var(--vscode-dropdown-border); z-index: 100; list-style: none; padding: 0; margin: 0; min-width: 180px; box-shadow: 0 4px 8px rgba(0,0,0,0.2); display: none; }
+
+        /* ── Builder sections ── */
+        .bsection { display: flex; flex-direction: column; gap: 6px; }
+        .bsection-head { display: flex; align-items: center; gap: 8px; }
+        .builder-field-search { padding: 3px 8px; min-width: 130px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, var(--asfx-border)); border-radius: var(--asfx-radius-sm); font-size: 11px; outline: none; }
+        .builder-field-search:focus { border-color: var(--vscode-focusBorder); }
+        .bsection-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--vscode-descriptionForeground); }
+        .bsection-spacer { flex: 1; }
+        .brow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+        .brow > select, .brow > input { padding: 5px 7px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, var(--asfx-border)); border-radius: var(--asfx-radius-sm); font-size: 12px; font-family: inherit; outline: none; }
+        .brow > select:focus, .brow > input:focus { border-color: var(--vscode-focusBorder); }
+        #builder-object { min-width: 220px; }
+        #builder-limit { width: 90px; }
+        .builder-actions { display: flex; gap: 8px; padding-top: 2px; }
+        #builder-apply-btn { font-weight: 600; }
+
+        /* Field checkbox grid */
+        .builder-fields { max-height: 180px; overflow-y: auto; border: 1px solid var(--vscode-input-border, var(--asfx-border)); border-radius: var(--asfx-radius-sm); padding: 6px; background: var(--vscode-input-background); display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 1px 12px; font-size: 12px; }
+        .builder-fields label { display: flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; padding: 2px 4px; border-radius: 3px; overflow: hidden; }
+        .builder-fields label:hover { background: var(--vscode-list-hoverBackground); }
+        .builder-fields input { margin: 0; accent-color: var(--asfx-accent); }
+
+        /* WHERE rows */
+        .bw-row { display: flex; gap: 6px; align-items: center; margin-bottom: 5px; }
+        .bw-row select, .bw-row input { padding: 5px 7px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, var(--asfx-border)); border-radius: var(--asfx-radius-sm); font-size: 12px; font-family: inherit; outline: none; }
+        .bw-row select:focus, .bw-row input:focus { border-color: var(--vscode-focusBorder); }
+        .bw-conj { flex: 0 0 66px; }
+        .bw-field { flex: 2; min-width: 0; }
+        .bw-op { flex: 0 0 82px; }
+        .bw-val { flex: 2; min-width: 0; }
+        .bw-remove { flex: 0 0 26px; cursor: pointer; background: transparent; border: 1px solid transparent; color: var(--vscode-descriptionForeground); border-radius: var(--asfx-radius-sm); }
+        .bw-remove:hover { background: var(--vscode-list-hoverBackground); color: var(--vscode-errorForeground); }
+
+        /* Related-field chips */
+        #builder-rel-select, #builder-rel-field { padding: 5px 7px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, var(--asfx-border)); border-radius: var(--asfx-radius-sm); font-size: 12px; font-family: inherit; outline: none; min-width: 150px; }
+        .builder-rel-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+        .rel-chip { display: inline-flex; align-items: center; gap: 7px; font-size: 11px; padding: 3px 8px; border-radius: 12px; background: color-mix(in srgb, var(--asfx-accent) 18%, transparent); color: var(--vscode-foreground); font-family: var(--vscode-editor-font-family, monospace); }
+        .rel-chip-x { cursor: pointer; opacity: .7; }
+        .rel-chip-x:hover { opacity: 1; color: var(--vscode-errorForeground); }
+
+        /* ── Query editor card ── */
+        .query-wrap { position: relative; }
+        textarea#query-input { width: 100%; box-sizing: border-box; height: 110px; font-family: var(--vscode-editor-font-family, monospace); font-size: var(--vscode-editor-font-size, 13px); background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, var(--asfx-border)); border-radius: var(--asfx-radius-sm); padding: 10px; resize: vertical; line-height: 1.55; outline: none; }
+        textarea#query-input:focus { border-color: var(--vscode-focusBorder); }
+        #completion-list { position: absolute; left: 0; top: 100%; margin: 2px 0 0; max-height: 220px; overflow-y: auto; background: var(--vscode-dropdown-background, var(--asfx-card-bg)); border: 1px solid var(--vscode-dropdown-border, var(--asfx-border)); border-radius: var(--asfx-radius-sm); z-index: 100; list-style: none; padding: 2px 0; min-width: 220px; box-shadow: 0 6px 16px rgba(0,0,0,0.3); display: none; }
         #completion-list.visible { display: block; }
-        #completion-list li { padding: 4px 8px; cursor: pointer; font-family: monospace; font-size: 12px; display: flex; align-items: center; gap: 5px; }
+        #completion-list li { padding: 4px 10px; cursor: pointer; font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; display: flex; align-items: center; gap: 6px; }
         #completion-list li:hover, #completion-list li.selected { background: var(--vscode-list-hoverBackground); }
-        .type-badge { display: inline-block; min-width: 18px; text-align: center; font-size: 10px; font-weight: bold; color: var(--vscode-badge-foreground); background: var(--vscode-badge-background); border-radius: 2px; padding: 0 2px; flex-shrink: 0; }
-        button { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: none; padding: 8px 16px; cursor: pointer; }
-        button:hover { background: var(--vscode-button-hoverBackground); }
-        button:disabled { opacity: 0.5; cursor: default; }
-        #results-container { overflow-x: auto; }
-        table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; }
-        th, td { text-align: left; padding: 6px; border-bottom: 1px solid var(--vscode-panel-border); border-right: 1px solid var(--vscode-panel-border); vertical-align: top; }
-        th { background: var(--vscode-editor-inactiveSelectionBackground); position: sticky; top: 0; }
+        .type-badge { display: inline-block; min-width: 20px; text-align: center; font-size: 10px; font-weight: 700; color: var(--vscode-badge-foreground); background: var(--vscode-badge-background); border-radius: 3px; padding: 1px 3px; flex-shrink: 0; }
+        .type-badge.rel-badge { color: var(--vscode-button-foreground); background: var(--asfx-accent); }
+        .rel-target { color: var(--vscode-descriptionForeground); font-size: 10px; font-style: italic; margin-left: 4px; }
+        .query-hint { font-size: 11px; color: var(--vscode-descriptionForeground); }
+        .query-hint kbd { font-family: var(--vscode-editor-font-family, monospace); background: color-mix(in srgb, var(--vscode-foreground) 10%, transparent); border-radius: 3px; padding: 0 4px; }
+
+        /* ── Error ── */
+        .error { color: var(--vscode-errorForeground); white-space: pre-wrap; font-size: 12px; padding: 9px 12px; border-radius: var(--asfx-radius-sm); background: var(--vscode-inputValidation-errorBackground, rgba(255,0,0,0.08)); border: 1px solid var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground)); display: none; flex-shrink: 0; }
+        .error:not(:empty) { display: block; }
+
+        /* ── Results card ── */
+        .results-card { flex: 1; min-height: 120px; display: flex; flex-direction: column; }
+        .results-toolbar { display: flex; align-items: center; gap: 6px; }
+        .results-count { font-size: 11px; color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; font-weight: 600; }
+        .results-wrap { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; padding: 0; }
+        #results-container { overflow: auto; flex: 1; }
+        #results-container > p, #results-container:empty::before { color: var(--vscode-descriptionForeground); font-size: 12px; padding: 14px; display: block; }
+        table { width: 100%; border-collapse: collapse; font-size: 12px; }
+        th, td { text-align: left; padding: 5px 9px; border-bottom: 1px solid var(--asfx-border); border-right: 1px solid var(--asfx-border); vertical-align: top; }
+        th { background: var(--vscode-sideBarSectionHeader-background, var(--asfx-card-bg)); position: sticky; top: 0; z-index: 1; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .4px; color: var(--vscode-descriptionForeground); white-space: nowrap; }
+        tr:hover td { background: var(--vscode-list-hoverBackground); }
         td[contenteditable="true"]:focus { outline: 2px solid var(--vscode-focusBorder); background: var(--vscode-input-background); }
-        .changed { background-color: rgba(255, 255, 0, 0.2); }
-        .nested-cell { padding: 4px; }
-        .nested-table { width: 100%; font-size: 12px; margin: 4px 0; }
-        .nested-table th, .nested-table td { padding: 4px; }
-        .expandable { cursor: pointer; }
-        .expandable::before { content: '▶ '; font-size: 10px; }
+        td.editable-cell { cursor: text; }
+        td.editable-cell:hover { background: var(--vscode-input-background); box-shadow: inset 0 0 0 1px var(--vscode-input-border, var(--asfx-border)); }
+        td.editable-cell::after { content: "✎"; float: right; margin-left: 6px; opacity: 0; font-size: 10px; color: var(--vscode-descriptionForeground); }
+        td.editable-cell:hover::after { opacity: .6; }
+        .changed { background-color: rgba(255, 200, 0, 0.15) !important; }
+        .nested-cell { padding: 4px; white-space: normal; }
+        .nested-table { width: 100%; font-size: 11px; margin: 4px 0; }
+        .nested-table th, .nested-table td { padding: 3px 6px; font-size: 11px; }
+        .expandable { cursor: pointer; user-select: none; }
+        .expandable::before { content: '▶ '; font-size: 10px; opacity: .7; }
         .expandable.open::before { content: '▼ '; }
-        .status-bar { margin-top: 10px; display: flex; justify-content: space-between; align-items: center; }
-        .error { color: var(--vscode-errorForeground); margin-top: 10px; white-space: pre-wrap; }
-        #results-container a { color: var(--vscode-textLink-foreground); text-decoration: underline; }
-        #results-container a:hover { color: var(--vscode-textLink-activeForeground); }
-        td.readonly-cell { background: var(--vscode-editor-inactiveSelectionBackground); color: var(--vscode-descriptionForeground); cursor: not-allowed; border-left: 2px solid var(--vscode-descriptionForeground); }
+        .status-bar { display: flex; justify-content: space-between; align-items: center; padding: 6px 12px; font-size: 11px; color: var(--vscode-descriptionForeground); border-top: 1px solid var(--asfx-border); flex-shrink: 0; }
+        #results-container a { color: var(--vscode-textLink-foreground); text-decoration: none; }
+        #results-container a:hover { color: var(--vscode-textLink-activeForeground); text-decoration: underline; }
+        td.readonly-cell { background: var(--asfx-card-bg); color: var(--vscode-descriptionForeground); cursor: not-allowed; border-left: 2px solid var(--asfx-border); }
     </style>
 </head>
 <body>
-    <div class="builder-toggle">
-        <button id="builder-toggle-btn" type="button">▼ Show Builder</button>
-    </div>
-    <div id="builder-panel" class="builder-panel">
-        <div class="builder-row">
-            <label>Object</label>
-            <select id="builder-object">
-                <option value="">Select object...</option>
-            </select>
-        </div>
-        <div class="builder-row">
-            <label>Fields</label>
-            <div style="flex: 1;">
-                <button type="button" id="builder-select-all" style="padding: 2px 8px; font-size: 11px;">Select all</button>
-                <button type="button" id="builder-select-none" style="padding: 2px 8px; font-size: 11px; margin-left: 4px;">Clear</button>
-                <div id="builder-fields" class="builder-fields"></div>
-            </div>
-        </div>
-        <div class="builder-row">
-            <label>WHERE</label>
-            <select id="builder-where-field">
-                <option value="">—</option>
-            </select>
-            <select id="builder-where-op">
-                <option value="=">=</option>
-                <option value="!=">!=</option>
-                <option value="LIKE">LIKE</option>
-                <option value="IN">IN</option>
-                <option value="NOT IN">NOT IN</option>
-            </select>
-            <input type="text" id="builder-where-value" placeholder="Value" />
-        </div>
-        <div class="builder-row">
-            <label>ORDER BY</label>
-            <select id="builder-order-field">
-                <option value="">—</option>
-            </select>
-            <select id="builder-order-dir">
-                <option value="ASC">ASC</option>
-                <option value="DESC">DESC</option>
-            </select>
-        </div>
-        <div class="builder-row">
-            <label>LIMIT</label>
-            <input type="number" id="builder-limit" min="1" max="2000" placeholder="e.g. 100" style="width: 80px;" />
-        </div>
-        <div class="builder-actions">
-            <button type="button" id="builder-apply-btn">Apply to query</button>
+    <div class="page-header">
+        <div class="page-title"><span>🔍</span> SOQL Workbench</div>
+        <div class="header-actions">
+            <button id="builder-toggle-btn" type="button" class="btn-secondary btn-sm">▼ Show Builder</button>
         </div>
     </div>
 
     <script type="application/json" id="soql-initial-data">${initialDataEscaped}</script>
-    <div class="controls">
-        <div class="query-wrap">
-            <div class="query-label">Query (edit directly or use Builder above)</div>
-            <textarea id="query-input" placeholder="SELECT Id, Name FROM Account LIMIT 10">SELECT Id, Name FROM Account LIMIT 10</textarea>
-            <ul id="completion-list"></ul>
+
+    <div class="content-wrap">
+        <!-- Visual builder (toggled from the header) -->
+        <div id="builder-panel" class="card builder-panel">
+            <div class="card-head" style="cursor:default;">
+                <span class="card-title">Visual Query Builder</span>
+                <span class="card-chevron">point &amp; click → SOQL</span>
+            </div>
+            <div class="card-body">
+                <div class="bsection">
+                    <span class="bsection-label">Object</span>
+                    <div class="brow"><select id="builder-object"><option value="">Select object…</option></select></div>
+                </div>
+                <div class="bsection">
+                    <div class="bsection-head"><span class="bsection-label">Fields</span>
+                        <input type="text" id="builder-field-search" class="builder-field-search" placeholder="Filter fields…" />
+                        <span class="bsection-spacer"></span>
+                        <button type="button" id="builder-select-all" class="btn-mini">Select all</button>
+                        <button type="button" id="builder-select-none" class="btn-mini">Clear</button>
+                    </div>
+                    <div id="builder-fields" class="builder-fields"></div>
+                </div>
+                <div class="bsection">
+                    <span class="bsection-label">Related (parent) fields</span>
+                    <div class="brow">
+                        <select id="builder-rel-select"><option value="">— relationship —</option></select>
+                        <select id="builder-rel-field"><option value="">— field —</option></select>
+                        <button type="button" id="builder-rel-add" class="btn-mini">+ Add field</button>
+                    </div>
+                    <div id="builder-rel-chips" class="builder-rel-chips"></div>
+                </div>
+                <div class="bsection">
+                    <span class="bsection-label">Child relationships (subqueries)</span>
+                    <div class="brow">
+                        <select id="builder-child-select"><option value="">— child relationship —</option></select>
+                        <select id="builder-child-field"><option value="">— field —</option></select>
+                        <button type="button" id="builder-child-add" class="btn-mini">+ Add field</button>
+                    </div>
+                    <div id="builder-child-chips" class="builder-rel-chips"></div>
+                </div>
+                <div class="bsection">
+                    <span class="bsection-label">Filters (WHERE)</span>
+                    <div id="builder-where-block">
+                        <div id="builder-where-rows"></div>
+                        <button type="button" id="builder-add-where" class="btn-mini" style="align-self:flex-start;">+ Condition</button>
+                    </div>
+                </div>
+                <div class="bsection">
+                    <span class="bsection-label">Sort &amp; limit</span>
+                    <div class="brow">
+                        <select id="builder-order-field"><option value="">— order by —</option></select>
+                        <select id="builder-order-dir"><option value="ASC">ASC</option><option value="DESC">DESC</option></select>
+                        <span style="opacity:.4;">·</span>
+                        <span class="bsection-label">LIMIT</span>
+                        <input type="number" id="builder-limit" min="1" max="2000" placeholder="e.g. 100" />
+                    </div>
+                </div>
+                <div class="builder-actions">
+                    <button type="button" id="builder-from-query-btn" class="btn-secondary btn-sm" title="Read the current query text back into the builder">↺ From query</button>
+                    <button type="button" id="builder-apply-btn" class="btn-secondary btn-sm">Apply to query →</button>
+                    <button type="button" id="builder-run-btn" title="Apply the builder to the query and run it">▶ Apply &amp; Execute</button>
+                </div>
+            </div>
         </div>
-        <div style="display: flex; flex-direction: column; gap: 5px;">
-            <div class="builder-row" style="margin-bottom: 0;">
-                <label>History</label>
-                <input type="text" id="history-search" placeholder="Filter..." style="width: 70px; padding: 2px 4px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); font-size: 12px;" title="Filter history" />
-                <select id="history-select" title="Reopen a previous query" style="flex: 1; min-width: 0;">
-                    <option value="">— select —</option>
-                </select>
-                <button type="button" id="history-clear-btn" style="padding: 4px 8px; font-size: 11px;" title="Clear all history">&#x2715;</button>
+
+        <!-- Query editor -->
+        <div class="card card-query">
+            <div class="card-head" style="cursor:default;">
+                <span class="card-title">Query</span>
+                <span class="query-hint"><kbd>⌘/Ctrl+Enter</kbd> run · <kbd>Ctrl+Space</kbd> complete</span>
+                <span class="bsection-spacer" style="flex:1;"></span>
+                <button type="button" id="format-btn" class="btn-secondary btn-sm" title="Format / prettify (Shift+Alt+F)" onclick="formatSoql()">✨ Format</button>
             </div>
-            <div class="builder-row" style="margin-bottom: 0;">
-                <label>Org</label>
-                <select id="org-select" title="Override org to run query">
-                    <option value="">Default org</option>
-                </select>
+            <div class="card-body" style="gap:8px;">
+                <div class="query-wrap">
+                    <textarea id="query-input" placeholder="SELECT Id, Name FROM Account LIMIT 10">SELECT Id, Name FROM Account LIMIT 10</textarea>
+                    <ul id="completion-list"></ul>
+                </div>
             </div>
-            <button id="execute-btn">Execute</button>
-            <div style="display: flex; gap: 5px;">
-                <button id="save-btn" style="display: none; background-color: var(--vscode-statusBarItem-warningBackground); color: var(--vscode-statusBarItem-warningForeground);">Save</button>
-                <button id="discard-btn" style="display: none;">Discard</button>
+        </div>
+
+        <!-- Run bar (org / history / execute) — sits between query and results -->
+        <div class="run-bar">
+            <span class="rb-label">Org</span>
+            <select id="org-select" title="Org to run the query against"><option value="">Default org</option></select>
+            <button type="button" id="btn-refresh-cache" class="btn-refresh" title="Refresh schema &amp; org cache">🔄</button>
+            <span id="cache-status-row"></span>
+            <span class="rb-spacer"></span>
+            <span class="rb-label">History</span>
+            <select id="history-select" title="Reopen a previous query"><option value="">— recent —</option></select>
+            <button type="button" id="history-clear-btn" class="btn-refresh" title="Clear history">&#x2715;</button>
+            <span class="rb-sep"></span>
+            <span class="rb-label">Saved</span>
+            <select id="saved-select" title="Open a saved query"><option value="">— saved —</option></select>
+            <button type="button" id="saved-save-btn" class="btn-refresh" title="Save current query">💾</button>
+            <button type="button" id="saved-delete-btn" class="btn-refresh" title="Delete selected saved query">🗑</button>
+            <button id="execute-btn">&#9654; Execute</button>
+        </div>
+
+        <div id="error-msg" class="error"></div>
+
+        <!-- Results -->
+        <div class="card results-card">
+            <div class="card-head" style="cursor:default;">
+                <span class="card-title">Results</span>
+                <div class="card-actions results-toolbar" id="results-toolbar" style="display:none;">
+                    <span id="results-count" class="results-count"></span>
+                    <button type="button" id="load-more-btn" class="btn-mini" style="display:none;" title="Load the next page of records">⬇ Load more</button>
+                    <button id="save-btn" class="btn-mini" style="display:none;">💾 Save edits</button>
+                    <button id="discard-btn" class="btn-mini" style="display:none;">Discard</button>
+                    <button type="button" class="btn-mini" onclick="exportResults('csv')" title="Download results as CSV">⬇ CSV</button>
+                    <button type="button" class="btn-mini" onclick="exportResults('json')" title="Download results as JSON">⬇ JSON</button>
+                </div>
+            </div>
+            <div class="results-wrap">
+                <div id="results-container"></div>
+                <div class="status-bar" id="status-bar"></div>
             </div>
         </div>
     </div>
-    
-    <div id="error-msg" class="error"></div>
-    <div id="results-container"></div>
-    <div class="status-bar" id="status-bar"></div>
 
     <script>
         const vscode = acquireVsCodeApi();
@@ -594,19 +1027,36 @@ export class SOQLEditorProvider {
         const builderFieldsEl = document.getElementById('builder-fields');
         const builderSelectAll = document.getElementById('builder-select-all');
         const builderSelectNone = document.getElementById('builder-select-none');
-        const builderWhereField = document.getElementById('builder-where-field');
-        const builderWhereOp = document.getElementById('builder-where-op');
-        const builderWhereValue = document.getElementById('builder-where-value');
+        const builderWhereRows = document.getElementById('builder-where-rows');
+        const builderAddWhere = document.getElementById('builder-add-where');
+        const builderRelSelect = document.getElementById('builder-rel-select');
+        const builderRelField = document.getElementById('builder-rel-field');
+        const builderRelAdd = document.getElementById('builder-rel-add');
+        const builderRelChips = document.getElementById('builder-rel-chips');
         const builderOrderField = document.getElementById('builder-order-field');
         const builderOrderDir = document.getElementById('builder-order-dir');
         const builderLimit = document.getElementById('builder-limit');
         const builderApplyBtn = document.getElementById('builder-apply-btn');
+        const builderChildSelect = document.getElementById('builder-child-select');
+        const builderChildField = document.getElementById('builder-child-field');
+        const builderChildAdd = document.getElementById('builder-child-add');
+        const builderChildChips = document.getElementById('builder-child-chips');
+        const builderFromQueryBtn = document.getElementById('builder-from-query-btn');
         const orgSelect = document.getElementById('org-select');
         const historySelect = document.getElementById('history-select');
-        const historySearch = document.getElementById('history-search');
         const historyClearBtn = document.getElementById('history-clear-btn');
+        const savedSelect = document.getElementById('saved-select');
+        const savedSaveBtn = document.getElementById('saved-save-btn');
+        const savedDeleteBtn = document.getElementById('saved-delete-btn');
+        const loadMoreBtn = document.getElementById('load-more-btn');
 
         let fullHistory = [];
+        let savedQueries = [];        // [{name, query}]
+        let nextRecordsUrl = null;    // pagination cursor for the current result set
+        let resultTotalSize = 0;
+        let builderChildList = [];    // [{name, sobject}] child relationships of the root object
+        let selectedChildFields = []; // [{rel, field}] picked subquery fields
+        let pendingBuilderApply = null; // parsed query awaiting field load (two-way sync)
 
         const soqlInitialEl = document.getElementById('soql-initial-data');
         if (soqlInitialEl && soqlInitialEl.textContent) {
@@ -617,8 +1067,40 @@ export class SOQLEditorProvider {
                     fullHistory = data.history;
                     renderHistoryOptions(fullHistory);
                 }
+                if (Array.isArray(data.saved)) {
+                    savedQueries = data.saved;
+                    renderSavedOptions(savedQueries);
+                }
             } catch (e) {}
         }
+
+        // ── Saved queries ─────────────────────────────────────────────────────
+        function renderSavedOptions(items) {
+            savedQueries = items || [];
+            while (savedSelect.options.length > 1) savedSelect.remove(1);
+            savedQueries.forEach((q) => {
+                const opt = document.createElement('option');
+                opt.value = q.name;
+                opt.textContent = q.name;
+                opt.title = q.query;
+                savedSelect.appendChild(opt);
+            });
+        }
+        if (savedSelect) savedSelect.addEventListener('change', () => {
+            const found = savedQueries.find(q => q.name === savedSelect.value);
+            if (found) { queryInput.value = found.query; errorMsg.textContent = ''; queryInput.focus(); }
+        });
+        if (savedSaveBtn) savedSaveBtn.addEventListener('click', () => {
+            const query = (queryInput.value || '').trim();
+            if (!query) { errorMsg.textContent = 'Nothing to save — the query is empty.'; return; }
+            // The host shows the name input box (webview window.prompt is a no-op in VS Code).
+            vscode.postMessage({ command: 'saveQuery', query: query, suggestedName: savedSelect.value || '' });
+        });
+        if (savedDeleteBtn) savedDeleteBtn.addEventListener('click', () => {
+            const name = savedSelect.value;
+            if (!name) { errorMsg.textContent = 'Pick a saved query to delete.'; return; }
+            vscode.postMessage({ command: 'deleteSavedQuery', name: name });
+        });
 
         function renderHistoryOptions(items) {
             while (historySelect.options.length > 1) historySelect.remove(1);
@@ -633,22 +1115,13 @@ export class SOQLEditorProvider {
 
         function setHistoryDropdown(items) {
             fullHistory = items || [];
-            const filter = historySearch ? historySearch.value.trim().toLowerCase() : '';
-            renderHistoryOptions(filter ? fullHistory.filter(q => q.toLowerCase().includes(filter)) : fullHistory);
-        }
-
-        if (historySearch) {
-            historySearch.addEventListener('input', () => {
-                const filter = historySearch.value.trim().toLowerCase();
-                renderHistoryOptions(filter ? fullHistory.filter(q => q.toLowerCase().includes(filter)) : fullHistory);
-            });
+            renderHistoryOptions(fullHistory);
         }
 
         if (historyClearBtn) {
             historyClearBtn.addEventListener('click', () => {
                 fullHistory = [];
                 renderHistoryOptions([]);
-                if (historySearch) historySearch.value = '';
                 vscode.postMessage({ command: 'clearHistory' });
             });
         }
@@ -670,6 +1143,8 @@ export class SOQLEditorProvider {
         let selectedIndex = 0;
         let builderObjectList = [];
         let builderFieldsList = [];
+        let builderRelList = [];          // [{name, target}] relationships on the object
+        let selectedRelFields = [];       // ["Owner.Name", "Account.Industry", ...]
         let currentInstanceUrl = null;
         let editableFieldsByType = {}; // { "Account": { "Name": true, ... }, ... }
         /** parentSobject -> { relationshipName: childSobject } for subquery field resolution */
@@ -718,6 +1193,17 @@ export class SOQLEditorProvider {
             }
         });
 
+        function refreshCache() {
+            const btn = document.getElementById('btn-refresh-cache');
+            if (btn) { btn.disabled = true; btn.textContent = '⏳'; }
+            const statusRow = document.getElementById('cache-status-row');
+            if (statusRow) statusRow.textContent = 'Refreshing…';
+            vscode.postMessage({ command: 'refreshCache', targetOrg: currentTargetOrg() });
+        }
+
+        const refreshCacheBtn = document.getElementById('btn-refresh-cache');
+        if (refreshCacheBtn) refreshCacheBtn.addEventListener('click', refreshCache);
+
         builderToggleBtn.addEventListener('click', () => {
             const visible = builderPanel.classList.toggle('visible');
             builderToggleBtn.textContent = visible ? '▲ Hide Builder' : '▼ Show Builder';
@@ -728,65 +1214,201 @@ export class SOQLEditorProvider {
 
         function escOp(op) { return op.replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 
-        function updateBuilderWhereOps(fieldType) {
+        function opsForType(fieldType) {
             const t = (fieldType || '').toLowerCase();
-            let ops;
-            if (['double', 'integer', 'currency', 'percent', 'long'].includes(t)) {
-                ops = ['=', '!=', '>', '<', '>=', '<=', 'IN', 'NOT IN'];
-            } else if (t === 'date' || t === 'datetime') {
-                ops = ['=', '!=', '>', '<', '>=', '<='];
-            } else if (t === 'boolean') {
-                ops = ['=', '!='];
-            } else if (['picklist', 'multipicklist'].includes(t)) {
-                ops = ['=', '!=', 'IN', 'NOT IN', 'INCLUDES', 'EXCLUDES'];
-            } else {
-                ops = ['=', '!=', 'LIKE', 'IN', 'NOT IN'];
-            }
-            builderWhereOp.innerHTML = ops.map(op => '<option value="' + escOp(op) + '">' + escOp(op) + '</option>').join('');
+            if (['double', 'integer', 'currency', 'percent', 'long'].includes(t)) return ['=', '!=', '>', '<', '>=', '<=', 'IN', 'NOT IN'];
+            if (t === 'date' || t === 'datetime') return ['=', '!=', '>', '<', '>=', '<='];
+            if (t === 'boolean') return ['=', '!='];
+            if (['picklist', 'multipicklist'].includes(t)) return ['=', '!=', 'IN', 'NOT IN', 'INCLUDES', 'EXCLUDES'];
+            return ['=', '!=', 'LIKE', 'IN', 'NOT IN'];
         }
-
-        builderWhereField.addEventListener('change', () => {
-            const sel = builderWhereField.options[builderWhereField.selectedIndex];
-            updateBuilderWhereOps(sel ? sel.dataset.type : '');
-        });
+        function fieldOptionsHtml() {
+            return '<option value="">— field —</option>' + builderFieldsList.map(f => '<option value="' + escOp(f.name) + '" data-type="' + escOp(f.type || '') + '">' + escOp(f.name) + '</option>').join('');
+        }
+        function refreshWhereRowOps(row) {
+            const fsel = row.querySelector('.bw-field');
+            const opsel = row.querySelector('.bw-op');
+            const type = fsel.options[fsel.selectedIndex] ? fsel.options[fsel.selectedIndex].dataset.type : '';
+            const cur = opsel.value;
+            opsel.innerHTML = opsForType(type).map(op => '<option value="' + escOp(op) + '">' + escOp(op) + '</option>').join('');
+            if (cur) opsel.value = cur;
+        }
+        function addWhereRow() {
+            if (!builderWhereRows) return;
+            const first = builderWhereRows.children.length === 0;
+            const row = document.createElement('div');
+            row.className = 'bw-row';
+            row.innerHTML =
+                '<select class="bw-conj" style="' + (first ? 'visibility:hidden;' : '') + '"><option value="AND">AND</option><option value="OR">OR</option></select>'
+                + '<select class="bw-field">' + fieldOptionsHtml() + '</select>'
+                + '<select class="bw-op"></select>'
+                + '<input type="text" class="bw-val" placeholder="value" />'
+                + '<button type="button" class="bw-remove" title="Remove condition">✕</button>';
+            builderWhereRows.appendChild(row);
+            refreshWhereRowOps(row);
+            row.querySelector('.bw-field').addEventListener('change', () => refreshWhereRowOps(row));
+            row.querySelector('.bw-remove').addEventListener('click', () => { row.remove(); fixFirstConj(); });
+        }
+        function fixFirstConj() {
+            const rows = builderWhereRows ? builderWhereRows.querySelectorAll('.bw-row') : [];
+            rows.forEach((r, i) => { const c = r.querySelector('.bw-conj'); if (c) c.style.visibility = i === 0 ? 'hidden' : ''; });
+        }
+        function repopulateWhereFields() {
+            if (!builderWhereRows) return;
+            builderWhereRows.querySelectorAll('.bw-row').forEach(row => {
+                const fsel = row.querySelector('.bw-field');
+                const cur = fsel.value;
+                fsel.innerHTML = fieldOptionsHtml();
+                if (cur) fsel.value = cur;
+                refreshWhereRowOps(row);
+            });
+        }
+        if (builderAddWhere) builderAddWhere.addEventListener('click', () => { addWhereRow(); fixFirstConj(); });
 
         builderObject.addEventListener('change', () => {
             const sobject = builderObject.value;
             builderFieldsList = [];
+            builderRelList = [];
+            selectedRelFields = [];
+            builderChildList = [];
+            selectedChildFields = [];
+            renderRelChips();
+            renderChildChips();
             builderFieldsEl.innerHTML = '';
-            builderWhereField.innerHTML = '<option value="">—</option>';
+            if (builderRelSelect) builderRelSelect.innerHTML = '<option value="">— relationship —</option>';
+            if (builderRelField) builderRelField.innerHTML = '<option value="">— field —</option>';
+            if (builderChildSelect) builderChildSelect.innerHTML = '<option value="">— child relationship —</option>';
+            if (builderChildField) builderChildField.innerHTML = '<option value="">— field —</option>';
+            if (builderWhereRows) builderWhereRows.innerHTML = '';
+            addWhereRow();
             builderOrderField.innerHTML = '<option value="">—</option>';
             if (sobject) {
                 vscode.postMessage({ command: 'getBuilderFields', sobject: sobject, targetOrg: currentTargetOrg() });
+                vscode.postMessage({ command: 'getBuilderChildren', sobject: sobject, targetOrg: currentTargetOrg() });
             }
         });
 
+        // ── Child relationships (subqueries) ─────────────────────────────────
+        if (builderChildSelect) builderChildSelect.addEventListener('change', () => {
+            const opt = builderChildSelect.options[builderChildSelect.selectedIndex];
+            const childSobject = opt ? opt.dataset.sobject : '';
+            builderChildField.innerHTML = '<option value="">— field —</option>';
+            if (builderChildSelect.value && childSobject) {
+                vscode.postMessage({ command: 'getBuilderChildFields', childSobject: childSobject, childRel: builderChildSelect.value, targetOrg: currentTargetOrg() });
+            }
+        });
+        if (builderChildAdd) builderChildAdd.addEventListener('click', () => {
+            const rel = builderChildSelect.value, field = builderChildField.value;
+            if (!rel || !field) return;
+            if (!selectedChildFields.some(c => c.rel === rel && c.field === field)) {
+                selectedChildFields.push({ rel: rel, field: field });
+                renderChildChips();
+            }
+        });
+        function renderChildChips() {
+            if (!builderChildChips) return;
+            builderChildChips.innerHTML = selectedChildFields.map((c, i) =>
+                '<span class="rel-chip">' + (c.rel + '.' + c.field).replace(/</g,'&lt;') + '<span class="rel-chip-x" data-i="' + i + '">✕</span></span>'
+            ).join('');
+            builderChildChips.querySelectorAll('.rel-chip-x').forEach(x => x.addEventListener('click', () => {
+                selectedChildFields.splice(parseInt(x.dataset.i, 10), 1); renderChildChips();
+            }));
+        }
+        /** Build the (SELECT ... FROM Rel) subquery fragments grouped per child relationship. */
+        function buildChildSubqueries() {
+            const byRel = {};
+            selectedChildFields.forEach(c => { (byRel[c.rel] = byRel[c.rel] || []).push(c.field); });
+            return Object.keys(byRel).map(rel => {
+                const flds = byRel[rel];
+                if (flds.indexOf('Id') === -1) flds.unshift('Id');
+                return '(SELECT ' + flds.join(', ') + ' FROM ' + rel + ')';
+            });
+        }
+
+        // Select all / Clear act on the fields currently visible (respect the filter).
         builderSelectAll.addEventListener('click', () => {
-            builderFieldsEl.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = true);
+            builderFieldsEl.querySelectorAll('label').forEach(l => { if (l.style.display !== 'none') { const cb = l.querySelector('input[type="checkbox"]'); if (cb) cb.checked = true; } });
         });
         builderSelectNone.addEventListener('click', () => {
-            builderFieldsEl.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = false);
+            builderFieldsEl.querySelectorAll('label').forEach(l => { if (l.style.display !== 'none') { const cb = l.querySelector('input[type="checkbox"]'); if (cb) cb.checked = false; } });
         });
+        // Filter the field checkboxes by name (keeps checked state intact).
+        const builderFieldSearch = document.getElementById('builder-field-search');
+        function applyFieldFilter() {
+            const term = builderFieldSearch ? builderFieldSearch.value.trim().toLowerCase() : '';
+            builderFieldsEl.querySelectorAll('label').forEach(l => {
+                const cb = l.querySelector('input[type="checkbox"]');
+                const name = cb ? cb.value.toLowerCase() : l.textContent.toLowerCase();
+                l.style.display = (!term || name.indexOf(term) !== -1) ? '' : 'none';
+            });
+        }
+        if (builderFieldSearch) builderFieldSearch.addEventListener('input', applyFieldFilter);
+
+        // ── Related (parent) fields ──────────────────────────────────────────
+        if (builderRelSelect) builderRelSelect.addEventListener('change', () => {
+            const opt = builderRelSelect.options[builderRelSelect.selectedIndex];
+            const target = opt ? opt.dataset.target : '';
+            builderRelField.innerHTML = '<option value="">— field —</option>';
+            if (builderRelSelect.value && target) {
+                vscode.postMessage({ command: 'getBuilderFields', sobject: target, relName: builderRelSelect.value, targetOrg: currentTargetOrg() });
+            }
+        });
+        if (builderRelAdd) builderRelAdd.addEventListener('click', () => {
+            const rel = builderRelSelect.value, field = builderRelField.value;
+            if (!rel || !field) return;
+            const path = rel + '.' + field;
+            if (selectedRelFields.indexOf(path) === -1) { selectedRelFields.push(path); renderRelChips(); }
+        });
+        function renderRelChips() {
+            if (!builderRelChips) return;
+            builderRelChips.innerHTML = selectedRelFields.map((p, i) =>
+                '<span class="rel-chip">' + p.replace(/</g,'&lt;') + '<span class="rel-chip-x" data-i="' + i + '">✕</span></span>'
+            ).join('');
+            builderRelChips.querySelectorAll('.rel-chip-x').forEach(x => x.addEventListener('click', () => {
+                selectedRelFields.splice(parseInt(x.dataset.i, 10), 1); renderRelChips();
+            }));
+        }
+
+        function buildWhereClauseFromBuilder() {
+            if (!builderWhereRows) return '';
+            const esc = (s) => String(s).replace(/\\\\/g, '\\\\\\\\').replace(/'/g, "\\\\'");
+            const rows = builderWhereRows.querySelectorAll('.bw-row');
+            let clause = '';
+            let any = false;
+            rows.forEach((row) => {
+                const field = row.querySelector('.bw-field').value;
+                const op = row.querySelector('.bw-op').value;
+                const raw = row.querySelector('.bw-val').value.trim();
+                const conj = row.querySelector('.bw-conj').value || 'AND';
+                if (!field || raw === '') return;
+                const fsel = row.querySelector('.bw-field');
+                const type = (fsel.options[fsel.selectedIndex] ? fsel.options[fsel.selectedIndex].dataset.type : '') || '';
+                const t = type.toLowerCase();
+                const bare = ['double','integer','currency','percent','long','boolean','date','datetime'].includes(t);
+                const one = (v) => bare ? String(v).trim() : "'" + esc(String(v).trim()) + "'";
+                let cond;
+                if (op === 'IN' || op === 'NOT IN' || op === 'INCLUDES' || op === 'EXCLUDES') {
+                    const list = raw.split(',').map(s => one(s)).join(', ');
+                    cond = field + ' ' + op + ' (' + list + ')';
+                } else if (op === 'LIKE') {
+                    cond = field + " LIKE '" + esc(raw) + "'";
+                } else {
+                    cond = field + ' ' + op + ' ' + one(raw);
+                }
+                clause += (any ? ' ' + conj + ' ' : ' WHERE ') + cond;
+                any = true;
+            });
+            return clause;
+        }
 
         function buildQueryFromBuilder() {
             const sobject = builderObject.value;
             if (!sobject) return '';
-            const fields = Array.from(builderFieldsEl.querySelectorAll('input[type="checkbox"]:checked')).map(cb => cb.value);
+            const fields = Array.from(builderFieldsEl.querySelectorAll('input[type="checkbox"]:checked')).map(cb => cb.value).concat(selectedRelFields).concat(buildChildSubqueries());
             if (fields.length === 0) return '';
             const selectList = fields.join(', ');
             let q = 'SELECT ' + selectList + ' FROM ' + sobject;
-            const whereF = builderWhereField.value;
-            const whereOp = builderWhereOp.value;
-            const whereVal = builderWhereValue.value.trim();
-            if (whereF && whereVal !== '') {
-                const escape = (s) => s.replace(/\\\\/g, '\\\\\\\\').replace(/'/g, "\\\\'");
-                if (whereOp === 'IN' || whereOp === 'NOT IN') {
-                    const list = whereVal.split(',').map(s => "'" + escape(s.trim()) + "'").join(',');
-                    q += ' WHERE ' + whereF + ' ' + whereOp + ' (' + list + ')';
-                } else {
-                    q += ' WHERE ' + whereF + ' ' + whereOp + " '" + escape(whereVal) + "'";
-                }
-            }
+            q += buildWhereClauseFromBuilder();
             const orderF = builderOrderField.value;
             if (orderF) {
                 q += ' ORDER BY ' + orderF + ' ' + builderOrderDir.value;
@@ -806,7 +1428,143 @@ export class SOQLEditorProvider {
             }
         });
 
-        executeBtn.addEventListener('click', () => {
+        const builderRunBtn = document.getElementById('builder-run-btn');
+        if (builderRunBtn) builderRunBtn.addEventListener('click', () => {
+            const query = buildQueryFromBuilder();
+            if (!query) { errorMsg.textContent = 'Pick an object and at least one field first.'; return; }
+            queryInput.value = query;
+            errorMsg.textContent = '';
+            runQuery();
+        });
+
+        // ── Two-way sync: parse the query text back into the builder ───────────
+        function splitTopLevel(str, sep) {
+            const out = []; let depth = 0; let inq = false; let cur = '';
+            for (let i = 0; i < str.length; i++) {
+                const ch = str[i];
+                if (ch === "'") { inq = !inq; cur += ch; continue; }
+                if (!inq && ch === '(') { depth++; cur += ch; continue; }
+                if (!inq && ch === ')') { depth--; cur += ch; continue; }
+                if (!inq && depth === 0 && ch === sep) { if (cur.trim() !== '') out.push(cur.trim()); cur = ''; continue; }
+                cur += ch;
+            }
+            if (cur.trim() !== '') out.push(cur.trim());
+            return out;
+        }
+        function splitWhereConds(where) {
+            const conds = []; let depth = 0; let inq = false; let start = 0; let lastConj = 'AND';
+            for (let i = 0; i < where.length; i++) {
+                const ch = where[i];
+                if (ch === "'") { inq = !inq; continue; }
+                if (inq) continue;
+                if (ch === '(') { depth++; continue; }
+                if (ch === ')') { depth--; continue; }
+                if (depth === 0) {
+                    const rest = where.slice(i);
+                    const mAnd = /^\\s+AND\\s+/i.exec(rest);
+                    const mOr = !mAnd ? /^\\s+OR\\s+/i.exec(rest) : null;
+                    const m = mAnd || mOr;
+                    if (m) {
+                        const e = where.slice(start, i).trim();
+                        if (e) conds.push({ conj: lastConj, expr: e });
+                        lastConj = mAnd ? 'AND' : 'OR';
+                        i += m[0].length - 1; start = i + 1;
+                    }
+                }
+            }
+            const tail = where.slice(start).trim();
+            if (tail) conds.push({ conj: lastConj, expr: tail });
+            return conds;
+        }
+        function unquoteVal(raw) {
+            let v = raw.trim();
+            if (v[0] === '(' && v[v.length - 1] === ')') v = v.slice(1, -1);
+            return splitTopLevel(v, ',').map(function (part) {
+                let p = part.trim();
+                if (p[0] === "'" && p[p.length - 1] === "'") p = p.slice(1, -1).replace(/\\\\'/g, "'").replace(/\\\\\\\\/g, '\\\\');
+                return p;
+            }).join(',');
+        }
+        function parseQueryIntoBuilder() {
+            const q = (queryInput.value || '').replace(/\\s+/g, ' ').trim();
+            const m = /^SELECT\\s+(.+?)\\s+FROM\\s+([A-Za-z0-9_]+)(.*)$/i.exec(q);
+            if (!m) { errorMsg.textContent = 'Could not parse the query into the builder.'; return; }
+            const selectPart = m[1];
+            const object = m[2];
+            let rest = m[3] || '';
+            const parsed = { object: object, fields: [], relFields: [], childFields: [], where: [], orderField: '', orderDir: 'ASC', limit: '' };
+            splitTopLevel(selectPart, ',').forEach(function (f) {
+                const sub = /^\\(\\s*SELECT\\s+(.+?)\\s+FROM\\s+([A-Za-z0-9_]+)\\s*(?:WHERE[\\s\\S]*?)?\\)$/i.exec(f);
+                if (sub) {
+                    const rel = sub[2];
+                    splitTopLevel(sub[1], ',').forEach(function (cf) { parsed.childFields.push({ rel: rel, field: cf.trim() }); });
+                } else if (f.indexOf('.') !== -1) {
+                    parsed.relFields.push(f);
+                } else {
+                    parsed.fields.push(f);
+                }
+            });
+            let mLimit = /\\bLIMIT\\s+(\\d+)\\b/i.exec(rest);
+            if (mLimit) { parsed.limit = mLimit[1]; rest = rest.replace(mLimit[0], ''); }
+            let mOrder = /\\bORDER\\s+BY\\s+([A-Za-z0-9_.]+)\\s*(ASC|DESC)?/i.exec(rest);
+            if (mOrder) { parsed.orderField = mOrder[1]; parsed.orderDir = (mOrder[2] || 'ASC').toUpperCase(); rest = rest.replace(mOrder[0], ''); }
+            let mWhere = /\\bWHERE\\s+([\\s\\S]+)$/i.exec(rest);
+            if (mWhere) {
+                splitWhereConds(mWhere[1].trim()).forEach(function (c) {
+                    const em = /^(\\S+)\\s+(NOT IN|INCLUDES|EXCLUDES|IN|LIKE|!=|>=|<=|=|>|<)\\s+([\\s\\S]+)$/i.exec(c.expr);
+                    if (em) parsed.where.push({ conj: c.conj, field: em[1], op: em[2].toUpperCase(), val: unquoteVal(em[3]) });
+                });
+            }
+            pendingBuilderApply = parsed;
+            // Select the object; once its fields arrive, applyPendingBuilder() runs.
+            if (builderObjectList.indexOf(object) === -1) {
+                const opt = document.createElement('option'); opt.value = object; opt.textContent = object; builderObject.appendChild(opt);
+            }
+            if (builderObject.value !== object) {
+                builderObject.value = object;
+                builderObject.dispatchEvent(new Event('change'));
+            } else {
+                // Same object already loaded — request fresh fields to trigger apply.
+                vscode.postMessage({ command: 'getBuilderFields', sobject: object, targetOrg: currentTargetOrg() });
+                vscode.postMessage({ command: 'getBuilderChildren', sobject: object, targetOrg: currentTargetOrg() });
+            }
+        }
+        function applyPendingBuilder() {
+            if (!pendingBuilderApply) return;
+            const p = pendingBuilderApply;
+            pendingBuilderApply = null;
+            // Plain fields → check matching boxes.
+            const want = {}; p.fields.forEach(function (f) { want[f.toLowerCase()] = true; });
+            builderFieldsEl.querySelectorAll('input[type="checkbox"]').forEach(function (cb) { cb.checked = !!want[cb.value.toLowerCase()]; });
+            // Parent relationship fields.
+            selectedRelFields = p.relFields.slice(); renderRelChips();
+            // Child subqueries.
+            selectedChildFields = p.childFields.slice(); renderChildChips();
+            // Order & limit.
+            if (p.orderField) { builderOrderField.value = p.orderField; builderOrderDir.value = p.orderDir; }
+            builderLimit.value = p.limit || '';
+            // WHERE rows.
+            if (builderWhereRows) {
+                builderWhereRows.innerHTML = '';
+                if (p.where.length === 0) { addWhereRow(); }
+                else {
+                    p.where.forEach(function (w) {
+                        addWhereRow();
+                        const row = builderWhereRows.lastElementChild;
+                        const fsel = row.querySelector('.bw-field');
+                        fsel.value = w.field; refreshWhereRowOps(row);
+                        const opsel = row.querySelector('.bw-op');
+                        if (Array.from(opsel.options).some(function (o) { return o.value === w.op; })) opsel.value = w.op;
+                        row.querySelector('.bw-val').value = w.val;
+                        const conj = row.querySelector('.bw-conj'); if (conj) conj.value = w.conj;
+                    });
+                    fixFirstConj();
+                }
+            }
+        }
+        if (builderFromQueryBtn) builderFromQueryBtn.addEventListener('click', parseQueryIntoBuilder);
+
+        function runQuery() {
             const query = queryInput.value;
             if (!query) return;
             changes = {};
@@ -814,6 +1572,15 @@ export class SOQLEditorProvider {
             hideCompletion();
             const targetOrg = orgSelect.value || null;
             vscode.postMessage({ command: 'execute', query: query, targetOrg: targetOrg });
+        }
+        executeBtn.addEventListener('click', runQuery);
+        // Cmd/Ctrl+Enter inside the query box executes (unless the completion popup is open).
+        queryInput.addEventListener('keydown', (e) => {
+            if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                if (completionList.classList.contains('visible')) return;
+                e.preventDefault();
+                runQuery();
+            }
         });
 
         saveBtn.addEventListener('click', () => {
@@ -855,19 +1622,26 @@ export class SOQLEditorProvider {
             completionReplaceLen = replaceLen;
             selectedIndex = 0;
             completionList.innerHTML = '';
-            items.slice(0, 80).forEach((item, i) => {
+            items.slice(0, 120).forEach((item, i) => {
                 const li = document.createElement('li');
                 const name = (typeof item === 'object' && item && item.name !== undefined) ? item.name : String(item);
                 const fieldType = (typeof item === 'object' && item && item.type) ? item.type : null;
-                const icon = fieldType ? fieldTypeIcon(fieldType) : null;
+                const isRel = !!(typeof item === 'object' && item && item.rel);
+                const icon = isRel ? '→' : (fieldType ? fieldTypeIcon(fieldType) : null);
                 if (icon) {
                     const badge = document.createElement('span');
-                    badge.className = 'type-badge';
+                    badge.className = 'type-badge' + (isRel ? ' rel-badge' : '');
                     badge.textContent = icon;
-                    badge.title = fieldType;
+                    badge.title = isRel ? ('relationship → ' + (item.target || '') + ' (drill in with a dot)') : fieldType;
                     li.appendChild(badge);
                 }
                 li.appendChild(document.createTextNode(name));
+                if (isRel && item.target) {
+                    const hint = document.createElement('span');
+                    hint.className = 'rel-target';
+                    hint.textContent = ' ' + item.target;
+                    li.appendChild(hint);
+                }
                 li.dataset.index = String(i);
                 li.addEventListener('click', () => insertCompletion(item, replaceStart, replaceLen));
                 completionList.appendChild(li);
@@ -880,17 +1654,26 @@ export class SOQLEditorProvider {
             pushUndoState();
             const name = (typeof textOrItem === 'object' && textOrItem && textOrItem.name !== undefined) ? textOrItem.name : String(textOrItem);
             const sobject = (typeof textOrItem === 'object' && textOrItem && textOrItem.sobject) ? textOrItem.sobject : null;
+            const isRel = !!(typeof textOrItem === 'object' && textOrItem && textOrItem.rel);
             const trailingSpace = typeof textOrItem === 'object' && textOrItem && textOrItem.trailingSpace;
             const before = queryInput.value.slice(0, start);
             const after = queryInput.value.slice(start + len);
             const alreadyHasClosing = after.charAt(0) === ')';
             const closingParen = (sobject && !alreadyHasClosing) ? ')' : '';
-            const space = (trailingSpace && !closingParen && after.charAt(0) !== ' ') ? ' ' : '';
-            queryInput.value = before + name + closingParen + space + after;
-            const newCursor = start + name.length + closingParen.length + space.length;
+            // Picking a relationship (e.g. "Parent") inserts a trailing dot so the
+            // user immediately drills into its fields (Parent.Name).
+            const relDot = (isRel && after.charAt(0) !== '.') ? '.' : '';
+            const space = (!relDot && trailingSpace && !closingParen && after.charAt(0) !== ' ') ? ' ' : '';
+            queryInput.value = before + name + closingParen + relDot + space + after;
+            const newCursor = start + name.length + closingParen.length + relDot.length + space.length;
             queryInput.setSelectionRange(newCursor, newCursor);
             queryInput.focus();
             hideCompletion();
+            if (relDot) {
+                // Re-trigger so the parent's fields appear right after the dot.
+                setTimeout(() => triggerCompletion(getQueryContext()), 0);
+                return;
+            }
             if (sobject) {
                 const subqueryCursor = start + name.length + closingParen.length;
                 queryInput.setSelectionRange(subqueryCursor, subqueryCursor);
@@ -978,17 +1761,26 @@ export class SOQLEditorProvider {
                 return { type: 'object', prefix: fromMatch[1], start: cursor - fromMatch[1].length };
             }
 
-            // 2. After "Something." -> suggest fields; resolve __r relationship names via extension
-            const dotMatch = before.match(/(\\w+)\\.(\\w*)$/);
+            // 2. After a relationship chain "Owner.Manager." -> fields of the resolved target.
+            //    Handles standard + custom (__r) relationships, multiple hops deep,
+            //    resolved 100% from org describe metadata (no guessing).
+            const dotMatch = before.match(/([A-Za-z_][\\w]*(?:\\.[A-Za-z_][\\w]*)*)\\.(\\w*)$/);
             if (dotMatch) {
-                const relOrSobject = dotMatch[1];
+                const chain = dotMatch[1];
                 const prefix = dotMatch[2];
                 const start = cursor - prefix.length;
-                if (relOrSobject.endsWith('__r')) {
-                    const fromSobject = getMainQueryFrom(fullText) || '';
-                    return { type: 'relField', relName: relOrSobject, fromSobject, prefix, start };
+                let root = null;
+                if (subqueryBefore) {
+                    const subqueryFull = getSubqueryFull(fullText, cursor);
+                    const fc = (subqueryFull || subqueryBefore).match(/\\bFROM\\s+(\\w+)/i);
+                    root = fc ? fc[1] : null;
+                    const parentSobject = getMainQueryFrom(fullText);
+                    if (root && parentSobject && relationshipCache[parentSobject] && relationshipCache[parentSobject][root])
+                        root = relationshipCache[parentSobject][root];
+                } else {
+                    root = getMainQueryFrom(fullText);
                 }
-                return { type: 'field', sobject: relOrSobject, prefix, start };
+                return { type: 'path', fromSobject: root || '', path: chain.split('.'), prefix: prefix, start: start };
             }
 
             // Resolve sobject for WHERE and SELECT field completion
@@ -1043,6 +1835,8 @@ export class SOQLEditorProvider {
                 const ops = SOQL_OPERATORS.filter(op => op.startsWith(prefix));
                 if (ops.length > 0) showCompletion(ops.map(op => ({ name: op, trailingSpace: true })), ctx.start, ctx.prefix.length);
                 else hideCompletion();
+            } else if (ctx.type === 'path') {
+                vscode.postMessage({ command: 'getFieldsForPath', fromSobject: ctx.fromSobject, path: ctx.path, targetOrg: currentTargetOrg() });
             } else if (ctx.type === 'relField') {
                 vscode.postMessage({ command: 'getFieldsForRelationship', relName: ctx.relName, fromSobject: ctx.fromSobject, targetOrg: currentTargetOrg() });
             } else {
@@ -1137,8 +1931,26 @@ export class SOQLEditorProvider {
                 case 'results':
                     if (message.instanceUrl) currentInstanceUrl = message.instanceUrl;
                     if (message.editableFields) editableFieldsByType = message.editableFields;
+                    nextRecordsUrl = message.nextRecordsUrl || null;
+                    resultTotalSize = message.totalSize;
                     renderTable(message.data);
                     statusBar.textContent = 'Total: ' + message.totalSize + ' records';
+                    updateResultsToolbar(message.data, message.totalSize);
+                    break;
+                case 'moreResults':
+                    if (message.instanceUrl) currentInstanceUrl = message.instanceUrl;
+                    if (message.editableFields) editableFieldsByType = Object.assign(editableFieldsByType || {}, message.editableFields);
+                    nextRecordsUrl = message.nextRecordsUrl || null;
+                    resultTotalSize = message.totalSize || resultTotalSize;
+                    renderTable((currentRecords || []).concat(message.data || []));
+                    statusBar.textContent = 'Total: ' + resultTotalSize + ' records';
+                    updateResultsToolbar(currentRecords, resultTotalSize);
+                    break;
+                case 'loadingMore':
+                    if (loadMoreBtn) {
+                        loadMoreBtn.disabled = message.value;
+                        loadMoreBtn.textContent = message.value ? 'Loading…' : '⬇ Load more';
+                    }
                     break;
                 case 'orgList':
                     orgSelect.innerHTML = '<option value="">Default org</option>';
@@ -1194,12 +2006,60 @@ export class SOQLEditorProvider {
                     builderObjectList = message.items || [];
                     builderObject.innerHTML = '<option value="">Select object...</option>' + builderObjectList.map(o => '<option value="' + o + '">' + o + '</option>').join('');
                     break;
-                case 'builderFields':
-                    builderFieldsList = (message.items || []).map(f => typeof f === 'object' ? f : { name: f, type: '' });
+                case 'builderFields': {
+                    const items = (message.items || []).map(f => typeof f === 'object' ? f : { name: f, type: '' });
+                    if (message.relName) {
+                        // Fields of a relationship target → fill the related-field dropdown
+                        // (only if it's still the selected relationship).
+                        if (builderRelSelect && builderRelSelect.value === message.relName && builderRelField) {
+                            builderRelField.innerHTML = '<option value="">— field —</option>' +
+                                items.map(f => '<option value="' + f.name + '">' + f.name + '</option>').join('');
+                        }
+                        break;
+                    }
+                    builderFieldsList = items.filter(f => !f.rel);
+                    // Sort alphabetically (case-insensitive) but keep Id, then Name, on top.
+                    builderFieldsList.sort((a, b) => {
+                        const rank = (n) => n === 'Id' ? 0 : (n === 'Name' ? 1 : 2);
+                        const ra = rank(a.name), rb = rank(b.name);
+                        if (ra !== rb) return ra - rb;
+                        return a.name.toLowerCase().localeCompare(b.name.toLowerCase());
+                    });
+                    builderRelList = items.filter(f => f.rel).map(f => ({ name: f.name, target: f.target || '' }));
                     builderFieldsEl.innerHTML = builderFieldsList.map(f => '<label><input type="checkbox" value="' + f.name + '"> ' + f.name + '</label>').join('');
-                    builderWhereField.innerHTML = '<option value="">—</option>' + builderFieldsList.map(f => '<option value="' + f.name + '" data-type="' + (f.type || '') + '">' + f.name + '</option>').join('');
+                    applyFieldFilter();
                     builderOrderField.innerHTML = '<option value="">—</option>' + builderFieldsList.map(f => '<option value="' + f.name + '">' + f.name + '</option>').join('');
-                    updateBuilderWhereOps('');
+                    if (builderRelSelect) builderRelSelect.innerHTML = '<option value="">— relationship —</option>' +
+                        builderRelList.map(r => '<option value="' + r.name + '" data-target="' + r.target + '">' + r.name + ' →' + r.target + '</option>').join('');
+                    if (builderWhereRows && builderWhereRows.children.length === 0) addWhereRow();
+                    repopulateWhereFields();
+                    if (pendingBuilderApply && pendingBuilderApply.object &&
+                        pendingBuilderApply.object.toLowerCase() === (builderObject.value || '').toLowerCase()) {
+                        applyPendingBuilder();
+                    }
+                    break;
+                }
+                case 'cacheRefreshed': {
+                    const refreshBtn = document.getElementById('btn-refresh-cache');
+                    if (refreshBtn) { refreshBtn.disabled = false; refreshBtn.textContent = '🔄'; }
+                    const statusRow = document.getElementById('cache-status-row');
+                    if (statusRow) statusRow.textContent = '✓ Refreshed at ' + new Date().toLocaleTimeString();
+                    break;
+                }
+                case 'savedQueries':
+                    renderSavedOptions(message.items || []);
+                    break;
+                case 'builderChildren':
+                    builderChildList = (message.items || []).map(c => ({ name: c.name, sobject: c.sobject || c.childSObject || '' })).filter(c => c.name);
+                    if (builderChildSelect) builderChildSelect.innerHTML = '<option value="">— child relationship —</option>' +
+                        builderChildList.map(c => '<option value="' + c.name + '" data-sobject="' + c.sobject + '">' + c.name + (c.sobject ? ' (' + c.sobject + ')' : '') + '</option>').join('');
+                    break;
+                case 'builderChildFields':
+                    if (builderChildSelect && builderChildSelect.value === message.childRel && builderChildField) {
+                        const cfItems = (message.items || []).map(f => typeof f === 'object' ? f : { name: f });
+                        builderChildField.innerHTML = '<option value="">— field —</option>' +
+                            cfItems.map(f => '<option value="' + f.name + '">' + f.name + '</option>').join('');
+                    }
                     break;
             }
         });
@@ -1252,6 +2112,8 @@ export class SOQLEditorProvider {
                             const isEditableNested = recId && recType && h !== 'Id' && !isNestedObject && editableFieldsByType[recType] && editableFieldsByType[recType][h];
                             if (isEditableNested) {
                                 td.contentEditable = true;
+                                td.classList.add('editable-cell');
+                                td.title = 'Editable — click to change, then Save edits';
                                 td.addEventListener('input', () => {
                                     const newValue = td.textContent.trim();
                                     if (!changes[recId]) changes[recId] = { _type: recType };
@@ -1346,6 +2208,8 @@ export class SOQLEditorProvider {
                     const isEditable = recId && type && h !== 'Id' && !isObject && editableFieldsByType[type] && editableFieldsByType[type][h];
                     if (isEditable) {
                         td.contentEditable = true;
+                        td.classList.add('editable-cell');
+                        td.title = 'Editable — click to change, then Save edits';
                         td.addEventListener('input', () => {
                             const newValue = td.textContent.trim();
                             if (!changes[recId]) changes[recId] = { _type: type };
@@ -1370,6 +2234,69 @@ export class SOQLEditorProvider {
             saveBtn.style.display = hasChanges ? 'block' : 'none';
             discardBtn.style.display = hasChanges ? 'block' : 'none';
         }
+
+        // ── Results toolbar (count + export) ──────────────────────────────────
+        function updateResultsToolbar(records, totalSize) {
+            const tb = document.getElementById('results-toolbar');
+            const cnt = document.getElementById('results-count');
+            const n = (records && records.length) || 0;
+            if (tb) tb.style.display = n > 0 ? 'flex' : 'none';
+            if (cnt) cnt.textContent = n + (totalSize > n ? ' of ' + totalSize : '') + ' record' + (totalSize === 1 ? '' : 's');
+            if (loadMoreBtn) loadMoreBtn.style.display = nextRecordsUrl ? 'inline-block' : 'none';
+        }
+        if (loadMoreBtn) loadMoreBtn.addEventListener('click', () => {
+            if (!nextRecordsUrl) return;
+            vscode.postMessage({ command: 'queryMore', nextRecordsUrl: nextRecordsUrl, targetOrg: orgSelect.value || null });
+        });
+
+        // ── Format / prettify SOQL ────────────────────────────────────────────
+        function formatSoql() {
+            let q = (queryInput.value || '').replace(/\\s+/g, ' ').trim();
+            if (!q) return;
+            // Uppercase the major keywords (outside of string literals is approximated).
+            const kw = ['SELECT','FROM','WHERE','GROUP BY','HAVING','ORDER BY','LIMIT','OFFSET','AND','OR','ASC','DESC','NULLS FIRST','NULLS LAST','TYPEOF','WHEN','THEN','ELSE','END'];
+            kw.forEach(function(k){ q = q.replace(new RegExp('\\\\b' + k.replace(' ','\\\\s+') + '\\\\b','gi'), k); });
+            // Newline + indent before major clauses.
+            ['FROM','WHERE','GROUP BY','HAVING','ORDER BY','LIMIT','OFFSET'].forEach(function(k){
+                q = q.replace(new RegExp('\\\\s+' + k.replace(' ','\\\\s+') + '\\\\b','g'), '\\n' + k);
+            });
+            q = q.replace(/\\s+(AND|OR)\\b/g, '\\n  $1');
+            pushUndoState();
+            queryInput.value = q;
+            queryInput.focus();
+        }
+
+        // ── Export results (CSV / JSON) ───────────────────────────────────────
+        function flattenForExport(rec) {
+            const out = {};
+            Object.keys(rec || {}).forEach(function(k){
+                if (k === 'attributes') return;
+                const v = rec[k];
+                out[k] = (v !== null && typeof v === 'object') ? JSON.stringify(v) : v;
+            });
+            return out;
+        }
+        function buildCsv(records) {
+            const cols = [];
+            const seen = {};
+            records.forEach(function(r){ Object.keys(flattenForExport(r)).forEach(function(c){ if(!seen[c]){seen[c]=1;cols.push(c);} }); });
+            const esc = function(v){ if (v === null || v === undefined) return ''; v = String(v); return /[",\\n]/.test(v) ? '"' + v.replace(/"/g,'""') + '"' : v; };
+            const lines = [cols.join(',')];
+            records.forEach(function(r){ const f = flattenForExport(r); lines.push(cols.map(function(c){ return esc(f[c]); }).join(',')); });
+            return lines.join('\\n');
+        }
+        function exportResults(format) {
+            if (!currentRecords || !currentRecords.length) return;
+            let content, ext;
+            if (format === 'json') { content = JSON.stringify(currentRecords.map(flattenForExport), null, 2); ext = 'json'; }
+            else { content = buildCsv(currentRecords); ext = 'csv'; }
+            vscode.postMessage({ command: 'saveFile', content: content, suggestedName: 'soql-export.' + ext });
+        }
+
+        // Shift+Alt+F formats, like VS Code.
+        queryInput.addEventListener('keydown', (e) => {
+            if (e.shiftKey && e.altKey && (e.key === 'f' || e.key === 'F')) { e.preventDefault(); formatSoql(); }
+        });
     </script>
 </body>
 </html>`;

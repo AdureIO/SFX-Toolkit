@@ -158,14 +158,37 @@ class OrgMetadataCacheImpl {
 	}
 
 	/**
+	 * Like getFieldsWithMeta, but ALSO emits a relationship pseudo-field for every
+	 * reference field so completion can offer both the id field and the traversal:
+	 * e.g. `ParentId` (reference) AND `Parent` (rel → drill into Parent.Name).
+	 * `rel: true` marks the relationship entry; `target` is the referenced sobject.
+	 */
+	async getFieldsAndRelations(
+		org: string | null,
+		sobject: string
+	): Promise<{ name: string; type: string; rel?: boolean; target?: string }[]> {
+		const desc = await this.getDescribe(org, sobject);
+		if (!desc) return [];
+		const out: { name: string; type: string; rel?: boolean; target?: string }[] = [];
+		for (const f of desc.fields) {
+			out.push({ name: f.name, type: f.type });
+			if (f.relationshipName && f.referenceTo && f.referenceTo.length > 0) {
+				out.push({ name: f.relationshipName, type: "reference", rel: true, target: f.referenceTo[0] });
+			}
+		}
+		return out;
+	}
+
+	/**
 	 * Resolve a relationship name (e.g. `Account__r`) on fromSobject to the target sobject API name.
 	 * Returns null if the relationship is not found in the describe.
 	 */
 	async getRelationshipTarget(org: string | null, fromSobject: string, relName: string): Promise<string | null> {
 		const desc = await this.getDescribe(org, fromSobject);
 		if (!desc) return null;
+		const want = (relName || "").toLowerCase();
 		for (const f of desc.fields) {
-			if (f.relationshipName === relName && f.referenceTo && f.referenceTo.length > 0) {
+			if (f.relationshipName && f.relationshipName.toLowerCase() === want && f.referenceTo && f.referenceTo.length > 0) {
 				return f.referenceTo[0];
 			}
 		}

@@ -26,6 +26,7 @@ import {
 } from "./commands/orgCommands";
 import { orgTreeProvider } from "./providers/OrgTreeProvider";
 import { ApexCodeLensProvider } from "./providers/ApexCodeLensProvider";
+import { registerApexTestController } from "./providers/ApexTestController";
 import { ApexCompletionProvider } from "./providers/ApexCompletionProvider";
 import { DevActionsProvider } from "./providers/DevActionsProvider";
 import {
@@ -45,7 +46,7 @@ import { Logger, outputChannel } from "./utils/outputChannel";
 import { metadataDiff } from "./commands/metadataDiff";
 import { OrgHealthProvider } from "./commands/orgHealth";
 import { quickSoqlFromSelection } from "./commands/quickSoql";
-import { DeployHistoryProvider } from "./commands/deployHistory";
+import { DeployHistoryProvider, initDeployHistory, setOpenDeployPanelCallback } from "./commands/deployHistory";
 import { lwcNavigate, lwcGoToJs, lwcGoToHtml, lwcGoToMeta, lwcGoToCss } from "./commands/lwcNavigator";
 import {
   showSnippets,
@@ -61,6 +62,9 @@ import {
 import { ApexSnippetsPanelProvider } from "./providers/ApexSnippetsPanelProvider";
 import { SnippetTreeProvider } from "./providers/SnippetTreeProvider";
 import { addToGitignore, addToForceignore, addToIgnore } from "./commands/addToIgnore";
+import { DataToolsPanelProvider } from "./providers/DataToolsPanelProvider";
+import { RestExplorerPanelProvider } from "./providers/RestExplorerPanelProvider";
+import { DataMigrationPanelProvider } from "./providers/DataMigrationPanelProvider";
 import * as path from "path";
 import * as fs from "fs";
 import { getPollingInterval } from "./utils/constants";
@@ -138,7 +142,20 @@ export function activate(context: vscode.ExtensionContext) {
   try {
     Logger.info("Extension activation starting...");
 
-    // 0. Remove-final-newline save hook (config-gated; safe to register before SFDX checks)
+    // 0. Bootstrap persistent state stores
+    initDeployHistory(context);
+    setOpenDeployPanelCallback((entry) => {
+      const preset = {
+        name: entry.presetName || "Re-deploy",
+        sourcePaths: entry.sourcePaths,
+        deployType: "NoTestRun" as const,
+        testClassNames: [],
+        targetOrg: entry.targetOrg
+      };
+      void DeployMetadataPanelProvider.show(preset);
+    });
+
+    // Remove-final-newline save hook (config-gated; safe to register before SFDX checks)
     registerRemoveFinalNewlineHook(context);
 
     // 1. Filter Logs Commands
@@ -187,13 +204,18 @@ export function activate(context: vscode.ExtensionContext) {
     // CodeLens
     context.subscriptions.push(
       vscode.languages.registerCodeLensProvider(
+        // Only anonymous-Apex scratch files (.apex) — NOT .cls classes/tests, where
+        // "Run Anonymous Apex" makes no sense (you can't run a class anonymously).
         [
-          { language: "apex", scheme: "file" },
+          { language: "apex-anon", scheme: "file" },
           { pattern: "**/*.apex", scheme: "file" }
         ],
         new ApexCodeLensProvider()
       )
     );
+
+    // Apex tests in VS Code's native Testing view (discovery + run + coverage)
+    registerApexTestController(context);
 
     // Apex completion — covers .apex files, .cls files, and any editor with language "apex"
     context.subscriptions.push(
@@ -411,6 +433,14 @@ export function activate(context: vscode.ExtensionContext) {
     const openSOQLEditorCmd = register("adure-sfx-toolkit.openSOQLEditor", () => {
       SOQLEditorProvider.show(context.extensionUri);
     });
+    // Restore the SOQL panel after a window reload (so its tab doesn't vanish).
+    context.subscriptions.push(
+      vscode.window.registerWebviewPanelSerializer(SOQLEditorProvider.viewType, {
+        async deserializeWebviewPanel(panel: vscode.WebviewPanel): Promise<void> {
+          await SOQLEditorProvider.revive(panel, context.extensionUri);
+        }
+      })
+    );
 
     // 14. Show Output
     const showOutputCmd = register("adure-sfx-toolkit.showOutput", () => {
@@ -497,6 +527,22 @@ export function activate(context: vscode.ExtensionContext) {
 
     // 17. Add to Ignore
     const addToGitignoreCmd = register("adure-sfx-toolkit.addToGitignore", (uri?: vscode.Uri) => addToGitignore(uri));
+
+    // 19. Data Export / Import
+    const dataToolsCmd = register("adure-sfx-toolkit.dataTools", () => DataToolsPanelProvider.show());
+
+    // 20. REST API Explorer
+    const restExplorerCmd = register("adure-sfx-toolkit.restExplorer", () => RestExplorerPanelProvider.show());
+    context.subscriptions.push(
+      vscode.window.registerWebviewPanelSerializer(RestExplorerPanelProvider.viewType, {
+        async deserializeWebviewPanel(panel: vscode.WebviewPanel): Promise<void> {
+          await RestExplorerPanelProvider.revive(panel);
+        }
+      })
+    );
+
+    // 21. Data Migration Wizard
+    const dataMigrationCmd = register("adure-sfx-toolkit.dataMigration", () => DataMigrationPanelProvider.show());
     const addToForceignoreCmd = register("adure-sfx-toolkit.addToForceignore", (uri?: vscode.Uri) =>
       addToForceignore(uri)
     );
@@ -569,7 +615,10 @@ export function activate(context: vscode.ExtensionContext) {
       lwcJsCmd,
       lwcHtmlCmd,
       lwcMetaCmd,
-      lwcCssCmd
+      lwcCssCmd,
+      dataToolsCmd,
+      restExplorerCmd,
+      dataMigrationCmd
     );
 
     if (isSalesforceProject()) {

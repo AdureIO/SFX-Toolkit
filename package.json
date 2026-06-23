@@ -334,6 +334,26 @@
         "command": "adure-sfx-toolkit.lwcGoToCss",
         "title": "ASFXT: LWC: Open CSS",
         "icon": "$(paintcan)"
+      },
+      {
+        "command": "adure-sfx-toolkit.dataTools",
+        "title": "ASFXT: Data Export / Import",
+        "icon": "$(database)"
+      },
+      {
+        "command": "adure-sfx-toolkit.restExplorer",
+        "title": "ASFXT: REST API Explorer",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "adure-sfx-toolkit.dataMigration",
+        "title": "ASFXT: Data Migration Wizard",
+        "icon": "$(arrow-swap)"
+      },
+      {
+        "command": "adure-sfx-toolkit.openApexTests",
+        "title": "ASFXT: Open Apex Tests (Test Explorer)",
+        "category": "Adure SFX Toolkit"
       }
     ],
     "languages": [
@@ -550,6 +570,21 @@
         },
         {
           "command": "adure-sfx-toolkit.openSOQLEditor",
+          "when": "view == adure-sfx-toolkit.development",
+          "group": "navigation"
+        },
+        {
+          "command": "adure-sfx-toolkit.dataTools",
+          "when": "view == adure-sfx-toolkit.development",
+          "group": "navigation"
+        },
+        {
+          "command": "adure-sfx-toolkit.restExplorer",
+          "when": "view == adure-sfx-toolkit.development",
+          "group": "navigation"
+        },
+        {
+          "command": "adure-sfx-toolkit.dataMigration",
           "when": "view == adure-sfx-toolkit.development",
           "group": "navigation"
         }
@@ -846,13 +881,15 @@
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
+    "compile": "tsc -p ./ && node esbuild.js --production",
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src --ext ts",
     "test": "node ./out/test/runTest.js",
     "package": "vsce package",
-    "test:unit": "npm run compile && mocha --reporter spec \"out/test/**/*.test.js\""
+    "test:unit": "npm run compile && mocha --reporter spec \"out/test/**/*.test.js\"",
+    "bundle": "node esbuild.js --production",
+    "bundle:dev": "node esbuild.js"
   },
   "devDependencies": {
     "@types/glob": "^8.1.0",
@@ -862,6 +899,7 @@
     "@typescript-eslint/eslint-plugin": "^5.59.8",
     "@typescript-eslint/parser": "^5.59.8",
     "@vscode/test-electron": "^2.3.2",
+    "esbuild": "^0.28.1",
     "eslint": "^8.41.0",
     "mocha": "^10.8.2",
     "typescript": "^5.1.3"

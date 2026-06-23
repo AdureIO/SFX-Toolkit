@@ -81,6 +81,16 @@ export class AuthInfo {
 			return null;
 		}
 		const auth = buildOrgAuth(parsed.result);
+		// Recent Salesforce CLI versions hide the access token from `sf org display`.
+		// We set SF_TEMP_SHOW_SECRETS=true to restore it; if it's still missing the
+		// token is genuinely unavailable — surface a precise, actionable error.
+		if (!auth.accessToken) {
+			outputChannel.appendLine(
+				`AuthInfo: 'sf org display' returned no access token${targetOrg ? ` (${targetOrg})` : ""}. ` +
+				`Update the Salesforce CLI, or set SF_TEMP_SHOW_SECRETS=true, then re-authenticate: sf org login web`
+			);
+			return null;
+		}
 		if (targetOrg) auth.alias = targetOrg;
 		return auth;
 	}

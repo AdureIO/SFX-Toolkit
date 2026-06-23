@@ -18,7 +18,13 @@ function asfxEnv(baseCommand: string): NodeJS.ProcessEnv {
   return {
     ...process.env,
     ASFX: "1",
-    ASFX_CMD: baseCommand
+    ASFX_CMD: baseCommand,
+    // Recent Salesforce CLI releases hide secrets (incl. the access token) from
+    // `sf org display --json`. Without the token, every authenticated call fails
+    // with a misleading "session expired / revoked" error. This env var restores
+    // the token in the JSON output (the CLI's own documented workaround). Honor an
+    // existing user-set value if present.
+    SF_TEMP_SHOW_SECRETS: process.env.SF_TEMP_SHOW_SECRETS ?? "true"
   };
 }
 

@@ -6,11 +6,11 @@ import {
   filterPathsToPackageDirs,
   buildDeployCommand,
   createDeployProgressHandler,
+  getPackageDirectories,
   DEPLOY_TIMEOUT_MS,
   DEPLOY_TYPE_RUN_ALL,
   DEPLOY_TYPE_RUN_RELEVANT,
   DEPLOY_TYPE_SPECIFIED,
-  DEPLOY_TYPE_VALIDATE,
   DEPLOY_TYPE_NO_TESTS,
   type DeployTreePackageNode
 } from "../commands/deployMetadata";
@@ -19,9 +19,11 @@ import { loadPresets, addPreset, type DeployPreset, type DeployTypeKey } from ".
 import { getAnonymousApexOrgList } from "../commands/executeAnonymous";
 import { runCommand } from "../utils/commandRunner";
 import { Logger } from "../utils/outputChannel";
-import { cleanDeployOutput } from "../commands/devCommands";
+import { cleanDeployOutput, parseDeployStats, parseCoverageData } from "../commands/devCommands";
+import { addDeployHistoryEntry } from "../commands/deployHistory";
 import { clearDeployDiagnostics, setDeployDiagnosticsFromFailure } from "../utils/deployDiagnostics";
 import { AuthInfo } from "../utils/authInfo";
+import { upsertTestSuite, deleteTestSuite as deleteTestSuiteEntry, loadTestSuites, type TestSuite } from "../utils/testSuites";
 
 /** Panel state we persist in the extension so it survives webview HTML replacement (tab switch/revive). */
 export interface DeployPanelState {
@@ -29,10 +31,12 @@ export interface DeployPanelState {
   presetName?: string | null;
   deployType?: string;
   testClassNames?: string[];
+  testSuiteName?: string | null;
   targetOrg?: string | null;
   treeSearch?: string;
   filterOnlySelected?: boolean;
   autoGitSelect?: boolean;
+  validateOnly?: boolean;
 }
 
 export class DeployMetadataPanelProvider {
@@ -49,6 +53,7 @@ export class DeployMetadataPanelProvider {
     presets: DeployPreset[];
     orgs: { label: string; username: string }[];
     defaultOrg: string;
+    testSuites: TestSuite[];
   } | null = null;
 
   /** Per-panel message listener disposable; disposed when panel closes or before re-attach on revive to avoid leaks. */
@@ -66,40 +71,11 @@ export class DeployMetadataPanelProvider {
     const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
 
     const panel = vscode.window.createWebviewPanel(DeployMetadataPanelProvider.viewType, "Deploy Metadata", column, {
-      enableScripts: true
+      enableScripts: true,
+      retainContextWhenHidden: true  // keeps DOM alive on tab switch — no revive/re-render on switching back
     });
 
-    let tree: DeployTreePackageNode[] = [];
-    let testClasses: { label: string; description: string }[] = [];
-    let presets: DeployPreset[] = [];
-    let orgs: { label: string; username: string }[] = [];
-    let defaultOrg = "";
-
-    try {
-      tree = getMetadataTreeByPackage(workspaceRoot);
-    } catch {
-      /* non-fatal: empty tree */
-    }
-    try {
-      testClasses = getTestClassItems(workspaceRoot);
-    } catch {
-      /* non-fatal: no test class list */
-    }
-    try {
-      presets = await loadPresets(folder.uri);
-    } catch {
-      /* non-fatal: no presets */
-    }
-    try {
-      orgs = await getAnonymousApexOrgList();
-      defaultOrg = orgs.length > 0 ? orgs[0].username : "";
-    } catch {
-      /* non-fatal: no org list */
-    }
-
-    DeployMetadataPanelProvider.initCache = { workspaceRoot, tree, testClasses, presets, orgs, defaultOrg };
-    AuthInfo.warmAuthForOrg(defaultOrg || null);
-    const initPayload = { tree, testClasses, presets, initialPreset: initialPreset ?? null, orgs, defaultOrg };
+    // Render HTML immediately — panel is visible with "Loading…" while data loads in parallel.
     try {
       panel.webview.html = this.getHtml();
     } catch (e) {
@@ -110,7 +86,24 @@ export class DeployMetadataPanelProvider {
       return;
     }
 
-    this.attachMessageHandler(panel, initPayload, folder, workspaceRoot);
+    // Load all data in parallel. The message handler awaits this before sending 'init'.
+    const dataPromise = Promise.allSettled([
+      Promise.resolve().then(() => getMetadataTreeByPackage(workspaceRoot)),
+      Promise.resolve().then(() => getTestClassItems(workspaceRoot)),
+      loadPresets(folder.uri),
+      getAnonymousApexOrgList(),
+      Promise.resolve().then(() => loadTestSuites(workspaceRoot))
+    ]).then(([treeR, testR, presetsR, orgsR, suitesR]) => {
+      const tree = treeR.status === "fulfilled" ? treeR.value : ([] as DeployTreePackageNode[]);
+      const testClasses = testR.status === "fulfilled" ? testR.value : ([] as { label: string; description: string }[]);
+      const presets = presetsR.status === "fulfilled" ? presetsR.value : ([] as DeployPreset[]);
+      const orgs = orgsR.status === "fulfilled" ? orgsR.value : ([] as { label: string; username: string }[]);
+      const defaultOrg = orgs.length > 0 ? orgs[0].username : "";
+      const testSuites = suitesR.status === "fulfilled" ? suitesR.value : ([] as TestSuite[]);
+      return { tree, testClasses, presets, orgs, defaultOrg, testSuites };
+    });
+
+    this.attachMessageHandler(panel, initialPreset ?? null, dataPromise, folder, workspaceRoot);
   }
 
   /** Call when panel is restored (e.g. after switching back to the tab). Uses cached data so restore is instant. */
@@ -121,65 +114,44 @@ export class DeployMetadataPanelProvider {
       return;
     }
     const workspaceRoot = folder.uri.fsPath;
-    const cache = DeployMetadataPanelProvider.initCache;
-    let tree: DeployTreePackageNode[];
-    let testClasses: { label: string; description: string }[];
-    let presets: DeployPreset[];
-    let orgs: { label: string; username: string }[];
-    let defaultOrg: string;
-    if (cache && cache.workspaceRoot === workspaceRoot) {
-      tree = cache.tree;
-      testClasses = cache.testClasses;
-      presets = cache.presets;
-      orgs = cache.orgs;
-      defaultOrg = cache.defaultOrg;
-    } else {
-      tree = [];
-      testClasses = [];
-      presets = [];
-      orgs = [];
-      defaultOrg = "";
-      try {
-        tree = getMetadataTreeByPackage(workspaceRoot);
-      } catch {
-        /* non-fatal: empty tree */
-      }
-      try {
-        testClasses = getTestClassItems(workspaceRoot);
-      } catch {
-        /* non-fatal: no test class list */
-      }
-      try {
-        presets = await loadPresets(folder.uri);
-      } catch {
-        /* non-fatal: no presets */
-      }
-      try {
-        orgs = await getAnonymousApexOrgList();
-        defaultOrg = orgs.length > 0 ? orgs[0].username : "";
-      } catch {
-        /* non-fatal: no org list */
-      }
-      DeployMetadataPanelProvider.initCache = { workspaceRoot, tree, testClasses, presets, orgs, defaultOrg };
-    }
-    const state = DeployMetadataPanelProvider.panelStateByWorkspace[workspaceRoot];
-    AuthInfo.warmAuthForOrg((state?.targetOrg ?? defaultOrg) || null);
-    const initPayload = { tree, testClasses, presets, initialPreset: null, orgs, defaultOrg };
+
+    // Render HTML immediately — visible at once regardless of cache hit/miss.
     panel.webview.options = { enableScripts: true };
     panel.webview.html = this.getHtml();
-    this.attachMessageHandler(panel, initPayload, folder, workspaceRoot);
+
+    const cache = DeployMetadataPanelProvider.initCache;
+    const dataPromise = (cache && cache.workspaceRoot === workspaceRoot)
+      ? Promise.resolve({ tree: cache.tree, testClasses: cache.testClasses, presets: cache.presets, orgs: cache.orgs, defaultOrg: cache.defaultOrg, testSuites: cache.testSuites ?? [] })
+      : Promise.allSettled([
+          Promise.resolve().then(() => getMetadataTreeByPackage(workspaceRoot)),
+          Promise.resolve().then(() => getTestClassItems(workspaceRoot)),
+          loadPresets(folder.uri),
+          getAnonymousApexOrgList(),
+          Promise.resolve().then(() => loadTestSuites(workspaceRoot))
+        ]).then(([treeR, testR, presetsR, orgsR, suitesR]) => {
+          const tree = treeR.status === "fulfilled" ? treeR.value : ([] as DeployTreePackageNode[]);
+          const testClasses = testR.status === "fulfilled" ? testR.value : ([] as { label: string; description: string }[]);
+          const presets = presetsR.status === "fulfilled" ? presetsR.value : ([] as DeployPreset[]);
+          const orgs = orgsR.status === "fulfilled" ? orgsR.value : ([] as { label: string; username: string }[]);
+          const defaultOrg = orgs.length > 0 ? orgs[0].username : "";
+          const testSuites = suitesR.status === "fulfilled" ? suitesR.value : ([] as TestSuite[]);
+          return { tree, testClasses, presets, orgs, defaultOrg, testSuites };
+        });
+
+    this.attachMessageHandler(panel, null, dataPromise, folder, workspaceRoot);
   }
 
   private static attachMessageHandler(
     panel: vscode.WebviewPanel,
-    initPayload: {
+    initialPreset: DeployPreset | null,
+    dataPromise: Promise<{
       tree: DeployTreePackageNode[];
       testClasses: { label: string; description: string }[];
       presets: DeployPreset[];
-      initialPreset: DeployPreset | null;
       orgs: { label: string; username: string }[];
       defaultOrg: string;
-    },
+      testSuites: TestSuite[];
+    }>,
     folder: vscode.WorkspaceFolder,
     workspaceRoot: string
   ): void {
@@ -189,6 +161,40 @@ export class DeployMetadataPanelProvider {
       existing.dispose();
       DeployMetadataPanelProvider.messageListenerByPanel.delete(panel);
     }
+
+    // ── FileSystemWatcher for auto-git ──────────────────────────────────────
+    // Created/destroyed based on the autoGitSelect panel-state flag. Fires with
+    // 600ms debounce so rapid saves during a batch write don't spam git status.
+    let fileWatcher: vscode.FileSystemWatcher | null = null;
+    let watcherDebounce: ReturnType<typeof setTimeout> | null = null;
+
+    const updateFileWatcher = (enabled: boolean): void => {
+      if (fileWatcher) { fileWatcher.dispose(); fileWatcher = null; }
+      if (watcherDebounce) { clearTimeout(watcherDebounce); watcherDebounce = null; }
+      if (!enabled) return;
+
+      const watcher = vscode.workspace.createFileSystemWatcher(
+        new vscode.RelativePattern(workspaceRoot, "**/*"),
+        false, false, false
+      );
+      const onChange = () => {
+        if (watcherDebounce) clearTimeout(watcherDebounce);
+        watcherDebounce = setTimeout(async () => {
+          try {
+            const paths = await DeployMetadataPanelProvider.runGitStatusSfdxPaths(workspaceRoot);
+            panel.webview.postMessage({ command: "setChangedPaths", paths });
+          } catch (e) {
+            panel.webview.postMessage({ command: "setChangedPaths", paths: [], error: String(e) });
+          }
+        }, 600);
+      };
+      watcher.onDidCreate(onChange);
+      watcher.onDidChange(onChange);
+      watcher.onDidDelete(onChange);
+      fileWatcher = watcher;
+    };
+    // ── end FileSystemWatcher ────────────────────────────────────────────────
+
     const listenerDisposable = panel.webview.onDidReceiveMessage(
       async (msg: {
         command: string;
@@ -200,15 +206,20 @@ export class DeployMetadataPanelProvider {
         presetName?: string;
         deployType?: DeployTypeKey;
         state?: DeployPanelState;
+        suiteName?: string;
       }) => {
         if (msg.command === "persistPanelState" && msg.state !== null && msg.state !== undefined) {
           DeployMetadataPanelProvider.panelStateByWorkspace[workspaceRoot] = msg.state;
+          updateFileWatcher(msg.state.autoGitSelect ?? false);
           return;
         }
         if (msg.command === "panelReady") {
+          const { tree, testClasses, presets, orgs, defaultOrg, testSuites } = await dataPromise;
+          DeployMetadataPanelProvider.initCache = { workspaceRoot, tree, testClasses, presets, orgs, defaultOrg, testSuites };
           const savedState = DeployMetadataPanelProvider.panelStateByWorkspace[workspaceRoot] ?? null;
-          AuthInfo.warmAuthForOrg(savedState?.targetOrg ?? initPayload.defaultOrg ?? null);
-          panel.webview.postMessage({ command: "init", ...initPayload, savedState });
+          AuthInfo.warmAuthForOrg((savedState?.targetOrg ?? defaultOrg) || null);
+          updateFileWatcher(savedState?.autoGitSelect ?? false);
+          panel.webview.postMessage({ command: "init", tree, testClasses, presets, initialPreset, orgs, defaultOrg, savedState, testSuites });
           return;
         }
         if (msg.command === "savePreset") {
@@ -277,38 +288,34 @@ export class DeployMetadataPanelProvider {
         }
         if (msg.command === "getChangedFiles") {
           try {
-            const out = await runCommand("git status --porcelain", workspaceRoot, undefined, false, undefined, 10000);
-            const paths: string[] = [];
-            const n = (s: string) => {
-              let t = s.replace(/\\/g, "/").replace(/^\.\//, "").trim();
-              if (t.length >= 2 && t.startsWith('"') && t.endsWith('"')) t = t.slice(1, -1).replace(/\\"/g, '"');
-              return t.split("/").filter(Boolean).join("/");
-            };
-            for (const line of (out || "").split(/\r?\n/)) {
-              if (line.length < 4) continue;
-              const rest = line.substring(3).trim();
-              if (rest.includes(" -> ")) {
-                const [a, b] = rest.split(" -> ").map((x) => x.trim());
-                const pa = n(a);
-                const pb = n(b);
-                if (pa) paths.push(pa);
-                if (pb) paths.push(pb);
-              } else {
-                const p = n(rest);
-                if (p) paths.push(p);
-              }
-            }
-            // Dedupe while preserving order (same path can appear as add + modify)
-            const seen = new Set<string>();
-            const unique = paths.filter((p) => {
-              if (seen.has(p)) return false;
-              seen.add(p);
-              return true;
-            });
-            panel.webview.postMessage({ command: "setChangedPaths", paths: unique });
+            const paths = await DeployMetadataPanelProvider.runGitStatusSfdxPaths(workspaceRoot);
+            panel.webview.postMessage({ command: "setChangedPaths", paths });
           } catch (e) {
             panel.webview.postMessage({ command: "setChangedPaths", paths: [], error: String(e) });
           }
+          return;
+        }
+        if (msg.command === "saveTestSuite") {
+          const testClassNames = Array.isArray(msg.testClassNames) ? msg.testClassNames : [];
+          let suiteName = (msg.suiteName ?? "").trim();
+          if (!suiteName) {
+            const input = await vscode.window.showInputBox({
+              title: "Save test suite",
+              prompt: "Suite name",
+              validateInput: (v) => (!v?.trim() ? "Name is required" : null)
+            });
+            if (!input?.trim()) return;
+            suiteName = input.trim();
+          }
+          const suites = upsertTestSuite(workspaceRoot, { name: suiteName, testClassNames });
+          panel.webview.postMessage({ command: "testSuitesUpdated", suites });
+          return;
+        }
+        if (msg.command === "deleteTestSuite") {
+          const name = (msg.suiteName ?? "").trim();
+          if (!name) return;
+          const suites = deleteTestSuiteEntry(workspaceRoot, name);
+          panel.webview.postMessage({ command: "testSuitesUpdated", suites });
           return;
         }
         if (msg.command !== "deploy" || !msg.sourcePaths || !msg.testLevel) return;
@@ -317,7 +324,7 @@ export class DeployMetadataPanelProvider {
         if (!(await confirmProductionOrgOperation(prodAction, msg.targetOrg || undefined))) {
           return;
         }
-        let testLevel = msg.testLevel;
+        const testLevel = msg.testLevel;
         let testFlags = "";
         if (
           msg.testLevel === "RunSpecifiedTests" &&
@@ -325,8 +332,6 @@ export class DeployMetadataPanelProvider {
           msg.testClassNames.length > 0
         ) {
           testFlags = msg.testClassNames.map((t) => `-t ${t}`).join(" ");
-        } else if (msg.testLevel === "ValidateOnly") {
-          testLevel = "RunLocalTests";
         }
         const resolved = resolveSourcePaths(msg.sourcePaths, workspaceRoot);
         const absPaths = filterPathsToPackageDirs(workspaceRoot, resolved);
@@ -334,6 +339,8 @@ export class DeployMetadataPanelProvider {
           | { done: true; success: true; result: string }
           | { done: true; success: false; error: string }
           | { done: true; cancelled: true };
+        const deployStartTime = Date.now();
+        panel.webview.postMessage({ command: "deployStart", dryRun });
         let resolveProgress: (outcome: DeployOutcome) => void;
         const progressPromise = new Promise<DeployOutcome>((resolve) => {
           resolveProgress = resolve;
@@ -386,12 +393,21 @@ export class DeployMetadataPanelProvider {
             return progressPromise;
           }
         );
-        if ("cancelled" in outcome && outcome.cancelled) return;
+        if ("cancelled" in outcome && outcome.cancelled) {
+          const durationMs = Date.now() - deployStartTime;
+          panel.webview.postMessage({ command: "deployResult", success: false, cancelled: true, dryRun, components: 0, componentErrors: 0, testsPassed: 0, testsFailed: 0, durationMs, targetOrg: msg.targetOrg ?? "" });
+          addDeployHistoryEntry({ timestamp: deployStartTime, status: "Cancelled", dryRun, components: 0, componentErrors: 0, testsPassed: 0, testsFailed: 0, durationMs, targetOrg: msg.targetOrg ?? "", sourcePaths: msg.sourcePaths ?? [], presetName: msg.presetName ?? null });
+          return;
+        }
         if ("success" in outcome && outcome.success) {
           // Log a concise, cleaned summary of the successful deploy so users can see details like Status and components.
           const cleaned = cleanDeployOutput(outcome.result);
           Logger.info(`Deploy result (from CLI output):\n${cleaned}`);
-
+          const stats = parseDeployStats(outcome.result);
+          const coverage = parseCoverageData(outcome.result);
+          const durationMs = Date.now() - deployStartTime;
+          panel.webview.postMessage({ command: "deployResult", success: true, cancelled: false, dryRun, ...stats, coverage, durationMs, targetOrg: msg.targetOrg ?? "" });
+          addDeployHistoryEntry({ timestamp: deployStartTime, status: "Succeeded", dryRun, ...stats, durationMs, targetOrg: msg.targetOrg ?? "", sourcePaths: msg.sourcePaths ?? [], presetName: msg.presetName ?? null });
           if (dryRun) {
             vscode.window.showInformationMessage("Validation completed successfully.");
           } else {
@@ -399,7 +415,10 @@ export class DeployMetadataPanelProvider {
           }
         } else if ("error" in outcome) {
           Logger.show();
-
+          const stats = parseDeployStats(outcome.error);
+          const durationMs = Date.now() - deployStartTime;
+          panel.webview.postMessage({ command: "deployResult", success: false, cancelled: false, dryRun, ...stats, durationMs, targetOrg: msg.targetOrg ?? "" });
+          addDeployHistoryEntry({ timestamp: deployStartTime, status: "Failed", dryRun, ...stats, durationMs, targetOrg: msg.targetOrg ?? "", sourcePaths: msg.sourcePaths ?? [], presetName: msg.presetName ?? null });
           vscode.window.showErrorMessage("Deploy failed. Check Output for details.", "View Log").then((choice) => {
             if (choice === "View Log") {
               Logger.show();
@@ -435,6 +454,7 @@ export class DeployMetadataPanelProvider {
     if (!DeployMetadataPanelProvider.panelsWithDisposeRegistered.has(panel)) {
       DeployMetadataPanelProvider.panelsWithDisposeRegistered.add(panel);
       panel.onDidDispose(() => {
+        updateFileWatcher(false); // dispose watcher + debounce timer
         const d = DeployMetadataPanelProvider.messageListenerByPanel.get(panel);
         if (d) {
           d.dispose();
@@ -445,13 +465,46 @@ export class DeployMetadataPanelProvider {
     }
   }
 
+  /** Run `git status --porcelain` and return paths filtered to SFDX package dirs. */
+  public static async runGitStatusSfdxPaths(workspaceRoot: string): Promise<string[]> {
+    const out = await runCommand("git status --porcelain", workspaceRoot, undefined, false, undefined, 10000);
+    const paths: string[] = [];
+    const n = (s: string) => {
+      let t = s.replace(/\\/g, "/").replace(/^\.\//, "").trim();
+      if (t.length >= 2 && t.startsWith('"') && t.endsWith('"')) t = t.slice(1, -1).replace(/\\"/g, '"');
+      return t.split("/").filter(Boolean).join("/");
+    };
+    for (const line of (out || "").split(/\r?\n/)) {
+      if (line.length < 4) continue;
+      const rest = line.substring(3).trim();
+      if (rest.includes(" -> ")) {
+        const [a, b] = rest.split(" -> ").map((x) => x.trim());
+        const pa = n(a);
+        const pb = n(b);
+        if (pa) paths.push(pa);
+        if (pb) paths.push(pb);
+      } else {
+        const p = n(rest);
+        if (p) paths.push(p);
+      }
+    }
+    const seen = new Set<string>();
+    const unique = paths.filter((p) => { if (seen.has(p)) return false; seen.add(p); return true; });
+    const packageDirs = getPackageDirectories(workspaceRoot);
+    return packageDirs.length > 0
+      ? unique.filter((p) => packageDirs.some((dir) => {
+          const d = dir.replace(/\\/g, "/").replace(/\/$/, "");
+          return p === d || p.startsWith(d + "/");
+        }))
+      : unique;
+  }
+
   private static getHtml(): string {
     const testLevels = [
       { value: "NoTestRun", label: DEPLOY_TYPE_NO_TESTS },
       { value: "RunAllTestsInOrg", label: DEPLOY_TYPE_RUN_ALL },
       { value: "RunRelevantTests", label: DEPLOY_TYPE_RUN_RELEVANT },
-      { value: "RunSpecifiedTests", label: DEPLOY_TYPE_SPECIFIED },
-      { value: "ValidateOnly", label: DEPLOY_TYPE_VALIDATE }
+      { value: "RunSpecifiedTests", label: DEPLOY_TYPE_SPECIFIED }
     ];
 
     return `<!DOCTYPE html>
@@ -461,113 +514,245 @@ export class DeployMetadataPanelProvider {
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
 	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
 	<style>
-		* { box-sizing: border-box; }
-		body { font-family: var(--vscode-font-family); font-size: 13px; color: var(--vscode-foreground); background: var(--vscode-editor-background); margin: 0; padding: 0; min-width: 960px; height: 100vh; display: flex; flex-direction: row; overflow: hidden; }
-		.panel-left { flex: 1; min-width: 420px; display: flex; flex-direction: column; overflow: hidden; border-right: 1px solid var(--vscode-panel-border); }
-		.panel-right { flex: 0 0 auto; width: 340px; min-width: 300px; display: flex; flex-direction: column; padding: 12px; min-height: 0; overflow: hidden; }
-		.panel-left .section { flex: 1; display: flex; flex-direction: column; min-height: 0; margin: 0; border: none; border-radius: 0; border-bottom: 1px solid var(--vscode-panel-border); }
-		.panel-right .section { flex: 1 1 auto; min-height: 0; margin-bottom: 8px; border: 1px solid var(--vscode-panel-border); border-radius: 6px; overflow: hidden; display: flex; flex-direction: column; }
-		.panel-right .deployment-header { flex-direction: column; align-items: stretch; gap: 10px; padding: 12px; flex-shrink: 0; }
-		.panel-right .deployment-left { flex-direction: column; gap: 8px; }
-		.panel-right .deployment-left select { width: 100%; max-width: 100%; }
-		.panel-right .deployment-right { flex-wrap: wrap; }
-		.section-title { background: var(--vscode-editor-inactiveSelectionBackground); padding: 8px 12px; font-weight: 600; flex-shrink: 0; }
-		.deployment-header { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 12px; }
-		.deployment-left { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; }
-		.deployment-left label { margin: 0; }
-		.deployment-left select { min-width: 160px; padding: 6px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); border-radius: 4px; }
-		.deployment-right { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; width: 100%; }
-		.radio-group { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
-		.radio-group label { margin: 0; cursor: pointer; display: flex; align-items: center; gap: 4px; }
-		.test-classes-block { padding: 8px 12px 12px; border-top: 1px solid var(--vscode-panel-border); display: none; flex-shrink: 0; }
-		.test-classes-block.visible { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; overflow: hidden; }
-		.test-classes-block .subtitle { font-size: 12px; margin-bottom: 8px; color: var(--vscode-descriptionForeground); flex-shrink: 0; }
-		.test-search-row { padding: 4px 0 8px 0; flex-shrink: 0; }
-		.test-search-row .tree-search-input { width: 100%; }
-		.test-list { min-height: 80px; flex: 1 1 auto; overflow-y: auto; border: 1px solid var(--vscode-input-border); border-radius: 4px; padding: 8px; background: var(--vscode-input-background); }
-		.test-list .tree-node { margin: 2px 0; }
-		.test-list .folder-row, .test-list .file-node { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
-		.test-list .folder-row { background: var(--vscode-list-inactiveSelectionBackground); border-radius: 3px; }
-		.test-list .folder-icon, .test-list .file-icon { flex-shrink: 0; font-size: 14px; }
-		.test-list .node-children { margin-left: 20px; }
-		.tree-search-row { padding: 6px 8px; border-bottom: 1px solid var(--vscode-panel-border); display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-		.btn-tree-toolbar { padding: 4px 8px; font-size: 12px; line-height: 1; cursor: pointer; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: 1px solid var(--vscode-button-border); border-radius: 4px; flex-shrink: 0; }
-		.btn-select-deselect-all { padding: 4px 8px; font-size: 14px; line-height: 1; cursor: pointer; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: 1px solid var(--vscode-button-border); border-radius: 4px; flex-shrink: 0; }
+		* { box-sizing: border-box; margin: 0; padding: 0; }
+
+		/* ── Design tokens ───────────────────────────────────────────────────────── */
+		:root {
+			--asfx-gap: 14px;
+			--asfx-radius: 6px;
+			--asfx-radius-sm: 4px;
+			--asfx-border: var(--vscode-widget-border, var(--vscode-panel-border, rgba(128,128,128,0.28)));
+			--asfx-border-strong: var(--vscode-contrastBorder, var(--vscode-widget-border, rgba(128,128,128,0.45)));
+			--asfx-card-bg: var(--vscode-editorWidget-background, var(--vscode-editor-inactiveSelectionBackground));
+			--asfx-elevate: 0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.18);
+			--asfx-accent: var(--vscode-button-background);
+			--asfx-ok: #3fb950;
+			--asfx-warn: var(--vscode-editorWarning-foreground, #d29922);
+			--asfx-err: var(--vscode-errorForeground, #f85149);
+		}
+
+		/* ── Scrollbars ──────────────────────────────────────────────────────────── */
+		::-webkit-scrollbar { width: 8px; height: 8px; }
+		::-webkit-scrollbar-track { background: transparent; }
+		::-webkit-scrollbar-thumb { background: var(--vscode-scrollbarSlider-background); border-radius: 6px; border: 2px solid transparent; background-clip: padding-box; }
+		::-webkit-scrollbar-thumb:hover { background: var(--vscode-scrollbarSlider-hoverBackground); background-clip: padding-box; }
+
+		/* ── Layout shell ────────────────────────────────────────────────────────── */
+		body { font-family: var(--vscode-font-family); font-size: 13px; color: var(--vscode-foreground); background: var(--vscode-editor-background); height: 100vh; display: flex; overflow: hidden; min-width: 720px; }
+		.panel-left { flex: 1; min-width: 360px; display: flex; flex-direction: column; overflow: hidden; border-right: 1px solid var(--asfx-border); background: var(--vscode-sideBar-background, var(--vscode-editor-background)); }
+		.panel-right { width: 340px; min-width: 300px; flex-shrink: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--vscode-editor-background); }
+		.panel-left .section { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+		/* Right panel becomes a header / scroll-body / sticky-footer column */
+		.panel-right .section { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+
+		/* ── Section headers ─────────────────────────────────────────────────────── */
+		.section-title { display: flex; align-items: center; gap: 8px; padding: 11px 16px; font-size: 11px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: var(--vscode-foreground); background: var(--vscode-sideBarSectionHeader-background, var(--vscode-editor-inactiveSelectionBackground)); border-bottom: 1px solid var(--asfx-border); flex-shrink: 0; user-select: none; }
+		.section-title .st-icon { font-size: 14px; line-height: 1; }
+		.section-title .st-spacer { flex: 1; }
+
+		/* ── Tree toolbar ────────────────────────────────────────────────────────── */
+		.tree-search-row { padding: 9px 12px; border-bottom: 1px solid var(--asfx-border); display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+		.btn-tree-toolbar { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0; font-size: 11px; cursor: pointer; background: transparent; color: var(--vscode-icon-foreground, var(--vscode-foreground)); border: 1px solid transparent; border-radius: var(--asfx-radius-sm); flex-shrink: 0; opacity: 0.75; transition: opacity 0.12s, background 0.12s, border-color 0.12s; }
+		.btn-tree-toolbar:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); border-color: var(--asfx-border); }
+		.btn-select-deselect-all { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; padding: 0; font-size: 15px; line-height: 1; cursor: pointer; background: transparent; color: var(--vscode-icon-foreground, var(--vscode-foreground)); border: 1px solid transparent; border-radius: var(--asfx-radius-sm); flex-shrink: 0; opacity: 0.75; transition: opacity 0.12s, background 0.12s, border-color 0.12s; }
+		.btn-select-deselect-all:hover { opacity: 1; background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); border-color: var(--asfx-border); }
 		.btn-select-deselect-all .btn-select-deselect-icon { display: inline-block; }
-		.tree-search-input { flex: 1; min-width: 120px; padding: 6px 10px; font-size: 13px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); border-radius: 4px; box-sizing: border-box; }
-		.tree-filter-only-selected { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--vscode-descriptionForeground); }
-		.tree-filter-only-selected input { margin: 0; }
-		.panel-left .tree-wrap { flex: 1; overflow-y: auto; padding: 8px; min-height: 0; }
-		.tree-wrap { padding: 8px; }
-		.tree-node { margin: 2px 0; }
-		.tree-node .node-children, .tree-node .package-children { margin-left: 20px; }
-		.tree-node .package-row, .tree-node .folder-row { display: flex; align-items: center; gap: 4px; padding: 2px 0; }
-		.tree-node .folder-row .row-label, .tree-node .package-row .row-label { flex: 1; cursor: pointer; display: flex; align-items: center; gap: 6px; }
-		.tree-node .folder-row .row-label:hover, .tree-node .package-row .row-label:hover { background: var(--vscode-list-hoverBackground); border-radius: 2px; }
-		.folder-icon { display: inline-block; width: 1.1em; color: var(--vscode-icon-foreground); font-size: 14px; flex-shrink: 0; }
+		.tree-search-input { flex: 1; min-width: 80px; padding: 6px 10px; font-size: 12px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, var(--asfx-border)); border-radius: var(--asfx-radius-sm); outline: none; font-family: inherit; transition: border-color 0.12s; }
+		.tree-search-input::placeholder { color: var(--vscode-input-placeholderForeground, var(--vscode-descriptionForeground)); }
+		.tree-search-input:focus { border-color: var(--vscode-focusBorder); }
+		.tree-filter-only-selected { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--vscode-descriptionForeground); white-space: nowrap; flex-shrink: 0; cursor: pointer; user-select: none; }
+		.tree-filter-only-selected input { margin: 0; cursor: pointer; accent-color: var(--asfx-accent); }
+		#sel-count-badge { display: none; font-size: 10px; font-weight: 700; font-variant-numeric: tabular-nums; padding: 1px 6px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); border-radius: 9px; line-height: 1.5; }
+
+		/* ── Metadata tree ───────────────────────────────────────────────────────── */
+		.panel-left .tree-wrap { flex: 1; overflow-y: auto; padding: 8px 10px 12px; min-height: 0; }
+		.tree-wrap { padding: 6px 8px; }
+		.tree-wrap > p { padding: 16px; color: var(--vscode-descriptionForeground); font-size: 12px; line-height: 1.5; text-align: center; }
+		.tree-node { margin: 1px 0; }
+		.tree-node .node-children { margin-left: 18px; border-left: 1px solid var(--vscode-tree-inactiveIndentGuidesStroke, rgba(128,128,128,0.18)); padding-left: 8px; }
+		.tree-node .package-children { margin-left: 8px; padding-left: 8px; }
+		.tree-node .package-row, .tree-node .folder-row { display: flex; align-items: center; gap: 2px; border-radius: var(--asfx-radius-sm); }
+		.tree-node .folder-row .row-label, .tree-node .package-row .row-label { flex: 1; cursor: pointer; display: flex; align-items: center; gap: 7px; padding: 4px 6px; border-radius: var(--asfx-radius-sm); min-width: 0; }
+		.tree-node .folder-row .row-label:hover, .tree-node .package-row .row-label:hover { background: var(--vscode-list-hoverBackground); }
+		.folder-icon { display: inline-block; width: 1.1em; font-size: 14px; flex-shrink: 0; }
 		.tree-node .package-row .folder-icon { color: var(--vscode-textLink-foreground); }
-		.tree-node .folder-row { background: var(--vscode-list-inactiveSelectionBackground); border-radius: 3px; margin: 1px 0; }
-		.tree-node .package-row { background: var(--vscode-editor-inactiveSelectionBackground); border-radius: 3px; margin: 1px 0; padding: 2px 4px; }
-		.tree-node label.file-node { cursor: pointer; display: flex; align-items: center; gap: 6px; padding: 2px 0; }
-		.file-icon { display: inline-block; width: 1.1em; font-size: 14px; flex-shrink: 0; color: var(--vscode-icon-foreground); }
-		.tree-node input[type="checkbox"] { flex-shrink: 0; }
-		.btn-toggle { margin-left: 4px; padding: 2px 6px; font-size: 12px; line-height: 1; cursor: pointer; background: transparent; color: var(--vscode-foreground); border: 1px solid var(--vscode-button-border); border-radius: 3px; flex-shrink: 0; }
-		.btn-toggle:hover { background: var(--vscode-list-hoverBackground); }
-		.deploy-btn { width: 100%; padding: 8px 20px; font-size: 13px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: 1px solid var(--vscode-button-border); border-radius: 4px; cursor: pointer; }
-		.auto-git-label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--vscode-descriptionForeground); }
-		.auto-git-label input { margin: 0; }
-		.btn-git-select, .btn-save-preset { padding: 6px 12px; font-size: 12px; cursor: pointer; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: 1px solid var(--vscode-button-border); border-radius: 4px; }
-		.modal-overlay { position: fixed; left: 0; top: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
-		.modal-box { background: var(--vscode-editor-background); border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 16px; min-width: 280px; }
-		.modal-box p { margin: 0 0 16px 0; }
+		.tree-node .package-row { background: var(--asfx-card-bg); border: 1px solid var(--asfx-border); border-radius: var(--asfx-radius-sm); margin: 7px 0 3px; padding: 2px 4px; font-weight: 600; }
+		.tree-node .package-row .label-text { font-weight: 600; }
+		.tree-node label.file-node { cursor: pointer; display: flex; align-items: center; gap: 7px; padding: 4px 6px; border-radius: var(--asfx-radius-sm); min-width: 0; }
+		.tree-node label.file-node:hover { background: var(--vscode-list-hoverBackground); }
+		.label-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+		.file-icon { display: inline-block; width: 1.1em; font-size: 13px; flex-shrink: 0; color: var(--vscode-icon-foreground); }
+		.tree-node input[type="checkbox"] { flex-shrink: 0; width: 14px; height: 14px; accent-color: var(--asfx-accent); cursor: pointer; }
+		.btn-toggle { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; font-size: 10px; cursor: pointer; background: transparent; color: var(--vscode-descriptionForeground); border: none; border-radius: var(--asfx-radius-sm); flex-shrink: 0; opacity: 0; margin-left: auto; transition: opacity 0.12s; }
+		.tree-node .package-row:hover .btn-toggle, .tree-node .folder-row:hover .btn-toggle { opacity: 0.75; }
+		.btn-toggle:hover { opacity: 1 !important; background: var(--vscode-list-hoverBackground); }
+
+		/* ── Right column structure ──────────────────────────────────────────────── */
+		.rp-body { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 14px; display: flex; flex-direction: column; gap: var(--asfx-gap); min-height: 0; }
+		.rp-footer { flex-shrink: 0; border-top: 1px solid var(--asfx-border); background: var(--vscode-sideBar-background, var(--vscode-editor-background)); }
+
+		/* ── Cards ───────────────────────────────────────────────────────────────── */
+		.card { background: var(--asfx-card-bg); border: 1px solid var(--asfx-border); border-radius: var(--asfx-radius); padding: 14px; display: flex; flex-direction: column; gap: 12px; flex-shrink: 0; }
+		.card-title { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: var(--vscode-descriptionForeground); display: flex; align-items: center; gap: 6px; }
+
+		/* ── Form fields ─────────────────────────────────────────────────────────── */
+		.field-row { display: flex; flex-direction: column; gap: 5px; }
+		.field-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: var(--vscode-descriptionForeground); }
+		.field-row select { width: 100%; padding: 7px 9px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, var(--asfx-border)); border-radius: var(--asfx-radius-sm); font-size: 12.5px; outline: none; font-family: inherit; cursor: pointer; transition: border-color 0.12s; }
+		.field-row select:focus { border-color: var(--vscode-focusBorder); }
+
+		/* ── Test-level segmented pills ──────────────────────────────────────────── */
+		.radio-group { display: flex; flex-wrap: wrap; gap: 6px; }
+		.radio-group label { margin: 0; cursor: pointer; display: inline-flex; align-items: center; padding: 4px 11px; border-radius: 999px; font-size: 11px; font-weight: 500; border: 1px solid var(--asfx-border-strong); background: var(--vscode-input-background); color: var(--vscode-foreground); user-select: none; transition: background 0.12s, border-color 0.12s, color 0.12s; }
+		.radio-group label:hover { background: var(--vscode-list-hoverBackground); border-color: var(--vscode-focusBorder); }
+		.radio-group label:has(input:checked) { background: var(--asfx-accent); color: var(--vscode-button-foreground); border-color: transparent; font-weight: 600; box-shadow: var(--asfx-elevate); }
+		.radio-group input[type="radio"] { display: none; }
+
+		/* ── Test classes block ──────────────────────────────────────────────────── */
+		.test-classes-block { display: none; max-height: 340px; overflow: hidden; flex-direction: column; gap: 0; }
+		.test-classes-block.visible { display: flex; }
+		.test-classes-block .subtitle { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 10px; color: var(--vscode-descriptionForeground); flex-shrink: 0; display: flex; align-items: center; gap: 6px; }
+		.suite-row { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; flex-shrink: 0; }
+		.suite-select { flex: 1; min-width: 0; }
+		.test-search-row { padding: 0 0 8px 0; flex-shrink: 0; }
+		.test-search-row .tree-search-input { width: 100%; }
+		.test-list { flex: 1; overflow-y: auto; border: 1px solid var(--vscode-input-border, var(--asfx-border)); border-radius: var(--asfx-radius-sm); padding: 6px; background: var(--vscode-input-background); min-height: 120px; }
+		.test-list .tree-node { margin: 1px 0; }
+		.test-list .folder-row, .test-list .file-node { display: flex; align-items: center; gap: 7px; padding: 3px 5px; border-radius: var(--asfx-radius-sm); cursor: pointer; }
+		.test-list .folder-row:hover, .test-list .file-node:hover { background: var(--vscode-list-hoverBackground); }
+		.test-list .row-label { display: flex; align-items: center; gap: 7px; flex: 1; min-width: 0; cursor: pointer; }
+		.test-list .folder-icon, .test-list .file-icon { flex-shrink: 0; font-size: 13px; }
+		.test-list .node-children { margin-left: 18px; }
+		.test-list input[type="checkbox"] { flex-shrink: 0; width: 14px; height: 14px; accent-color: var(--asfx-accent); cursor: pointer; }
+		.test-list .btn-toggle { opacity: 0.6; }
+		.test-list .folder-row:hover .btn-toggle, .test-list .package-row:hover .btn-toggle { opacity: 0.9; }
+
+		/* ── Deployment options ──────────────────────────────────────────────────── */
+		.git-section { gap: 10px; }
+		.opt-toggle, .auto-git-label { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; color: var(--vscode-foreground); cursor: pointer; user-select: none; line-height: 1.4; }
+		.opt-toggle input, .auto-git-label input { margin: 1px 0 0; cursor: pointer; accent-color: var(--asfx-accent); flex-shrink: 0; width: 14px; height: 14px; }
+		.opt-toggle .opt-sub, .auto-git-label .opt-sub { display: block; font-size: 11px; color: var(--vscode-descriptionForeground); margin-top: 1px; }
+		.btn-git-select { display: inline-flex; align-items: center; justify-content: center; gap: 6px; align-self: flex-start; padding: 5px 11px; font-size: 12px; cursor: pointer; background: var(--vscode-button-secondaryBackground, var(--vscode-input-background)); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); border: 1px solid var(--asfx-border-strong); border-radius: var(--asfx-radius-sm); font-family: inherit; transition: background 0.12s, border-color 0.12s; }
+		.btn-git-select:hover { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground)); border-color: var(--vscode-focusBorder); }
+		.btn-git-select::before { content: '⑂'; font-size: 13px; opacity: 0.9; }
+		.opt-divider { height: 1px; background: var(--asfx-border); margin: 2px 0; border: 0; }
+
+		/* ── Footer: status + actions ────────────────────────────────────────────── */
+		.deploy-status { padding: 9px 14px; font-size: 11.5px; color: var(--vscode-descriptionForeground); line-height: 1.45; flex-shrink: 0; }
+		.actions-row { padding: 0 14px 14px; display: flex; gap: 8px; align-items: stretch; flex-shrink: 0; }
+		.btn-save-preset { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; font-size: 12px; cursor: pointer; background: var(--vscode-button-secondaryBackground, var(--vscode-input-background)); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); border: 1px solid var(--asfx-border-strong); border-radius: var(--asfx-radius-sm); white-space: nowrap; font-family: inherit; transition: background 0.12s, border-color 0.12s; }
+		.btn-save-preset:hover { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground)); border-color: var(--vscode-focusBorder); }
+		.deploy-btn { flex: 1; padding: 7px 14px; font-size: 12.5px; font-weight: 600; background: var(--asfx-accent); color: var(--vscode-button-foreground); border: 1px solid transparent; border-radius: var(--asfx-radius-sm); cursor: pointer; font-family: inherit; transition: filter 0.12s; }
+		.deploy-btn:hover { filter: brightness(1.1); }
+		.deploy-btn:active { filter: brightness(0.95); }
+
+		/* ── Result / coverage / status (in scroll body) ─────────────────────────── */
+		.deploy-result-bar { display: none; padding: 11px 13px; font-size: 12px; font-weight: 500; border-left: 3px solid transparent; border-radius: var(--asfx-radius-sm); line-height: 1.5; flex-shrink: 0; background: var(--asfx-card-bg); border: 1px solid var(--asfx-border); }
+		.deploy-result-bar.running { border-left: 3px solid var(--vscode-progressBar-background); background: color-mix(in srgb, var(--vscode-progressBar-background) 12%, var(--asfx-card-bg)); }
+		.deploy-result-bar.success { border-left: 3px solid var(--asfx-ok); background: color-mix(in srgb, var(--asfx-ok) 12%, var(--asfx-card-bg)); }
+		.deploy-result-bar.failure { border-left: 3px solid var(--asfx-err); background: color-mix(in srgb, var(--asfx-err) 12%, var(--asfx-card-bg)); }
+
+		/* ── Coverage panel ──────────────────────────────────────────────────────── */
+		.coverage-panel { flex-shrink: 0; border: 1px solid var(--asfx-border); border-radius: var(--asfx-radius); overflow: hidden; background: var(--asfx-card-bg); }
+		.coverage-toggle { padding: 10px 13px; font-size: 12px; cursor: pointer; display: flex; align-items: center; gap: 7px; user-select: none; color: var(--vscode-foreground); font-weight: 600; }
+		.coverage-toggle:hover { background: var(--vscode-list-hoverBackground); }
+		.cov-avg { font-weight: 700; font-variant-numeric: tabular-nums; }
+		.cov-chev { margin-left: auto; opacity: 0.55; font-size: 10px; }
+		.coverage-list { padding: 2px 10px 10px; }
+		.cov-row { display: flex; justify-content: space-between; align-items: center; padding: 3px 7px; border-radius: var(--asfx-radius-sm); font-size: 11.5px; margin: 1px 0; }
+		.cov-row:hover { background: var(--vscode-list-hoverBackground); }
+		.cov-name { font-family: var(--vscode-editor-font-family, monospace); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; opacity: 0.88; }
+		.cov-pct { font-weight: 700; font-variant-numeric: tabular-nums; margin-left: 10px; flex-shrink: 0; }
+		.cov-green { color: var(--asfx-ok); }
+		.cov-amber { color: var(--asfx-warn); }
+		.cov-red { color: var(--asfx-err); }
+
+		/* ── Test suite buttons ──────────────────────────────────────────────────── */
+		.btn-suite { display: inline-flex; align-items: center; justify-content: center; padding: 6px 11px; font-size: 11.5px; cursor: pointer; background: var(--vscode-button-secondaryBackground, var(--vscode-input-background)); border: 1px solid var(--asfx-border-strong); border-radius: var(--asfx-radius-sm); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); font-family: inherit; white-space: nowrap; flex-shrink: 0; transition: background 0.12s, border-color 0.12s; }
+		.btn-suite:hover { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground)); border-color: var(--vscode-focusBorder); }
+		.btn-suite-delete { color: var(--asfx-err); }
+
+		/* ── Modals ──────────────────────────────────────────────────────────────── */
+		.modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; backdrop-filter: blur(1px); }
+		.modal-box { background: var(--vscode-editorWidget-background, var(--vscode-editor-background)); border: 1px solid var(--asfx-border); border-radius: var(--asfx-radius); padding: 20px 22px; min-width: 300px; max-width: 380px; box-shadow: 0 12px 32px rgba(0,0,0,0.4); }
+		.modal-box p { margin: 0 0 16px 0; font-size: 13px; line-height: 1.55; }
 		.modal-buttons { display: flex; gap: 8px; justify-content: flex-end; }
-		.modal-btn { padding: 6px 14px; cursor: pointer; border-radius: 4px; border: 1px solid var(--vscode-button-border); }
-		.deploy-status { padding: 8px 12px; font-size: 12px; color: var(--vscode-descriptionForeground); flex-shrink: 0; border-top: 1px solid var(--vscode-panel-border); }
+		.modal-btn { padding: 7px 15px; cursor: pointer; border-radius: var(--asfx-radius-sm); border: 1px solid var(--asfx-border-strong); font-size: 12px; background: var(--vscode-button-secondaryBackground, transparent); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); font-family: inherit; transition: background 0.12s; }
+		.modal-btn:hover { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground)); }
+		.modal-save { background: var(--asfx-accent); color: var(--vscode-button-foreground); border-color: transparent; font-weight: 600; }
+		.modal-save:hover { filter: brightness(1.12); background: var(--asfx-accent); }
 	</style>
 </head>
 <body>
 	<div class="panel-left">
 		<div class="section">
-			<div class="section-title">Metadata to deploy</div>
+			<div class="section-title"><span class="st-icon" aria-hidden="true">📦</span><span>Metadata to deploy</span></div>
 			<div class="tree-search-row">
 				<button type="button" class="btn-tree-toolbar" id="btn-expand-all" title="Expand all" aria-label="Expand all">▼</button>
 				<button type="button" class="btn-tree-toolbar" id="btn-collapse-all" title="Collapse all" aria-label="Collapse all">▶</button>
 				<button type="button" class="btn-select-deselect-all" id="btn-select-deselect-all" title="Select all" aria-label="Select all"><span class="btn-select-deselect-icon" aria-hidden="true">☑</span></button>
-				<input type="text" id="tree-search" class="tree-search-input" placeholder="Search files…" aria-label="Search metadata files" />
-				<label class="tree-filter-only-selected"><input type="checkbox" id="filter-only-selected" aria-label="Only show selected" /> Only show selected</label>
+				<input type="text" id="tree-search" class="tree-search-input" placeholder="Search metadata…" aria-label="Search metadata files" />
+				<label class="tree-filter-only-selected"><input type="checkbox" id="filter-only-selected" aria-label="Only show selected" /> Selected <span id="sel-count-badge"></span></label>
 			</div>
 			<div class="tree-wrap" id="tree-wrap"></div>
 		</div>
 	</div>
 	<div class="panel-right">
 		<div class="section">
-			<div class="section-title">Deployment</div>
-			<div class="deployment-header">
-				<div class="deployment-left">
-					<label for="org-select">Target org:</label>
-					<select id="org-select"></select>
-					<label for="preset-select">Preset:</label>
-					<select id="preset-select"><option value="">— None —</option></select>
-					<div class="radio-group" id="test-level">
-						${testLevels.map((t) => `<label><input type="radio" name="testLevel" value="${t.value}"> ${t.label}</label>`).join("")}
+			<div class="section-title"><span class="st-icon" aria-hidden="true">⚡</span><span>Deployment</span></div>
+			<div class="rp-body">
+				<div class="card">
+					<div class="field-row">
+						<label class="field-label" for="org-select">Target org</label>
+						<select id="org-select"></select>
+					</div>
+					<div class="field-row">
+						<label class="field-label" for="preset-select">Preset</label>
+						<select id="preset-select"><option value="">— None —</option></select>
+					</div>
+					<div class="field-row">
+						<span class="field-label">Test level</span>
+						<div class="radio-group" id="test-level">
+							${testLevels.map((t) => `<label><input type="radio" name="testLevel" value="${t.value}"> ${t.label}</label>`).join("")}
+						</div>
 					</div>
 				</div>
-				<div class="deployment-right">
-					<label class="auto-git-label" title="Periodically add Git-changed files to selection"><input type="checkbox" id="auto-git-select" aria-label="Auto select changed files in Git"> Auto select changed (Git)</label>
-					<button type="button" class="btn-git-select" id="btn-git-select" title="Preselect files changed in Git">Select changed (Git)</button>
-					<button type="button" class="btn-save-preset" id="btn-save-preset" title="Save current options as preset">Save preset</button>
-					<button class="deploy-btn" id="deploy-btn">Deploy</button>
+				<div class="card test-classes-block" id="specified-tests-wrap">
+					<div class="subtitle"><span aria-hidden="true">🧪</span> Test classes</div>
+					<div class="suite-row">
+						<select id="suite-select" class="tree-search-input suite-select" aria-label="Test suite"></select>
+						<button type="button" id="btn-save-suite" class="btn-suite" title="Save selected tests as a named suite">Save suite</button>
+						<button type="button" id="btn-delete-suite" class="btn-suite btn-suite-delete" title="Delete this suite" style="display:none;">🗑</button>
+					</div>
+					<div class="test-search-row"><input type="text" id="test-search" class="tree-search-input" placeholder="Search tests…" aria-label="Search test classes" /></div>
+					<div class="test-list" id="test-list"></div>
+				</div>
+				<div class="card git-section">
+					<div class="card-title">Options</div>
+					<label class="auto-git-label" title="Validate the deployment without saving changes to the org (check-only / dry run)">
+						<input type="checkbox" id="validate-only-check" aria-label="Validate only (dry run)">
+						<span>Validate only (dry run)<span class="opt-sub">Check the deployment against the org without committing changes</span></span>
+					</label>
+					<hr class="opt-divider">
+					<label class="auto-git-label" title="Auto-watch file saves and update Git selection">
+						<input type="checkbox" id="auto-git-select" aria-label="Auto select changed files in Git">
+						<span>Auto-select Git changes<span class="opt-sub">Watch file saves and update the selection automatically</span></span>
+					</label>
+					<button type="button" class="btn-git-select" id="btn-git-select" title="Select files changed in Git">Select changed (Git)</button>
+				</div>
+				<div class="deploy-result-bar" id="deploy-result-bar"></div>
+				<div id="coverage-panel" class="coverage-panel" style="display:none;"></div>
+			</div>
+			<div class="rp-footer">
+				<div class="deploy-status" id="deploy-status"></div>
+				<div class="actions-row">
+					<button type="button" class="btn-save-preset" id="btn-save-preset" title="Save current options as preset">💾 Save preset</button>
+					<button class="deploy-btn" id="deploy-btn">⚡ Deploy</button>
 				</div>
 			</div>
-			<div class="test-classes-block" id="specified-tests-wrap">
-				<div class="subtitle">Test classes (select for Run Specified Tests):</div>
-				<div class="test-search-row"><input type="text" id="test-search" class="tree-search-input" placeholder="Search tests…" aria-label="Search test classes" /></div>
-				<div class="test-list" id="test-list"></div>
-			</div>
 		</div>
-		<div class="deploy-status" id="deploy-status"></div>
 	</div>
-		<div id="preset-modal-overlay" class="modal-overlay" style="display:none;">
+	<div id="preset-modal-overlay" class="modal-overlay" style="display:none;">
 		<div class="modal-box">
 			<p id="preset-modal-message"></p>
 			<div class="modal-buttons">
@@ -589,9 +774,13 @@ export class DeployMetadataPanelProvider {
 	</div>
 	<script>
 		var treeData = [], testClassesData = [], presetsData = [], initialPreset = null, orgsData = [], defaultOrgVal = '';
+		var testSuitesData = [];
 		var lastRenderedTreeData = null;
 		var extraPaths = [], loadedPresetName = null, dirty = false, pendingPresetIndex = null;
-		var autoGitTimer = null;
+		// Persistent selection snapshot — survives filter/re-render cycles.
+		// Contains normalized leaf file paths that are currently selected.
+		// Single source of truth; DOM is restored from this on every re-render.
+		var _selSS = new Set();
 		var vsCodeApi = null;
 		try { if (typeof acquireVsCodeApi !== 'undefined') vsCodeApi = acquireVsCodeApi(); } catch (e) { console.error('acquireVsCodeApi failed', e); }
 		function postToHost(payload) { try { if (vsCodeApi) vsCodeApi.postMessage(payload); } catch (err) { console.error('postMessage failed', err); } }
@@ -602,6 +791,8 @@ export class DeployMetadataPanelProvider {
 				var searchEl = safeGet('tree-search');
 				var filterEl = safeGet('filter-only-selected');
 				var autoGitEl = safeGet('auto-git-select');
+				var validateEl = safeGet('validate-only-check');
+				var suiteEl = safeGet('suite-select');
 				var state = {
 					sourcePaths: s.sourcePaths,
 					presetName: loadedPresetName || null,
@@ -610,7 +801,9 @@ export class DeployMetadataPanelProvider {
 					targetOrg: s.targetOrg || null,
 					treeSearch: (searchEl && searchEl.value) ? searchEl.value : '',
 					filterOnlySelected: !!(filterEl && filterEl.checked),
-					autoGitSelect: !!(autoGitEl && autoGitEl.checked)
+					autoGitSelect: !!(autoGitEl && autoGitEl.checked),
+					validateOnly: !!(validateEl && validateEl.checked),
+					testSuiteName: (suiteEl && suiteEl.value) ? suiteEl.value : null
 				};
 				if (vsCodeApi && typeof vsCodeApi.setState === 'function') vsCodeApi.setState(state);
 				postToHost({ command: 'persistPanelState', state: state });
@@ -651,7 +844,10 @@ export class DeployMetadataPanelProvider {
 				if (!found) extraPaths.push(p);
 			});
 			var deployType = state.deployType || 'NoTestRun';
-			var radio = document.querySelector('input[name="testLevel"][value="' + (state.deployType || 'NoTestRun') + '"]');
+			var legacyValidate = false;
+			// Legacy: "ValidateOnly" used to be a test level — migrate it to the dry-run option.
+			if (deployType === 'ValidateOnly') { legacyValidate = true; deployType = 'NoTestRun'; }
+			var radio = document.querySelector('input[name="testLevel"][value="' + deployType + '"]');
 			if (radio) { radio.checked = true; var w = safeGet('specified-tests-wrap'); if (w) w.classList.toggle('visible', deployType === 'RunSpecifiedTests'); }
 			document.querySelectorAll('.test-class').forEach(function(cb) { cb.checked = Array.isArray(state.testClassNames) && state.testClassNames.indexOf(cb.value) !== -1; });
 			var orgSel = safeGet('org-select');
@@ -670,8 +866,23 @@ export class DeployMetadataPanelProvider {
 			var autoGitEl = safeGet('auto-git-select');
 			if (autoGitEl && state.hasOwnProperty('autoGitSelect')) {
 				autoGitEl.checked = !!state.autoGitSelect;
-				toggleAutoGitTimer(true);
+				// FileSystemWatcher is managed host-side; no timer needed here.
 			}
+			var validateEl = safeGet('validate-only-check');
+			if (validateEl) validateEl.checked = legacyValidate || !!state.validateOnly;
+			var suiteEl = safeGet('suite-select');
+			if (suiteEl && state.testSuiteName) {
+				suiteEl.value = state.testSuiteName;
+				var delBtn = safeGet('btn-delete-suite');
+				if (delBtn) delBtn.style.display = suiteEl.value ? '' : 'none';
+			}
+			// Rebuild persistent snapshot from restored leaf checkboxes + extra paths
+			_selSS = new Set();
+			document.querySelectorAll('.path-check:not(.folder-check):checked').forEach(function(cb) {
+				var p = norm(cb.getAttribute('data-path') || '');
+				if (p) _selSS.add(p);
+			});
+			extraPaths.forEach(function(p) { var np = norm(p); if (np) _selSS.add(np); });
 			filterTree();
 			updateSelectionStatus();
 		}
@@ -726,9 +937,13 @@ export class DeployMetadataPanelProvider {
 		function updateSelectionStatus() {
 			var statusEl = safeGet('deploy-status');
 			if (!statusEl) return;
+			// Count: use _selSS (leaf paths, includes items hidden by filter) + extra paths not already in snapshot
+			var totalCount = _selSS.size + extraPaths.filter(function(p) { return !_selSS.has(norm(p)); }).length;
+			var badge = safeGet('sel-count-badge');
+			if (badge) { badge.textContent = totalCount > 0 ? String(totalCount) : ''; badge.style.display = totalCount > 0 ? 'inline' : 'none'; }
 			var paths = [];
 			document.querySelectorAll('.path-check:checked').forEach(function(cb) { paths.push(cb.getAttribute('data-path')); });
-			if (paths.length === 0) { statusEl.textContent = 'Ready. No metadata selected.'; return; }
+			if (totalCount === 0) { statusEl.textContent = 'Ready. No metadata selected.'; return; }
 			var byType = {};
 			document.querySelectorAll('.path-check:checked').forEach(function(cb) {
 				if (cb.classList.contains('folder-check')) return;
@@ -883,18 +1098,30 @@ export class DeployMetadataPanelProvider {
 			var onlySelected = (safeGet('filter-only-selected') && safeGet('filter-only-selected').checked) || false;
 			if (!wrap) return;
 			var search = (searchEl && searchEl.value) ? searchEl.value.trim().toLowerCase() : '';
+			// Sync currently-visible leaf checkboxes into the persistent snapshot before any re-render.
+			// This captures explicit unchecks on visible items while preserving selections on hidden items.
+			document.querySelectorAll('#tree-wrap .path-check:not(.folder-check)').forEach(function(cb) {
+				var p = norm(cb.getAttribute('data-path') || '');
+				if (p) { if (cb.checked) _selSS.add(p); else _selSS.delete(p); }
+			});
 			if (!search && !onlySelected) {
 				if (lastRenderedTreeData !== treeData) {
-					var selectedSet = getSelectedPathSet();
-			renderTreeWithData(treeData, selectedSet, false);
+					renderTreeWithData(treeData, _selSS, false);
 				} else {
+					// Just un-hide everything; re-apply snapshot to nodes that were hidden.
 					wrap.querySelectorAll('.package-node, .folder-node, .file-node').forEach(function(n) { n.style.display = ''; });
+					wrap.querySelectorAll('.path-check:not(.folder-check)').forEach(function(cb) {
+						var p = norm(cb.getAttribute('data-path') || '');
+						if (p && _selSS.has(p)) cb.checked = true;
+					});
+					document.querySelectorAll('.folder-node, .package-node').forEach(function(f) { updateFolderCheckboxState(f); });
+					updateSelectAllButtonState();
+					updateSelectionStatus();
 				}
 				return;
 			}
-			var selectedSet = getSelectedPathSet();
 			var filtered = (treeData || []).map(function(pkg) {
-				var visibleChildren = filterTreeDataToVisible(pkg.children || [], search, onlySelected, selectedSet);
+				var visibleChildren = filterTreeDataToVisible(pkg.children || [], search, onlySelected, _selSS);
 				if (visibleChildren.length === 0) return null;
 				visibleChildren = mergeFewChildFoldersIntoParent(visibleChildren);
 				visibleChildren = collapseSingleChildInTree(visibleChildren);
@@ -904,18 +1131,30 @@ export class DeployMetadataPanelProvider {
 				}
 				return { label: pkg.label, path: pkg.path, children: visibleChildren };
 			}).filter(Boolean);
-			renderTreeWithData(filtered, selectedSet, true);
+			renderTreeWithData(filtered, _selSS, true);
 		}
 
 		function getMinimalSourcePaths() {
 			var items = [];
+			var domPaths = new Set();
+			// Read visible selections from DOM (folders + leaves currently rendered)
 			document.querySelectorAll('.path-check:checked').forEach(function(cb) {
 				var p = cb.getAttribute('data-path');
 				if (!p) return;
 				var isFolder = cb.classList.contains('folder-check');
-				items.push({ path: norm(p), isFolder: isFolder });
+				var np = norm(p);
+				domPaths.add(np);
+				items.push({ path: np, isFolder: isFolder });
 			});
-			extraPaths.forEach(function(p) { items.push({ path: norm(p), isFolder: false }); });
+			// Add leaf paths selected but currently hidden by the active filter
+			_selSS.forEach(function(p) {
+				if (!domPaths.has(p)) items.push({ path: p, isFolder: false });
+			});
+			// Extra paths: git/preset paths not matched to any tree node (not in _selSS)
+			extraPaths.forEach(function(p) {
+				var np = norm(p);
+				if (!domPaths.has(np) && !_selSS.has(np)) items.push({ path: np, isFolder: false });
+			});
 			var onlyShowSelected = !!(safeGet('filter-only-selected') && safeGet('filter-only-selected').checked);
 			if (onlyShowSelected) {
 				return items.filter(function(x) { return !x.isFolder; }).map(function(x) { return x.path; });
@@ -939,12 +1178,12 @@ export class DeployMetadataPanelProvider {
 		}
 
 		function applyChangedPaths(paths) {
-			var currentSelected = getSelectedPathSet();
 			var allTreePaths = getAllPathsFromTreeData(treeData);
 			var matchResult = matchGitPathsToTreePaths(paths, allTreePaths);
 			var matchedTreePaths = matchResult.matched;
-			var newSelectedSet = new Set(currentSelected);
-			matchedTreePaths.forEach(function(p) { newSelectedSet.add(p); });
+			// Merge matched paths into the persistent snapshot first
+			matchedTreePaths.forEach(function(p) { _selSS.add(p); });
+			var newSelectedSet = new Set(_selSS);
 			var onlyShowSelected = !!(safeGet('filter-only-selected') && safeGet('filter-only-selected').checked);
 			var searchEl = safeGet('tree-search');
 			var search = (searchEl && searchEl.value) ? searchEl.value.trim().toLowerCase() : '';
@@ -983,6 +1222,58 @@ export class DeployMetadataPanelProvider {
 			var data = event.data;
 			if (!data || !data.command) return;
 			var statusEl = safeGet('deploy-status');
+			if (data.command === 'deployStart') {
+				var bar = safeGet('deploy-result-bar');
+				if (bar) { bar.className = 'deploy-result-bar running'; bar.textContent = data.dryRun ? 'Validating…' : 'Deploying…'; bar.style.display = 'block'; }
+				return;
+			}
+			if (data.command === 'testSuitesUpdated') {
+				testSuitesData = data.suites || [];
+				renderSuiteSelect();
+				return;
+			}
+			if (data.command === 'deployResult') {
+				var bar = safeGet('deploy-result-bar');
+				if (!bar) return;
+				var covPanel = safeGet('coverage-panel');
+				if (data.cancelled) {
+					bar.style.display = 'none';
+					if (covPanel) { covPanel.style.display = 'none'; covPanel.innerHTML = ''; }
+					return;
+				}
+				var success = !!data.success;
+				bar.className = 'deploy-result-bar ' + (success ? 'success' : 'failure');
+				var icon = success ? '✅' : '❌';
+				var verb = data.dryRun ? (success ? 'Validation passed' : 'Validation failed') : (success ? 'Deploy succeeded' : 'Deploy failed');
+				var parts = [icon + ' ' + verb];
+				if (data.components > 0) parts.push(data.components + ' component' + (data.components !== 1 ? 's' : ''));
+				if (data.componentErrors > 0) parts.push(data.componentErrors + ' error' + (data.componentErrors !== 1 ? 's' : ''));
+				if (data.testsPassed > 0 || data.testsFailed > 0) {
+					var tf = data.testsFailed > 0 ? (', ' + data.testsFailed + ' failed') : '';
+					parts.push('Tests: ' + data.testsPassed + ' passed' + tf);
+				}
+				if (data.durationMs) { var s = Math.round(data.durationMs / 1000); parts.push(s >= 60 ? Math.floor(s / 60) + 'm ' + (s % 60) + 's' : s + 's'); }
+				bar.textContent = parts.join(' · ');
+				bar.style.display = 'block';
+				// ── Coverage table ───────────────────────────────────────────────────────
+				if (covPanel) {
+					var cov = (data.coverage && Array.isArray(data.coverage) && success) ? data.coverage : [];
+					if (cov.length > 0) {
+						var avg = Math.round(cov.reduce(function(acc, e) { return acc + e.pct; }, 0) / cov.length);
+						var avgCls = avg < 75 ? 'cov-red' : avg < 85 ? 'cov-amber' : 'cov-green';
+						covPanel.innerHTML = '<div class="coverage-toggle" id="cov-toggle">📊 Coverage — <span class="cov-avg ' + avgCls + '">' + avg + '%</span> avg <span class="cov-chev">▾</span></div><div class="coverage-list" id="cov-list">' +
+							cov.map(function(e) { var c = e.pct < 75 ? 'cov-red' : e.pct < 85 ? 'cov-amber' : 'cov-green'; return '<div class="cov-row"><span class="cov-name">' + escapeHtml(e.name) + '</span><span class="cov-pct ' + c + '">' + e.pct + '%</span></div>'; }).join('') +
+							'</div>';
+						var togEl = document.getElementById('cov-toggle');
+						if (togEl) togEl.onclick = function() { var l = document.getElementById('cov-list'); if (!l) return; var h = l.style.display === 'none'; l.style.display = h ? '' : 'none'; var ch = this.querySelector('.cov-chev'); if (ch) ch.textContent = h ? '▾' : '▸'; };
+						covPanel.style.display = 'block';
+					} else {
+						covPanel.style.display = 'none';
+						covPanel.innerHTML = '';
+					}
+				}
+				return;
+			}
 			if (data.command === 'setChangedPaths') {
 				if (data.error) { if (statusEl) statusEl.textContent = 'Git: ' + data.error; return; }
 				var paths = data.paths || [];
@@ -1059,14 +1350,25 @@ export class DeployMetadataPanelProvider {
 				if (!found) extraPaths.push(p);
 			});
 			var deployType = preset.deployType || 'NoTestRun';
+			var presetValidate = false;
+			if (deployType === 'ValidateOnly') { presetValidate = true; deployType = 'NoTestRun'; }
 			var radio = document.querySelector('input[name="testLevel"][value="' + deployType + '"]');
 			if (radio) { radio.checked = true; var w = safeGet('specified-tests-wrap'); if (w) w.classList.toggle('visible', deployType === 'RunSpecifiedTests'); }
+			var presetValidateEl = safeGet('validate-only-check');
+			if (presetValidateEl) presetValidateEl.checked = presetValidate;
 			document.querySelectorAll('.test-class').forEach(function(cb) { cb.checked = Array.isArray(preset.testClassNames) && preset.testClassNames.indexOf(cb.value) !== -1; });
 			var orgSel = safeGet('org-select');
 			if (orgSel && preset.targetOrg) { var found = Array.from(orgSel.options).find(function(o){ return o.value === preset.targetOrg; }); if (found) orgSel.value = preset.targetOrg; }
 			document.querySelectorAll('.folder-node, .package-node').forEach(function(f) { updateFolderCheckboxState(f); });
 			updateSelectAllButtonState();
 			updateSelectionStatus();
+			// Rebuild persistent snapshot from current leaf checkboxes + extra paths
+			_selSS = new Set();
+			document.querySelectorAll('.path-check:not(.folder-check):checked').forEach(function(cb) {
+				var p = norm(cb.getAttribute('data-path') || '');
+				if (p) _selSS.add(p);
+			});
+			extraPaths.forEach(function(p) { var np = norm(p); if (np) _selSS.add(np); });
 			if (savedOnlyShowSelected || savedSearch) {
 				if (filterEl) filterEl.checked = savedOnlyShowSelected;
 				if (searchEl) searchEl.value = savedSearch;
@@ -1259,6 +1561,11 @@ export class DeployMetadataPanelProvider {
 					var check = this.checked;
 					// Cascade: check/uncheck all items below this folder (files and subfolders)
 					folderNode.querySelectorAll('.path-check').forEach(function(c) { c.checked = check; c.indeterminate = false; });
+					// Sync all leaf paths in this folder into the persistent snapshot
+					folderNode.querySelectorAll('.path-check:not(.folder-check)').forEach(function(c) {
+						var p = norm(c.getAttribute('data-path') || '');
+						if (p) { if (check) _selSS.add(p); else _selSS.delete(p); }
+					});
 					updateAncestorCheckboxes(folderNode.parentElement);
 					updateSelectAllButtonState();
 					updateSelectionStatus();
@@ -1267,6 +1574,8 @@ export class DeployMetadataPanelProvider {
 			// Only attach to file checkboxes so we don't overwrite the folder-check handler above
 			wrap.querySelectorAll('.path-check:not(.folder-check)').forEach(function(cb) {
 				cb.onchange = function() {
+					var p = norm(this.getAttribute('data-path') || '');
+					if (p) { if (this.checked) _selSS.add(p); else _selSS.delete(p); }
 					setDirty();
 					var node = this.closest('.tree-node');
 					if (!node) return;
@@ -1321,6 +1630,11 @@ export class DeployMetadataPanelProvider {
 				var allSelected = all.length > 0 && checked.length === all.length;
 				var newState = !allSelected;
 				wrap.querySelectorAll('.path-check').forEach(function(cb) { cb.checked = newState; cb.indeterminate = false; });
+				// Sync visible leaf paths into the persistent snapshot
+				wrap.querySelectorAll('.path-check:not(.folder-check)').forEach(function(cb) {
+					var p = norm(cb.getAttribute('data-path') || '');
+					if (p) { if (newState) _selSS.add(p); else _selSS.delete(p); }
+				});
 				document.querySelectorAll('.folder-node, .package-node').forEach(function(f) { updateFolderCheckboxState(f); });
 				updateSelectAllButtonState();
 				updateSelectionStatus();
@@ -1498,22 +1812,16 @@ export class DeployMetadataPanelProvider {
 			postToHost({
 				command: 'deploy',
 				sourcePaths: sourcePaths,
-				testLevel: testLevel === 'ValidateOnly' ? 'ValidateOnly' : testLevel,
+				testLevel: testLevel,
 				testClassNames: testClassNames.length ? testClassNames : undefined,
-				dryRun: testLevel === 'ValidateOnly',
-				targetOrg: (function(){ var s = safeGet('org-select'); return s && s.value ? s.value : undefined; })()
+				dryRun: !!(safeGet('validate-only-check') && safeGet('validate-only-check').checked),
+				targetOrg: (function(){ var s = safeGet('org-select'); return s && s.value ? s.value : undefined; })(),
+				presetName: loadedPresetName || undefined
 			});
 		};
 
-		function toggleAutoGitTimer(skipImmediate) {
-			var el = safeGet('auto-git-select');
-			if (!el) return;
-			if (autoGitTimer) { clearInterval(autoGitTimer); autoGitTimer = null; }
-			if (el.checked) {
-				if (!skipImmediate) postToHost({ command: 'getChangedFiles' });
-				autoGitTimer = setInterval(function() { postToHost({ command: 'getChangedFiles' }); }, 8000);
-			}
-		}
+		// Auto-git is now driven by a FileSystemWatcher on the host side.
+		// The webview only needs to: (a) trigger an immediate git-status on enable, (b) save state.
 		var gitBtn = safeGet('btn-git-select');
 		if (gitBtn) gitBtn.onclick = function() {
 			postToHost({ command: 'getChangedFiles' });
@@ -1522,9 +1830,62 @@ export class DeployMetadataPanelProvider {
 		};
 		var autoGitCheck = safeGet('auto-git-select');
 		if (autoGitCheck) {
-			autoGitCheck.onchange = function() { scheduleSaveState(); toggleAutoGitTimer(); };
-			toggleAutoGitTimer();
+			autoGitCheck.onchange = function() {
+				if (this.checked) {
+					// Trigger an immediate git-status when first enabled so the user sees results right away.
+					var st = safeGet('deploy-status');
+					if (st) st.textContent = 'Reading Git status…';
+					postToHost({ command: 'getChangedFiles' });
+				}
+				scheduleSaveState();
+			};
 		}
+
+		// ── Test suite helpers ──────────────────────────────────────────────────────
+		function renderSuiteSelect() {
+			var sel = safeGet('suite-select');
+			if (!sel) return;
+			var curVal = sel.value;
+			sel.innerHTML = '<option value="">— No suite —</option>' + (testSuitesData || []).map(function(s) {
+				return '<option value="' + escapeAttr(s.name) + '">' + escapeHtml(s.name) + ' (' + (s.testClassNames || []).length + ')</option>';
+			}).join('');
+			if (curVal) sel.value = curVal;
+			var delBtn = safeGet('btn-delete-suite');
+			if (delBtn) delBtn.style.display = (sel.value) ? '' : 'none';
+		}
+		var suiteSelectEl = safeGet('suite-select');
+		if (suiteSelectEl) {
+			suiteSelectEl.onchange = function() {
+				var name = this.value;
+				var delBtn = safeGet('btn-delete-suite');
+				if (delBtn) delBtn.style.display = name ? '' : 'none';
+				if (!name) return;
+				var suite = (testSuitesData || []).find(function(s) { return s.name === name; });
+				if (!suite) return;
+				document.querySelectorAll('.test-class').forEach(function(cb) { cb.checked = false; });
+				(suite.testClassNames || []).forEach(function(cn) {
+					document.querySelectorAll('.test-class').forEach(function(cb) { if (cb.value === cn) cb.checked = true; });
+				});
+				setDirty();
+				scheduleSaveState();
+			};
+		}
+		var saveSuiteBtn = safeGet('btn-save-suite');
+		if (saveSuiteBtn) saveSuiteBtn.onclick = function() {
+			var tcNames = [];
+			document.querySelectorAll('.test-class:checked').forEach(function(cb) { tcNames.push(cb.value); });
+			var st = safeGet('deploy-status');
+			if (!tcNames.length) { if (st) st.textContent = 'Select test classes to save as a suite.'; return; }
+			var sel = safeGet('suite-select');
+			postToHost({ command: 'saveTestSuite', suiteName: (sel && sel.value) ? sel.value : '', testClassNames: tcNames });
+		};
+		var deleteSuiteBtn = safeGet('btn-delete-suite');
+		if (deleteSuiteBtn) deleteSuiteBtn.onclick = function() {
+			var sel = safeGet('suite-select');
+			var name = sel && sel.value ? sel.value : '';
+			if (!name) return;
+			postToHost({ command: 'deleteTestSuite', suiteName: name });
+		};
 
 		var savePresetBtn = safeGet('btn-save-preset');
 		if (savePresetBtn) savePresetBtn.onclick = function() {
@@ -1601,6 +1962,7 @@ export class DeployMetadataPanelProvider {
 			treeData = Array.isArray(data.tree) ? data.tree : [];
 			testClassesData = Array.isArray(data.testClasses) ? data.testClasses : [];
 			presetsData = Array.isArray(data.presets) ? data.presets : [];
+			testSuitesData = Array.isArray(data.testSuites) ? data.testSuites : [];
 			initialPreset = data.initialPreset || null;
 			orgsData = Array.isArray(data.orgs) ? data.orgs : [];
 			defaultOrgVal = (data.defaultOrg != null && data.defaultOrg !== '') ? String(data.defaultOrg) : '';
@@ -1611,6 +1973,7 @@ export class DeployMetadataPanelProvider {
 				renderTree();
 				renderTestList();
 				renderPresetSelect();
+				renderSuiteSelect();
 				var savedState = (data.savedState != null && Array.isArray(data.savedState.sourcePaths))
 					? data.savedState
 					: (vsCodeApi && typeof vsCodeApi.getState === 'function' ? vsCodeApi.getState() : null);
