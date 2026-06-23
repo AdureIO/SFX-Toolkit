@@ -1,10 +1,10 @@
 import * as vscode from "vscode";
 import * as path from "path";
 import * as fs from "fs";
-import { runCommandArgs } from "../utils/commandRunner";
 import { AuthInfo } from "../utils/authInfo";
 import { getToolingApiVersion } from "../utils/constants";
 import { OrgMetadataCache } from "../utils/orgMetadataCache";
+import { sfRequest } from "../utils/dataMigration";
 import { getCachedOrgList, refreshOrgListCache, warmOrgListCache } from "../utils/orgListCache";
 
 const SOQL_HISTORY_MAX = 50;
@@ -100,7 +100,7 @@ export class SOQLEditorProvider {
             await this.promptDeleteSavedQuery(panel, message.name);
             break;
           case "save":
-            await this.saveChanges(panel, message.changes);
+            await this.saveChanges(panel, message.changes, message.targetOrg || null);
             break;
           case "getObjectList":
             await this.sendObjectList(panel, message.targetOrg || null);
@@ -632,14 +632,31 @@ export class SOQLEditorProvider {
     await SOQLEditorProvider.deleteSavedQuery(panel, name);
   }
 
-  /** Escape a string for use inside double-quoted key=value pair for sf data update record. */
-  private static escapeValue(value: string): string {
-    return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  /**
+   * Coerce a string cell value (everything from contentEditable is a string) into the
+   * JSON type Salesforce's REST PATCH expects, so inline edits work for all field types.
+   */
+  private static coerceCellValue(value: string): unknown {
+    if (value === null || value === undefined) return null;
+    const s = String(value).trim();
+    if (s === "") return null; // clear the field
+    if (/^(true|false)$/i.test(s)) return s.toLowerCase() === "true";
+    return s; // SF coerces numeric/date/picklist/reference strings on its own
   }
 
-  private static async saveChanges(panel: vscode.WebviewPanel, changes: any) {
+  private static async saveChanges(panel: vscode.WebviewPanel, changes: any, targetOrg: string | null) {
     try {
       panel.webview.postMessage({ command: "saving", value: true });
+
+      const auth = await AuthInfo.getAuthInfoForOrg(targetOrg);
+      if (!auth || !auth.accessToken || !auth.instanceUrl) {
+        const msg = "Could not authenticate to the org to save changes.";
+        panel.webview.postMessage({ command: "saveErrors", errors: [msg] });
+        vscode.window.showErrorMessage(msg);
+        panel.webview.postMessage({ command: "saveComplete", success: false });
+        return;
+      }
+      const apiVersion = getToolingApiVersion();
 
       let successCount = 0;
       const errors: string[] = [];
@@ -655,42 +672,35 @@ export class SOQLEditorProvider {
           continue;
         }
 
-        // One update per field to avoid --values parsing issues with multiple fields
+        // Build a single typed PATCH body for all changed fields on this record.
+        const body: Record<string, unknown> = {};
         for (const field of Object.keys(fieldsToUpdate)) {
-          const value = fieldsToUpdate[field];
-          const pair = `${field}=${SOQLEditorProvider.escapeValue(value)}`;
-          try {
-            const resultStr = await runCommandArgs("sf", [
-              "data",
-              "update",
-              "record",
-              "--sobject",
-              type,
-              "--record-id",
-              id,
-              "--values",
-              `"${pair}"`,
-              "--json"
-            ]);
+          body[field] = SOQLEditorProvider.coerceCellValue(fieldsToUpdate[field]);
+        }
 
-            const result = JSON.parse(resultStr);
-            if (result.status !== 0) {
-              throw new Error(result.message || "Unknown SF Error");
-            }
+        try {
+          const resp = await sfRequest(
+            auth.instanceUrl,
+            `/services/data/${apiVersion}/sobjects/${encodeURIComponent(type)}/${encodeURIComponent(id)}`,
+            "PATCH",
+            auth.accessToken,
+            body
+          );
+          if (resp.status >= 200 && resp.status < 300) {
             successCount++;
-          } catch (e: any) {
-            let errMsg = e.message || String(e);
-            if (e.stdout) {
-              try {
-                const output = JSON.parse(e.stdout);
-                if (output.message) errMsg = output.message;
-                else if (Array.isArray(output) && output[0]?.message) errMsg = output[0].message;
-              } catch {
-                // ignore
-              }
+          } else {
+            let errMsg = `HTTP ${resp.status}`;
+            try {
+              const parsed = JSON.parse(resp.body);
+              const first = Array.isArray(parsed) ? parsed[0] : parsed;
+              if (first && first.message) errMsg = first.message;
+            } catch {
+              if (resp.body) errMsg = resp.body.slice(0, 300);
             }
-            errors.push(`Record ${id}, field ${field}: ${errMsg}`);
+            errors.push(`Record ${id}: ${errMsg}`);
           }
+        } catch (e: any) {
+          errors.push(`Record ${id}: ${e.message || String(e)}`);
         }
       }
 
@@ -698,7 +708,7 @@ export class SOQLEditorProvider {
         panel.webview.postMessage({ command: "saveErrors", errors });
         vscode.window.showErrorMessage(`Some updates failed: ${errors.join("; ")}`);
       } else if (successCount > 0) {
-        vscode.window.showInformationMessage(`Successfully saved ${successCount} change(s).`);
+        vscode.window.showInformationMessage(`Successfully saved ${successCount} record(s).`);
       }
       panel.webview.postMessage({ command: "saveComplete", success: errors.length === 0 });
     } catch (e: any) {
@@ -1588,7 +1598,7 @@ export class SOQLEditorProvider {
             for (const id of Object.keys(changes)) {
                 payload[id] = { ...changes[id] };
             }
-            vscode.postMessage({ command: 'save', changes: payload });
+            vscode.postMessage({ command: 'save', changes: payload, targetOrg: orgSelect.value || null });
         });
 
         discardBtn.addEventListener('click', () => {
@@ -2109,7 +2119,7 @@ export class SOQLEditorProvider {
                                 if (link) td.appendChild(link);
                                 else td.textContent = v === null ? '' : v;
                             }
-                            const isEditableNested = recId && recType && h !== 'Id' && !isNestedObject && editableFieldsByType[recType] && editableFieldsByType[recType][h];
+                            const isEditableNested = recId && recType && h !== 'Id' && !isNestedObject && isFieldEditable(recType, h);
                             if (isEditableNested) {
                                 td.contentEditable = true;
                                 td.classList.add('editable-cell');
@@ -2161,6 +2171,15 @@ export class SOQLEditorProvider {
             return document.createTextNode(value);
         }
 
+        // A cell is editable if describe says the field is updateable. When describe
+        // info is unavailable for the type, fall back to editable (let the user try; SF
+        // rejects genuinely read-only fields on save) so inline edit works everywhere.
+        function isFieldEditable(type, field) {
+            const map = editableFieldsByType[type];
+            if (!map || Object.keys(map).length === 0) return true;
+            return !!map[field];
+        }
+
         function renderTable(records) {
             currentRecords = records;
             resultsContainer.innerHTML = '';
@@ -2205,7 +2224,7 @@ export class SOQLEditorProvider {
                         else td.textContent = value === null ? '' : value;
                     }
 
-                    const isEditable = recId && type && h !== 'Id' && !isObject && editableFieldsByType[type] && editableFieldsByType[type][h];
+                    const isEditable = recId && type && h !== 'Id' && !isObject && isFieldEditable(type, h);
                     if (isEditable) {
                         td.contentEditable = true;
                         td.classList.add('editable-cell');
