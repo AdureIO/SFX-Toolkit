@@ -303,7 +303,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	button.icon svg path, button.icon svg circle { fill:none; stroke:currentColor; stroke-width:1.4; stroke-linecap:round; stroke-linejoin:round; }
 	button.icon svg .fill { fill:currentColor; stroke:none; }
 	button.icon.on { background:rgba(21,210,116,0.22); color:#15d274; }
-	.tabs { margin-left:auto; display:inline-flex; gap:2px; padding:2px; background:var(--vscode-input-background); border-radius:8px; }
+	.tabs { display:inline-flex; gap:2px; padding:2px; background:var(--vscode-input-background); border-radius:8px; }
 	.tab { padding:4px 14px; font-size:12px; cursor:pointer; color:var(--vscode-foreground); border-radius:6px; }
 	.tab.active { background:var(--vscode-button-background); color:var(--vscode-button-foreground); font-weight:500; }
 	.page { flex:1; min-height:0; display:none; }
@@ -347,11 +347,11 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 <body>
 <script type="application/json" id="wb-data">${data}</script>
 <div id="bar">
-	<span id="title">ASFX workbench</span>
+	<span class="tabs"><span class="tab active" data-t="logs">Logs</span><span class="tab" data-t="exec">Execute</span><span class="tab" data-t="soql">SOQL</span></span>
+	<span style="flex:1;"></span>
 	<select id="org" title="Target org for logs, execution and queries"><option value="">Loading…</option></select>
 	<span id="tracePill" title="Active debug traces">Trace: —</span>
 	<button id="refresh" class="icon" title="Refresh" aria-label="Refresh"><svg viewBox="0 0 16 16"><path d="M13.6 8a5.6 5.6 0 1 1-1.7-4"/><path d="M13.9 2.3v3.2h-3.2"/></svg></button>
-	<span class="tabs"><span class="tab active" data-t="logs">Logs</span><span class="tab" data-t="exec">Execute</span><span class="tab" data-t="soql">SOQL</span></span>
 </div>
 
 <div id="page-logs" class="page active">
