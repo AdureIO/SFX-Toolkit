@@ -368,16 +368,27 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 	select { flex: 1; min-width: 0; padding: 4px 8px; font-size: 12px;
 		background: var(--vscode-input-background); color: var(--vscode-input-foreground);
 		border: 1px solid var(--vscode-input-border, transparent); border-radius: 4px; }
-	#main { flex: 1; display: flex; gap: 6px; min-height: 120px; }
-	#editor { flex: 1; min-width: 0; border: 1px solid var(--vscode-input-border, transparent); border-radius: 4px; overflow: hidden; }
-	#results { flex: 1; min-width: 0; display: flex; flex-direction: column; border: 1px solid var(--vscode-input-border, transparent);
-		border-radius: 4px; overflow: hidden; background: var(--vscode-editor-background); }
+	#main { flex: 1; display: flex; flex-direction: column; min-height: 120px; }
+	#editor { flex: 1 1 auto; min-height: 80px; border: 1px solid var(--vscode-input-border, transparent); border-radius: 4px; overflow: hidden; }
+	/* Drag handle to resize the results pane vertically. */
+	#splitter { flex: 0 0 8px; height: 8px; cursor: row-resize; display: flex; align-items: center; }
+	#splitter::before { content: ''; display: block; width: 100%; height: 3px; border-radius: 2px;
+		background: var(--vscode-panel-border, rgba(128,128,128,0.3)); }
+	#splitter:hover::before { background: var(--vscode-focusBorder, rgba(0,120,212,0.6)); }
+	#results { flex: 0 0 auto; height: 180px; min-height: 56px; display: flex; flex-direction: column;
+		border: 1px solid var(--vscode-input-border, transparent); border-radius: 4px; overflow: hidden; background: var(--vscode-editor-background); }
 	#results-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 8px; font-size: 11px;
-		opacity: 0.9; border-bottom: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25)); flex-shrink: 0; }
+		opacity: 0.95; border-bottom: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25)); flex-shrink: 0; }
+	.results-tools { display: flex; align-items: center; gap: 6px; }
+	#result-filter { display: none; width: 200px; max-width: 40vw; padding: 2px 6px; font-size: 11px;
+		background: var(--vscode-input-background); color: var(--vscode-input-foreground);
+		border: 1px solid var(--vscode-input-border, transparent); border-radius: 4px; }
+	#result-filter.invalid { border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground)); }
 	#open-log-btn { display: none; font-size: 11px; padding: 2px 8px; border: none; border-radius: 4px; cursor: pointer;
 		background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
 	#result-content { flex: 1; margin: 0; padding: 8px; overflow: auto; white-space: pre-wrap; word-break: break-word;
 		font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; line-height: 1.4; }
+	#result-content mark { background: var(--vscode-editor-findMatchHighlightBackground, rgba(234,92,0,0.4)); color: inherit; border-radius: 2px; }
 	#result-content.error { color: var(--vscode-errorForeground); }
 	#result-content.muted { opacity: 0.6; }
 	#error-box { padding: 8px; font-size: 12px; line-height: 1.4; white-space: pre-wrap; word-break: break-word;
@@ -400,8 +411,15 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 	<select id="org-select" title="Org to execute against"><option value="">Loading…</option></select></div>
 <div id="main">
 	<div id="editor"></div>
+	<div id="splitter" title="Drag to resize the results pane"></div>
 	<div id="results">
-		<div id="results-header"><span id="results-title">Result</span><button id="open-log-btn" title="Open the full debug log in an editor">Open log</button></div>
+		<div id="results-header">
+			<span id="results-title">Result</span>
+			<div class="results-tools">
+				<input id="result-filter" type="text" placeholder="Filter (regex)…" title="Show only log lines matching this regular expression; matches are highlighted" spellcheck="false" />
+				<button id="open-log-btn" title="Open the full debug log in an editor">Open log</button>
+			</div>
+		</div>
 		<pre id="result-content" class="muted">Run code to see the result and debug log here.</pre>
 	</div>
 </div>
@@ -421,6 +439,10 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 	const resultContent = document.getElementById('result-content');
 	const resultsTitle = document.getElementById('results-title');
 	const openLogBtn = document.getElementById('open-log-btn');
+	const resultFilter = document.getElementById('result-filter');
+	const splitter = document.getElementById('splitter');
+	const resultsPane = document.getElementById('results');
+	let rawLog = '';
 	let editor = null;
 	let saveTimer = null;
 	let initial = { lastCode: '', history: [] };
@@ -431,6 +453,41 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 		resultContent.textContent = text || '';
 		resultContent.classList.toggle('error', mode === 'error');
 		resultContent.classList.toggle('muted', mode === 'muted');
+	}
+	function escapeHtml(s) {
+		return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+	}
+	// Highlight regex matches within one line (input is raw text; output is escaped HTML).
+	function highlightLine(line, re) {
+		if (!re) return escapeHtml(line);
+		let out = '', last = 0, m;
+		re.lastIndex = 0;
+		while ((m = re.exec(line)) !== null) {
+			out += escapeHtml(line.slice(last, m.index)) + '<mark>' + escapeHtml(m[0]) + '</mark>';
+			last = m.index + m[0].length;
+			if (m.index === re.lastIndex) re.lastIndex++; // guard against zero-width matches
+		}
+		return out + escapeHtml(line.slice(last));
+	}
+	// Render the debug log, applying the regex filter (line-level) + highlighting.
+	function renderLog() {
+		resultContent.classList.remove('error', 'muted');
+		const q = (resultFilter.value || '').trim();
+		let re = null;
+		if (q) {
+			try { re = new RegExp(q, 'gi'); resultFilter.classList.remove('invalid'); }
+			catch (e) { resultFilter.classList.add('invalid'); re = null; }
+		} else {
+			resultFilter.classList.remove('invalid');
+		}
+		if (!re) { resultContent.textContent = rawLog; return; }
+		const kept = [];
+		const lines = rawLog.split('\\n');
+		for (let i = 0; i < lines.length; i++) {
+			re.lastIndex = 0;
+			if (re.test(lines[i])) kept.push(highlightLine(lines[i], re));
+		}
+		resultContent.innerHTML = kept.length ? kept.join('\\n') : '<span style="opacity:0.6">No lines match the filter.</span>';
 	}
 	function setHistory(items) {
 		while (historySelect.options.length > 1) historySelect.remove(1);
@@ -466,18 +523,25 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 		else if (d.type === 'completionResult') { const cb = pending[d.requestId]; if (cb) { delete pending[d.requestId]; cb(d.items || []); } }
 		else if (d.type === 'hoverResult') { const cb = pending[d.requestId]; if (cb) { delete pending[d.requestId]; cb(d.hover || null); } }
 		else if (d.type === 'flush') flushContent();
-		else if (d.type === 'executeStarted') { resultsTitle.textContent = 'Running…'; openLogBtn.style.display = 'none'; setResult('Executing…', 'muted'); }
+		else if (d.type === 'executeStarted') {
+			resultsTitle.textContent = 'Running…'; openLogBtn.style.display = 'none'; resultFilter.style.display = 'none';
+			rawLog = ''; setResult('Executing…', 'muted');
+		}
 		else if (d.type === 'executeResult') {
 			if (!d.success) {
 				resultsTitle.textContent = 'Error';
+				rawLog = ''; openLogBtn.style.display = 'none'; resultFilter.style.display = 'none';
 				setResult(d.error || 'Execution failed.', 'error');
-				openLogBtn.style.display = 'none';
+			} else if (d.hasLog) {
+				resultsTitle.textContent = 'Debug log';
+				rawLog = d.log || '';
+				openLogBtn.style.display = ''; resultFilter.style.display = '';
+				renderLog();
+				resultContent.scrollTop = resultContent.scrollHeight; // jump to latest output
 			} else {
-				resultsTitle.textContent = d.hasLog ? 'Debug log' : 'Result';
-				setResult(d.log || 'Executed successfully.', d.hasLog ? null : 'muted');
-				openLogBtn.style.display = d.hasLog ? '' : 'none';
-				// Jump to the end of the log (most recent output).
-				resultContent.scrollTop = resultContent.scrollHeight;
+				resultsTitle.textContent = 'Result';
+				rawLog = ''; openLogBtn.style.display = 'none'; resultFilter.style.display = 'none';
+				setResult('Executed successfully.', 'muted');
 			}
 		}
 	});
@@ -619,6 +683,31 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 		historySelect.selectedIndex = 0;
 	});
 	openLogBtn.onclick = function () { vscode.postMessage({ type: 'openLog' }); };
+	resultFilter.addEventListener('input', renderLog);
+
+	// ── results pane: drag the splitter to resize vertically (persisted) ──────
+	(function () {
+		const saved = (function () { try { return (vscode.getState() || {}).resultsHeight; } catch (e) { return null; } })();
+		if (saved && saved > 56) resultsPane.style.height = saved + 'px';
+		let dragging = false, startY = 0, startH = 0;
+		splitter.addEventListener('mousedown', function (e) {
+			dragging = true; startY = e.clientY; startH = resultsPane.getBoundingClientRect().height;
+			document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none';
+			e.preventDefault();
+		});
+		window.addEventListener('mousemove', function (e) {
+			if (!dragging) return;
+			// Dragging the handle up (clientY decreases) grows the results pane.
+			const max = Math.max(80, window.innerHeight - 160);
+			const h = Math.min(max, Math.max(56, startH + (startY - e.clientY)));
+			resultsPane.style.height = h + 'px';
+		});
+		window.addEventListener('mouseup', function () {
+			if (!dragging) return;
+			dragging = false; document.body.style.cursor = ''; document.body.style.userSelect = '';
+			try { const s = vscode.getState() || {}; s.resultsHeight = resultsPane.getBoundingClientRect().height; vscode.setState(s); } catch (e) {}
+		});
+	})();
 	document.getElementById('execute-btn').onclick = doExecute;
 	document.getElementById('open-editor-btn').onclick = function () { vscode.postMessage({ type: 'openInEditor', code: editor ? editor.getValue() : '' }); };
 	document.getElementById('clear-btn').onclick = function () { if (editor) { editor.setValue(''); editor.focus(); } showError(''); vscode.postMessage({ type: 'contentChanged', code: '' }); };
