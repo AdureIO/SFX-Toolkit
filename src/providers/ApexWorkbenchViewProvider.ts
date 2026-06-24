@@ -130,14 +130,17 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	* { box-sizing:border-box; }
 	body { margin:0; padding:0; height:100vh; display:flex; flex-direction:column; color:var(--vscode-foreground);
 		background:var(--vscode-editor-background); font-family:var(--vscode-font-family); font-size:var(--vscode-font-size,13px); }
-	#bar { display:flex; align-items:center; gap:8px; padding:6px 8px; border-bottom:1px solid var(--vscode-panel-border, rgba(128,128,128,0.25)); flex-shrink:0; }
-	.lbl { font-size:11px; opacity:0.8; }
-	select { padding:3px 6px; font-size:12px; background:var(--vscode-input-background); color:var(--vscode-input-foreground); border:1px solid var(--vscode-input-border, transparent); border-radius:4px; max-width:230px; }
-	button { font-size:11px; padding:3px 8px; border:none; border-radius:4px; cursor:pointer; background:var(--vscode-button-secondaryBackground); color:var(--vscode-button-secondaryForeground); }
+	#bar { display:flex; align-items:center; gap:10px; padding:8px 10px; border-bottom:1px solid var(--vscode-panel-border, rgba(128,128,128,0.25)); flex-shrink:0; }
+	#title { display:inline-flex; align-items:center; gap:6px; font-size:13px; font-weight:500; white-space:nowrap; }
+	.lbl { font-size:11px; opacity:0.7; }
+	select { padding:4px 8px; font-size:12px; background:var(--vscode-input-background); color:var(--vscode-input-foreground); border:1px solid var(--vscode-input-border, var(--vscode-panel-border)); border-radius:6px; max-width:220px; }
+	#tracePill { display:inline-flex; align-items:center; gap:5px; padding:3px 9px; border-radius:11px; font-size:11px; background:var(--vscode-badge-background); color:var(--vscode-badge-foreground); white-space:nowrap; }
+	#tracePill.on { background:rgba(21,210,116,0.18); color:#15d274; }
+	button { font-size:11px; padding:4px 10px; border:none; border-radius:6px; cursor:pointer; background:var(--vscode-button-secondaryBackground); color:var(--vscode-button-secondaryForeground); }
 	button:hover { background:var(--vscode-button-hoverBackground); }
 	button.primary { background:var(--vscode-button-background); color:var(--vscode-button-foreground); }
-	.tabs { margin-left:auto; display:inline-flex; border:1px solid var(--vscode-input-border, transparent); border-radius:4px; overflow:hidden; }
-	.tab { padding:4px 12px; font-size:12px; cursor:pointer; color:var(--vscode-foreground); }
+	.tabs { margin-left:auto; display:inline-flex; gap:2px; padding:2px; background:var(--vscode-input-background); border-radius:8px; }
+	.tab { padding:4px 14px; font-size:12px; cursor:pointer; color:var(--vscode-foreground); border-radius:6px; }
 	.tab.active { background:var(--vscode-button-background); color:var(--vscode-button-foreground); font-weight:500; }
 	.page { flex:1; min-height:0; display:none; }
 	.page.active { display:flex; }
@@ -154,7 +157,10 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	.vtools { display:flex; align-items:center; gap:6px; padding:5px 8px; border-bottom:1px solid var(--vscode-panel-border, rgba(128,128,128,0.2)); flex-shrink:0; }
 	.vtools input { flex:1; min-width:50px; height:26px; padding:2px 6px; font-size:11px; background:var(--vscode-input-background); color:var(--vscode-input-foreground); border:1px solid var(--vscode-input-border, transparent); border-radius:4px; }
 	.vtools input.invalid { border-color:var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground)); }
+	.qf { border-radius:11px; padding:3px 11px; }
 	.qf.active { background:var(--vscode-button-background); color:var(--vscode-button-foreground); }
+	#listHead { padding:7px 10px; font-size:11px; opacity:0.7; display:flex; justify-content:space-between; border-bottom:1px solid var(--vscode-panel-border, rgba(128,128,128,0.18)); }
+	.row { padding:7px 10px; }
 	.content { flex:1; margin:0; padding:8px; overflow:auto; white-space:pre-wrap; word-break:break-word; font-family:var(--vscode-editor-font-family,monospace); font-size:12px; line-height:1.4; }
 	.content mark { background:var(--vscode-editor-findMatchHighlightBackground, rgba(234,92,0,0.4)); color:inherit; border-radius:2px; }
 	.content.error { color:var(--vscode-errorForeground); }
@@ -171,14 +177,16 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 <body>
 <script type="application/json" id="wb-data">${data}</script>
 <div id="bar">
-	<span class="lbl">Org</span>
-	<select id="org"><option value="">Loading…</option></select>
+	<span id="title">Apex workbench</span>
+	<select id="org" title="Target org for logs and execution"><option value="">Loading…</option></select>
+	<span id="tracePill" title="Active debug traces">Trace: —</span>
 	<button id="refresh" title="Refresh">Refresh</button>
 	<span class="tabs"><span class="tab active" data-t="logs">Logs</span><span class="tab" data-t="exec">Execute</span></span>
 </div>
 
 <div id="page-logs" class="page active">
 	<div id="list">
+		<div id="listHead"><span>Debug logs</span><span id="logCount"></span></div>
 		<div id="listRows"><div class="muted" style="padding:8px;">Loading logs…</div></div>
 		<div id="traces"><span class="muted">Traces: —</span> <button id="quickTrace" title="Start a debug trace">Quick trace</button></div>
 	</div>
@@ -266,7 +274,8 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	const listRows=document.getElementById('listRows'); let currentId='';
 	function fmtTime(s){ try{const d=new Date(s); return isNaN(d)?s:d.toLocaleTimeString();}catch(e){return s;} }
 	function fmtSize(n){ if(!n) return ''; if(n<1024) return n+' B'; if(n<1048576) return Math.round(n/1024)+' KB'; return (n/1048576).toFixed(1)+' MB'; }
-	function renderList(rows){ if(!rows||!rows.length){ listRows.innerHTML='<div class="muted" style="padding:8px;">No logs.</div>'; return; }
+	function renderList(rows){ document.getElementById('logCount').textContent=(rows&&rows.length)?rows.length:'';
+		if(!rows||!rows.length){ listRows.innerHTML='<div class="muted" style="padding:8px;">No logs.</div>'; return; }
 		listRows.innerHTML=rows.map(function(r){ const err=r.status&&r.status.toLowerCase()!=='success';
 			return '<div class="row" data-id="'+r.id+'">'+fmtTime(r.startTime)+'<div class="meta'+(err?' err':'')+'">'+esc((r.operation||'')+' · '+(r.status||''))+' · '+fmtSize(r.length)+'</div></div>'; }).join('');
 		Array.prototype.forEach.call(listRows.querySelectorAll('.row'), function(el){ el.onclick=function(){
@@ -322,7 +331,9 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 		else if(d.type==='logList'){ if((d.org||'')===orgVal()) renderList(d.rows||[]); }
 		else if(d.type==='logLoading'){ if(d.id===currentId) logView.setText('Loading log…', true); }
 		else if(d.type==='logBody'){ if(d.id===currentId) logView.setLog(d.text||''); }
-		else if(d.type==='traceInfo'){ const t=document.getElementById('traces'); const span=t.querySelector('span'); span.className=d.count>0?'':'muted'; span.textContent= d.count>0 ? ('Traces: '+d.count+' active') : 'Traces: none'; }
+		else if(d.type==='traceInfo'){ if((d.org||'')!==orgVal()) return;
+			const t=document.getElementById('traces').querySelector('span'); t.className=d.count>0?'':'muted'; t.textContent= d.count>0 ? ('Traces: '+d.count+' active') : 'Traces: none';
+			const pill=document.getElementById('tracePill'); pill.classList.toggle('on', d.count>0); pill.textContent= d.count>0 ? ('Trace: '+d.count+' on') : 'Trace: off'; }
 		else if(d.type==='execStarted'){ execTitle.textContent='Running…'; execOpen.style.display='none'; execFilter.style.display='none'; execView.setText('Executing…', true); }
 		else if(d.type==='execResult'){
 			if(!d.success){ execTitle.textContent='Error'; execOpen.style.display='none'; execFilter.style.display='none'; execView.setError(d.error||'Execution failed.'); }

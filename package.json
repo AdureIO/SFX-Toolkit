@@ -398,6 +398,11 @@
           "id": "adure-sfx-toolkit-panel",
           "title": "Execute Apex",
           "icon": "$(play)"
+        },
+        {
+          "id": "adure-sfx-toolkit-workbench",
+          "title": "Apex Workbench",
+          "icon": "$(beaker)"
         }
       ]
     },
@@ -436,11 +441,13 @@
           "id": "adure-sfx-toolkit.anonymousApexPanel",
           "name": "Apex",
           "when": "adure-sfx-toolkit:isSalesforceProject"
-        },
+        }
+      ],
+      "adure-sfx-toolkit-workbench": [
         {
           "type": "webview",
           "id": "adure-sfx-toolkit.apexWorkbench",
-          "name": "Workbench",
+          "name": "Apex Workbench",
           "when": "adure-sfx-toolkit:isSalesforceProject"
         }
       ]
