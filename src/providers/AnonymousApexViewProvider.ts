@@ -161,11 +161,13 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 			}
 			return items.slice(0, 200).map((it) => {
 				const label = typeof it.label === 'string' ? it.label : it.label.label;
+				const isSnippet = it.insertText instanceof vscode.SnippetString;
 				const insert = typeof it.insertText === 'string' ? it.insertText : (it.insertText as vscode.SnippetString | undefined)?.value ?? label;
 				const doc2 = typeof it.documentation === 'string' ? it.documentation : (it.documentation as vscode.MarkdownString | undefined)?.value;
 				return {
 					label,
 					insertText: insert,
+					isSnippet,
 					kind: typeof it.kind === 'number' ? it.kind : 0,
 					detail: it.detail,
 					documentation: doc2,
@@ -452,7 +454,9 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 							startColumn: word.startColumn, endColumn: word.endColumn };
 						resolve({ suggestions: items.map(function (it) {
 							return { label: it.label, kind: mapKind(it.kind),
-								insertText: it.insertText || it.label, detail: it.detail,
+								insertText: it.insertText || it.label,
+								insertTextRules: it.isSnippet ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet : undefined,
+								detail: it.detail,
 								documentation: it.documentation ? { value: it.documentation } : undefined,
 								sortText: it.sortText, filterText: it.filterText, range: range };
 						}) });
