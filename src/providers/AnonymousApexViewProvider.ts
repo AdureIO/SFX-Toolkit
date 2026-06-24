@@ -368,14 +368,14 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 	select { flex: 1; min-width: 0; padding: 4px 8px; font-size: 12px;
 		background: var(--vscode-input-background); color: var(--vscode-input-foreground);
 		border: 1px solid var(--vscode-input-border, transparent); border-radius: 4px; }
-	#main { flex: 1; display: flex; flex-direction: column; min-height: 120px; }
-	#editor { flex: 1 1 auto; min-height: 80px; border: 1px solid var(--vscode-input-border, transparent); border-radius: 4px; overflow: hidden; }
-	/* Drag handle to resize the results pane vertically. */
-	#splitter { flex: 0 0 8px; height: 8px; cursor: row-resize; display: flex; align-items: center; }
-	#splitter::before { content: ''; display: block; width: 100%; height: 3px; border-radius: 2px;
+	#main { flex: 1; display: flex; flex-direction: row; min-height: 120px; }
+	#editor { flex: 1 1 auto; min-width: 120px; border: 1px solid var(--vscode-input-border, transparent); border-radius: 4px; overflow: hidden; }
+	/* Drag handle to resize the results pane horizontally (drag left/right). */
+	#splitter { flex: 0 0 8px; width: 8px; cursor: col-resize; display: flex; justify-content: center; }
+	#splitter::before { content: ''; display: block; height: 100%; width: 3px; border-radius: 2px;
 		background: var(--vscode-panel-border, rgba(128,128,128,0.3)); }
 	#splitter:hover::before { background: var(--vscode-focusBorder, rgba(0,120,212,0.6)); }
-	#results { flex: 0 0 auto; height: 180px; min-height: 56px; display: flex; flex-direction: column;
+	#results { flex: 0 0 auto; width: 45%; min-width: 140px; display: flex; flex-direction: column;
 		border: 1px solid var(--vscode-input-border, transparent); border-radius: 4px; overflow: hidden; background: var(--vscode-editor-background); }
 	#results-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 8px; font-size: 11px;
 		opacity: 0.95; border-bottom: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25)); flex-shrink: 0; }
@@ -535,7 +535,7 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 			} else if (d.hasLog) {
 				resultsTitle.textContent = 'Debug log';
 				rawLog = d.log || '';
-				openLogBtn.style.display = ''; resultFilter.style.display = '';
+				openLogBtn.style.display = 'inline-block'; resultFilter.style.display = 'inline-block';
 				renderLog();
 				resultContent.scrollTop = resultContent.scrollHeight; // jump to latest output
 			} else {
@@ -685,27 +685,27 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 	openLogBtn.onclick = function () { vscode.postMessage({ type: 'openLog' }); };
 	resultFilter.addEventListener('input', renderLog);
 
-	// ── results pane: drag the splitter to resize vertically (persisted) ──────
+	// ── results pane: drag the splitter to resize its width (persisted) ───────
 	(function () {
-		const saved = (function () { try { return (vscode.getState() || {}).resultsHeight; } catch (e) { return null; } })();
-		if (saved && saved > 56) resultsPane.style.height = saved + 'px';
-		let dragging = false, startY = 0, startH = 0;
+		const saved = (function () { try { return (vscode.getState() || {}).resultsWidth; } catch (e) { return null; } })();
+		if (saved && saved > 140) resultsPane.style.width = saved + 'px';
+		let dragging = false, startX = 0, startW = 0;
 		splitter.addEventListener('mousedown', function (e) {
-			dragging = true; startY = e.clientY; startH = resultsPane.getBoundingClientRect().height;
-			document.body.style.cursor = 'row-resize'; document.body.style.userSelect = 'none';
+			dragging = true; startX = e.clientX; startW = resultsPane.getBoundingClientRect().width;
+			document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none';
 			e.preventDefault();
 		});
 		window.addEventListener('mousemove', function (e) {
 			if (!dragging) return;
-			// Dragging the handle up (clientY decreases) grows the results pane.
-			const max = Math.max(80, window.innerHeight - 160);
-			const h = Math.min(max, Math.max(56, startH + (startY - e.clientY)));
-			resultsPane.style.height = h + 'px';
+			// Results sits on the right; dragging the handle left (clientX decreases) grows it.
+			const max = Math.max(140, window.innerWidth - 160);
+			const w = Math.min(max, Math.max(140, startW + (startX - e.clientX)));
+			resultsPane.style.width = w + 'px';
 		});
 		window.addEventListener('mouseup', function () {
 			if (!dragging) return;
 			dragging = false; document.body.style.cursor = ''; document.body.style.userSelect = '';
-			try { const s = vscode.getState() || {}; s.resultsHeight = resultsPane.getBoundingClientRect().height; vscode.setState(s); } catch (e) {}
+			try { const s = vscode.getState() || {}; s.resultsWidth = resultsPane.getBoundingClientRect().width; vscode.setState(s); } catch (e) {}
 		});
 	})();
 	document.getElementById('execute-btn').onclick = doExecute;

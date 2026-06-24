@@ -11,7 +11,6 @@ import { openLogById } from "./listLogs";
 import { AuthInfo } from "../utils/authInfo";
 import { getToolingApiVersion } from "../utils/constants";
 import { httpsPost } from "../utils/httpUtils";
-import { outputChannel } from "../utils/outputChannel";
 
 // ─── Fast SOAP execution (no CLI spawn; debug log inline) ───────────────────────
 //
@@ -101,18 +100,13 @@ function parseSoapAnon(xml: string): { result: AnonResult; log: string } {
 async function soapExecuteAnonymous(org: string | null, code: string): Promise<{ result: AnonResult; log: string }> {
   const version = getToolingApiVersion().replace(/^v/i, ""); // "v59.0" → "59.0"
   const send = async (): Promise<string> => {
-    const tAuth = Date.now();
     const auth = await AuthInfo.getAuthInfoForOrg(org);
-    outputChannel.appendLine(`ExecuteAnonymous: auth resolved in ${Date.now() - tAuth}ms`);
     if (!auth) throw new Error("Not authenticated. Run: sf org login web");
     const endpoint = `${auth.instanceUrl.replace(/\/$/, "")}/services/Soap/s/${version}`;
-    const tHttp = Date.now();
-    const res = await httpsPost(endpoint, buildSoapEnvelope(auth.accessToken, code), {
+    return httpsPost(endpoint, buildSoapEnvelope(auth.accessToken, code), {
       "Content-Type": "text/xml; charset=UTF-8",
       SOAPAction: '""',
     });
-    outputChannel.appendLine(`ExecuteAnonymous: SOAP round-trip in ${Date.now() - tHttp}ms`);
-    return res;
   };
   let body: string;
   try {
