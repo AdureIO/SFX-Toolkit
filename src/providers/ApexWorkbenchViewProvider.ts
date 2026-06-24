@@ -64,6 +64,14 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 					await vscode.commands.executeCommand('adure-sfx-toolkit.quickTrace');
 					this._post('traceInfo', { org: data.org || '', ...(await listActiveTraceFlags(data.org || null)) });
 					break;
+				case 'newTrace':
+					await vscode.commands.executeCommand('adure-sfx-toolkit.addDebugTrace');
+					this._post('traceInfo', { org: data.org || '', ...(await listActiveTraceFlags(data.org || null)) });
+					break;
+				case 'deleteAllLogs':
+					await vscode.commands.executeCommand('adure-sfx-toolkit.deleteAllLogs');
+					this._post('logList', { org: data.org || '', rows: await listApexLogs(data.org || null) });
+					break;
 				case 'openLog': {
 					this._post('logLoading', { id: data.id });
 					this._post('logBody', { id: data.id, text: await fetchApexLogBody(data.org || null, data.id) });
@@ -121,7 +129,8 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	private _html(webview: vscode.Webview, initialCode: string): string {
 		const monacoBase = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'node_modules', 'monaco-editor', 'min', 'vs'));
 		const cspSource = webview.cspSource;
-		const data = JSON.stringify({ highlightPatterns: getHighlightPatterns(), code: initialCode || '' })
+		const pollSeconds = vscode.workspace.getConfiguration('adure-sfx-toolkit').get<number>('pollingIntervalSeconds', 5);
+		const data = JSON.stringify({ highlightPatterns: getHighlightPatterns(), code: initialCode || '', pollSeconds })
 			.replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
 		return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
@@ -186,9 +195,22 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 
 <div id="page-logs" class="page active">
 	<div id="list">
-		<div id="listHead"><span>Debug logs</span><span id="logCount"></span></div>
+		<div id="listHead">
+			<span>Debug logs <span id="logCount"></span></span>
+			<span style="display:inline-flex; gap:4px;">
+				<button id="listen" title="Listen for new logs (poll)">Listen</button>
+				<button id="deleteAll" title="Delete all logs">Delete all</button>
+			</span>
+		</div>
 		<div id="listRows"><div class="muted" style="padding:8px;">Loading logs…</div></div>
-		<div id="traces"><span class="muted">Traces: —</span> <button id="quickTrace" title="Start a debug trace">Quick trace</button></div>
+		<div id="traces">
+			<div><span class="muted">Traces: —</span></div>
+			<div style="display:flex; gap:4px; margin-top:5px;">
+				<button id="quickTrace" title="Start a quick debug trace">Quick trace</button>
+				<button id="newTrace" title="Create a new debug trace">New trace</button>
+				<button id="refreshTraces" title="Refresh traces">Refresh</button>
+			</div>
+		</div>
 	</div>
 	<div class="viewer">
 		<div class="vtools">
@@ -278,13 +300,27 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 		if(!rows||!rows.length){ listRows.innerHTML='<div class="muted" style="padding:8px;">No logs.</div>'; return; }
 		listRows.innerHTML=rows.map(function(r){ const err=r.status&&r.status.toLowerCase()!=='success';
 			return '<div class="row" data-id="'+r.id+'">'+fmtTime(r.startTime)+'<div class="meta'+(err?' err':'')+'">'+esc((r.operation||'')+' · '+(r.status||''))+' · '+fmtSize(r.length)+'</div></div>'; }).join('');
-		Array.prototype.forEach.call(listRows.querySelectorAll('.row'), function(el){ el.onclick=function(){
-			Array.prototype.forEach.call(listRows.querySelectorAll('.row'),function(r){r.classList.remove('sel');}); el.classList.add('sel');
-			currentId=el.getAttribute('data-id'); logView.setText('Loading log…', true); vscode.postMessage({type:'openLog', org:orgVal(), id:currentId}); }; }); }
+		Array.prototype.forEach.call(listRows.querySelectorAll('.row'), function(el){
+			if(el.getAttribute('data-id')===currentId) el.classList.add('sel'); // keep selection across refreshes
+			el.onclick=function(){
+				Array.prototype.forEach.call(listRows.querySelectorAll('.row'),function(r){r.classList.remove('sel');}); el.classList.add('sel');
+				currentId=el.getAttribute('data-id'); logView.setText('Loading log…', true); vscode.postMessage({type:'openLog', org:orgVal(), id:currentId}); }; }); }
 	function loadLogs(){ listRows.innerHTML='<div class="muted" style="padding:8px;">Loading…</div>'; vscode.postMessage({type:'listLogs', org:orgVal()}); vscode.postMessage({type:'listTraces', org:orgVal()}); }
 	document.getElementById('logOpen').onclick=function(){ if(currentId) vscode.postMessage({type:'openLogInEditor', org:orgVal(), id:currentId}); };
 	document.getElementById('quickTrace').onclick=function(){ vscode.postMessage({type:'quickTrace', org:orgVal()}); };
+	document.getElementById('newTrace').onclick=function(){ vscode.postMessage({type:'newTrace', org:orgVal()}); };
+	document.getElementById('refreshTraces').onclick=function(){ vscode.postMessage({type:'listTraces', org:orgVal()}); };
+	document.getElementById('deleteAll').onclick=function(){ vscode.postMessage({type:'deleteAllLogs', org:orgVal()}); };
 	document.getElementById('refresh').onclick=loadLogs;
+
+	// Listen for new logs: poll the selected org's log list on an interval.
+	let listenTimer=null; const pollMs=Math.max(2,(initial.pollSeconds||5))*1000;
+	const listenBtn=document.getElementById('listen');
+	listenBtn.onclick=function(){
+		if(listenTimer){ clearInterval(listenTimer); listenTimer=null; listenBtn.classList.remove('primary'); listenBtn.textContent='Listen'; }
+		else { listenBtn.classList.add('primary'); listenBtn.textContent='Listening…'; vscode.postMessage({type:'listLogs', org:orgVal()});
+			listenTimer=setInterval(function(){ vscode.postMessage({type:'listLogs', org:orgVal()}); }, pollMs); }
+	};
 
 	// ── execute editor ─────────────────────────────────────────────────────────
 	let editor=null, saveTimer=null, reqId=0; const pending={};
