@@ -41,6 +41,30 @@ export async function listApexLogs(org: string | null, limit = 50): Promise<Apex
 	}
 }
 
+export interface TraceSummary {
+	count: number;
+	nearestExpiry: string | null;
+}
+
+/** Active debug TraceFlags for an org (count + nearest expiry). */
+export async function listActiveTraceFlags(org: string | null): Promise<TraceSummary> {
+	const version = getToolingApiVersion();
+	const q =
+		"SELECT Id, ExpirationDate FROM TraceFlag WHERE ExpirationDate > " +
+		new Date().toISOString().replace(/\.\d{3}Z$/, "Z") +
+		" ORDER BY ExpirationDate ASC";
+	try {
+		const { body } = await AuthInfo.get(org, (a) =>
+			`${a.instanceUrl.replace(/\/$/, "")}/services/data/${version}/tooling/query/?q=${encodeURIComponent(q)}`
+		);
+		const records: any[] = JSON.parse(body).records ?? [];
+		return { count: records.length, nearestExpiry: records[0]?.ExpirationDate ?? null };
+	} catch (e: any) {
+		outputChannel.appendLine(`apexLogApi: listActiveTraceFlags failed: ${e?.message ?? e}`);
+		return { count: 0, nearestExpiry: null };
+	}
+}
+
 /** Raw debug-log body for a log id on an org. */
 export async function fetchApexLogBody(org: string | null, logId: string): Promise<string> {
 	const version = getToolingApiVersion();

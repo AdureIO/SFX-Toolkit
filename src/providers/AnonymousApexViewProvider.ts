@@ -7,6 +7,7 @@ import { isSalesforceProject } from '../utils/projectUtils';
 import { getHighlightPatterns } from '../utils/apexLogHighlight';
 import { getSalesforceLogDirectory } from '../utils/logPaths';
 import { AuthInfo } from '../utils/authInfo';
+import { ApexBufferBridge } from './apexBufferBridge';
 
 const BUFFER_RELATIVE_PATH = '.vscode/anon-apex-buffer.apex';
 const ASFX_DIR = '.sfdx/asfx';
@@ -24,27 +25,10 @@ const APEX_HISTORY_MAX = 10;
 export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 	private _view?: vscode.WebviewView;
 	private _messageListener?: vscode.Disposable;
-	private _bufferDoc?: vscode.TextDocument;
 	private _lastLog = '';
+	private readonly _bridge = new ApexBufferBridge(BUFFER_RELATIVE_PATH);
 
 	constructor(private readonly _extensionUri: vscode.Uri) {}
-
-	private getBufferUri(): vscode.Uri | undefined {
-		const root = vscode.workspace.workspaceFolders?.[0]?.uri;
-		if (!root) return undefined;
-		return vscode.Uri.joinPath(root, BUFFER_RELATIVE_PATH);
-	}
-
-	private async readBuffer(): Promise<string> {
-		const uri = this.getBufferUri();
-		if (!uri) return '';
-		try {
-			return new TextDecoder().decode(await vscode.workspace.fs.readFile(uri));
-		} catch {
-			return '';
-		}
-	}
-
 
 	private getApexStorageDir(): string | null {
 		const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -68,7 +52,7 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 				}
 			} catch { /* ignore */ }
 		}
-		if (!lastCode.trim()) lastCode = await this.readBuffer();
+		if (!lastCode.trim()) lastCode = await this._bridge.readBuffer();
 		return { lastCode, history };
 	}
 
@@ -107,142 +91,6 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 		}
 	}
 
-	/**
-	 * Keep a single backing document for the buffer file open & in sync so the
-	 * completion/hover providers see the current text. This document is the ONLY
-	 * writer of the file: we never fs-write it while it's open (doing both caused
-	 * "the content of the file is newer" save conflicts). Updates go through
-	 * applyEdit + save; durable panel state lives separately in apex-last.txt.
-	 */
-	private async syncBufferDoc(text: string): Promise<vscode.TextDocument | undefined> {
-		const uri = this.getBufferUri();
-		if (!uri) return undefined;
-		if (!this._bufferDoc || this._bufferDoc.isClosed) {
-			try {
-				// Create the file once if it doesn't exist (providers need a real URI).
-				try {
-					await vscode.workspace.fs.stat(uri);
-				} catch {
-					await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(uri, '..'));
-					await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(''));
-				}
-				this._bufferDoc = await vscode.workspace.openTextDocument(uri);
-			} catch {
-				return undefined;
-			}
-		}
-		const doc = this._bufferDoc;
-		if (doc.getText() !== text) {
-			const edit = new vscode.WorkspaceEdit();
-			const full = new vscode.Range(doc.positionAt(0), doc.positionAt(doc.getText().length));
-			edit.replace(uri, full, text);
-			try {
-				await vscode.workspace.applyEdit(edit);
-				await doc.save(); // keep disk in sync via the document itself (no rival fs writer)
-			} catch {
-				/* ignore */
-			}
-		}
-		return doc;
-	}
-
-	/** The identifier prefix immediately before the cursor (for client-side filtering). */
-	private static prefixAt(text: string, line: number, character: number): string {
-		const lineText = text.split('\n')[line] ?? '';
-		const m = /([A-Za-z0-9_]+)$/.exec(lineText.slice(0, character));
-		return (m ? m[1] : '').toLowerCase();
-	}
-
-	/** Resolve completions from the real editor providers for the current buffer text/position. */
-	private async getRealCompletions(text: string, line: number, character: number): Promise<unknown[]> {
-		const doc = await this.syncBufferDoc(text);
-		if (!doc) return [];
-		try {
-			const list = await vscode.commands.executeCommand<vscode.CompletionList>(
-				'vscode.executeCompletionItemProvider',
-				doc.uri,
-				new vscode.Position(line, character),
-			);
-			let items = list?.items ?? [];
-			// `executeCompletionItemProvider` returns the providers' raw, unfiltered
-			// results — for SObject/type completion that's the whole org (thousands).
-			// We must filter by the typed prefix ourselves *before* capping, or the
-			// match (e.g. the namespace-optional `filterText`) gets truncated away.
-			const prefix = AnonymousApexViewProvider.prefixAt(text, line, character);
-			if (prefix) {
-				const matches = (s?: string) => !!s && s.toLowerCase().startsWith(prefix);
-				items = items.filter((it) => {
-					const label = typeof it.label === 'string' ? it.label : it.label.label;
-					// filterText carries the namespace-optional form (acme__Foo__c → Foo__c).
-					return matches(it.filterText) || matches(label) || (it.filterText ?? '').toLowerCase().includes(prefix);
-				});
-			}
-			return items.slice(0, 200).map((it) => {
-				const label = typeof it.label === 'string' ? it.label : it.label.label;
-				const isSnippet = it.insertText instanceof vscode.SnippetString;
-				const insert = typeof it.insertText === 'string' ? it.insertText : (it.insertText as vscode.SnippetString | undefined)?.value ?? label;
-				const doc2 = typeof it.documentation === 'string' ? it.documentation : (it.documentation as vscode.MarkdownString | undefined)?.value;
-				return {
-					label,
-					insertText: insert,
-					isSnippet,
-					kind: typeof it.kind === 'number' ? it.kind : 0,
-					detail: it.detail,
-					documentation: doc2,
-					sortText: it.sortText,
-					filterText: it.filterText,
-				};
-			});
-		} catch {
-			return [];
-		}
-	}
-
-	/** Resolve a definition location from the real providers and open it in an editor. */
-	private async gotoDefinition(text: string, line: number, character: number): Promise<void> {
-		const doc = await this.syncBufferDoc(text);
-		if (!doc) return;
-		try {
-			const res = await vscode.commands.executeCommand<(vscode.Location | vscode.LocationLink)[]>(
-				'vscode.executeDefinitionProvider',
-				doc.uri,
-				new vscode.Position(line, character),
-			);
-			const first = (res ?? [])[0];
-			if (!first) return;
-			const uri = 'targetUri' in first ? first.targetUri : first.uri;
-			const range = 'targetUri' in first ? (first.targetSelectionRange ?? first.targetRange) : first.range;
-			// Skip self-references into the hidden buffer (can't reveal a webview editor).
-			if (uri.toString() === doc.uri.toString()) return;
-			await vscode.window.showTextDocument(uri, { selection: range, preview: false });
-		} catch {
-			/* no definition */
-		}
-	}
-
-	/** Resolve hover info from the real editor providers for the current buffer text/position. */
-	private async getRealHover(text: string, line: number, character: number): Promise<{ contents: string[] } | null> {
-		const doc = await this.syncBufferDoc(text);
-		if (!doc) return null;
-		try {
-			const hovers = await vscode.commands.executeCommand<vscode.Hover[]>(
-				'vscode.executeHoverProvider',
-				doc.uri,
-				new vscode.Position(line, character),
-			);
-			const contents: string[] = [];
-			for (const h of hovers ?? []) {
-				for (const c of h.contents) {
-					const value = typeof c === 'string' ? c : (c as vscode.MarkdownString).value;
-					if (value && value.trim()) contents.push(value);
-				}
-			}
-			return contents.length ? { contents } : null;
-		} catch {
-			return null;
-		}
-	}
-
 	private _post(type: string, payload: Record<string, unknown> = {}): void {
 		this._view?.webview.postMessage({ type, ...payload });
 	}
@@ -278,17 +126,17 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 					break;
 				}
 				case 'getCompletions': {
-					const items = await this.getRealCompletions(data.text || '', data.line || 0, data.character || 0);
+					const items = await this._bridge.completions(data.text || '', data.line || 0, data.character || 0);
 					this._post('completionResult', { requestId: data.requestId, items });
 					break;
 				}
 				case 'getHover': {
-					const hover = await this.getRealHover(data.text || '', data.line || 0, data.character || 0);
+					const hover = await this._bridge.hover(data.text || '', data.line || 0, data.character || 0);
 					this._post('hoverResult', { requestId: data.requestId, hover });
 					break;
 				}
 				case 'gotoDefinition': {
-					await this.gotoDefinition(data.text || '', data.line || 0, data.character || 0);
+					await this._bridge.gotoDefinition(data.text || '', data.line || 0, data.character || 0);
 					break;
 				}
 				case 'execute': {
@@ -330,22 +178,13 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 					break;
 				}
 				case 'openInEditor': {
-					// Open the single backing document (kept in sync via syncBufferDoc),
-					// never an independent fs write, to avoid save conflicts.
-					const doc = await this.syncBufferDoc(typeof data.code === 'string' ? data.code : await this.readBuffer());
-					if (doc) {
-						try {
-							await vscode.window.showTextDocument(doc, { preview: false });
-						} catch {
-							await vscode.commands.executeCommand('vscode.open', doc.uri);
-						}
-					}
+					await this._bridge.openInEditor(typeof data.code === 'string' ? data.code : await this._bridge.readBuffer());
 					break;
 				}
 				case 'contentChanged': {
 					if (typeof data.code === 'string') {
-						await this.syncBufferDoc(data.code);   // single-writer update for completion/hover
-						this.saveLastCode(data.code);          // restored-on-reload snapshot
+						await this._bridge.update(data.code);   // single-writer update for completion/hover
+						this.saveLastCode(data.code);           // restored-on-reload snapshot
 					}
 					break;
 				}

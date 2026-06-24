@@ -2,23 +2,29 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
-import { getAnonymousApexOrgList } from '../commands/executeAnonymous';
-import { listApexLogs, fetchApexLogBody } from '../utils/apexLogApi';
+import { getAnonymousApexOrgList, executeAnonymousForPanel } from '../commands/executeAnonymous';
+import { listApexLogs, fetchApexLogBody, listActiveTraceFlags } from '../utils/apexLogApi';
 import { getHighlightPatterns } from '../utils/apexLogHighlight';
 import { getSalesforceLogDirectory } from '../utils/logPaths';
 import { AuthInfo } from '../utils/authInfo';
 import { isSalesforceProject } from '../utils/projectUtils';
+import { ApexBufferBridge } from './apexBufferBridge';
+
+const WORKBENCH_BUFFER = '.vscode/anon-workbench-buffer.apex';
 
 /**
- * The Apex Workbench — a bottom-panel webview that browses debug logs for the
- * org chosen in its own org switcher (so you can read logs from any environment)
- * and displays the selected log with the same category toggles, regex search and
- * configurable highlighting as the Execute Apex results pane. Coexists with the
- * sidebar Logs/Traces views and the standalone Execute panel.
+ * The Apex Workbench — a bottom-panel webview combining, under one org switcher:
+ *   • Logs tab: an org-scoped debug-log browser + viewer (toggles / regex /
+ *     configurable highlighting) and an active-traces strip.
+ *   • Execute tab: a Monaco editor with org-aware completion/hover/go-to-def and
+ *     a results pane, running anonymous Apex against the selected org.
+ * Coexists with the sidebar Logs/Traces views and the standalone Execute panel.
  */
 export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	private _view?: vscode.WebviewView;
 	private _listener?: vscode.Disposable;
+	private _lastLog = '';
+	private readonly _bridge = new ApexBufferBridge(WORKBENCH_BUFFER);
 
 	constructor(private readonly _extensionUri: vscode.Uri) {}
 
@@ -30,9 +36,13 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 		this._view = view;
 		view.webview.options = {
 			enableScripts: true,
-			localResourceRoots: [this._extensionUri],
+			localResourceRoots: [
+				this._extensionUri,
+				vscode.Uri.joinPath(this._extensionUri, 'node_modules', 'monaco-editor', 'min'),
+			],
 		};
-		view.webview.html = this._html();
+		const initialCode = await this._bridge.readBuffer();
+		view.webview.html = this._html(view.webview, initialCode);
 
 		this._listener?.dispose();
 		this._listener = view.webview.onDidReceiveMessage(async (data: any) => {
@@ -43,170 +53,282 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 				case 'warmOrg':
 					if (isSalesforceProject()) AuthInfo.warmAuthForOrg(data.org || null);
 					break;
-				case 'listLogs': {
-					const rows = await listApexLogs(data.org || null);
-					this._post('logList', { org: data.org || '', rows });
+				// ── Logs ────────────────────────────────────────────────────────────
+				case 'listLogs':
+					this._post('logList', { org: data.org || '', rows: await listApexLogs(data.org || null) });
 					break;
-				}
+				case 'listTraces':
+					this._post('traceInfo', { org: data.org || '', ...(await listActiveTraceFlags(data.org || null)) });
+					break;
+				case 'quickTrace':
+					await vscode.commands.executeCommand('adure-sfx-toolkit.quickTrace');
+					this._post('traceInfo', { org: data.org || '', ...(await listActiveTraceFlags(data.org || null)) });
+					break;
 				case 'openLog': {
 					this._post('logLoading', { id: data.id });
-					const text = await fetchApexLogBody(data.org || null, data.id);
-					this._post('logBody', { id: data.id, text });
+					this._post('logBody', { id: data.id, text: await fetchApexLogBody(data.org || null, data.id) });
 					break;
 				}
-				case 'openInEditor': {
+				case 'openLogInEditor': {
 					const text = await fetchApexLogBody(data.org || null, data.id);
-					if (!text) return;
-					try {
-						const dir = getSalesforceLogDirectory() || os.tmpdir();
-						if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-						const file = path.join(dir, `${data.id}.log`);
-						fs.writeFileSync(file, text, 'utf8');
-						const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
-						await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active, preview: false });
-					} catch {
-						const doc = await vscode.workspace.openTextDocument({ content: text, language: 'salesforce-log' });
-						await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active, preview: false });
-					}
+					if (text) await this._openLogFile(`${data.id}.log`, text);
 					break;
 				}
+				// ── Execute (editor bridge + run) ────────────────────────────────────
+				case 'getCompletions':
+					this._post('completionResult', { requestId: data.requestId, items: await this._bridge.completions(data.text || '', data.line || 0, data.character || 0) });
+					break;
+				case 'getHover':
+					this._post('hoverResult', { requestId: data.requestId, hover: await this._bridge.hover(data.text || '', data.line || 0, data.character || 0) });
+					break;
+				case 'gotoDefinition':
+					await this._bridge.gotoDefinition(data.text || '', data.line || 0, data.character || 0);
+					break;
+				case 'contentChanged':
+					if (typeof data.code === 'string') await this._bridge.update(data.code);
+					break;
+				case 'execute': {
+					if (!isSalesforceProject()) { this._post('execResult', { success: false, error: 'Open an SFDX project to use this feature.' }); return; }
+					this._post('execStarted', {});
+					const result = await executeAnonymousForPanel(data.code || '', data.org || undefined);
+					this._lastLog = result.log || '';
+					this._post('execResult', { success: result.success, error: result.errorMessage || '', log: result.log || '', hasLog: !!(result.log && result.log.trim()) });
+					break;
+				}
+				case 'openExecLog':
+					if (this._lastLog.trim()) await this._openLogFile(`anon-apex-${Date.now()}.log`, this._lastLog);
+					break;
 			}
 		});
 
 		view.onDidDispose(() => { this._listener?.dispose(); this._listener = undefined; });
 	}
 
-	private _html(): string {
-		const initial = JSON.stringify({ highlightPatterns: getHighlightPatterns() })
-			.replace(/</g, '\\u003c')
-			.replace(/>/g, '\\u003e');
+	private async _openLogFile(name: string, text: string): Promise<void> {
+		try {
+			const dir = getSalesforceLogDirectory() || os.tmpdir();
+			if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+			const file = path.join(dir, name);
+			fs.writeFileSync(file, text, 'utf8');
+			const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+			await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active, preview: false });
+		} catch {
+			const doc = await vscode.workspace.openTextDocument({ content: text, language: 'salesforce-log' });
+			await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active, preview: false });
+		}
+	}
+
+	private _html(webview: vscode.Webview, initialCode: string): string {
+		const monacoBase = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'node_modules', 'monaco-editor', 'min', 'vs'));
+		const cspSource = webview.cspSource;
+		const data = JSON.stringify({ highlightPatterns: getHighlightPatterns(), code: initialCode || '' })
+			.replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
 		return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${cspSource} 'unsafe-eval' 'unsafe-inline'; style-src ${cspSource} 'unsafe-inline'; font-src ${cspSource}; img-src ${cspSource} data:; worker-src blob:; connect-src ${cspSource};">
 <style>
-	* { box-sizing: border-box; }
+	* { box-sizing:border-box; }
 	body { margin:0; padding:0; height:100vh; display:flex; flex-direction:column; color:var(--vscode-foreground);
 		background:var(--vscode-editor-background); font-family:var(--vscode-font-family); font-size:var(--vscode-font-size,13px); }
 	#bar { display:flex; align-items:center; gap:8px; padding:6px 8px; border-bottom:1px solid var(--vscode-panel-border, rgba(128,128,128,0.25)); flex-shrink:0; }
 	.lbl { font-size:11px; opacity:0.8; }
-	select { padding:3px 6px; font-size:12px; background:var(--vscode-input-background); color:var(--vscode-input-foreground);
-		border:1px solid var(--vscode-input-border, transparent); border-radius:4px; max-width:240px; }
-	button { font-size:11px; padding:3px 8px; border:none; border-radius:4px; cursor:pointer;
-		background:var(--vscode-button-secondaryBackground); color:var(--vscode-button-secondaryForeground); }
+	select { padding:3px 6px; font-size:12px; background:var(--vscode-input-background); color:var(--vscode-input-foreground); border:1px solid var(--vscode-input-border, transparent); border-radius:4px; max-width:230px; }
+	button { font-size:11px; padding:3px 8px; border:none; border-radius:4px; cursor:pointer; background:var(--vscode-button-secondaryBackground); color:var(--vscode-button-secondaryForeground); }
 	button:hover { background:var(--vscode-button-hoverBackground); }
-	button.active { background:var(--vscode-button-background); color:var(--vscode-button-foreground); }
-	#body { flex:1; display:flex; min-height:0; }
-	#list { width:240px; flex:0 0 240px; border-right:1px solid var(--vscode-panel-border, rgba(128,128,128,0.25)); overflow:auto; }
-	#list .row { padding:5px 8px; font-size:12px; cursor:pointer; border-bottom:1px solid var(--vscode-panel-border, rgba(128,128,128,0.12)); }
-	#list .row:hover { background:var(--vscode-list-hoverBackground); }
-	#list .row.sel { background:var(--vscode-list-activeSelectionBackground); color:var(--vscode-list-activeSelectionForeground); }
-	#list .meta { font-size:11px; opacity:0.75; font-family:var(--vscode-editor-font-family,monospace); }
-	#list .err { color:var(--vscode-errorForeground); }
-	#viewer { flex:1; display:flex; flex-direction:column; min-width:0; }
-	#vtools { display:flex; align-items:center; gap:6px; padding:5px 8px; border-bottom:1px solid var(--vscode-panel-border, rgba(128,128,128,0.2)); flex-shrink:0; }
-	#vtools input { flex:1; min-width:60px; height:26px; padding:2px 6px; font-size:11px;
-		background:var(--vscode-input-background); color:var(--vscode-input-foreground); border:1px solid var(--vscode-input-border, transparent); border-radius:4px; }
-	#vtools input.invalid { border-color:var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground)); }
-	#content { flex:1; margin:0; padding:8px; overflow:auto; white-space:pre-wrap; word-break:break-word;
-		font-family:var(--vscode-editor-font-family,monospace); font-size:12px; line-height:1.4; }
-	#content mark { background:var(--vscode-editor-findMatchHighlightBackground, rgba(234,92,0,0.4)); color:inherit; border-radius:2px; }
+	button.primary { background:var(--vscode-button-background); color:var(--vscode-button-foreground); }
+	.tabs { margin-left:auto; display:inline-flex; border:1px solid var(--vscode-input-border, transparent); border-radius:4px; overflow:hidden; }
+	.tab { padding:4px 12px; font-size:12px; cursor:pointer; color:var(--vscode-foreground); }
+	.tab.active { background:var(--vscode-button-background); color:var(--vscode-button-foreground); font-weight:500; }
+	.page { flex:1; min-height:0; display:none; }
+	.page.active { display:flex; }
+	/* logs */
+	#list { width:240px; flex:0 0 240px; border-right:1px solid var(--vscode-panel-border, rgba(128,128,128,0.25)); display:flex; flex-direction:column; }
+	#listRows { flex:1; overflow:auto; }
+	.row { padding:5px 8px; font-size:12px; cursor:pointer; border-bottom:1px solid var(--vscode-panel-border, rgba(128,128,128,0.12)); }
+	.row:hover { background:var(--vscode-list-hoverBackground); }
+	.row.sel { background:var(--vscode-list-activeSelectionBackground); color:var(--vscode-list-activeSelectionForeground); }
+	.meta { font-size:11px; opacity:0.75; font-family:var(--vscode-editor-font-family,monospace); }
+	.err { color:var(--vscode-errorForeground); }
+	#traces { border-top:1px solid var(--vscode-panel-border, rgba(128,128,128,0.25)); padding:6px 8px; font-size:11px; }
+	.viewer { flex:1; display:flex; flex-direction:column; min-width:0; }
+	.vtools { display:flex; align-items:center; gap:6px; padding:5px 8px; border-bottom:1px solid var(--vscode-panel-border, rgba(128,128,128,0.2)); flex-shrink:0; }
+	.vtools input { flex:1; min-width:50px; height:26px; padding:2px 6px; font-size:11px; background:var(--vscode-input-background); color:var(--vscode-input-foreground); border:1px solid var(--vscode-input-border, transparent); border-radius:4px; }
+	.vtools input.invalid { border-color:var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground)); }
+	.qf.active { background:var(--vscode-button-background); color:var(--vscode-button-foreground); }
+	.content { flex:1; margin:0; padding:8px; overflow:auto; white-space:pre-wrap; word-break:break-word; font-family:var(--vscode-editor-font-family,monospace); font-size:12px; line-height:1.4; }
+	.content mark { background:var(--vscode-editor-findMatchHighlightBackground, rgba(234,92,0,0.4)); color:inherit; border-radius:2px; }
+	.content.error { color:var(--vscode-errorForeground); }
 	.muted { opacity:0.6; }
+	/* execute */
+	#editor { flex:1 1 auto; min-width:120px; border:1px solid var(--vscode-input-border, transparent); border-radius:4px; overflow:hidden; }
+	#splitX { flex:0 0 8px; width:8px; cursor:col-resize; display:flex; justify-content:center; }
+	#splitX::before { content:''; display:block; height:100%; width:3px; border-radius:2px; background:var(--vscode-panel-border, rgba(128,128,128,0.3)); }
+	#execResults { flex:0 0 auto; width:45%; min-width:140px; display:flex; flex-direction:column; border:1px solid var(--vscode-input-border, transparent); border-radius:4px; overflow:hidden; }
+	#execPage { flex-direction:column; padding:6px; gap:6px; }
+	#execTop { flex:1; display:flex; min-height:0; }
+	#execActions { display:flex; gap:8px; flex-shrink:0; }
 </style></head>
 <body>
-<script type="application/json" id="wb-data">${initial}</script>
+<script type="application/json" id="wb-data">${data}</script>
 <div id="bar">
 	<span class="lbl">Org</span>
 	<select id="org"><option value="">Loading…</option></select>
-	<button id="refresh" title="Refresh log list">Refresh</button>
+	<button id="refresh" title="Refresh">Refresh</button>
+	<span class="tabs"><span class="tab active" data-t="logs">Logs</span><span class="tab" data-t="exec">Execute</span></span>
 </div>
-<div id="body">
-	<div id="list"><div class="muted" style="padding:8px;">Select an org to load logs.</div></div>
-	<div id="viewer">
-		<div id="vtools">
-			<button class="qf" data-f="debug" title="Toggle USER_DEBUG, exceptions and errors">Debug</button>
-			<button class="qf" data-f="soql" title="Toggle SOQL and DML">SOQL/DML</button>
-			<input id="filter" type="text" placeholder="Filter (regex)…" spellcheck="false" />
-			<button id="openEditor" title="Open this log in an editor">Open</button>
+
+<div id="page-logs" class="page active">
+	<div id="list">
+		<div id="listRows"><div class="muted" style="padding:8px;">Loading logs…</div></div>
+		<div id="traces"><span class="muted">Traces: —</span> <button id="quickTrace" title="Start a debug trace">Quick trace</button></div>
+	</div>
+	<div class="viewer">
+		<div class="vtools">
+			<button class="qf" data-pane="log" data-f="debug" title="Toggle USER_DEBUG, exceptions and errors">Debug</button>
+			<button class="qf" data-pane="log" data-f="soql" title="Toggle SOQL and DML">SOQL/DML</button>
+			<input data-pane="log" type="text" placeholder="Filter (regex)…" spellcheck="false" />
+			<button id="logOpen" title="Open this log in an editor">Open</button>
 		</div>
-		<pre id="content" class="muted">Select a log to view it.</pre>
+		<pre id="logContent" class="content muted">Select a log to view it.</pre>
 	</div>
 </div>
+
+<div id="page-exec" class="page" style="flex-direction:column; padding:6px; gap:6px;">
+	<div id="execTop">
+		<div id="editor"></div>
+		<div id="splitX"></div>
+		<div id="execResults">
+			<div class="vtools">
+				<span id="execTitle" style="font-size:11px; opacity:0.9; margin-right:auto;">Result</span>
+				<button class="qf" data-pane="exec" data-f="debug" title="Toggle USER_DEBUG, exceptions and errors">Debug</button>
+				<button class="qf" data-pane="exec" data-f="soql" title="Toggle SOQL and DML">SOQL/DML</button>
+				<input data-pane="exec" type="text" placeholder="Filter (regex)…" spellcheck="false" style="display:none;" />
+				<button id="execOpen" title="Open the debug log in an editor" style="display:none;">Open log</button>
+			</div>
+			<pre id="execContent" class="content muted">Run code to see the result and debug log here.</pre>
+		</div>
+	</div>
+	<div id="execActions"><button id="run" class="primary" title="Execute (Ctrl+Enter)">Execute</button><button id="openEditor">Open in editor</button><button id="clear">Clear</button></div>
+</div>
+
+<script src="${monacoBase}/loader.js"></script>
 <script>
 	const vscode = acquireVsCodeApi();
-	const orgSel = document.getElementById('org');
-	const listEl = document.getElementById('list');
-	const content = document.getElementById('content');
-	const filter = document.getElementById('filter');
-	const refreshBtn = document.getElementById('refresh');
-	const openEditorBtn = document.getElementById('openEditor');
-	let initial = { highlightPatterns: [] };
+	let initial = { highlightPatterns: [], code: '' };
 	try { initial = JSON.parse(document.getElementById('wb-data').textContent); } catch (e) {}
-	let rawLog = '', currentId = '';
-	const activeToggles = { debug:false, soql:false };
+	const orgSel = document.getElementById('org');
+	function orgVal(){ return (orgSel.value||'').trim(); }
 
 	const HL = (initial.highlightPatterns||[]).map(function(p){
 		let re=null; try{re=new RegExp(p.pattern,'i');}catch(e){}
 		let s=''; const fg=(p.foreground||'').replace(/[^#\\w(),.%\\s-]/g,'');
-		if(fg) s+='color:'+fg+';';
-		if(p.fontStyle&&p.fontStyle.indexOf('bold')>=0) s+='font-weight:bold;';
-		if(p.fontStyle&&p.fontStyle.indexOf('italic')>=0) s+='font-style:italic;';
+		if(fg) s+='color:'+fg+';'; if(p.fontStyle&&p.fontStyle.indexOf('bold')>=0) s+='font-weight:bold;'; if(p.fontStyle&&p.fontStyle.indexOf('italic')>=0) s+='font-style:italic;';
 		return {re:re, style:s};
 	}).filter(function(p){return p.re&&p.style;});
 	function lineStyle(line){ for(let i=0;i<HL.length;i++){HL[i].re.lastIndex=0; if(HL[i].re.test(line)) return HL[i].style;} return ''; }
 	function esc(s){ return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-	function hl(line, re){ if(!re) return esc(line); let o='',last=0,m; re.lastIndex=0;
-		while((m=re.exec(line))!==null){ o+=esc(line.slice(last,m.index))+'<mark>'+esc(m[0])+'</mark>'; last=m.index+m[0].length; if(m.index===re.lastIndex) re.lastIndex++; }
-		return o+esc(line.slice(last)); }
+	function hl(line,re){ if(!re) return esc(line); let o='',last=0,m; re.lastIndex=0; while((m=re.exec(line))!==null){ o+=esc(line.slice(last,m.index))+'<mark>'+esc(m[0])+'</mark>'; last=m.index+m[0].length; if(m.index===re.lastIndex) re.lastIndex++; } return o+esc(line.slice(last)); }
 	const EVENT=/^\\d{2}:\\d{2}:\\d{2}\\./;
-	function applyToggles(lines){ if(!activeToggles.debug&&!activeToggles.soql) return lines; const out=[]; let keep=false;
-		for(let i=0;i<lines.length;i++){ const l=lines[i];
-			if(EVENT.test(l)){ let m=false;
-				if(activeToggles.debug&&(l.indexOf('|USER_DEBUG|')>=0||l.indexOf('FATAL_ERROR')>=0||l.indexOf('EXCEPTION_THROWN')>=0||l.indexOf('|ERROR|')>=0)) m=true;
-				if(!m&&activeToggles.soql&&(l.indexOf('|SOQL_EXECUTE')>=0||l.indexOf('|DML_')>=0)) m=true;
-				keep=m; if(m) out.push(l);
-			} else if(keep) out.push(l);
-		} return out; }
-	function render(){ content.classList.remove('muted');
-		const q=(filter.value||'').trim(); let re=null;
-		if(q){ try{re=new RegExp(q,'gi'); filter.classList.remove('invalid');}catch(e){filter.classList.add('invalid'); re=null;} } else filter.classList.remove('invalid');
-		const lines=applyToggles(rawLog.split('\\n')); const out=[];
-		for(let i=0;i<lines.length;i++){ const l=lines[i]; if(re){re.lastIndex=0; if(!re.test(l)) continue;}
-			const inner=hl(l,re); const st=lineStyle(l); out.push(st?'<span style="'+st+'">'+inner+'</span>':inner); }
-		content.innerHTML=out.length?out.join('\\n'):'<span class="muted">No matching lines.</span>'; }
 
-	function fmtTime(s){ try{ const d=new Date(s); return isNaN(d)?s:d.toLocaleTimeString(); }catch(e){return s;} }
-	function fmtSize(n){ if(!n) return ''; if(n<1024) return n+' B'; if(n<1048576) return Math.round(n/1024)+' KB'; return (n/1048576).toFixed(1)+' MB'; }
-	function renderList(rows){
-		if(!rows||!rows.length){ listEl.innerHTML='<div class="muted" style="padding:8px;">No logs for this org.</div>'; return; }
-		listEl.innerHTML = rows.map(function(r){
-			const err = r.status && r.status.toLowerCase()!=='success';
-			return '<div class="row" data-id="'+r.id+'">'+fmtTime(r.startTime)+
-				'<div class="meta'+(err?' err':'')+'">'+esc((r.operation||'')+' · '+(r.status||''))+' · '+fmtSize(r.length)+'</div></div>';
-		}).join('');
-		Array.prototype.forEach.call(listEl.querySelectorAll('.row'), function(el){
-			el.onclick=function(){ selectRow(el); vscode.postMessage({type:'openLog', org:orgVal(), id:el.getAttribute('data-id')}); };
-		});
+	// A reusable log viewer bound to a content <pre>, a filter input and its toggle buttons.
+	function makeViewer(contentEl, filterEl){
+		const toggles={debug:false,soql:false}; let raw='';
+		function applyToggles(lines){ if(!toggles.debug&&!toggles.soql) return lines; const out=[]; let keep=false;
+			for(let i=0;i<lines.length;i++){ const l=lines[i];
+				if(EVENT.test(l)){ let m=false;
+					if(toggles.debug&&(l.indexOf('|USER_DEBUG|')>=0||l.indexOf('FATAL_ERROR')>=0||l.indexOf('EXCEPTION_THROWN')>=0||l.indexOf('|ERROR|')>=0)) m=true;
+					if(!m&&toggles.soql&&(l.indexOf('|SOQL_EXECUTE')>=0||l.indexOf('|DML_')>=0)) m=true;
+					keep=m; if(m) out.push(l);
+				} else if(keep) out.push(l);
+			} return out; }
+		function render(){ contentEl.classList.remove('error','muted');
+			const q=(filterEl.value||'').trim(); let re=null;
+			if(q){ try{re=new RegExp(q,'gi'); filterEl.classList.remove('invalid');}catch(e){filterEl.classList.add('invalid'); re=null;} } else filterEl.classList.remove('invalid');
+			const lines=applyToggles(raw.split('\\n')); const out=[];
+			for(let i=0;i<lines.length;i++){ const l=lines[i]; if(re){re.lastIndex=0; if(!re.test(l)) continue;} const inner=hl(l,re); const st=lineStyle(l); out.push(st?'<span style="'+st+'">'+inner+'</span>':inner); }
+			contentEl.innerHTML=out.length?out.join('\\n'):'<span class="muted">No matching lines.</span>'; }
+		filterEl.addEventListener('input', render);
+		return { setLog:function(t){ raw=t||''; render(); contentEl.scrollTop=0; }, render:render, toggles:toggles,
+			setText:function(t,muted){ raw=''; contentEl.classList.toggle('muted',!!muted); contentEl.classList.remove('error'); contentEl.textContent=t||''; },
+			setError:function(t){ raw=''; contentEl.classList.remove('muted'); contentEl.classList.add('error'); contentEl.textContent=t||''; } };
 	}
-	function selectRow(el){ Array.prototype.forEach.call(listEl.querySelectorAll('.row'),function(r){r.classList.remove('sel');}); el.classList.add('sel'); currentId=el.getAttribute('data-id'); }
-	function orgVal(){ return (orgSel.value||'').trim(); }
-	function loadLogs(){ listEl.innerHTML='<div class="muted" style="padding:8px;">Loading…</div>'; vscode.postMessage({type:'listLogs', org:orgVal()}); }
+	const logView = makeViewer(document.getElementById('logContent'), document.querySelector('input[data-pane="log"]'));
+	const execView = makeViewer(document.getElementById('execContent'), document.querySelector('input[data-pane="exec"]'));
+	Array.prototype.forEach.call(document.querySelectorAll('.qf'), function(b){ b.onclick=function(){ const v=b.getAttribute('data-pane')==='log'?logView:execView; const f=b.getAttribute('data-f'); v.toggles[f]=!v.toggles[f]; b.classList.toggle('active',v.toggles[f]); v.render(); }; });
 
+	// ── tabs ──────────────────────────────────────────────────────────────────
+	function setTab(t){ Array.prototype.forEach.call(document.querySelectorAll('.tab'),function(el){el.classList.toggle('active',el.getAttribute('data-t')===t);});
+		document.getElementById('page-logs').classList.toggle('active', t==='logs');
+		document.getElementById('page-exec').classList.toggle('active', t==='exec'); }
+	Array.prototype.forEach.call(document.querySelectorAll('.tab'), function(el){ el.onclick=function(){ setTab(el.getAttribute('data-t')); }; });
+
+	// ── logs ──────────────────────────────────────────────────────────────────
+	const listRows=document.getElementById('listRows'); let currentId='';
+	function fmtTime(s){ try{const d=new Date(s); return isNaN(d)?s:d.toLocaleTimeString();}catch(e){return s;} }
+	function fmtSize(n){ if(!n) return ''; if(n<1024) return n+' B'; if(n<1048576) return Math.round(n/1024)+' KB'; return (n/1048576).toFixed(1)+' MB'; }
+	function renderList(rows){ if(!rows||!rows.length){ listRows.innerHTML='<div class="muted" style="padding:8px;">No logs.</div>'; return; }
+		listRows.innerHTML=rows.map(function(r){ const err=r.status&&r.status.toLowerCase()!=='success';
+			return '<div class="row" data-id="'+r.id+'">'+fmtTime(r.startTime)+'<div class="meta'+(err?' err':'')+'">'+esc((r.operation||'')+' · '+(r.status||''))+' · '+fmtSize(r.length)+'</div></div>'; }).join('');
+		Array.prototype.forEach.call(listRows.querySelectorAll('.row'), function(el){ el.onclick=function(){
+			Array.prototype.forEach.call(listRows.querySelectorAll('.row'),function(r){r.classList.remove('sel');}); el.classList.add('sel');
+			currentId=el.getAttribute('data-id'); logView.setText('Loading log…', true); vscode.postMessage({type:'openLog', org:orgVal(), id:currentId}); }; }); }
+	function loadLogs(){ listRows.innerHTML='<div class="muted" style="padding:8px;">Loading…</div>'; vscode.postMessage({type:'listLogs', org:orgVal()}); vscode.postMessage({type:'listTraces', org:orgVal()}); }
+	document.getElementById('logOpen').onclick=function(){ if(currentId) vscode.postMessage({type:'openLogInEditor', org:orgVal(), id:currentId}); };
+	document.getElementById('quickTrace').onclick=function(){ vscode.postMessage({type:'quickTrace', org:orgVal()}); };
+	document.getElementById('refresh').onclick=loadLogs;
+
+	// ── execute editor ─────────────────────────────────────────────────────────
+	let editor=null, saveTimer=null, reqId=0; const pending={};
+	function mapKind(k){ const M=monaco.languages.CompletionItemKind; const T={0:M.Text,1:M.Method,2:M.Function,3:M.Constructor,4:M.Field,5:M.Variable,6:M.Class,7:M.Interface,8:M.Module,9:M.Property,10:M.Unit,11:M.Value,12:M.Enum,13:M.Keyword,14:M.Snippet,15:M.Color,16:M.File,17:M.Reference,18:M.Folder,19:M.EnumMember,20:M.Constant,21:M.Struct,22:M.Event,23:M.Operator,24:M.TypeParameter}; return T[k]!=null?T[k]:M.Text; }
+	require.config({ paths:{ vs:'${monacoBase}' } });
+	self.MonacoEnvironment={ getWorkerUrl:function(){ return URL.createObjectURL(new Blob(["self.MonacoEnvironment={baseUrl:'"+'${monacoBase}'+"/'};importScripts('"+'${monacoBase}'+"/base/worker/workerMain.js');"],{type:'text/javascript'})); } };
+	require(['vs/editor/editor.main'], function(){
+		monaco.languages.register({ id:'apex' });
+		monaco.languages.setMonarchTokensProvider('apex', { ignoreCase:true,
+			keywords:['abstract','after','before','break','catch','class','continue','delete','do','else','enum','extends','final','finally','for','get','global','if','implements','insert','instanceof','interface','merge','new','null','on','override','private','protected','public','return','set','static','super','switch','testmethod','this','throw','transient','trigger','try','undelete','update','upsert','virtual','void','webservice','when','while','with','without','sharing','true','false','select','from','where','limit','order','by','group','having','and','or','not','like','in'],
+			typeKeywords:['Boolean','Date','Datetime','Decimal','Double','Id','Integer','Long','Object','String','Blob','Time','List','Map','Set','SObject','Account','Contact','System','Database','Test','Schema','Limits'],
+			tokenizer:{ root:[[/\\/\\/.*$/,'comment'],[/\\/\\*/,'comment','@comment'],[/'(?:[^'\\\\]|\\\\.)*'/,'string'],[/@[a-zA-Z_][\\w]*/,'annotation'],[/\\[/,'string.soql','@soql'],[/\\b\\d+(\\.\\d+)?\\b/,'number'],[/[a-zA-Z_][\\w]*/,{cases:{'@keywords':'keyword','@typeKeywords':'type','@default':'identifier'}}]],
+				comment:[[/[^*/]+/,'comment'],[/\\*\\//,'comment','@pop'],[/[*/]/,'comment']],
+				soql:[[/'(?:[^'\\\\]|\\\\.)*'/,'string'],[/\\]/,'string.soql','@pop'],[/[a-zA-Z_][\\w]*/,{cases:{'@keywords':'keyword','@default':'identifier'}}],[/./,'string.soql']] } });
+		monaco.languages.setLanguageConfiguration('apex',{ comments:{lineComment:'//',blockComment:['/*','*/']}, brackets:[['{','}'],['[',']'],['(',')']], autoClosingPairs:[{open:'{',close:'}'},{open:'[',close:']'},{open:'(',close:')'},{open:"'",close:"'"}] });
+		monaco.languages.registerHoverProvider('apex',{ provideHover:function(model,pos){ return new Promise(function(resolve){ const id=++reqId; pending[id]=function(h){ if(!h||!h.contents||!h.contents.length){resolve(null);return;} const w=model.getWordAtPosition(pos); const range=w?{startLineNumber:pos.lineNumber,endLineNumber:pos.lineNumber,startColumn:w.startColumn,endColumn:w.endColumn}:undefined; resolve({range:range,contents:h.contents.map(function(v){return{value:v};})}); }; vscode.postMessage({type:'getHover',requestId:id,text:model.getValue(),line:pos.lineNumber-1,character:pos.column-1}); }); } });
+		monaco.languages.registerCompletionItemProvider('apex',{ triggerCharacters:['.',' ','(',',','_'], provideCompletionItems:function(model,pos){ return new Promise(function(resolve){ const id=++reqId; pending[id]=function(items){ const w=model.getWordUntilPosition(pos); const range={startLineNumber:pos.lineNumber,endLineNumber:pos.lineNumber,startColumn:w.startColumn,endColumn:w.endColumn}; resolve({suggestions:items.map(function(it){ return {label:it.label,kind:mapKind(it.kind),insertText:it.insertText||it.label,insertTextRules:it.isSnippet?monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet:undefined,detail:it.detail,documentation:it.documentation?{value:it.documentation}:undefined,sortText:it.sortText,filterText:it.filterText,range:range}; })}); }; vscode.postMessage({type:'getCompletions',requestId:id,text:model.getValue(),line:pos.lineNumber-1,character:pos.column-1}); }); } });
+		const dark=document.body.classList.contains('vscode-dark')||document.body.classList.contains('vscode-high-contrast');
+		editor=monaco.editor.create(document.getElementById('editor'),{ value:initial.code||'', language:'apex', theme:dark?'vs-dark':'vs', automaticLayout:true, minimap:{enabled:false}, scrollBeyondLastLine:false, fontSize:13, tabSize:4, quickSuggestions:true, fixedOverflowWidgets:true });
+		editor.onDidChangeModelContent(function(){ if(saveTimer) clearTimeout(saveTimer); saveTimer=setTimeout(function(){ vscode.postMessage({type:'contentChanged',code:editor.getValue()}); },500); });
+		editor.onMouseDown(function(e){ if((e.event.ctrlKey||e.event.metaKey)&&e.target&&e.target.position){ const p=e.target.position; vscode.postMessage({type:'gotoDefinition',text:editor.getValue(),line:p.lineNumber-1,character:p.column-1}); } });
+		editor.addCommand(monaco.KeyMod.CtrlCmd|monaco.KeyCode.Enter, doRun);
+	});
+	function flush(){ if(!editor) return; if(saveTimer){clearTimeout(saveTimer);saveTimer=null;} vscode.postMessage({type:'contentChanged',code:editor.getValue()}); }
+	window.addEventListener('blur', flush);
+	function doRun(){ vscode.postMessage({type:'execute', code:editor?editor.getValue():'', org:orgVal()||undefined}); }
+	document.getElementById('run').onclick=doRun;
+	document.getElementById('openEditor').onclick=function(){ vscode.postMessage({type:'openInEditor', code:editor?editor.getValue():''}); };
+	document.getElementById('clear').onclick=function(){ if(editor){editor.setValue('');editor.focus();} vscode.postMessage({type:'contentChanged',code:''}); };
+	const execTitle=document.getElementById('execTitle'); const execFilter=document.querySelector('input[data-pane="exec"]'); const execOpen=document.getElementById('execOpen');
+	execOpen.onclick=function(){ vscode.postMessage({type:'openExecLog'}); };
+
+	// ── execute results splitter ────────────────────────────────────────────────
+	(function(){ const sp=document.getElementById('splitX'); const pane=document.getElementById('execResults'); let drag=false,sx=0,sw=0;
+		sp.addEventListener('mousedown',function(e){ drag=true; sx=e.clientX; sw=pane.getBoundingClientRect().width; document.body.style.cursor='col-resize'; document.body.style.userSelect='none'; e.preventDefault(); });
+		window.addEventListener('mousemove',function(e){ if(!drag) return; const max=Math.max(140,window.innerWidth-160); pane.style.width=Math.min(max,Math.max(140,sw+(sx-e.clientX)))+'px'; });
+		window.addEventListener('mouseup',function(){ drag=false; document.body.style.cursor=''; document.body.style.userSelect=''; }); })();
+
+	// ── messages ────────────────────────────────────────────────────────────────
 	window.addEventListener('message', function(e){ const d=e.data; if(!d) return;
 		if(d.type==='orgList'){ const orgs=d.orgs||[];
-			orgSel.innerHTML = orgs.length ? orgs.map(function(o){ const def=(o.label||'').indexOf('(default)')>=0; const v=def?'':(o.username||'');
-				return '<option value="'+v.replace(/"/g,'&quot;')+'">'+(o.label||o.username||'').replace(/</g,'&lt;')+'</option>'; }).join('') : '<option value="">No orgs</option>';
-			vscode.postMessage({type:'warmOrg', org:orgVal()}); loadLogs();
-		} else if(d.type==='logList'){ if((d.org||'')===orgVal()) renderList(d.rows||[]); }
-		else if(d.type==='logLoading'){ if(d.id===currentId){ rawLog=''; content.classList.add('muted'); content.textContent='Loading log…'; } }
-		else if(d.type==='logBody'){ if(d.id===currentId){ rawLog=d.text||''; render(); content.scrollTop=0; } }
+			orgSel.innerHTML=orgs.length?orgs.map(function(o){ const def=(o.label||'').indexOf('(default)')>=0; const v=def?'':(o.username||''); return '<option value="'+v.replace(/"/g,'&quot;')+'">'+(o.label||o.username||'').replace(/</g,'&lt;')+'</option>'; }).join(''):'<option value="">No orgs</option>';
+			vscode.postMessage({type:'warmOrg', org:orgVal()}); loadLogs(); }
+		else if(d.type==='logList'){ if((d.org||'')===orgVal()) renderList(d.rows||[]); }
+		else if(d.type==='logLoading'){ if(d.id===currentId) logView.setText('Loading log…', true); }
+		else if(d.type==='logBody'){ if(d.id===currentId) logView.setLog(d.text||''); }
+		else if(d.type==='traceInfo'){ const t=document.getElementById('traces'); const span=t.querySelector('span'); span.className=d.count>0?'':'muted'; span.textContent= d.count>0 ? ('Traces: '+d.count+' active') : 'Traces: none'; }
+		else if(d.type==='execStarted'){ execTitle.textContent='Running…'; execOpen.style.display='none'; execFilter.style.display='none'; execView.setText('Executing…', true); }
+		else if(d.type==='execResult'){
+			if(!d.success){ execTitle.textContent='Error'; execOpen.style.display='none'; execFilter.style.display='none'; execView.setError(d.error||'Execution failed.'); }
+			else if(d.hasLog){ execTitle.textContent='Debug log'; execOpen.style.display='inline-block'; execFilter.style.display='inline-block'; execView.setLog(d.log||''); }
+			else { execTitle.textContent='Result'; execOpen.style.display='none'; execFilter.style.display='none'; execView.setText('Executed successfully.', true); } }
 	});
-
-	orgSel.addEventListener('change', function(){ vscode.postMessage({type:'warmOrg', org:orgVal()}); loadLogs(); });
-	refreshBtn.onclick=loadLogs;
-	filter.addEventListener('input', render);
-	openEditorBtn.onclick=function(){ if(currentId) vscode.postMessage({type:'openInEditor', org:orgVal(), id:currentId}); };
-	Array.prototype.forEach.call(document.querySelectorAll('.qf'), function(b){ b.onclick=function(){ const f=b.getAttribute('data-f'); activeToggles[f]=!activeToggles[f]; b.classList.toggle('active',activeToggles[f]); render(); }; });
-
 	vscode.postMessage({type:'getOrgs'});
 </script>
 </body></html>`;
