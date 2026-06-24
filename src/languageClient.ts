@@ -66,8 +66,13 @@ export function startLanguageServer(context: vscode.ExtensionContext): void {
 		documentSelector: [
 			{ scheme: "file", language: "soql" },
 			{ scheme: "file", pattern: "**/*.soql" },
-			// Apex files: the server completes only inside inline [SELECT …] queries.
+			// Apex files: inline [SELECT …] queries + org-aware completion.
 			{ scheme: "file", language: "apex" },
+			// Anonymous Apex (.apex) — the Salesforce extension registers these as
+			// the `apex-anon` language, and the Execute Apex panel's hidden buffer is
+			// a `.apex` file; match both so completion works there too.
+			{ scheme: "file", language: "apex-anon" },
+			{ scheme: "file", pattern: "**/*.apex" },
 			{ scheme: "file", pattern: "**/*.cls" },
 			{ scheme: "file", pattern: "**/*.trigger" },
 		],

@@ -249,6 +249,24 @@ describe("Apex language features", () => {
     assert.ok(labels.includes("Name") && labels.includes("acme__Amount__c"));
   });
 
+  it("completes Salesforce standard-library types and namespaces in a statement position", async () => {
+    const src = "public class C {\n  void m() {\n    Sys\n  }\n}\n";
+    const labels = labelsOf(await complete(src, 2, 7, "apex"));
+    assert.ok(labels.includes("System"), "expected System among bare-identifier completions");
+  });
+
+  it("completes static members of a standard namespace (System.debug)", async () => {
+    const src = "public class C {\n  void m() {\n    System.\n  }\n}\n";
+    const labels = labelsOf(await complete(src, 2, 11, "apex"));
+    assert.ok(labels.includes("debug") && labels.includes("assertEquals"));
+  });
+
+  it("offers Database static methods after the namespace dot", async () => {
+    const src = "public class C {\n  void m() {\n    Database.\n  }\n}\n";
+    const labels = labelsOf(await complete(src, 2, 13, "apex"));
+    assert.ok(labels.includes("query") && labels.includes("insert"));
+  });
+
   it("go-to-definition lands on in-file declarations", async () => {
     const uri = `file:///tmp/Def${version++}.cls`;
     const src = "public class C {\n  Integer total;\n  void m() { total = 1; }\n}\n";

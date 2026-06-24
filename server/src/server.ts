@@ -30,6 +30,7 @@ import { completionsFor } from '@salesforce/soql-language-server/lib/completion'
 import { parseApex, enclosingClass, ApexParseResult, ApexMember } from './apexSymbols';
 import { WorkspaceIndex } from './workspaceIndex';
 import { getStub, setStubRoot, clearStubs } from './sobjectStub';
+import { STD_TYPES, stdTypeName, stdMembersFor, StdMember } from './apexStdlib';
 
 // ─── Custom request contract with the host (see src/languageClient.ts) ──────────
 // Server → host. Host answers from OrgMetadataCache / SchemaCache for the active org.
@@ -560,7 +561,21 @@ connection.onCompletion(async (params) => {
             if (ctor.length) return ctor;
             const member = await apexMemberCompletion(doc, offset, params.position);
             if (member.length) return member;
-            return apexTypeCompletion(doc, offset);
+            // Bare identifier position: SObject types + workspace user classes +
+            // Salesforce standard-library types/namespaces.
+            const out: CompletionItem[] = [];
+            const seen = new Set<string>();
+            for (const it of await apexTypeCompletion(doc, offset)) {
+                if (seen.has(String(it.label))) continue;
+                seen.add(String(it.label));
+                out.push(it);
+            }
+            for (const it of apexGlobalCompletion(doc, offset)) {
+                if (seen.has(String(it.label))) continue;
+                seen.add(String(it.label));
+                out.push(it);
+            }
+            return out;
         }
     }
 
@@ -746,8 +761,12 @@ async function apexMemberCompletion(
 
     let items: CompletionItem[] = [];
     const userMembers = index.types.get(base);
+    const stdMembers = stdMembersFor(base);
     if (userMembers && userMembers.length) {
         items = userMembers.map((m) => memberItem(base, m));
+    } else if (stdMembers) {
+        // Static members of a Salesforce built-in namespace/type (System.debug…).
+        items = stdMembers.map((m) => stdMemberItem(stdTypeName(base) ?? base, m));
     } else {
         const d = await describe(doc.uri, base);
         if (d) items = d.fields.map((f) => fieldItem(base, f));
@@ -791,6 +810,75 @@ async function apexTypeCompletion(doc: TextDocument, offset: number): Promise<Co
         ),
     );
     return sfxTag(applyNamespace(items, ns));
+}
+
+// A static member of a Salesforce built-in (e.g. `System.debug`).
+function stdMemberItem(owner: string, m: StdMember): CompletionItem {
+    const isMethod = m.kind === 'method';
+    return withSchemaDoc(
+        {
+            label: m.name,
+            kind: isMethod ? CompletionItemKind.Method : CompletionItemKind.Field,
+            insertText: isMethod ? `${m.name}($0)` : m.name,
+            insertTextFormat: isMethod ? InsertTextFormat.Snippet : InsertTextFormat.PlainText,
+            labelDetails: { detail: m.detail.replace(/^\S+\s+\S+/, '').trim() || undefined, description: owner },
+            sortText: '0_' + m.name,
+        },
+        ['`' + owner + '.' + m.detail + '`'],
+    );
+}
+
+/**
+ * Bare-identifier completion in Apex statement positions: workspace user classes
+ * (so `MyService` completes) and Salesforce standard-library types/namespaces
+ * (`System`, `Database`, `Math`, …). Skipped after a `.` (member access) and after
+ * `new ` (handled by the constructor path). Deprioritized below locals/keywords.
+ */
+function apexGlobalCompletion(doc: TextDocument, offset: number): CompletionItem[] {
+    const full = doc.getText();
+    const lineStart = full.lastIndexOf('\n', offset - 1) + 1;
+    const lineUpToCursor = full.slice(lineStart, offset);
+    const m = /([A-Za-z_]\w*)$/.exec(lineUpToCursor);
+    if (!m) return [];
+    const before = lineUpToCursor.slice(0, m.index).trimEnd();
+    if (before.endsWith('.') || /\bnew$/.test(before)) return [];
+    const partial = m[1].toLowerCase();
+
+    const items: CompletionItem[] = [];
+
+    // Workspace user classes/triggers.
+    for (const name of WorkspaceIndex.allTypeNames()) {
+        if (partial && !name.toLowerCase().startsWith(partial)) continue;
+        items.push(
+            withSchemaDoc(
+                {
+                    label: name,
+                    kind: CompletionItemKind.Class,
+                    labelDetails: { description: 'Apex class' },
+                    sortText: '3_' + name,
+                },
+                ['`' + name + '` — Apex class'],
+            ),
+        );
+    }
+
+    // Salesforce standard library types & namespaces.
+    for (const name of STD_TYPES) {
+        if (partial && !name.toLowerCase().startsWith(partial)) continue;
+        items.push(
+            withSchemaDoc(
+                {
+                    label: name,
+                    kind: CompletionItemKind.Class,
+                    labelDetails: { description: 'System' },
+                    sortText: '4_' + name,
+                },
+                ['`' + name + '` — Salesforce system type'],
+            ),
+        );
+    }
+
+    return sfxTag(items);
 }
 
 // ─── Apex outline + syntax diagnostics (gated) ──────────────────────────────────

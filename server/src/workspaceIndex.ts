@@ -18,11 +18,13 @@ const MAX_FILES = 20000; // basename→path entries are tiny; cap only as a back
 class WorkspaceIndexImpl {
     private roots: string[] = [];
     private files = new Map<string, string>(); // lower-cased type name → file path
+    private names = new Map<string, string>(); // lower-cased → original-cased type name
     private scanned = false;
 
     setRoots(roots: string[]): void {
         this.roots = roots;
         this.files.clear();
+        this.names.clear();
         this.scanned = false;
     }
 
@@ -32,9 +34,16 @@ class WorkspaceIndexImpl {
             const file = fileURLToPath(uri);
             const base = path.basename(file).replace(/\.(cls|trigger)$/i, '');
             this.files.set(base.toLowerCase(), file);
+            this.names.set(base.toLowerCase(), base);
         } catch {
             /* ignore */
         }
+    }
+
+    /** All known top-level Apex type (class/trigger) names, original-cased. */
+    allTypeNames(): string[] {
+        if (!this.scanned) this.scan();
+        return [...this.names.values()];
     }
 
     findType(name: string): Location | undefined {
@@ -74,6 +83,7 @@ class WorkspaceIndexImpl {
                     const m = /^(.*)\.(cls|trigger)$/i.exec(e.name);
                     if (m) {
                         this.files.set(m[1].toLowerCase(), full);
+                        this.names.set(m[1].toLowerCase(), m[1]);
                         count++;
                     }
                 }
