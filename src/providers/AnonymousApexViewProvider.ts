@@ -320,11 +320,11 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 							const file = path.join(dir, `anon-apex-${Date.now()}.log`);
 							fs.writeFileSync(file, this._lastLog, 'utf8');
 							const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
-							await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Beside, preview: false });
+							await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active, preview: false });
 						} catch {
 							// Fallback: open as an in-memory salesforce-log document.
 							const doc = await vscode.workspace.openTextDocument({ content: this._lastLog, language: 'salesforce-log' });
-							await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Beside, preview: false });
+							await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Active, preview: false });
 						}
 					}
 					break;
