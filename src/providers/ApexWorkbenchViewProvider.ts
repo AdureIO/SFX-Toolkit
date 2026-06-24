@@ -7,10 +7,28 @@ import { listApexLogs, fetchApexLogBody, fetchApexLogHead, listActiveTraceFlags,
 import { getHighlightPatterns } from '../utils/apexLogHighlight';
 import { getSalesforceLogDirectory } from '../utils/logPaths';
 import { AuthInfo } from '../utils/authInfo';
+import { getToolingApiVersion } from '../utils/constants';
 import { isSalesforceProject } from '../utils/projectUtils';
 import { ApexBufferBridge } from './apexBufferBridge';
 
 const WORKBENCH_BUFFER = '.vscode/anon-workbench-buffer.apex';
+const SOQL_BUFFER = '.vscode/workbench-soql-buffer.soql';
+
+/** Flatten a query record to dotted columns (relationship objects recurse; subqueries → count). */
+function flattenRecord(rec: any, prefix = '', out: Record<string, string> = {}): Record<string, string> {
+	for (const key of Object.keys(rec || {})) {
+		if (key === 'attributes') continue;
+		const val = rec[key];
+		const col = prefix + key;
+		if (val === null || val === undefined) out[col] = '';
+		else if (Array.isArray(val)) out[col] = `[${val.length}]`;
+		else if (typeof val === 'object') {
+			if (val.attributes) flattenRecord(val, col + '.', out);
+			else out[col] = JSON.stringify(val);
+		} else out[col] = String(val);
+	}
+	return out;
+}
 const ASFX_DIR = '.sfdx/asfx';
 const HISTORY_FILE = 'workbench-apex-history.json';
 const HISTORY_MAX = 10;
@@ -28,6 +46,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	private _listener?: vscode.Disposable;
 	private _lastLog = '';
 	private readonly _bridge = new ApexBufferBridge(WORKBENCH_BUFFER);
+	private readonly _soqlBridge = new ApexBufferBridge(SOQL_BUFFER);
 	/** Cache of fetched log bodies (id → { text, unit }) so re-opening is instant. */
 	private readonly _bodyCache = new Map<string, { text: string; unit: string | null }>();
 	/** Cache of parsed entry-point code units (id → unit) for the list. */
@@ -80,7 +99,8 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 			],
 		};
 		const initialCode = await this._bridge.readBuffer();
-		view.webview.html = this._html(view.webview, initialCode);
+		const initialSoql = await this._soqlBridge.readBuffer();
+		view.webview.html = this._html(view.webview, initialCode, initialSoql);
 
 		this._listener?.dispose();
 		this._listener = view.webview.onDidReceiveMessage(async (data: any) => {
@@ -172,6 +192,24 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 				case 'openExecLog':
 					if (this._lastLog.trim()) await this._openLogFile(`anon-apex-${Date.now()}.log`, this._lastLog);
 					break;
+				// ── SOQL tab (editor bridge + run) ───────────────────────────────────
+				case 'getSoqlCompletions':
+					this._post('completionResult', { requestId: data.requestId, items: await this._soqlBridge.completions(data.text || '', data.line || 0, data.character || 0) });
+					break;
+				case 'getSoqlHover':
+					this._post('hoverResult', { requestId: data.requestId, hover: await this._soqlBridge.hover(data.text || '', data.line || 0, data.character || 0) });
+					break;
+				case 'soqlChanged':
+					if (typeof data.query === 'string') await this._soqlBridge.update(data.query);
+					break;
+				case 'runSoql': {
+					this._post('soqlStarted', {});
+					this._post('soqlResult', await this._runSoql(data.org || null, data.query || ''));
+					break;
+				}
+				case 'openSoqlWorkbench':
+					await vscode.commands.executeCommand('adure-sfx-toolkit.openSOQLEditor', typeof data.query === 'string' ? data.query : undefined);
+					break;
 			}
 		});
 
@@ -198,6 +236,32 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 		}
 	}
 
+	/** Run a SOQL query against `org` and flatten the records into columns + rows. */
+	private async _runSoql(org: string | null, query: string): Promise<Record<string, unknown>> {
+		if (!query.trim()) return { error: 'Enter a query.' };
+		const version = getToolingApiVersion();
+		try {
+			const { body } = await AuthInfo.get(org, (a) =>
+				`${a.instanceUrl.replace(/\/$/, "")}/services/data/${version}/query?q=${encodeURIComponent(query)}`
+			);
+			const data = JSON.parse(body);
+			const records: any[] = data.records ?? [];
+			const columns: string[] = [];
+			const seen = new Set<string>();
+			const rows = records.slice(0, 2000).map((r) => {
+				const flat = flattenRecord(r);
+				for (const k of Object.keys(flat)) if (!seen.has(k)) { seen.add(k); columns.push(k); }
+				return flat;
+			});
+			return { columns, rows, total: data.totalSize ?? rows.length, returned: rows.length, done: data.done !== false };
+		} catch (e: any) {
+			let msg = e?.message ?? String(e);
+			const m = /HTTP \d+: (.+)$/s.exec(msg);
+			if (m) { try { const j = JSON.parse(m[1]); msg = Array.isArray(j) ? j.map((x) => x.message || x.errorCode).join('; ') : (j.message || m[1]); } catch { msg = m[1]; } }
+			return { error: msg };
+		}
+	}
+
 	private async _openLogFile(name: string, text: string): Promise<void> {
 		try {
 			const dir = getSalesforceLogDirectory() || os.tmpdir();
@@ -212,11 +276,11 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 		}
 	}
 
-	private _html(webview: vscode.Webview, initialCode: string): string {
+	private _html(webview: vscode.Webview, initialCode: string, initialSoql: string): string {
 		const monacoBase = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'node_modules', 'monaco-editor', 'min', 'vs'));
 		const cspSource = webview.cspSource;
 		const pollSeconds = vscode.workspace.getConfiguration('adure-sfx-toolkit').get<number>('pollingIntervalSeconds', 5);
-		const data = JSON.stringify({ highlightPatterns: getHighlightPatterns(), code: initialCode || '', pollSeconds, history: this._loadHistory() })
+		const data = JSON.stringify({ highlightPatterns: getHighlightPatterns(), code: initialCode || '', soql: initialSoql || '', pollSeconds, history: this._loadHistory() })
 			.replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
 		return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
@@ -265,6 +329,12 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	.content mark { background:var(--vscode-editor-findMatchHighlightBackground, rgba(234,92,0,0.4)); color:inherit; border-radius:2px; }
 	.content.error { color:var(--vscode-errorForeground); }
 	.muted { opacity:0.6; }
+	/* soql results table */
+	#soqlResults table { border-collapse:collapse; width:100%; font-size:12px; }
+	#soqlResults th, #soqlResults td { border:1px solid var(--vscode-panel-border, rgba(128,128,128,0.25)); padding:3px 8px; text-align:left; white-space:nowrap; vertical-align:top; max-width:360px; overflow:hidden; text-overflow:ellipsis; }
+	#soqlResults th { position:sticky; top:0; background:var(--vscode-editor-background); z-index:1; }
+	#soqlResults tr:nth-child(even) td { background:rgba(128,128,128,0.06); }
+	#soqlResults .rownum { color:var(--vscode-descriptionForeground); text-align:right; }
 	/* execute */
 	#editor { flex:1 1 auto; min-width:120px; border:1px solid var(--vscode-input-border, transparent); border-radius:4px; overflow:hidden; }
 	#splitX { flex:0 0 8px; width:8px; cursor:col-resize; display:flex; justify-content:center; }
@@ -277,11 +347,11 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 <body>
 <script type="application/json" id="wb-data">${data}</script>
 <div id="bar">
-	<span id="title">Apex workbench</span>
-	<select id="org" title="Target org for logs and execution"><option value="">Loading…</option></select>
+	<span id="title">ASFX workbench</span>
+	<select id="org" title="Target org for logs, execution and queries"><option value="">Loading…</option></select>
 	<span id="tracePill" title="Active debug traces">Trace: —</span>
 	<button id="refresh" class="icon" title="Refresh" aria-label="Refresh"><svg viewBox="0 0 16 16"><path d="M13.6 8a5.6 5.6 0 1 1-1.7-4"/><path d="M13.9 2.3v3.2h-3.2"/></svg></button>
-	<span class="tabs"><span class="tab active" data-t="logs">Logs</span><span class="tab" data-t="exec">Execute</span></span>
+	<span class="tabs"><span class="tab active" data-t="logs">Logs</span><span class="tab" data-t="exec">Execute</span><span class="tab" data-t="soql">SOQL</span></span>
 </div>
 
 <div id="page-logs" class="page active">
@@ -334,6 +404,22 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 		<button id="openEditor">Open in editor</button>
 		<button id="clear">Clear</button>
 		<select id="history" title="Reopen a previous snippet" style="margin-left:auto; max-width:240px;"><option value="">History</option></select>
+	</div>
+</div>
+
+<div id="page-soql" class="page" style="flex-direction:column; padding:6px; gap:6px;">
+	<div id="soqlTop" style="flex:1; display:flex; min-height:0;">
+		<div id="soqlEditor" style="flex:0 0 42%; min-width:160px; border:1px solid var(--vscode-input-border, transparent); border-radius:4px; overflow:hidden;"></div>
+		<div id="soqlSplit" style="flex:0 0 8px; cursor:col-resize; display:flex; justify-content:center;"><span style="height:100%; width:3px; border-radius:2px; background:var(--vscode-panel-border, rgba(128,128,128,0.3));"></span></div>
+		<div id="soqlResultsPane" style="flex:1; min-width:0; display:flex; flex-direction:column; border:1px solid var(--vscode-input-border, transparent); border-radius:4px; overflow:hidden;">
+			<div class="vtools"><span id="soqlStatus" class="muted" style="margin-right:auto;">Run a query to see results.</span></div>
+			<div id="soqlResults" style="flex:1; overflow:auto;"></div>
+		</div>
+	</div>
+	<div id="execActions">
+		<button id="runSoql" class="primary" title="Run query (Ctrl+Enter)">Run</button>
+		<button id="openSoqlWb">Open in SOQL Workbench</button>
+		<button id="clearSoql">Clear</button>
 	</div>
 </div>
 
@@ -437,6 +523,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 
 	// ── execute editor ─────────────────────────────────────────────────────────
 	let editor=null, saveTimer=null, reqId=0; const pending={};
+	let soqlEd=null, soqlTimer=null;
 	function mapKind(k){ const M=monaco.languages.CompletionItemKind; const T={0:M.Text,1:M.Method,2:M.Function,3:M.Constructor,4:M.Field,5:M.Variable,6:M.Class,7:M.Interface,8:M.Module,9:M.Property,10:M.Unit,11:M.Value,12:M.Enum,13:M.Keyword,14:M.Snippet,15:M.Color,16:M.File,17:M.Reference,18:M.Folder,19:M.EnumMember,20:M.Constant,21:M.Struct,22:M.Event,23:M.Operator,24:M.TypeParameter}; return T[k]!=null?T[k]:M.Text; }
 	require.config({ paths:{ vs:'${monacoBase}' } });
 	self.MonacoEnvironment={ getWorkerUrl:function(){ return URL.createObjectURL(new Blob(["self.MonacoEnvironment={baseUrl:'"+'${monacoBase}'+"/'};importScripts('"+'${monacoBase}'+"/base/worker/workerMain.js');"],{type:'text/javascript'})); } };
@@ -456,6 +543,17 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 		editor.onDidChangeModelContent(function(){ if(saveTimer) clearTimeout(saveTimer); saveTimer=setTimeout(function(){ vscode.postMessage({type:'contentChanged',code:editor.getValue()}); },500); });
 		editor.onMouseDown(function(e){ if((e.event.ctrlKey||e.event.metaKey)&&e.target&&e.target.position){ const p=e.target.position; vscode.postMessage({type:'gotoDefinition',text:editor.getValue(),line:p.lineNumber-1,character:p.column-1}); } });
 		editor.addCommand(monaco.KeyMod.CtrlCmd|monaco.KeyCode.Enter, doRun);
+
+		// ── SOQL editor ───────────────────────────────────────────────────────
+		monaco.languages.register({ id:'soql' });
+		monaco.languages.setMonarchTokensProvider('soql',{ ignoreCase:true,
+			keywords:['SELECT','FROM','WHERE','LIMIT','OFFSET','ORDER','BY','GROUP','HAVING','AND','OR','NOT','LIKE','IN','INCLUDES','EXCLUDES','ASC','DESC','NULLS','FIRST','LAST','COUNT','COUNT_DISTINCT','AVG','MIN','MAX','SUM','TYPEOF','WHEN','THEN','ELSE','END','USING','SCOPE','FOR','VIEW','REFERENCE','UPDATE','TRACKING','NULL','TRUE','FALSE'],
+			tokenizer:{ root:[[/'(?:[^'\\\\]|\\\\.)*'/,'string'],[/\\b\\d+(\\.\\d+)?\\b/,'number'],[/[a-zA-Z_][\\w.]*/,{cases:{'@keywords':'keyword','@default':'identifier'}}]] } });
+		soqlEd=monaco.editor.create(document.getElementById('soqlEditor'),{ value:initial.soql||'SELECT Id, Name FROM Account ORDER BY CreatedDate DESC LIMIT 50', language:'soql', theme:dark?'vs-dark':'vs', automaticLayout:true, minimap:{enabled:false}, scrollBeyondLastLine:false, fontSize:13, quickSuggestions:true, fixedOverflowWidgets:true });
+		soqlEd.onDidChangeModelContent(function(){ if(soqlTimer) clearTimeout(soqlTimer); soqlTimer=setTimeout(function(){ vscode.postMessage({type:'soqlChanged',query:soqlEd.getValue()}); },500); });
+		soqlEd.addCommand(monaco.KeyMod.CtrlCmd|monaco.KeyCode.Enter, doRunSoql);
+		monaco.languages.registerCompletionItemProvider('soql',{ triggerCharacters:['.',' ',',','('], provideCompletionItems:function(model,pos){ return new Promise(function(resolve){ const id=++reqId; pending[id]=function(items){ const w=model.getWordUntilPosition(pos); const range={startLineNumber:pos.lineNumber,endLineNumber:pos.lineNumber,startColumn:w.startColumn,endColumn:w.endColumn}; resolve({suggestions:items.map(function(it){ return {label:it.label,kind:mapKind(it.kind),insertText:it.insertText||it.label,insertTextRules:it.isSnippet?monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet:undefined,detail:it.detail,documentation:it.documentation?{value:it.documentation}:undefined,sortText:it.sortText,filterText:it.filterText,range:range}; })}); }; vscode.postMessage({type:'getSoqlCompletions',requestId:id,text:model.getValue(),line:pos.lineNumber-1,character:pos.column-1}); }); } });
+		monaco.languages.registerHoverProvider('soql',{ provideHover:function(model,pos){ return new Promise(function(resolve){ const id=++reqId; pending[id]=function(h){ if(!h||!h.contents||!h.contents.length){resolve(null);return;} resolve({contents:h.contents.map(function(v){return{value:v};})}); }; vscode.postMessage({type:'getSoqlHover',requestId:id,text:model.getValue(),line:pos.lineNumber-1,character:pos.column-1}); }); } });
 	});
 	function flush(){ if(!editor) return; if(saveTimer){clearTimeout(saveTimer);saveTimer=null;} vscode.postMessage({type:'contentChanged',code:editor.getValue()}); }
 	window.addEventListener('blur', flush);
@@ -463,6 +561,25 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	document.getElementById('run').onclick=doRun;
 	document.getElementById('openEditor').onclick=function(){ vscode.postMessage({type:'openInEditor', code:editor?editor.getValue():''}); };
 	document.getElementById('clear').onclick=function(){ if(editor){editor.setValue('');editor.focus();} vscode.postMessage({type:'contentChanged',code:''}); };
+
+	// ── SOQL tab actions ────────────────────────────────────────────────────────
+	function doRunSoql(){ if(!soqlEd) return; vscode.postMessage({type:'runSoql', org:orgVal()||undefined, query:soqlEd.getValue()}); }
+	document.getElementById('runSoql').onclick=doRunSoql;
+	document.getElementById('openSoqlWb').onclick=function(){ vscode.postMessage({type:'openSoqlWorkbench', query:soqlEd?soqlEd.getValue():''}); };
+	document.getElementById('clearSoql').onclick=function(){ if(soqlEd){soqlEd.setValue('');soqlEd.focus();} vscode.postMessage({type:'soqlChanged',query:''}); };
+	(function(){ const sp=document.getElementById('soqlSplit'); const ed=document.getElementById('soqlEditor'); let drag=false,sx=0,sw=0;
+		sp.addEventListener('mousedown',function(e){drag=true;sx=e.clientX;sw=ed.getBoundingClientRect().width;document.body.style.cursor='col-resize';document.body.style.userSelect='none';e.preventDefault();});
+		window.addEventListener('mousemove',function(e){ if(!drag)return; const max=Math.max(160,window.innerWidth-200); ed.style.flex='0 0 '+Math.min(max,Math.max(160,sw+(e.clientX-sx)))+'px'; });
+		window.addEventListener('mouseup',function(){drag=false;document.body.style.cursor='';document.body.style.userSelect='';}); })();
+	function renderSoql(d){ const status=document.getElementById('soqlStatus'); const out=document.getElementById('soqlResults');
+		if(d.error){ status.className=''; status.style.color='var(--vscode-errorForeground)'; status.textContent=d.error; out.innerHTML=''; return; }
+		status.style.color=''; status.className='muted';
+		const cols=d.columns||[]; const rows=d.rows||[];
+		status.textContent=(d.returned||rows.length)+' of '+(d.total||rows.length)+' rows'+(d.done===false?' · more available, open in workbench':'');
+		if(!rows.length){ out.innerHTML='<div class="muted" style="padding:8px;">No rows.</div>'; return; }
+		let html='<table><thead><tr><th class="rownum">#</th>'+cols.map(function(c){return '<th>'+esc(c)+'</th>';}).join('')+'</tr></thead><tbody>';
+		for(let i=0;i<rows.length;i++){ const r=rows[i]; html+='<tr><td class="rownum">'+(i+1)+'</td>'+cols.map(function(c){ const v=r[c]||''; return '<td title="'+esc(v)+'">'+esc(v)+'</td>'; }).join('')+'</tr>'; }
+		html+='</tbody></table>'; out.innerHTML=html; out.scrollTop=0; }
 	const historySel=document.getElementById('history');
 	function setHistory(items){ while(historySel.options.length>1) historySel.remove(1);
 		(items||[]).forEach(function(q){ const o=document.createElement('option'); o.value=q; o.textContent=(q.length>50?q.slice(0,47)+'…':q).replace(/\\s+/g,' '); o.title=q; historySel.appendChild(o); }); }
@@ -481,6 +598,8 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	window.addEventListener('message', function(e){ const d=e.data; if(!d) return;
 		if(d.type==='completionResult'){ const cb=pending[d.requestId]; if(cb){ delete pending[d.requestId]; cb(d.items||[]); } return; }
 		if(d.type==='hoverResult'){ const cb=pending[d.requestId]; if(cb){ delete pending[d.requestId]; cb(d.hover||null); } return; }
+		if(d.type==='soqlStarted'){ const s=document.getElementById('soqlStatus'); s.className='muted'; s.style.color=''; s.textContent='Running…'; document.getElementById('soqlResults').innerHTML=''; return; }
+		if(d.type==='soqlResult'){ renderSoql(d); return; }
 		if(d.type==='orgList'){ const orgs=d.orgs||[];
 			orgSel.innerHTML=orgs.length?orgs.map(function(o){ const def=(o.label||'').indexOf('(default)')>=0; const v=def?'':(o.username||''); return '<option value="'+v.replace(/"/g,'&quot;')+'">'+(o.label||o.username||'').replace(/</g,'&lt;')+'</option>'; }).join(''):'<option value="">No orgs</option>';
 			vscode.postMessage({type:'warmOrg', org:orgVal()}); loadLogs(); }

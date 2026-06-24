@@ -392,7 +392,7 @@
       "panel": [
         {
           "id": "adure-sfx-toolkit-workbench",
-          "title": "Apex Workbench",
+          "title": "ASFX Workbench",
           "icon": "$(beaker)"
         }
       ]
@@ -431,7 +431,7 @@
         {
           "type": "webview",
           "id": "adure-sfx-toolkit.apexWorkbench",
-          "name": "Apex Workbench",
+          "name": "ASFX Workbench",
           "when": "adure-sfx-toolkit:isSalesforceProject"
         }
       ]

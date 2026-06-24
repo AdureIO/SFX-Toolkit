@@ -456,8 +456,8 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.executeCommand("setContext", "adure-sfx-toolkit:polling", false);
 
     // 13. SOQL Editor
-    const openSOQLEditorCmd = register("adure-sfx-toolkit.openSOQLEditor", () => {
-      SOQLEditorProvider.show(context.extensionUri);
+    const openSOQLEditorCmd = register("adure-sfx-toolkit.openSOQLEditor", (query?: unknown) => {
+      SOQLEditorProvider.show(context.extensionUri, typeof query === "string" ? query : undefined);
     });
     // Restore the SOQL panel after a window reload (so its tab doesn't vanish).
     context.subscriptions.push(
