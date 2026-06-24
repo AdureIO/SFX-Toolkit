@@ -474,7 +474,8 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	// ── tabs ──────────────────────────────────────────────────────────────────
 	function setTab(t){ Array.prototype.forEach.call(document.querySelectorAll('.tab'),function(el){el.classList.toggle('active',el.getAttribute('data-t')===t);});
 		document.getElementById('page-logs').classList.toggle('active', t==='logs');
-		document.getElementById('page-exec').classList.toggle('active', t==='exec'); }
+		document.getElementById('page-exec').classList.toggle('active', t==='exec');
+		document.getElementById('page-soql').classList.toggle('active', t==='soql'); }
 	Array.prototype.forEach.call(document.querySelectorAll('.tab'), function(el){ el.onclick=function(){ setTab(el.getAttribute('data-t')); }; });
 
 	// ── logs ──────────────────────────────────────────────────────────────────
