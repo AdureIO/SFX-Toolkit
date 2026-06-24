@@ -219,10 +219,6 @@
         "title": "ASFXT: Retrieve Current File"
       },
       {
-        "command": "adure-sfx-toolkit.runLocalTests",
-        "title": "ASFXT: Run Local Tests"
-      },
-      {
         "command": "adure-sfx-toolkit.resetSourceTracking",
         "title": "ASFXT: Reset Source Tracking",
         "icon": "$(history)"
@@ -395,11 +391,6 @@
       ],
       "panel": [
         {
-          "id": "adure-sfx-toolkit-panel",
-          "title": "Execute Apex",
-          "icon": "$(play)"
-        },
-        {
           "id": "adure-sfx-toolkit-workbench",
           "title": "Apex Workbench",
           "icon": "$(beaker)"
@@ -411,7 +402,8 @@
         {
           "id": "adure-sfx-toolkit.logs",
           "name": "Logs",
-          "when": "adure-sfx-toolkit:isSalesforceProject"
+          "when": "adure-sfx-toolkit:isSalesforceProject",
+          "visibility": "collapsed"
         },
         {
           "id": "adure-sfx-toolkit.traces",
@@ -432,14 +424,6 @@
         {
           "id": "adure-sfx-toolkit.snippets",
           "name": "Apex Snippets",
-          "when": "adure-sfx-toolkit:isSalesforceProject"
-        }
-      ],
-      "adure-sfx-toolkit-panel": [
-        {
-          "type": "webview",
-          "id": "adure-sfx-toolkit.anonymousApexPanel",
-          "name": "Apex",
           "when": "adure-sfx-toolkit:isSalesforceProject"
         }
       ],
@@ -577,11 +561,6 @@
         },
         {
           "command": "adure-sfx-toolkit.retrieveCurrentFile",
-          "when": "view == adure-sfx-toolkit.development",
-          "group": "inline"
-        },
-        {
-          "command": "adure-sfx-toolkit.runLocalTests",
           "when": "view == adure-sfx-toolkit.development",
           "group": "inline"
         },

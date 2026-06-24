@@ -35,13 +35,11 @@ import {
   pullSource,
   deployCurrentFile,
   retrieveCurrentFile,
-  runLocalTests,
   resetSourceTracking
 } from "./commands/devCommands";
 import { PermissionSetEditorProvider } from "./editors/PermissionSetEditorProvider";
 import { ScratchOrgDefEditorProvider } from "./editors/ScratchOrgDefEditorProvider";
 import { SOQLEditorProvider } from "./providers/SOQLEditorProvider";
-import { AnonymousApexViewProvider } from "./providers/AnonymousApexViewProvider";
 import { registerApexLogDecorator } from "./providers/ApexLogDecorator";
 import { ApexWorkbenchViewProvider } from "./providers/ApexWorkbenchViewProvider";
 import { Logger, outputChannel } from "./utils/outputChannel";
@@ -351,20 +349,10 @@ export function activate(context: vscode.ExtensionContext) {
     const createScratchCmd = register("adure-sfx-toolkit.createScratch", createScratch);
     const quickScratchCmd = register("adure-sfx-toolkit.quickScratch", quickScratch);
 
-    // 8. Execute Apex panel (bottom panel only; content persisted in .vscode/anon-apex-buffer.apex)
-    // Highlight Salesforce debug logs (.log + opened logs) per the configured rules.
+    // 8. Highlight Salesforce debug logs (.log + opened logs) per the configured rules.
     registerApexLogDecorator(context);
 
-    const anonymousApexProvider = new AnonymousApexViewProvider(context.extensionUri);
-    context.subscriptions.push(
-      vscode.window.registerWebviewViewProvider("adure-sfx-toolkit.anonymousApexPanel", anonymousApexProvider, {
-        // Keep the Monaco editor (content, cursor, undo history) alive when the
-        // panel is hidden or focus moves away, instead of tearing it down.
-        webviewOptions: { retainContextWhenHidden: true },
-      })
-    );
-
-    // 8b. Apex Workbench panel (org-switchable log browser + viewer).
+    // 8b. Apex Workbench panel (org-switchable logs, traces & execute).
     context.subscriptions.push(
       vscode.window.registerWebviewViewProvider(
         "adure-sfx-toolkit.apexWorkbench",
@@ -382,7 +370,6 @@ export function activate(context: vscode.ExtensionContext) {
     const pullCmd = register("adure-sfx-toolkit.pullSource", pullSource);
     const deployFileCmd = register("adure-sfx-toolkit.deployCurrentFile", deployCurrentFile);
     const retrieveFileCmd = register("adure-sfx-toolkit.retrieveCurrentFile", retrieveCurrentFile);
-    const runTestsCmd = register("adure-sfx-toolkit.runLocalTests", runLocalTests);
     const resetTrackingCmd = register("adure-sfx-toolkit.resetSourceTracking", resetSourceTracking);
     const refreshMetadataCmd = register("adure-sfx-toolkit.refreshMetadata", async () => {
       await vscode.window.withProgress(
@@ -629,7 +616,6 @@ export function activate(context: vscode.ExtensionContext) {
       pullCmd,
       deployFileCmd,
       retrieveFileCmd,
-      runTestsCmd,
       resetTrackingCmd,
       refreshMetadataCmd,
       openSOQLEditorCmd,

@@ -49,6 +49,7 @@ export class DevActionsProvider implements vscode.TreeDataProvider<vscode.TreeIt
 				this.createItem("REST / API Explorer", "adure-sfx-toolkit.restExplorer", "globe", "Send REST/Tooling API requests to an org"),
 			]),
 			new DevGroupItem("Tools", "tools", [
+				this.createItem("Apex Workbench", "adure-sfx-toolkit.apexWorkbench.focus", "beaker", "Open the Apex Workbench (org-aware logs, traces & execute)"),
 				this.createItem("Refresh Org Metadata", "adure-sfx-toolkit.refreshMetadata", "refresh", "Refresh sobject/field cache for SOQL and builders"),
 				this.createItem("Apex Snippets", "adure-sfx-toolkit.showSnippets", "play", "Run, add, edit or delete Apex snippets"),
 				this.createItem("Apex Snippets Overview", "adure-sfx-toolkit.openSnippetsPanel", "list-unordered", "Open panel with all snippets"),

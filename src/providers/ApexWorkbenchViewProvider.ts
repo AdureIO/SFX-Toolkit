@@ -11,6 +11,9 @@ import { isSalesforceProject } from '../utils/projectUtils';
 import { ApexBufferBridge } from './apexBufferBridge';
 
 const WORKBENCH_BUFFER = '.vscode/anon-workbench-buffer.apex';
+const ASFX_DIR = '.sfdx/asfx';
+const HISTORY_FILE = 'workbench-apex-history.json';
+const HISTORY_MAX = 10;
 
 /**
  * The Apex Workbench — a bottom-panel webview combining, under one org switcher:
@@ -30,6 +33,35 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 
 	private _post(type: string, payload: Record<string, unknown> = {}): void {
 		this._view?.webview.postMessage({ type, ...payload });
+	}
+
+	private _storageDir(): string | null {
+		const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+		return root ? path.join(root, ASFX_DIR) : null;
+	}
+
+	private _loadHistory(): string[] {
+		const dir = this._storageDir();
+		if (!dir) return [];
+		try {
+			const p = path.join(dir, HISTORY_FILE);
+			if (fs.existsSync(p)) { const j = JSON.parse(fs.readFileSync(p, 'utf8')); return Array.isArray(j) ? j : []; }
+		} catch { /* ignore */ }
+		return [];
+	}
+
+	private _saveHistory(code: string): string[] {
+		const dir = this._storageDir();
+		const trimmed = (code || '').trim();
+		if (!dir || !trimmed) return this._loadHistory();
+		try {
+			if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+			const hist = [trimmed, ...this._loadHistory().filter((q) => q.trim() !== trimmed)].slice(0, HISTORY_MAX);
+			fs.writeFileSync(path.join(dir, HISTORY_FILE), JSON.stringify(hist, null, 0), 'utf8');
+			return hist;
+		} catch {
+			return this._loadHistory();
+		}
 	}
 
 	public async resolveWebviewView(view: vscode.WebviewView): Promise<void> {
@@ -115,6 +147,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 					const result = await executeAnonymousForPanel(data.code || '', data.org || undefined);
 					this._lastLog = result.log || '';
 					this._post('execResult', { success: result.success, error: result.errorMessage || '', log: result.log || '', hasLog: !!(result.log && result.log.trim()) });
+					if (result.success) this._post('historyUpdated', { history: this._saveHistory(data.code || '') });
 					break;
 				}
 				case 'openExecLog':
@@ -144,7 +177,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 		const monacoBase = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'node_modules', 'monaco-editor', 'min', 'vs'));
 		const cspSource = webview.cspSource;
 		const pollSeconds = vscode.workspace.getConfiguration('adure-sfx-toolkit').get<number>('pollingIntervalSeconds', 5);
-		const data = JSON.stringify({ highlightPatterns: getHighlightPatterns(), code: initialCode || '', pollSeconds })
+		const data = JSON.stringify({ highlightPatterns: getHighlightPatterns(), code: initialCode || '', pollSeconds, history: this._loadHistory() })
 			.replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
 		return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
@@ -257,7 +290,12 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 			<pre id="execContent" class="content muted">Run code to see the result and debug log here.</pre>
 		</div>
 	</div>
-	<div id="execActions"><button id="run" class="primary" title="Execute (Ctrl+Enter)">Execute</button><button id="openEditor">Open in editor</button><button id="clear">Clear</button></div>
+	<div id="execActions">
+		<button id="run" class="primary" title="Execute (Ctrl+Enter)">Execute</button>
+		<button id="openEditor">Open in editor</button>
+		<button id="clear">Clear</button>
+		<select id="history" title="Reopen a previous snippet" style="margin-left:auto; max-width:240px;"><option value="">History</option></select>
+	</div>
 </div>
 
 <script src="${monacoBase}/loader.js"></script>
@@ -293,9 +331,12 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 		function render(){ contentEl.classList.remove('error','muted');
 			const q=(filterEl.value||'').trim(); let re=null;
 			if(q){ try{re=new RegExp(q,'gi'); filterEl.classList.remove('invalid');}catch(e){filterEl.classList.add('invalid'); re=null;} } else filterEl.classList.remove('invalid');
-			const lines=applyToggles(raw.split('\\n')); const out=[];
-			for(let i=0;i<lines.length;i++){ const l=lines[i]; if(re){re.lastIndex=0; if(!re.test(l)) continue;} const inner=hl(l,re); const st=lineStyle(l); out.push(st?'<span style="'+st+'">'+inner+'</span>':inner); }
-			contentEl.innerHTML=out.length?out.join('\\n'):'<span class="muted">No matching lines.</span>'; }
+			const lines=applyToggles(raw.split('\\n')); const out=[]; const MAX=8000; let truncated=false;
+			for(let i=0;i<lines.length;i++){ const l=lines[i]; if(re){re.lastIndex=0; if(!re.test(l)) continue;}
+				if(out.length>=MAX){ truncated=true; break; }
+				const inner=hl(l,re); const st=lineStyle(l); out.push(st?'<span style="'+st+'">'+inner+'</span>':inner); }
+			if(!out.length){ contentEl.innerHTML='<span class="muted">No matching lines.</span>'; return; }
+			contentEl.innerHTML=out.join('\\n')+(truncated?('\\n<span class="muted">… showing first '+MAX+' of '+lines.length+' lines — filter, or Open to see all.</span>'):''); }
 		filterEl.addEventListener('input', render);
 		return { setLog:function(t){ raw=t||''; render(); contentEl.scrollTop=0; }, render:render, toggles:toggles,
 			setText:function(t,muted){ raw=''; contentEl.classList.toggle('muted',!!muted); contentEl.classList.remove('error'); contentEl.textContent=t||''; },
@@ -382,6 +423,11 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	document.getElementById('run').onclick=doRun;
 	document.getElementById('openEditor').onclick=function(){ vscode.postMessage({type:'openInEditor', code:editor?editor.getValue():''}); };
 	document.getElementById('clear').onclick=function(){ if(editor){editor.setValue('');editor.focus();} vscode.postMessage({type:'contentChanged',code:''}); };
+	const historySel=document.getElementById('history');
+	function setHistory(items){ while(historySel.options.length>1) historySel.remove(1);
+		(items||[]).forEach(function(q){ const o=document.createElement('option'); o.value=q; o.textContent=(q.length>50?q.slice(0,47)+'…':q).replace(/\\s+/g,' '); o.title=q; historySel.appendChild(o); }); }
+	setHistory(initial.history);
+	historySel.addEventListener('change', function(){ const code=historySel.value; if(code&&editor){ editor.setValue(code); editor.focus(); vscode.postMessage({type:'contentChanged',code:code}); } historySel.selectedIndex=0; });
 	const execTitle=document.getElementById('execTitle'); const execFilter=document.querySelector('input[data-pane="exec"]'); const execOpen=document.getElementById('execOpen');
 	execOpen.onclick=function(){ vscode.postMessage({type:'openExecLog'}); };
 
@@ -399,6 +445,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 		else if(d.type==='logList'){ if((d.org||'')===orgVal()) renderList(d.rows||[]); }
 		else if(d.type==='logLoading'){ if(d.id===currentId) logView.setText('Loading log…', true); }
 		else if(d.type==='logBody'){ if(d.id===currentId) logView.setLog(d.text||''); }
+		else if(d.type==='historyUpdated'){ setHistory(d.history||[]); }
 		else if(d.type==='traceInfo'){ if((d.org||'')!==orgVal()) return;
 			const pill=document.getElementById('tracePill'); pill.classList.toggle('on', d.count>0); pill.textContent= d.count>0 ? ('Trace: '+d.count+' on') : 'Trace: off'; }
 		else if(d.type==='execStarted'){ execTitle.textContent='Running…'; execOpen.style.display='none'; execFilter.style.display='none'; execView.setText('Executing…', true); }
