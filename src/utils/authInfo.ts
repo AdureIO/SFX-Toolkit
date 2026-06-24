@@ -1,5 +1,5 @@
 import { runCommandArgs } from "./commandRunner";
-import { httpsGet, httpsDelete, httpsPost } from "./httpUtils";
+import { httpsGet, httpsDelete, httpsPost, httpsGetRange } from "./httpUtils";
 import { Logger, outputChannel } from "./outputChannel";
 import { isSalesforceProject } from "./projectUtils";
 
@@ -257,6 +257,16 @@ export class AuthInfo {
 			httpsGet(buildUrl(a), a.accessToken)
 		);
 		return { body, auth };
+	}
+
+	/** Authenticated ranged GET (first `maxBytes`). On 401, refreshes and retries once. */
+	public static async getRange(
+		org: string | null,
+		buildUrl: (auth: OrgAuth) => string,
+		maxBytes: number
+	): Promise<string> {
+		const { result } = await this.withRetry(org, (a) => httpsGetRange(buildUrl(a), a.accessToken, maxBytes));
+		return result;
 	}
 
 	/**

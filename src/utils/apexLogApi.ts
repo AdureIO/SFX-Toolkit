@@ -171,6 +171,16 @@ export function extractCodeUnit(logBody: string): string | null {
 	return name || null;
 }
 
+/** First ~16 KB of a log body — enough to find the entry-point code unit cheaply. */
+export async function fetchApexLogHead(org: string | null, logId: string, maxBytes = 16000): Promise<string> {
+	const version = getToolingApiVersion();
+	try {
+		return await AuthInfo.getRange(org, (a) => `${base(a)}/services/data/${version}/tooling/sobjects/ApexLog/${logId}/Body`, maxBytes);
+	} catch {
+		return "";
+	}
+}
+
 /** Raw debug-log body for a log id on an org. */
 export async function fetchApexLogBody(org: string | null, logId: string): Promise<string> {
 	const version = getToolingApiVersion();

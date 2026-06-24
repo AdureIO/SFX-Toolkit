@@ -123,3 +123,35 @@ export function httpsPost(
 export function httpsDelete(url: string, token: string): Promise<string> {
     return httpsRequest('DELETE', url, token);
 }
+
+/**
+ * GET only the first `maxBytes` of a resource via a Range request. Salesforce may
+ * honor it (206 partial) or ignore it (200 full) — either is returned as-is.
+ */
+export function httpsGetRange(url: string, token: string, maxBytes: number): Promise<string> {
+    const timeout = getHttpTimeout();
+    return new Promise((resolve, reject) => {
+        const parsed = new URL(url);
+        const req = https.request(
+            {
+                hostname: parsed.hostname,
+                path: parsed.pathname + parsed.search,
+                method: 'GET',
+                headers: { Authorization: `Bearer ${token}`, Range: `bytes=0-${maxBytes}` },
+                timeout,
+            },
+            (res) => {
+                const chunks: any[] = [];
+                res.on('data', (d) => chunks.push(d));
+                res.on('end', () => {
+                    const body = Buffer.concat(chunks).toString();
+                    if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) resolve(body);
+                    else reject(new Error(`HTTP ${res.statusCode}: ${body.slice(0, 300)}`));
+                });
+            }
+        );
+        req.on('timeout', () => { req.destroy(); reject(new Error(`Request timed out: GET ${url}`)); });
+        req.on('error', (e) => reject(e));
+        req.end();
+    });
+}

@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { getAnonymousApexOrgList, executeAnonymousForPanel } from '../commands/executeAnonymous';
-import { listApexLogs, fetchApexLogBody, listActiveTraceFlags, deleteAllApexLogs, createUserTrace, extractCodeUnit } from '../utils/apexLogApi';
+import { listApexLogs, fetchApexLogBody, fetchApexLogHead, listActiveTraceFlags, deleteAllApexLogs, createUserTrace, extractCodeUnit, type ApexLogRow } from '../utils/apexLogApi';
 import { getHighlightPatterns } from '../utils/apexLogHighlight';
 import { getSalesforceLogDirectory } from '../utils/logPaths';
 import { AuthInfo } from '../utils/authInfo';
@@ -30,6 +30,10 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	private readonly _bridge = new ApexBufferBridge(WORKBENCH_BUFFER);
 	/** Cache of fetched log bodies (id → { text, unit }) so re-opening is instant. */
 	private readonly _bodyCache = new Map<string, { text: string; unit: string | null }>();
+	/** Cache of parsed entry-point code units (id → unit) for the list. */
+	private readonly _unitCache = new Map<string, string | null>();
+	/** Bumped on each list load so stale background enrichment self-cancels. */
+	private _enrichGen = 0;
 
 	constructor(private readonly _extensionUri: vscode.Uri) {}
 
@@ -88,9 +92,15 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 					if (isSalesforceProject()) AuthInfo.warmAuthForOrg(data.org || null);
 					break;
 				// ── Logs ────────────────────────────────────────────────────────────
-				case 'listLogs':
-					this._post('logList', { org: data.org || '', rows: await listApexLogs(data.org || null) });
+				case 'listLogs': {
+					const rows = await listApexLogs(data.org || null);
+					// Send cached code units up front so already-known names show instantly.
+					const units: Record<string, string> = {};
+					for (const r of rows) { const u = this._unitCache.get(r.id); if (u) units[r.id] = u; }
+					this._post('logList', { org: data.org || '', rows, units });
+					void this._enrichUnits(data.org || null, rows, ++this._enrichGen);
 					break;
+				}
 				case 'listTraces':
 					this._post('traceInfo', { org: data.org || '', ...(await listActiveTraceFlags(data.org || null)) });
 					break;
@@ -128,6 +138,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 					const unit = extractCodeUnit(text);
 					if (this._bodyCache.size > 20) this._bodyCache.delete(this._bodyCache.keys().next().value as string);
 					this._bodyCache.set(data.id, { text, unit });
+					this._unitCache.set(data.id, unit);
 					this._post('logBody', { id: data.id, text, unit });
 					break;
 				}
@@ -165,6 +176,26 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 		});
 
 		view.onDidDispose(() => { this._listener?.dispose(); this._listener = undefined; });
+	}
+
+	/**
+	 * Fill in each log's executed code unit in the background: fetch just the head
+	 * of each body (Range request) in small concurrent batches and stream the
+	 * parsed name to the webview. Self-cancels when a newer list load supersedes it.
+	 */
+	private async _enrichUnits(org: string | null, rows: ApexLogRow[], gen: number): Promise<void> {
+		const ids = rows.map((r) => r.id).filter((id) => !this._unitCache.has(id)).slice(0, 50);
+		for (let i = 0; i < ids.length; i += 4) {
+			if (gen !== this._enrichGen) return; // a newer list load took over
+			await Promise.all(
+				ids.slice(i, i + 4).map(async (id) => {
+					const head = await fetchApexLogHead(org, id);
+					const unit = head ? extractCodeUnit(head) : null;
+					this._unitCache.set(id, unit);
+					if (unit && gen === this._enrichGen) this._post('logUnit', { org: org ?? '', id, unit });
+				})
+			);
+		}
 	}
 
 	private async _openLogFile(name: string, text: string): Promise<void> {
@@ -451,9 +482,10 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 		if(d.type==='orgList'){ const orgs=d.orgs||[];
 			orgSel.innerHTML=orgs.length?orgs.map(function(o){ const def=(o.label||'').indexOf('(default)')>=0; const v=def?'':(o.username||''); return '<option value="'+v.replace(/"/g,'&quot;')+'">'+(o.label||o.username||'').replace(/</g,'&lt;')+'</option>'; }).join(''):'<option value="">No orgs</option>';
 			vscode.postMessage({type:'warmOrg', org:orgVal()}); loadLogs(); }
-		else if(d.type==='logList'){ if((d.org||'')===orgVal()) renderList(d.rows||[]); }
+		else if(d.type==='logList'){ if((d.org||'')!==orgVal()) return; if(d.units){ for(const k in d.units) unitById[k]=d.units[k]; } renderList(d.rows||[]); }
+		else if(d.type==='logUnit'){ if((d.org||'')!==orgVal()||!d.unit) return; unitById[d.id]=d.unit; const row=listRows.querySelector('.row[data-id="'+d.id+'"]'); if(row&&row.firstElementChild) row.firstElementChild.textContent=d.unit; }
 		else if(d.type==='logLoading'){ if(d.id===currentId) logView.setText('Loading log…', true); }
-		else if(d.type==='logBody'){ if(d.unit){ unitById[d.id]=d.unit; renderList(lastRows); } if(d.id===currentId) logView.setLog(d.text||''); }
+		else if(d.type==='logBody'){ if(d.unit){ unitById[d.id]=d.unit; const r=listRows.querySelector('.row[data-id="'+d.id+'"]'); if(r&&r.firstElementChild) r.firstElementChild.textContent=d.unit; } if(d.id===currentId) logView.setLog(d.text||''); }
 		else if(d.type==='historyUpdated'){ setHistory(d.history||[]); }
 		else if(d.type==='traceInfo'){ if((d.org||'')!==orgVal()) return;
 			const pill=document.getElementById('tracePill'); pill.classList.toggle('on', d.count>0); pill.textContent= d.count>0 ? ('Trace: '+d.count+' on') : 'Trace: off'; }
