@@ -762,8 +762,13 @@ async function apexMemberCompletion(
     let items: CompletionItem[] = [];
     const userMembers = index.types.get(base);
     const stdMembers = stdMembersFor(base);
+    // Cross-file user type defined in another workspace file (the common case in
+    // the Execute Apex panel and when referencing other classes).
+    const wsMembers = userMembers && userMembers.length ? undefined : WorkspaceIndex.findTypeMembers(base);
     if (userMembers && userMembers.length) {
         items = userMembers.map((m) => memberItem(base, m));
+    } else if (wsMembers && wsMembers.length) {
+        items = wsMembers.map((m) => memberItem(base, m));
     } else if (stdMembers) {
         // Static members of a Salesforce built-in namespace/type (System.debug…).
         items = stdMembers.map((m) => stdMemberItem(stdTypeName(base) ?? base, m));

@@ -121,6 +121,11 @@ before(async function () {
 
   const tmpRoot = path.join(os.tmpdir(), "sfx-test-" + process.pid);
   fs.mkdirSync(tmpRoot, { recursive: true });
+  // A class in another file, for cross-file member/type completion.
+  fs.writeFileSync(
+    path.join(tmpRoot, "Helper.cls"),
+    "public class Helper {\n  public Integer counter;\n  public String label { get; set; }\n  public static String greet(String who) { return who; }\n}\n",
+  );
   await conn.sendRequest("initialize", {
     processId: process.pid,
     rootUri: pathToFileURL(tmpRoot).href,
@@ -247,6 +252,13 @@ describe("Apex language features", () => {
     const src = "public class C {\n  void m() {\n    Integer x = ;\n    acme__Widget__c po = new acme__Widget__c();\n    po.\n  }\n}\n";
     const labels = labelsOf(await complete(src, 4, 7, "apex"));
     assert.ok(labels.includes("Name") && labels.includes("acme__Amount__c"));
+  });
+
+  it("member completion resolves members of a class defined in another file", async () => {
+    const src = "public class C {\n  void m() {\n    Helper.\n  }\n}\n";
+    const labels = labelsOf(await complete(src, 2, 11, "apex"));
+    assert.ok(labels.includes("greet"), "expected static method greet");
+    assert.ok(labels.includes("counter") && labels.includes("label"), "expected fields/properties");
   });
 
   it("completes Salesforce standard-library types and namespaces in a statement position", async () => {

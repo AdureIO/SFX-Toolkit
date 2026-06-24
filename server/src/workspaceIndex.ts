@@ -10,7 +10,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { pathToFileURL, fileURLToPath } from 'url';
 import { Location, Range, SymbolKind, DocumentSymbol } from 'vscode-languageserver/node';
-import { parseApex } from './apexSymbols';
+import { parseApex, ApexMember } from './apexSymbols';
 
 const IGNORE_DIRS = new Set(['node_modules', '.git', '.sfdx', '.vscode', 'out', 'dist']);
 const MAX_FILES = 20000; // basename→path entries are tiny; cap only as a backstop
@@ -19,12 +19,14 @@ class WorkspaceIndexImpl {
     private roots: string[] = [];
     private files = new Map<string, string>(); // lower-cased type name → file path
     private names = new Map<string, string>(); // lower-cased → original-cased type name
+    private memberCache = new Map<string, { mtime: number; members: ApexMember[] | undefined }>();
     private scanned = false;
 
     setRoots(roots: string[]): void {
         this.roots = roots;
         this.files.clear();
         this.names.clear();
+        this.memberCache.clear();
         this.scanned = false;
     }
 
@@ -44,6 +46,35 @@ class WorkspaceIndexImpl {
     allTypeNames(): string[] {
         if (!this.scanned) this.scan();
         return [...this.names.values()];
+    }
+
+    /**
+     * Members (methods/fields/properties) of a workspace type, for cross-file
+     * member completion (`MyClass.` or `instanceOfMyClass.`). Parses only the one
+     * file, cached by path+mtime so repeated completions don't re-parse.
+     */
+    findTypeMembers(name: string): ApexMember[] | undefined {
+        if (!this.scanned) this.scan();
+        const file = this.files.get(name.toLowerCase());
+        if (!file) return undefined;
+        try {
+            const mtime = fs.statSync(file).mtimeMs;
+            const cached = this.memberCache.get(file);
+            if (cached && cached.mtime === mtime) return cached.members;
+            const index = parseApex(fs.readFileSync(file, 'utf8')).index;
+            // Match the top-level type by name (case-insensitive).
+            let members: ApexMember[] | undefined;
+            for (const [typeName, ms] of index.types) {
+                if (typeName.toLowerCase() === name.toLowerCase()) {
+                    members = ms;
+                    break;
+                }
+            }
+            this.memberCache.set(file, { mtime, members });
+            return members;
+        } catch {
+            return undefined;
+        }
     }
 
     findType(name: string): Location | undefined {
