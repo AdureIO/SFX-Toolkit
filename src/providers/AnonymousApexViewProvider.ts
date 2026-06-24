@@ -556,9 +556,15 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 		else if (d.type === 'orgList') {
 			const orgs = d.orgs || [];
 			orgSelect.innerHTML = orgs.length
-				? orgs.map(o => '<option value="' + (o.username || '').replace(/"/g, '&quot;') + '">' + (o.label || o.username || '').replace(/</g, '&lt;') + '</option>').join('')
+				? orgs.map(function (o) {
+					// The default org maps to value "" so it reuses the token warmed at
+					// startup (cached under the default key, not its username).
+					const isDefault = (o.label || '').indexOf('(default)') >= 0;
+					const val = isDefault ? '' : (o.username || '');
+					return '<option value="' + val.replace(/"/g, '&quot;') + '">' + (o.label || o.username || '').replace(/</g, '&lt;') + '</option>';
+				}).join('')
 				: '<option value="">No orgs</option>';
-			// Warm the (default-)selected org's token so the first run is fast.
+			// Warm the selected org's token so the first run is fast (no-op if default).
 			vscode.postMessage({ type: 'warmOrg', org: (orgSelect.value || '').trim() });
 		} else if (d.type === 'historyUpdated') setHistory(d.history || []);
 		else if (d.type === 'completionResult') { const cb = pending[d.requestId]; if (cb) { delete pending[d.requestId]; cb(d.items || []); } }
