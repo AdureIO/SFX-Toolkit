@@ -823,6 +823,28 @@
           "default": "v60.0",
           "description": "Salesforce Tooling API version."
         },
+        "adure-sfx-toolkit.apexLog.highlightPatterns": {
+          "type": "array",
+          "scope": "resource",
+          "markdownDescription": "Line-highlighting rules for Salesforce debug logs (`.log` files and the Execute Apex results pane). Each rule is a regular expression with a color and optional style. Order matters: the first matching rule wins for a line.",
+          "default": [
+            { "pattern": "\\|FATAL_ERROR\\|.*", "foreground": "#f64b4b", "highlightEntireLine": true },
+            { "pattern": "\\|EXCEPTION_THROWN\\|.*", "foreground": "#f64b4b", "highlightEntireLine": true },
+            { "pattern": "\\|USER_DEBUG\\|.*", "foreground": "#6c64ff", "fontStyle": "bold", "highlightEntireLine": true },
+            { "pattern": "\\|SOQL_EXECUTE_BEGIN\\|.*", "foreground": "#15d274", "fontStyle": "bold", "highlightEntireLine": true },
+            { "pattern": "\\|DML_BEGIN\\|.*", "foreground": "#e2c08d", "fontStyle": "bold", "highlightEntireLine": true }
+          ],
+          "items": {
+            "type": "object",
+            "required": ["pattern"],
+            "properties": {
+              "pattern": { "type": "string", "description": "Regular expression matched against each log line." },
+              "foreground": { "type": "string", "description": "Text color (hex, e.g. #f64b4b)." },
+              "fontStyle": { "type": "string", "enum": ["normal", "bold", "italic", "bold italic"], "description": "Font style for matched text." },
+              "highlightEntireLine": { "type": "boolean", "default": false, "description": "Color the whole line rather than only the matched text." }
+            }
+          }
+        },
         "adure-sfx-toolkit.soql.enableCompletion": {
           "type": "boolean",
           "default": true,

@@ -42,6 +42,7 @@ import { PermissionSetEditorProvider } from "./editors/PermissionSetEditorProvid
 import { ScratchOrgDefEditorProvider } from "./editors/ScratchOrgDefEditorProvider";
 import { SOQLEditorProvider } from "./providers/SOQLEditorProvider";
 import { AnonymousApexViewProvider } from "./providers/AnonymousApexViewProvider";
+import { registerApexLogDecorator } from "./providers/ApexLogDecorator";
 import { Logger, outputChannel } from "./utils/outputChannel";
 import { metadataDiff } from "./commands/metadataDiff";
 import { OrgHealthProvider } from "./commands/orgHealth";
@@ -350,6 +351,9 @@ export function activate(context: vscode.ExtensionContext) {
     const quickScratchCmd = register("adure-sfx-toolkit.quickScratch", quickScratch);
 
     // 8. Execute Apex panel (bottom panel only; content persisted in .vscode/anon-apex-buffer.apex)
+    // Highlight Salesforce debug logs (.log + opened logs) per the configured rules.
+    registerApexLogDecorator(context);
+
     const anonymousApexProvider = new AnonymousApexViewProvider(context.extensionUri);
     context.subscriptions.push(
       vscode.window.registerWebviewViewProvider("adure-sfx-toolkit.anonymousApexPanel", anonymousApexProvider, {

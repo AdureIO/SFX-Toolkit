@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { executeAnonymousForPanel, getAnonymousApexOrgList } from '../commands/executeAnonymous';
 import { isSalesforceProject } from '../utils/projectUtils';
+import { getHighlightPatterns } from '../utils/apexLogHighlight';
 
 const BUFFER_RELATIVE_PATH = '.vscode/anon-apex-buffer.apex';
 const ASFX_DIR = '.sfdx/asfx';
@@ -348,7 +349,7 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 			vscode.Uri.joinPath(this._extensionUri, 'node_modules', 'monaco-editor', 'min', 'vs'),
 		);
 		const cspSource = webview.cspSource;
-		const initialData = JSON.stringify({ lastCode: initialContent || '', history: Array.isArray(history) ? history : [] })
+		const initialData = JSON.stringify({ lastCode: initialContent || '', history: Array.isArray(history) ? history : [], highlightPatterns: getHighlightPatterns() })
 			.replace(/</g, '\\u003c')
 			.replace(/>/g, '\\u003e');
 
@@ -384,6 +385,10 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 		background: var(--vscode-input-background); color: var(--vscode-input-foreground);
 		border: 1px solid var(--vscode-input-border, transparent); border-radius: 4px; }
 	#result-filter.invalid { border-color: var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground)); }
+	#filter-presets { display: none; gap: 4px; }
+	#filter-presets .qf { font-size: 11px; padding: 2px 7px; border: none; border-radius: 4px; cursor: pointer;
+		background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+	#filter-presets .qf:hover { background: var(--vscode-button-hoverBackground); }
 	#open-log-btn { display: none; font-size: 11px; padding: 2px 8px; border: none; border-radius: 4px; cursor: pointer;
 		background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
 	#result-content { flex: 1; margin: 0; padding: 8px; overflow: auto; white-space: pre-wrap; word-break: break-word;
@@ -416,6 +421,11 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 		<div id="results-header">
 			<span id="results-title">Result</span>
 			<div class="results-tools">
+				<span id="filter-presets">
+					<button class="qf" data-f="debug" title="Show USER_DEBUG, exceptions and errors">Debug</button>
+					<button class="qf" data-f="soql" title="Show SOQL and DML operations">SOQL/DML</button>
+					<button class="qf" data-f="all" title="Show all lines">All</button>
+				</span>
 				<input id="result-filter" type="text" placeholder="Filter (regex)…" title="Show only log lines matching this regular expression; matches are highlighted" spellcheck="false" />
 				<button id="open-log-btn" title="Open the full debug log in an editor">Open log</button>
 			</div>
@@ -440,6 +450,7 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 	const resultsTitle = document.getElementById('results-title');
 	const openLogBtn = document.getElementById('open-log-btn');
 	const resultFilter = document.getElementById('result-filter');
+	const filterPresets = document.getElementById('filter-presets');
 	const splitter = document.getElementById('splitter');
 	const resultsPane = document.getElementById('results');
 	let rawLog = '';
@@ -469,7 +480,26 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 		}
 		return out + escapeHtml(line.slice(last));
 	}
-	// Render the debug log, applying the regex filter (line-level) + highlighting.
+	// Configured line-color rules (shared with the .log decorator via settings).
+	const HL = ((initial.highlightPatterns) || []).map(function (p) {
+		let re = null;
+		try { re = new RegExp(p.pattern, 'i'); } catch (e) { re = null; }
+		let style = '';
+		const fg = (p.foreground || '').replace(/[^#\\w(),.%\\s-]/g, '');
+		if (fg) style += 'color:' + fg + ';';
+		if (p.fontStyle && p.fontStyle.indexOf('bold') >= 0) style += 'font-weight:bold;';
+		if (p.fontStyle && p.fontStyle.indexOf('italic') >= 0) style += 'font-style:italic;';
+		return { re: re, style: style };
+	}).filter(function (p) { return p.re && p.style; });
+
+	// First matching rule's inline style for a line (empty when none match).
+	function lineStyle(line) {
+		for (let i = 0; i < HL.length; i++) { HL[i].re.lastIndex = 0; if (HL[i].re.test(line)) return HL[i].style; }
+		return '';
+	}
+
+	// Render the debug log: apply the regex filter (line-level) + match highlight +
+	// the configured per-line color rules.
 	function renderLog() {
 		resultContent.classList.remove('error', 'muted');
 		const q = (resultFilter.value || '').trim();
@@ -480,14 +510,16 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 		} else {
 			resultFilter.classList.remove('invalid');
 		}
-		if (!re) { resultContent.textContent = rawLog; return; }
-		const kept = [];
 		const lines = rawLog.split('\\n');
+		const out = [];
 		for (let i = 0; i < lines.length; i++) {
-			re.lastIndex = 0;
-			if (re.test(lines[i])) kept.push(highlightLine(lines[i], re));
+			const line = lines[i];
+			if (re) { re.lastIndex = 0; if (!re.test(line)) continue; }
+			const inner = highlightLine(line, re);
+			const style = lineStyle(line);
+			out.push(style ? '<span style="' + style + '">' + inner + '</span>' : inner);
 		}
-		resultContent.innerHTML = kept.length ? kept.join('\\n') : '<span style="opacity:0.6">No lines match the filter.</span>';
+		resultContent.innerHTML = out.length ? out.join('\\n') : '<span style="opacity:0.6">No lines match the filter.</span>';
 	}
 	function setHistory(items) {
 		while (historySelect.options.length > 1) historySelect.remove(1);
@@ -524,23 +556,22 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 		else if (d.type === 'hoverResult') { const cb = pending[d.requestId]; if (cb) { delete pending[d.requestId]; cb(d.hover || null); } }
 		else if (d.type === 'flush') flushContent();
 		else if (d.type === 'executeStarted') {
-			resultsTitle.textContent = 'Running…'; openLogBtn.style.display = 'none'; resultFilter.style.display = 'none';
-			rawLog = ''; setResult('Executing…', 'muted');
+			resultsTitle.textContent = 'Running…'; setTools(false); rawLog = ''; setResult('Executing…', 'muted');
 		}
 		else if (d.type === 'executeResult') {
 			if (!d.success) {
 				resultsTitle.textContent = 'Error';
-				rawLog = ''; openLogBtn.style.display = 'none'; resultFilter.style.display = 'none';
+				rawLog = ''; setTools(false);
 				setResult(d.error || 'Execution failed.', 'error');
 			} else if (d.hasLog) {
 				resultsTitle.textContent = 'Debug log';
 				rawLog = d.log || '';
-				openLogBtn.style.display = 'inline-block'; resultFilter.style.display = 'inline-block';
+				setTools(true);
 				renderLog();
 				resultContent.scrollTop = resultContent.scrollHeight; // jump to latest output
 			} else {
 				resultsTitle.textContent = 'Result';
-				rawLog = ''; openLogBtn.style.display = 'none'; resultFilter.style.display = 'none';
+				rawLog = ''; setTools(false);
 				setResult('Executed successfully.', 'muted');
 			}
 		}
@@ -684,6 +715,19 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 	});
 	openLogBtn.onclick = function () { vscode.postMessage({ type: 'openLog' }); };
 	resultFilter.addEventListener('input', renderLog);
+
+	// Show/hide the log tools (filter + presets + open) together.
+	function setTools(on) {
+		openLogBtn.style.display = on ? 'inline-block' : 'none';
+		resultFilter.style.display = on ? 'inline-block' : 'none';
+		filterPresets.style.display = on ? 'inline-flex' : 'none';
+	}
+
+	// Quick-filter presets, aligned with the .log DEBUG / SOQL filters.
+	const PRESET = { debug: 'USER_DEBUG|FATAL_ERROR|EXCEPTION_THROWN', soql: 'SOQL_EXECUTE|DML_', all: '' };
+	Array.prototype.forEach.call(document.querySelectorAll('.qf'), function (b) {
+		b.onclick = function () { resultFilter.value = PRESET[b.getAttribute('data-f')] || ''; renderLog(); };
+	});
 
 	// ── results pane: drag the splitter to resize its width (persisted) ───────
 	(function () {
