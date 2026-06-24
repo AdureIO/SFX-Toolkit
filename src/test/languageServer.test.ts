@@ -320,6 +320,18 @@ describe("Hover", () => {
     assert.ok(ind && ind.includes("The primary industry") && ind.includes("Banking"));
   });
 
+  it("shows hover for a Salesforce standard-library type and its member", async () => {
+    const t = await hover("public class C {\n  void m() {\n    System x;\n  }\n}\n", 2, 7, "apex");
+    assert.ok(t && t.includes("System"), `type hover: ${JSON.stringify(t)}`);
+    const mbr = await hover("public class C {\n  void m() {\n    System.debug('x');\n  }\n}\n", 2, 12, "apex");
+    assert.ok(mbr && mbr.includes("debug"), `member hover: ${JSON.stringify(mbr)}`);
+  });
+
+  it("shows hover for a class defined in another file", async () => {
+    const h = await hover("public class C {\n  void m() {\n    Helper h;\n  }\n}\n", 2, 7, "apex");
+    assert.ok(h && /class Helper/.test(h), `hover: ${JSON.stringify(h)}`);
+  });
+
   it("enriches SObject (object) hover with label, key prefix, counts and CRUD", async () => {
     const h = await hover("SELECT Id FROM Account", 0, 17, "soql"); // hover the object name
     assert.ok(h && h.includes("SObject Account"), `hover: ${JSON.stringify(h)}`);

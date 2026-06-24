@@ -1115,6 +1115,12 @@ async function apexHover(doc: TextDocument, offset: number, pos: { line: number;
         const base = baseTypeName(typeName);
         const member = index.types.get(base)?.find((m) => m.name === word);
         if (member) return codeHover(`(${member.kind}) ${base}.${word}${member.detail ? ' : ' + member.detail : ''}`);
+        // Cross-file user type member.
+        const wsm = WorkspaceIndex.findTypeMembers(base)?.find((m) => m.name === word);
+        if (wsm) return codeHover(`(${wsm.kind}) ${base}.${word}${wsm.detail ? ' : ' + wsm.detail : ''}`);
+        // Salesforce standard-library member (System.debug, Database.query…).
+        const sm = stdMembersFor(base)?.find((m) => m.name.toLowerCase() === word.toLowerCase());
+        if (sm) return codeHover(`${stdTypeName(base) ?? base}.${sm.detail}`);
         const d = await describe(doc.uri, base);
         if (d) {
             const f = d.fields.find((x) => x.name.toLowerCase() === word.toLowerCase());
@@ -1132,6 +1138,10 @@ async function apexHover(doc: TextDocument, offset: number, pos: { line: number;
     if (index.types.has(word)) return codeHover(`type ${word}`);
     const d = await describe(doc.uri, word);
     if (d) return objectHover(word, d, await objectDescription(doc.uri, word));
+    // Workspace user class / Salesforce standard-library type.
+    if (WorkspaceIndex.findTypeMembers(word)) return codeHover(`class ${word}`);
+    const std = stdTypeName(word);
+    if (std) return codeHover(`${std} — Salesforce system type`);
     return null;
 }
 

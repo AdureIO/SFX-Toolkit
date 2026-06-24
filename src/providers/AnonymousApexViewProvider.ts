@@ -128,6 +128,13 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 		return doc;
 	}
 
+	/** The identifier prefix immediately before the cursor (for client-side filtering). */
+	private static prefixAt(text: string, line: number, character: number): string {
+		const lineText = text.split('\n')[line] ?? '';
+		const m = /([A-Za-z0-9_]+)$/.exec(lineText.slice(0, character));
+		return (m ? m[1] : '').toLowerCase();
+	}
+
 	/** Resolve completions from the real editor providers for the current buffer text/position. */
 	private async getRealCompletions(text: string, line: number, character: number): Promise<unknown[]> {
 		const doc = await this.syncBufferDoc(text);
@@ -138,7 +145,20 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 				doc.uri,
 				new vscode.Position(line, character),
 			);
-			const items = list?.items ?? [];
+			let items = list?.items ?? [];
+			// `executeCompletionItemProvider` returns the providers' raw, unfiltered
+			// results — for SObject/type completion that's the whole org (thousands).
+			// We must filter by the typed prefix ourselves *before* capping, or the
+			// match (e.g. the namespace-optional `filterText`) gets truncated away.
+			const prefix = AnonymousApexViewProvider.prefixAt(text, line, character);
+			if (prefix) {
+				const matches = (s?: string) => !!s && s.toLowerCase().startsWith(prefix);
+				items = items.filter((it) => {
+					const label = typeof it.label === 'string' ? it.label : it.label.label;
+					// filterText carries the namespace-optional form (acme__Foo__c → Foo__c).
+					return matches(it.filterText) || matches(label) || (it.filterText ?? '').toLowerCase().includes(prefix);
+				});
+			}
 			return items.slice(0, 200).map((it) => {
 				const label = typeof it.label === 'string' ? it.label : it.label.label;
 				const insert = typeof it.insertText === 'string' ? it.insertText : (it.insertText as vscode.SnippetString | undefined)?.value ?? label;
@@ -155,6 +175,29 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 			});
 		} catch {
 			return [];
+		}
+	}
+
+	/** Resolve hover info from the real editor providers for the current buffer text/position. */
+	private async getRealHover(text: string, line: number, character: number): Promise<{ contents: string[] } | null> {
+		const doc = await this.syncBufferDoc(text);
+		if (!doc) return null;
+		try {
+			const hovers = await vscode.commands.executeCommand<vscode.Hover[]>(
+				'vscode.executeHoverProvider',
+				doc.uri,
+				new vscode.Position(line, character),
+			);
+			const contents: string[] = [];
+			for (const h of hovers ?? []) {
+				for (const c of h.contents) {
+					const value = typeof c === 'string' ? c : (c as vscode.MarkdownString).value;
+					if (value && value.trim()) contents.push(value);
+				}
+			}
+			return contents.length ? { contents } : null;
+		} catch {
+			return null;
 		}
 	}
 
@@ -189,6 +232,11 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 				case 'getCompletions': {
 					const items = await this.getRealCompletions(data.text || '', data.line || 0, data.character || 0);
 					this._post('completionResult', { requestId: data.requestId, items });
+					break;
+				}
+				case 'getHover': {
+					const hover = await this.getRealHover(data.text || '', data.line || 0, data.character || 0);
+					this._post('hoverResult', { requestId: data.requestId, hover });
 					break;
 				}
 				case 'execute': {
@@ -331,6 +379,7 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 				: '<option value="">No orgs</option>';
 		} else if (d.type === 'historyUpdated') setHistory(d.history || []);
 		else if (d.type === 'completionResult') { const cb = pending[d.requestId]; if (cb) { delete pending[d.requestId]; cb(d.items || []); } }
+		else if (d.type === 'hoverResult') { const cb = pending[d.requestId]; if (cb) { delete pending[d.requestId]; cb(d.hover || null); } }
 	});
 	vscode.postMessage({ type: 'getOrgs' });
 
@@ -373,6 +422,23 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 			comments: { lineComment: '//', blockComment: ['/*', '*/'] },
 			brackets: [['{','}'],['[',']'],['(',')']],
 			autoClosingPairs: [{open:'{',close:'}'},{open:'[',close:']'},{open:'(',close:')'},{open:"'",close:"'"}],
+		});
+
+		monaco.languages.registerHoverProvider('apex', {
+			provideHover: function (model, position) {
+				return new Promise(function (resolve) {
+					const id = ++reqId;
+					pending[id] = function (hover) {
+						if (!hover || !hover.contents || !hover.contents.length) { resolve(null); return; }
+						const word = model.getWordAtPosition(position);
+						const range = word ? { startLineNumber: position.lineNumber, endLineNumber: position.lineNumber,
+							startColumn: word.startColumn, endColumn: word.endColumn } : undefined;
+						resolve({ range: range, contents: hover.contents.map(function (v) { return { value: v }; }) });
+					};
+					vscode.postMessage({ type: 'getHover', requestId: id,
+						text: model.getValue(), line: position.lineNumber - 1, character: position.column - 1 });
+				});
+			},
 		});
 
 		monaco.languages.registerCompletionItemProvider('apex', {
