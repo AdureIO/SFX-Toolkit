@@ -64,6 +64,82 @@ async function restLatestLogId(org: string | null, userId: string, exclude: stri
   }
 }
 
+/** Raw debug-log body for a log id (REST). */
+async function restLogBody(org: string | null, logId: string): Promise<string> {
+  const version = getToolingApiVersion();
+  try {
+    const { body } = await AuthInfo.get(org, (a) =>
+      `${a.instanceUrl.replace(/\/$/, "")}/services/data/${version}/tooling/sobjects/ApexLog/${logId}/Body`
+    );
+    return body;
+  } catch {
+    return "";
+  }
+}
+
+/** Build a human-readable error message from a Tooling executeAnonymous result. */
+function formatAnonError(r: AnonResult): string {
+  if (r.compileProblem) return r.line && r.line > 0 ? `Line ${r.line}: ${r.compileProblem}` : r.compileProblem;
+  if (r.exceptionMessage) return r.exceptionStackTrace ? `${r.exceptionMessage}\n${r.exceptionStackTrace}` : r.exceptionMessage;
+  return "Execution failed.";
+}
+
+export interface PanelExecResult {
+  success: boolean;
+  compiled: boolean;
+  errorMessage?: string;
+  log?: string;
+  logId?: string;
+}
+
+/**
+ * Run anonymous Apex for the Execute Apex panel, entirely over the Tooling REST
+ * API (no CLI), and return the structured result plus the debug-log text so the
+ * panel can render it inline. Best-effort log retrieval (only present when trace
+ * logging is enabled for the user).
+ */
+export async function executeAnonymousForPanel(code: string, targetOrg?: string): Promise<PanelExecResult> {
+  if (!code || !code.trim()) return { success: false, compiled: false, errorMessage: "No code to execute." };
+  if (!(await confirmProductionOrgOperation("execute anonymous Apex against", targetOrg))) {
+    return { success: false, compiled: false, errorMessage: "Cancelled." };
+  }
+  const org = targetOrg || null;
+  try {
+    lastAnonymousContent = code;
+    const userId = await restUserId(org);
+    const headBefore = await restLatestLogId(org, userId, null);
+
+    const result = await restExecuteAnonymous(org, code);
+    if (!result.compiled || !result.success) {
+      return { success: false, compiled: !!result.compiled, errorMessage: formatAnonError(result) };
+    }
+
+    // Poll briefly for the log this run produced.
+    let logId: string | null = null;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      if (attempt > 0) await new Promise((r) => setTimeout(r, 250));
+      logId = await restLatestLogId(org, userId, headBefore);
+      if (logId) break;
+    }
+    let log = "";
+    if (logId) {
+      log = await restLogBody(org, logId);
+      // Persist alongside (matches the SF "log exec" layout) for "open in editor".
+      const logDir = getSalesforceLogDirectory();
+      if (logDir && log) {
+        try {
+          if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
+          fs.writeFileSync(path.join(logDir, `${logId}.log`), log, "utf8");
+          fs.writeFileSync(path.join(logDir, `${logId}.apex`), code, "utf8");
+        } catch { /* best-effort */ }
+      }
+    }
+    return { success: true, compiled: true, log, logId: logId ?? undefined };
+  } catch (e: any) {
+    return { success: false, compiled: false, errorMessage: e?.message || e?.stderr || String(e) };
+  }
+}
+
 // Track last executed file for Rerun capability
 let lastAnonymousContent: string = "";
 

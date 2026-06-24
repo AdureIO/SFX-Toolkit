@@ -1,7 +1,9 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import { executeAnonymousApex, getAnonymousApexOrgList } from '../commands/executeAnonymous';
+import { executeAnonymousForPanel, getAnonymousApexOrgList } from '../commands/executeAnonymous';
+import { openLogById } from '../commands/listLogs';
+import { AuthInfo } from '../utils/authInfo';
 import { isSalesforceProject } from '../utils/projectUtils';
 
 const BUFFER_RELATIVE_PATH = '.vscode/anon-apex-buffer.apex';
@@ -231,6 +233,10 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 			],
 		};
 
+		// Warm the default-org auth token now (first call shells out to the CLI),
+		// so the first execution doesn't pay that cost.
+		if (isSalesforceProject()) AuthInfo.warmAuthForOrg(null);
+
 		const { lastCode, history } = await this.loadApexState();
 		webviewView.webview.html = this._getHtmlForWebview(webviewView.webview, lastCode, history);
 
@@ -257,16 +263,22 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 						return;
 					}
 					await this.writeBuffer(data.code || '');
-					try {
-						const result = await executeAnonymousApex(data.code || '', { fromPanel: true, targetOrg: data.targetOrg || undefined });
-						if (result.success) {
-							this._post('showError', { message: '' });
-							this._post('historyUpdated', { history: await this.saveApexOnExecute(data.code || '') });
-						} else {
-							this._post('showError', { message: result.errorMessage });
-						}
-					} catch (e: any) {
-						this._post('showError', { message: e?.message || e?.stderr || String(e) });
+					this._post('executeStarted', {});
+					const result = await executeAnonymousForPanel(data.code || '', data.targetOrg || undefined);
+					this._post('executeResult', {
+						success: result.success,
+						error: result.errorMessage || '',
+						log: result.log || '',
+						logId: result.logId || '',
+					});
+					if (result.success) {
+						this._post('historyUpdated', { history: await this.saveApexOnExecute(data.code || '') });
+					}
+					break;
+				}
+				case 'openLog': {
+					if (typeof data.logId === 'string' && data.logId) {
+						await openLogById(data.logId, vscode.ViewColumn.Beside, 'sf-anon-log', true, data.targetOrg || undefined);
 					}
 					break;
 				}
@@ -330,7 +342,18 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 	select { flex: 1; min-width: 0; padding: 4px 8px; font-size: 12px;
 		background: var(--vscode-input-background); color: var(--vscode-input-foreground);
 		border: 1px solid var(--vscode-input-border, transparent); border-radius: 4px; }
-	#editor { flex: 1; min-height: 120px; border: 1px solid var(--vscode-input-border, transparent); border-radius: 4px; overflow: hidden; }
+	#main { flex: 1; display: flex; gap: 6px; min-height: 120px; }
+	#editor { flex: 1; min-width: 0; border: 1px solid var(--vscode-input-border, transparent); border-radius: 4px; overflow: hidden; }
+	#results { flex: 1; min-width: 0; display: flex; flex-direction: column; border: 1px solid var(--vscode-input-border, transparent);
+		border-radius: 4px; overflow: hidden; background: var(--vscode-editor-background); }
+	#results-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 8px; font-size: 11px;
+		opacity: 0.9; border-bottom: 1px solid var(--vscode-panel-border, rgba(128,128,128,0.25)); flex-shrink: 0; }
+	#open-log-btn { display: none; font-size: 11px; padding: 2px 8px; border: none; border-radius: 4px; cursor: pointer;
+		background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+	#result-content { flex: 1; margin: 0; padding: 8px; overflow: auto; white-space: pre-wrap; word-break: break-word;
+		font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; line-height: 1.4; }
+	#result-content.error { color: var(--vscode-errorForeground); }
+	#result-content.muted { opacity: 0.6; }
 	#error-box { padding: 8px; font-size: 12px; line-height: 1.4; white-space: pre-wrap; word-break: break-word;
 		background: var(--vscode-inputValidation-errorBackground); border: 1px solid var(--vscode-inputValidation-errorBorder);
 		color: var(--vscode-errorForeground); border-radius: 4px; display: none; flex-shrink: 0; max-height: 140px; overflow: auto; }
@@ -349,7 +372,13 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 	<select id="history-select" title="Reopen a previous snippet"><option value="">History</option></select></div>
 <div class="row"><span class="label">Target org</span>
 	<select id="org-select" title="Org to execute against"><option value="">Loading…</option></select></div>
-<div id="editor"></div>
+<div id="main">
+	<div id="editor"></div>
+	<div id="results">
+		<div id="results-header"><span id="results-title">Result</span><button id="open-log-btn" title="Open the full debug log in an editor">Open log</button></div>
+		<pre id="result-content" class="muted">Run code to see the result and debug log here.</pre>
+	</div>
+</div>
 <div id="error-box" role="alert"></div>
 <div class="actions">
 	<button id="execute-btn" title="Execute (Ctrl+Enter)">Execute<span class="shortcut-hint">Ctrl+Enter</span></button>
@@ -363,12 +392,21 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 	const errorBox = document.getElementById('error-box');
 	const orgSelect = document.getElementById('org-select');
 	const historySelect = document.getElementById('history-select');
+	const resultContent = document.getElementById('result-content');
+	const resultsTitle = document.getElementById('results-title');
+	const openLogBtn = document.getElementById('open-log-btn');
+	let currentLogId = '';
 	let editor = null;
 	let saveTimer = null;
 	let initial = { lastCode: '', history: [] };
 	try { initial = JSON.parse(document.getElementById('apex-initial-data').textContent); } catch (e) {}
 
 	function showError(msg) { errorBox.textContent = msg || ''; errorBox.classList.toggle('visible', !!msg); }
+	function setResult(text, mode) {
+		resultContent.textContent = text || '';
+		resultContent.classList.toggle('error', mode === 'error');
+		resultContent.classList.toggle('muted', mode === 'muted');
+	}
 	function setHistory(items) {
 		while (historySelect.options.length > 1) historySelect.remove(1);
 		(items || []).forEach((q) => {
@@ -403,6 +441,21 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 		else if (d.type === 'completionResult') { const cb = pending[d.requestId]; if (cb) { delete pending[d.requestId]; cb(d.items || []); } }
 		else if (d.type === 'hoverResult') { const cb = pending[d.requestId]; if (cb) { delete pending[d.requestId]; cb(d.hover || null); } }
 		else if (d.type === 'flush') flushContent();
+		else if (d.type === 'executeStarted') { resultsTitle.textContent = 'Running…'; openLogBtn.style.display = 'none'; currentLogId = ''; setResult('Executing…', 'muted'); }
+		else if (d.type === 'executeResult') {
+			if (!d.success) {
+				resultsTitle.textContent = 'Error';
+				setResult(d.error || 'Execution failed.', 'error');
+				openLogBtn.style.display = 'none';
+			} else {
+				resultsTitle.textContent = d.log ? 'Debug log' : 'Result';
+				setResult(d.log || 'Executed successfully. (No debug log — enable trace logging to capture one.)', d.log ? null : 'muted');
+				currentLogId = d.logId || '';
+				openLogBtn.style.display = currentLogId ? '' : 'none';
+				// Jump to the end of the log (most recent output).
+				resultContent.scrollTop = resultContent.scrollHeight;
+			}
+		}
 	});
 	vscode.postMessage({ type: 'getOrgs' });
 
@@ -533,6 +586,7 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 		if (code && editor) { editor.setValue(code); editor.focus(); }
 		historySelect.selectedIndex = 0;
 	});
+	openLogBtn.onclick = function () { if (currentLogId) vscode.postMessage({ type: 'openLog', logId: currentLogId, targetOrg: (orgSelect.value || '').trim() || undefined }); };
 	document.getElementById('execute-btn').onclick = doExecute;
 	document.getElementById('open-editor-btn').onclick = function () { vscode.postMessage({ type: 'openInEditor', code: editor ? editor.getValue() : '' }); };
 	document.getElementById('clear-btn').onclick = function () { if (editor) { editor.setValue(''); editor.focus(); } showError(''); vscode.postMessage({ type: 'contentChanged', code: '' }); };
