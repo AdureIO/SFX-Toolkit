@@ -162,6 +162,11 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	button { font-size:11px; padding:4px 10px; border:none; border-radius:6px; cursor:pointer; background:var(--vscode-button-secondaryBackground); color:var(--vscode-button-secondaryForeground); }
 	button:hover { background:var(--vscode-button-hoverBackground); }
 	button.primary { background:var(--vscode-button-background); color:var(--vscode-button-foreground); }
+	button.icon { padding:4px 6px; display:inline-flex; align-items:center; justify-content:center; }
+	button.icon svg { width:14px; height:14px; display:block; }
+	button.icon svg path, button.icon svg circle { fill:none; stroke:currentColor; stroke-width:1.4; stroke-linecap:round; stroke-linejoin:round; }
+	button.icon svg .fill { fill:currentColor; stroke:none; }
+	button.icon.on { background:rgba(21,210,116,0.22); color:#15d274; }
 	.tabs { margin-left:auto; display:inline-flex; gap:2px; padding:2px; background:var(--vscode-input-background); border-radius:8px; }
 	.tab { padding:4px 14px; font-size:12px; cursor:pointer; color:var(--vscode-foreground); border-radius:6px; }
 	.tab.active { background:var(--vscode-button-background); color:var(--vscode-button-foreground); font-weight:500; }
@@ -175,7 +180,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	.row.sel { background:var(--vscode-list-activeSelectionBackground); color:var(--vscode-list-activeSelectionForeground); }
 	.meta { font-size:11px; opacity:0.75; font-family:var(--vscode-editor-font-family,monospace); }
 	.err { color:var(--vscode-errorForeground); }
-	#traces { border-top:1px solid var(--vscode-panel-border, rgba(128,128,128,0.25)); padding:6px 8px; font-size:11px; }
+	#traces { border-top:1px solid var(--vscode-panel-border, rgba(128,128,128,0.25)); padding:6px 8px; font-size:11px; display:flex; align-items:center; justify-content:space-between; }
 	.viewer { flex:1; display:flex; flex-direction:column; min-width:0; }
 	.vtools { display:flex; align-items:center; gap:6px; padding:5px 8px; border-bottom:1px solid var(--vscode-panel-border, rgba(128,128,128,0.2)); flex-shrink:0; }
 	.vtools input { flex:1; min-width:50px; height:26px; padding:2px 6px; font-size:11px; background:var(--vscode-input-background); color:var(--vscode-input-foreground); border:1px solid var(--vscode-input-border, transparent); border-radius:4px; }
@@ -203,7 +208,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	<span id="title">Apex workbench</span>
 	<select id="org" title="Target org for logs and execution"><option value="">Loading…</option></select>
 	<span id="tracePill" title="Active debug traces">Trace: —</span>
-	<button id="refresh" title="Refresh">Refresh</button>
+	<button id="refresh" class="icon" title="Refresh" aria-label="Refresh"><svg viewBox="0 0 16 16"><path d="M13.6 8a5.6 5.6 0 1 1-1.7-4"/><path d="M13.9 2.3v3.2h-3.2"/></svg></button>
 	<span class="tabs"><span class="tab active" data-t="logs">Logs</span><span class="tab" data-t="exec">Execute</span></span>
 </div>
 
@@ -212,18 +217,18 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 		<div id="listHead">
 			<span>Debug logs <span id="logCount"></span></span>
 			<span style="display:inline-flex; gap:4px;">
-				<button id="listen" title="Listen for new logs (poll)">Listen</button>
-				<button id="deleteAll" title="Delete all logs">Delete all</button>
+				<button id="listen" class="icon" title="Listen for new logs (poll)" aria-label="Listen for new logs"><svg viewBox="0 0 16 16"><circle class="fill" cx="8" cy="8" r="1.6"/><path d="M4.8 4.8a4.5 4.5 0 0 0 0 6.4"/><path d="M11.2 4.8a4.5 4.5 0 0 1 0 6.4"/></svg></button>
+				<button id="deleteAll" class="icon" title="Delete all logs" aria-label="Delete all logs"><svg viewBox="0 0 16 16"><path d="M2.8 4.2h10.4"/><path d="M6 4.2V2.6h4v1.6"/><path d="M4.6 4.2l.6 9.2h5.6l.6-9.2"/></svg></button>
 			</span>
 		</div>
 		<div id="listRows"><div class="muted" style="padding:8px;">Loading logs…</div></div>
 		<div id="traces">
-			<div><span class="muted">Traces: —</span></div>
-			<div style="display:flex; gap:4px; margin-top:5px;">
-				<button id="quickTrace" title="Start a quick debug trace">Quick trace</button>
-				<button id="newTrace" title="Create a new debug trace">New trace</button>
-				<button id="refreshTraces" title="Refresh traces">Refresh</button>
-			</div>
+			<span class="lbl">Traces</span>
+			<span style="display:inline-flex; gap:4px;">
+				<button id="quickTrace" class="icon" title="Quick trace (selected org)" aria-label="Quick trace"><svg viewBox="0 0 16 16"><path class="fill" d="M9 1.5 3.5 9H7l-1 5.5L12 6.5H8.5l.5-5z"/></svg></button>
+				<button id="newTrace" class="icon" title="New trace (choose duration)" aria-label="New trace"><svg viewBox="0 0 16 16"><path d="M8 3v10"/><path d="M3 8h10"/></svg></button>
+				<button id="refreshTraces" class="icon" title="Refresh traces" aria-label="Refresh traces"><svg viewBox="0 0 16 16"><path d="M13.6 8a5.6 5.6 0 1 1-1.7-4"/><path d="M13.9 2.3v3.2h-3.2"/></svg></button>
+			</span>
 		</div>
 	</div>
 	<div class="viewer">
@@ -231,7 +236,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 			<button class="qf" data-pane="log" data-f="debug" title="Toggle USER_DEBUG, exceptions and errors">Debug</button>
 			<button class="qf" data-pane="log" data-f="soql" title="Toggle SOQL and DML">SOQL/DML</button>
 			<input data-pane="log" type="text" placeholder="Filter (regex)…" spellcheck="false" />
-			<button id="logOpen" title="Open this log in an editor">Open</button>
+			<button id="logOpen" class="icon" title="Open this log in an editor" aria-label="Open log in editor"><svg viewBox="0 0 16 16"><path d="M9 3h4v4"/><path d="M13 3 7.5 8.5"/><path d="M11 9.5V13H3V5h3.5"/></svg></button>
 		</div>
 		<pre id="logContent" class="content muted">Select a log to view it.</pre>
 	</div>
@@ -344,8 +349,8 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	let listenTimer=null; const pollMs=Math.max(2,(initial.pollSeconds||5))*1000;
 	const listenBtn=document.getElementById('listen');
 	listenBtn.onclick=function(){
-		if(listenTimer){ clearInterval(listenTimer); listenTimer=null; listenBtn.classList.remove('primary'); listenBtn.textContent='Listen'; }
-		else { listenBtn.classList.add('primary'); listenBtn.textContent='Listening…'; vscode.postMessage({type:'listLogs', org:orgVal()});
+		if(listenTimer){ clearInterval(listenTimer); listenTimer=null; listenBtn.classList.remove('on'); listenBtn.title='Listen for new logs (poll)'; }
+		else { listenBtn.classList.add('on'); listenBtn.title='Listening… (click to stop)'; vscode.postMessage({type:'listLogs', org:orgVal()});
 			listenTimer=setInterval(function(){ vscode.postMessage({type:'listLogs', org:orgVal()}); }, pollMs); }
 	};
 
@@ -395,7 +400,6 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 		else if(d.type==='logLoading'){ if(d.id===currentId) logView.setText('Loading log…', true); }
 		else if(d.type==='logBody'){ if(d.id===currentId) logView.setLog(d.text||''); }
 		else if(d.type==='traceInfo'){ if((d.org||'')!==orgVal()) return;
-			const t=document.getElementById('traces').querySelector('span'); t.className=d.count>0?'':'muted'; t.textContent= d.count>0 ? ('Traces: '+d.count+' active') : 'Traces: none';
 			const pill=document.getElementById('tracePill'); pill.classList.toggle('on', d.count>0); pill.textContent= d.count>0 ? ('Trace: '+d.count+' on') : 'Trace: off'; }
 		else if(d.type==='execStarted'){ execTitle.textContent='Running…'; execOpen.style.display='none'; execFilter.style.display='none'; execView.setText('Executing…', true); }
 		else if(d.type==='execResult'){
