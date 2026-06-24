@@ -474,6 +474,9 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 			fontSize: 13,
 			tabSize: 4,
 			quickSuggestions: true,
+			// Render suggest/hover widgets at the document-body level so they aren't
+			// clipped or mispositioned inside the small panel editor container.
+			fixedOverflowWidgets: true,
 		});
 
 		let saveTimer = null;
