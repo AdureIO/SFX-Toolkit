@@ -293,6 +293,12 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 			}
 		});
 
+		// When the panel is hidden / focus moves away, ask the webview to flush its
+		// current content immediately (don't wait out the debounce) so nothing is lost.
+		webviewView.onDidChangeVisibility(() => {
+			if (!webviewView.visible) this._post('flush');
+		});
+
 		webviewView.onDidDispose(() => {
 			this._messageListener?.dispose();
 			this._messageListener = undefined;
@@ -358,6 +364,7 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 	const orgSelect = document.getElementById('org-select');
 	const historySelect = document.getElementById('history-select');
 	let editor = null;
+	let saveTimer = null;
 	let initial = { lastCode: '', history: [] };
 	try { initial = JSON.parse(document.getElementById('apex-initial-data').textContent); } catch (e) {}
 
@@ -395,6 +402,7 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 		} else if (d.type === 'historyUpdated') setHistory(d.history || []);
 		else if (d.type === 'completionResult') { const cb = pending[d.requestId]; if (cb) { delete pending[d.requestId]; cb(d.items || []); } }
 		else if (d.type === 'hoverResult') { const cb = pending[d.requestId]; if (cb) { delete pending[d.requestId]; cb(d.hover || null); } }
+		else if (d.type === 'flush') flushContent();
 	});
 	vscode.postMessage({ type: 'getOrgs' });
 
@@ -496,13 +504,24 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 			fixedOverflowWidgets: true,
 		});
 
-		let saveTimer = null;
 		editor.onDidChangeModelContent(function () {
 			if (saveTimer) clearTimeout(saveTimer);
 			saveTimer = setTimeout(function () { vscode.postMessage({ type: 'contentChanged', code: editor.getValue() }); }, 500);
 		});
+		// Flush immediately when focus leaves the editor, so edits persist even if
+		// the panel is hidden/disposed before the debounce fires.
+		editor.onDidBlurEditorText(flushContent);
 		editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, doExecute);
 	});
+
+	// Persist the current editor content right now (cancel any pending debounce).
+	function flushContent() {
+		if (!editor) return;
+		if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+		vscode.postMessage({ type: 'contentChanged', code: editor.getValue() });
+	}
+	window.addEventListener('blur', flushContent);
+	document.addEventListener('visibilitychange', function () { if (document.hidden) flushContent(); });
 
 	function doExecute() {
 		showError('');

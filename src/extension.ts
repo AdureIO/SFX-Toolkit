@@ -347,7 +347,11 @@ export function activate(context: vscode.ExtensionContext) {
     // 8. Execute Apex panel (bottom panel only; content persisted in .vscode/anon-apex-buffer.apex)
     const anonymousApexProvider = new AnonymousApexViewProvider(context.extensionUri);
     context.subscriptions.push(
-      vscode.window.registerWebviewViewProvider("adure-sfx-toolkit.anonymousApexPanel", anonymousApexProvider)
+      vscode.window.registerWebviewViewProvider("adure-sfx-toolkit.anonymousApexPanel", anonymousApexProvider, {
+        // Keep the Monaco editor (content, cursor, undo history) alive when the
+        // panel is hidden or focus moves away, instead of tearing it down.
+        webviewOptions: { retainContextWhenHidden: true },
+      })
     );
 
     // 9. Development Actions
