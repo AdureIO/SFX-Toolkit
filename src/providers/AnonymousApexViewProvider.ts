@@ -77,6 +77,16 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 		return { lastCode, history };
 	}
 
+	/** Persist the current editor content as the restored-on-reload snapshot. */
+	private saveLastCode(code: string): void {
+		const dir = this.getApexStorageDir();
+		if (!dir) return;
+		try {
+			if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+			fs.writeFileSync(path.join(dir, APEX_LAST_FILE), code, 'utf8');
+		} catch { /* best-effort persist */ }
+	}
+
 	private async saveApexOnExecute(code: string): Promise<string[]> {
 		const dir = this.getApexStorageDir();
 		if (!dir) return [];
@@ -274,7 +284,10 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 					break;
 				}
 				case 'contentChanged': {
-					if (typeof data.code === 'string') await this.writeBuffer(data.code);
+					if (typeof data.code === 'string') {
+						await this.writeBuffer(data.code);   // for completion/hover providers
+						this.saveLastCode(data.code);        // restored-on-reload snapshot
+					}
 					break;
 				}
 			}

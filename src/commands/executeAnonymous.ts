@@ -9,7 +9,60 @@ import { confirmProductionOrgOperation } from "../utils/orgSafety";
 export type { OrgOption };
 import { openLogById } from "./listLogs";
 import { AuthInfo } from "../utils/authInfo";
+import { getToolingApiVersion } from "../utils/constants";
 import { getSalesforceLogDirectory } from "../utils/logPaths";
+
+// ─── Fast REST execution (no CLI spawn) ─────────────────────────────────────────
+
+interface AnonResult {
+  compiled?: boolean;
+  success?: boolean;
+  compileProblem?: string | null;
+  exceptionMessage?: string | null;
+  exceptionStackTrace?: string | null;
+  line?: number;
+  column?: number;
+}
+
+/** Run anonymous Apex via the Tooling REST API (single authenticated request). */
+async function restExecuteAnonymous(org: string | null, code: string): Promise<AnonResult> {
+  const version = getToolingApiVersion();
+  const { body } = await AuthInfo.get(org, (a) =>
+    `${a.instanceUrl.replace(/\/$/, "")}/services/data/${version}/tooling/executeAnonymous/?anonymousBody=${encodeURIComponent(code)}`
+  );
+  return JSON.parse(body) as AnonResult;
+}
+
+/** Current user's Id via the OAuth userinfo endpoint (cached for the default org). */
+async function restUserId(org: string | null): Promise<string> {
+  if (org === null && cachedUserId !== null) return cachedUserId;
+  try {
+    const { body } = await AuthInfo.get(org, (a) => `${a.instanceUrl.replace(/\/$/, "")}/services/oauth2/userinfo`);
+    const id = (JSON.parse(body).user_id as string) || "";
+    if (org === null && id) cachedUserId = id;
+    return id;
+  } catch {
+    return "";
+  }
+}
+
+/** Most recent ApexLog Id for the user (REST query); null if none or equal to `exclude`. */
+async function restLatestLogId(org: string | null, userId: string, exclude: string | null): Promise<string | null> {
+  const version = getToolingApiVersion();
+  const q =
+    "SELECT Id FROM ApexLog" +
+    (userId ? ` WHERE LogUserId = '${userId}'` : "") +
+    " ORDER BY StartTime DESC LIMIT 1";
+  try {
+    const { body } = await AuthInfo.get(org, (a) =>
+      `${a.instanceUrl.replace(/\/$/, "")}/services/data/${version}/query/?q=${encodeURIComponent(q)}`
+    );
+    const id = (JSON.parse(body).records?.[0]?.Id as string) ?? null;
+    return id && id !== exclude ? id : null;
+  } catch {
+    return null;
+  }
+}
 
 // Track last executed file for Rerun capability
 let lastAnonymousContent: string = "";
@@ -102,8 +155,9 @@ export async function executeAnonymousApex(
     if (options?.fromPanel) {
       try {
         const j = JSON.parse(message);
-        if (j.compileProblem) message = j.compileProblem;
-        else if (j.exceptionMessage) message = j.exceptionMessage;
+        const r = j.result ?? j;
+        if (r.compileProblem) message = r.line && r.line > 0 ? `Line ${r.line}: ${r.compileProblem}` : r.compileProblem;
+        else if (r.exceptionMessage) message = r.exceptionStackTrace ? `${r.exceptionMessage}\n${r.exceptionStackTrace}` : r.exceptionMessage;
       } catch {
         // use original message
       }
@@ -128,119 +182,40 @@ async function executeContent(text: string, fromPanel?: boolean, targetOrg?: str
     },
     async (_progress, token) => {
       try {
-        // Execute Apex panel: run with --json, then same as Salesforce extension: download log to
-        // .sfdx/tools/debug/logs and save original script + JSON result alongside; open the log.
+        // Execute Apex panel: run via the Tooling REST API (no CLI spawn — orders
+        // of magnitude faster than `sf apex run`), then best-effort fetch the new
+        // debug log over REST and open it.
         if (fromPanel) {
-          const runOut = await runCommand(
-            `sf apex run -f "${tmpFile}" --json${orgFlag}`,
-            undefined,
-            undefined,
-            true,
-            token
-          );
+          const org = targetOrg || null;
+          const userId = await restUserId(org);
+          const headBefore = await restLatestLogId(org, userId, null);
 
-          /**
-           * NOTE: `sf apex run --json` wraps the actual result under `result`.
-           * We normalize that here so `compiled`/`success` checks work reliably.
-           */
-          let raw: any;
-          try {
-            raw = JSON.parse(runOut);
-          } catch {
-            raw = {};
-          }
-          const runResult: {
-            compiled?: boolean;
-            success?: boolean;
-            logs?: string;
-            compileProblem?: string;
-            exceptionMessage?: string;
-          } = raw && typeof raw === "object" && raw.result && typeof raw.result === "object" ? raw.result : raw || {};
+          const runResult = await restExecuteAnonymous(org, text);
+          if (token.isCancellationRequested) return;
 
           if (!runResult.compiled || !runResult.success) {
-            // Preserve full structured payload so the caller can extract a clean error message.
-            const errorPayload = {
-              ...(typeof raw === "object" ? raw : {}),
-              result: {
-                ...(typeof runResult === "object" ? runResult : {})
-              }
-            };
-            throw new Error(JSON.stringify(errorPayload));
+            // Preserve a structured payload so the caller extracts a clean message.
+            throw new Error(JSON.stringify({ result: runResult }));
           }
 
-          let userId: string;
-          if (targetOrg) {
-            try {
-              const userRes = await runCommand(
-                `sf org display user --json${orgFlag}`,
-                undefined,
-                undefined,
-                true,
-                token
-              );
-              const userJson = JSON.parse(userRes);
-              userId = userJson.status === 0 && userJson.result?.id ? userJson.result.id : "";
-            } catch {
-              userId = "";
-            }
-          } else {
-            if (cachedUserId !== null) {
-              userId = cachedUserId;
-            } else {
-              try {
-                const userRes = await runCommand("sf org display user --json", undefined, undefined, true, token);
-                const userJson = JSON.parse(userRes);
-                userId = userJson.status === 0 && userJson.result?.id ? userJson.result.id : "";
-                if (userId) cachedUserId = userId;
-              } catch {
-                userId = "";
-              }
-            }
-          }
-          const query =
-            "SELECT Id FROM ApexLog" +
-            (userId ? ` WHERE LogUserId = '${userId}'` : "") +
-            " ORDER BY StartTime DESC LIMIT 1";
-          await new Promise((r) => setTimeout(r, 350));
+          // Poll briefly for the log this run produced (only if trace logging is on).
           let logId: string | null = null;
-          try {
-            const logRes = await runCommand(
-              `sf data query -q "${query}" -t --json${orgFlag}`,
-              undefined,
-              undefined,
-              true,
-              token
-            );
-            const logJson = JSON.parse(logRes);
-            if (logJson.status === 0 && logJson.result.records?.length > 0) {
-              logId = logJson.result.records[0].Id;
-            }
-          } catch {
-            // no log id; we still succeeded
+          for (let attempt = 0; attempt < 3 && !token.isCancellationRequested; attempt++) {
+            if (attempt > 0) await new Promise((r) => setTimeout(r, 300));
+            logId = await restLatestLogId(org, userId, headBefore);
+            if (logId) break;
           }
 
           if (logId) {
             const logDir = getSalesforceLogDirectory();
             if (logDir) {
-              if (!fs.existsSync(logDir)) {
-                fs.mkdirSync(logDir, { recursive: true });
-              }
-              // Reuse Salesforce extension behavior: download log to logs directory
-              await runCommand(
-                `sf apex get log -i ${logId} -d "${logDir}"${orgFlag}`,
-                undefined,
-                undefined,
-                true,
-                token
-              );
-              // Save original script and JSON result alongside (like Salesforce extension "log exec")
-              const scriptPath = path.join(logDir, `${logId}.apex`);
-              const resultPath = path.join(logDir, `${logId}-result.json`);
-              fs.writeFileSync(scriptPath, text, "utf8");
-              fs.writeFileSync(resultPath, JSON.stringify(runResult, null, 2), "utf8");
+              if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
+              // Save original script + result alongside (matches the SF "log exec" layout).
+              fs.writeFileSync(path.join(logDir, `${logId}.apex`), text, "utf8");
+              fs.writeFileSync(path.join(logDir, `${logId}-result.json`), JSON.stringify(runResult, null, 2), "utf8");
             }
-            const targetColumn = vscode.ViewColumn.Beside;
-            await openLogById(logId, targetColumn, "sf-anon-log", true, targetOrg);
+            // openLogById fetches the body via REST (default org) and opens it.
+            await openLogById(logId, vscode.ViewColumn.Beside, "sf-anon-log", true, targetOrg);
             vscode.window.showInformationMessage("Anonymous Apex executed successfully.");
           } else {
             vscode.window.showInformationMessage("Anonymous Apex executed successfully, but no debug log was found.");
