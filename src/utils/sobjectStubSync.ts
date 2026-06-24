@@ -257,7 +257,12 @@ function cleanupStaleManaged(base: string, liveNames: Set<string>): void {
 	}
 }
 
-async function syncProject(projectDir: string, org: string | null, scope: "referenced" | "all"): Promise<number> {
+async function syncProject(
+	projectDir: string,
+	org: string | null,
+	scope: "referenced" | "all",
+	report?: (msg: string) => void,
+): Promise<number> {
 	// Lazy-require vscode-dependent modules so the pure helpers stay testable.
 	const { OrgMetadataCache } = require("./orgMetadataCache");
 	const { SoqlSchemaProvider } = require("./soqlSchemaProvider");
@@ -285,7 +290,9 @@ async function syncProject(projectDir: string, org: string | null, scope: "refer
 	const targets = scope === "all" ? objectNames : objectNames.filter((n) => used.has(n));
 
 	let written = 0;
+	let done = 0;
 	for (const name of targets) {
+		report?.(`${++done}/${targets.length} ${name}`);
 		const dir = path.join(base, isCustomObject(name) ? "customObjects" : "standardObjects");
 		const file = path.join(dir, `${name}.cls`);
 		const before = readFileOrEmpty(file);
@@ -348,14 +355,20 @@ async function runStubSync(): Promise<void> {
 		const scope = vscode.workspace.getConfiguration("adure-sfx-toolkit").get("apex.stubScope", "referenced") === "all" ? "all" : "referenced";
 		const folders: { uri: { fsPath: string } }[] = vscode.workspace.workspaceFolders ?? [];
 		let changed = 0;
-		for (const folder of folders) {
-			const root = folder.uri.fsPath;
-			// Sync the workspace root project and any nested sfdx-project.json dirs.
-			for (const projectDir of findSfdxProjectDirs(root)) {
-				const org = resolveDefaultTargetOrgUsernameSync(projectDir) ?? null;
-				changed += await syncProject(projectDir, org, scope);
-			}
-		}
+		// Status-bar (Window) progress so the user knows we're caching org schema.
+		await vscode.window.withProgress(
+			{ location: vscode.ProgressLocation.Window, title: "ASFX: caching org schema" },
+			async (progress: { report: (v: { message?: string }) => void }) => {
+				for (const folder of folders) {
+					const root = folder.uri.fsPath;
+					// Sync the workspace root project and any nested sfdx-project.json dirs.
+					for (const projectDir of findSfdxProjectDirs(root)) {
+						const org = resolveDefaultTargetOrgUsernameSync(projectDir) ?? null;
+						changed += await syncProject(projectDir, org, scope, (msg) => progress.report({ message: msg }));
+					}
+				}
+			},
+		);
 		// Record the first sync's outcome so the post-initial-load restart (handled
 		// by the health monitor, after the LS finishes loading) knows whether new
 		// stub types were written and need to be picked up.
