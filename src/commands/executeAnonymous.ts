@@ -10,9 +10,13 @@ export type { OrgOption };
 import { openLogById } from "./listLogs";
 import { AuthInfo } from "../utils/authInfo";
 import { getToolingApiVersion } from "../utils/constants";
-import { getSalesforceLogDirectory } from "../utils/logPaths";
+import { httpsPost } from "../utils/httpUtils";
 
-// ─── Fast REST execution (no CLI spawn) ─────────────────────────────────────────
+// ─── Fast SOAP execution (no CLI spawn; debug log inline) ───────────────────────
+//
+// The Salesforce "Execute Anonymous" button is fast and returns the debug log
+// without a TraceFlag because it uses the SOAP Apex API with a DebuggingHeader:
+// one request returns both the result and the log inline. We do the same here.
 
 interface AnonResult {
   compiled?: boolean;
@@ -24,60 +28,101 @@ interface AnonResult {
   column?: number;
 }
 
-/** Run anonymous Apex via the Tooling REST API (single authenticated request). */
-async function restExecuteAnonymous(org: string | null, code: string): Promise<AnonResult> {
-  const version = getToolingApiVersion();
-  const { body } = await AuthInfo.get(org, (a) =>
-    `${a.instanceUrl.replace(/\/$/, "")}/services/data/${version}/tooling/executeAnonymous/?anonymousBody=${encodeURIComponent(code)}`
+function xmlEscape(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+}
+
+function xmlUnescape(s: string): string {
+  return s
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#(\d+);/g, (_m, d) => String.fromCharCode(parseInt(d, 10)))
+    .replace(/&amp;/g, "&");
+}
+
+/** First inner text of a tag (namespace-prefix tolerant); null when absent/nil. */
+function soapTag(xml: string, name: string): string | null {
+  const m = new RegExp(`<(?:\\w+:)?${name}(?:\\s[^>]*)?>([\\s\\S]*?)</(?:\\w+:)?${name}>`).exec(xml);
+  return m ? m[1] : null;
+}
+
+const SOAP_LOG_CATEGORIES: [string, string][] = [
+  ["Db", "INFO"],
+  ["Workflow", "INFO"],
+  ["Validation", "INFO"],
+  ["Callout", "INFO"],
+  ["Apex_code", "DEBUG"],
+  ["Apex_profiling", "INFO"],
+  ["Visualforce", "INFO"],
+  ["System", "DEBUG"],
+];
+
+function buildSoapEnvelope(sessionId: string, code: string): string {
+  const cats = SOAP_LOG_CATEGORIES.map(
+    ([c, l]) => `<apex:categories><apex:category>${c}</apex:category><apex:level>${l}</apex:level></apex:categories>`
+  ).join("");
+  return (
+    `<?xml version="1.0" encoding="UTF-8"?>` +
+    `<env:Envelope xmlns:env="http://schemas.xmlsoap.org/soap/envelope/" xmlns:apex="http://soap.sforce.com/2006/08/apex">` +
+    `<env:Header>` +
+    `<apex:SessionHeader><apex:sessionId>${xmlEscape(sessionId)}</apex:sessionId></apex:SessionHeader>` +
+    `<apex:DebuggingHeader>${cats}</apex:DebuggingHeader>` +
+    `</env:Header>` +
+    `<env:Body><apex:executeAnonymous><apex:String>${xmlEscape(code)}</apex:String></apex:executeAnonymous></env:Body>` +
+    `</env:Envelope>`
   );
-  return JSON.parse(body) as AnonResult;
 }
 
-/** Current user's Id via the OAuth userinfo endpoint (cached for the default org). */
-async function restUserId(org: string | null): Promise<string> {
-  if (org === null && cachedUserId !== null) return cachedUserId;
+function parseSoapAnon(xml: string): { result: AnonResult; log: string } {
+  const result: AnonResult = {
+    compiled: soapTag(xml, "compiled") === "true",
+    success: soapTag(xml, "success") === "true",
+    compileProblem: soapTag(xml, "compileProblem"),
+    exceptionMessage: soapTag(xml, "exceptionMessage"),
+    exceptionStackTrace: soapTag(xml, "exceptionStackTrace"),
+    line: parseInt(soapTag(xml, "line") ?? "-1", 10),
+    column: parseInt(soapTag(xml, "column") ?? "-1", 10),
+  };
+  if (result.compileProblem) result.compileProblem = xmlUnescape(result.compileProblem);
+  if (result.exceptionMessage) result.exceptionMessage = xmlUnescape(result.exceptionMessage);
+  if (result.exceptionStackTrace) result.exceptionStackTrace = xmlUnescape(result.exceptionStackTrace);
+  const log = soapTag(xml, "debugLog");
+  return { result, log: log ? xmlUnescape(log) : "" };
+}
+
+/**
+ * Run anonymous Apex via the SOAP Apex API with a DebuggingHeader — a single
+ * request that returns the result AND the debug log inline (no TraceFlag,
+ * no ApexLog polling). Refreshes the session once on an expired-session fault.
+ */
+async function soapExecuteAnonymous(org: string | null, code: string): Promise<{ result: AnonResult; log: string }> {
+  const version = getToolingApiVersion().replace(/^v/i, ""); // "v59.0" → "59.0"
+  const send = async (): Promise<string> => {
+    const auth = await AuthInfo.getAuthInfoForOrg(org);
+    if (!auth) throw new Error("Not authenticated. Run: sf org login web");
+    const endpoint = `${auth.instanceUrl.replace(/\/$/, "")}/services/Soap/s/${version}`;
+    return httpsPost(endpoint, buildSoapEnvelope(auth.accessToken, code), {
+      "Content-Type": "text/xml; charset=UTF-8",
+      SOAPAction: '""',
+    });
+  };
+  let body: string;
   try {
-    const { body } = await AuthInfo.get(org, (a) => `${a.instanceUrl.replace(/\/$/, "")}/services/oauth2/userinfo`);
-    const id = (JSON.parse(body).user_id as string) || "";
-    if (org === null && id) cachedUserId = id;
-    return id;
-  } catch {
-    return "";
+    body = await send();
+  } catch (e: any) {
+    if (/INVALID_SESSION_ID|HTTP 401|HTTP 500/i.test(String(e?.message ?? e))) {
+      AuthInfo.invalidateOrg(org);
+      body = await send();
+    } else {
+      throw e;
+    }
   }
+  return parseSoapAnon(body);
 }
 
-/** Most recent ApexLog Id for the user (REST query); null if none or equal to `exclude`. */
-async function restLatestLogId(org: string | null, userId: string, exclude: string | null): Promise<string | null> {
-  const version = getToolingApiVersion();
-  const q =
-    "SELECT Id FROM ApexLog" +
-    (userId ? ` WHERE LogUserId = '${userId}'` : "") +
-    " ORDER BY StartTime DESC LIMIT 1";
-  try {
-    const { body } = await AuthInfo.get(org, (a) =>
-      `${a.instanceUrl.replace(/\/$/, "")}/services/data/${version}/query/?q=${encodeURIComponent(q)}`
-    );
-    const id = (JSON.parse(body).records?.[0]?.Id as string) ?? null;
-    return id && id !== exclude ? id : null;
-  } catch {
-    return null;
-  }
-}
-
-/** Raw debug-log body for a log id (REST). */
-async function restLogBody(org: string | null, logId: string): Promise<string> {
-  const version = getToolingApiVersion();
-  try {
-    const { body } = await AuthInfo.get(org, (a) =>
-      `${a.instanceUrl.replace(/\/$/, "")}/services/data/${version}/tooling/sobjects/ApexLog/${logId}/Body`
-    );
-    return body;
-  } catch {
-    return "";
-  }
-}
-
-/** Build a human-readable error message from a Tooling executeAnonymous result. */
+/** Build a human-readable error message from an executeAnonymous result. */
 function formatAnonError(r: AnonResult): string {
   if (r.compileProblem) return r.line && r.line > 0 ? `Line ${r.line}: ${r.compileProblem}` : r.compileProblem;
   if (r.exceptionMessage) return r.exceptionStackTrace ? `${r.exceptionMessage}\n${r.exceptionStackTrace}` : r.exceptionMessage;
@@ -89,14 +134,12 @@ export interface PanelExecResult {
   compiled: boolean;
   errorMessage?: string;
   log?: string;
-  logId?: string;
 }
 
 /**
- * Run anonymous Apex for the Execute Apex panel, entirely over the Tooling REST
- * API (no CLI), and return the structured result plus the debug-log text so the
- * panel can render it inline. Best-effort log retrieval (only present when trace
- * logging is enabled for the user).
+ * Run anonymous Apex for the Execute Apex panel via the SOAP Apex API (no CLI,
+ * no TraceFlag): a single request returns the result and the debug log inline —
+ * matching the speed and behavior of the Salesforce "Execute Anonymous" button.
  */
 export async function executeAnonymousForPanel(code: string, targetOrg?: string): Promise<PanelExecResult> {
   if (!code || !code.trim()) return { success: false, compiled: false, errorMessage: "No code to execute." };
@@ -106,35 +149,11 @@ export async function executeAnonymousForPanel(code: string, targetOrg?: string)
   const org = targetOrg || null;
   try {
     lastAnonymousContent = code;
-    const userId = await restUserId(org);
-    const headBefore = await restLatestLogId(org, userId, null);
-
-    const result = await restExecuteAnonymous(org, code);
+    const { result, log } = await soapExecuteAnonymous(org, code);
     if (!result.compiled || !result.success) {
-      return { success: false, compiled: !!result.compiled, errorMessage: formatAnonError(result) };
+      return { success: false, compiled: !!result.compiled, errorMessage: formatAnonError(result), log };
     }
-
-    // Poll briefly for the log this run produced.
-    let logId: string | null = null;
-    for (let attempt = 0; attempt < 4; attempt++) {
-      if (attempt > 0) await new Promise((r) => setTimeout(r, 250));
-      logId = await restLatestLogId(org, userId, headBefore);
-      if (logId) break;
-    }
-    let log = "";
-    if (logId) {
-      log = await restLogBody(org, logId);
-      // Persist alongside (matches the SF "log exec" layout) for "open in editor".
-      const logDir = getSalesforceLogDirectory();
-      if (logDir && log) {
-        try {
-          if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
-          fs.writeFileSync(path.join(logDir, `${logId}.log`), log, "utf8");
-          fs.writeFileSync(path.join(logDir, `${logId}.apex`), code, "utf8");
-        } catch { /* best-effort */ }
-      }
-    }
-    return { success: true, compiled: true, log, logId: logId ?? undefined };
+    return { success: true, compiled: true, log };
   } catch (e: any) {
     return { success: false, compiled: false, errorMessage: e?.message || e?.stderr || String(e) };
   }
@@ -243,7 +262,7 @@ export async function executeAnonymousApex(
   }
 }
 
-async function executeContent(text: string, fromPanel?: boolean, targetOrg?: string) {
+async function executeContent(text: string, _fromPanel?: boolean, targetOrg?: string) {
   const tmpDir = os.tmpdir();
   const tmpFile = path.join(tmpDir, `anon-${Date.now()}.apex`);
   fs.writeFileSync(tmpFile, text);
@@ -258,47 +277,9 @@ async function executeContent(text: string, fromPanel?: boolean, targetOrg?: str
     },
     async (_progress, token) => {
       try {
-        // Execute Apex panel: run via the Tooling REST API (no CLI spawn — orders
-        // of magnitude faster than `sf apex run`), then best-effort fetch the new
-        // debug log over REST and open it.
-        if (fromPanel) {
-          const org = targetOrg || null;
-          const userId = await restUserId(org);
-          const headBefore = await restLatestLogId(org, userId, null);
-
-          const runResult = await restExecuteAnonymous(org, text);
-          if (token.isCancellationRequested) return;
-
-          if (!runResult.compiled || !runResult.success) {
-            // Preserve a structured payload so the caller extracts a clean message.
-            throw new Error(JSON.stringify({ result: runResult }));
-          }
-
-          // Poll briefly for the log this run produced (only if trace logging is on).
-          let logId: string | null = null;
-          for (let attempt = 0; attempt < 3 && !token.isCancellationRequested; attempt++) {
-            if (attempt > 0) await new Promise((r) => setTimeout(r, 300));
-            logId = await restLatestLogId(org, userId, headBefore);
-            if (logId) break;
-          }
-
-          if (logId) {
-            const logDir = getSalesforceLogDirectory();
-            if (logDir) {
-              if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
-              // Save original script + result alongside (matches the SF "log exec" layout).
-              fs.writeFileSync(path.join(logDir, `${logId}.apex`), text, "utf8");
-              fs.writeFileSync(path.join(logDir, `${logId}-result.json`), JSON.stringify(runResult, null, 2), "utf8");
-            }
-            // openLogById fetches the body via REST (default org) and opens it.
-            await openLogById(logId, vscode.ViewColumn.Beside, "sf-anon-log", true, targetOrg);
-            vscode.window.showInformationMessage("Anonymous Apex executed successfully.");
-          } else {
-            vscode.window.showInformationMessage("Anonymous Apex executed successfully, but no debug log was found.");
-          }
-          return;
-        }
-
+        // The Execute Apex panel uses executeAnonymousForPanel (SOAP, inline log).
+        // This command path (palette / snippets) keeps the CLI-based flow that
+        // also opens the resulting debug log in an editor.
         let userId: string;
         if (targetOrg) {
           try {
@@ -417,7 +398,7 @@ async function executeContent(text: string, fromPanel?: boolean, targetOrg?: str
         } else {
           const msg =
             "Code executed successfully, but NO NEW debug log was generated. Please check if a Trace Flag is active for your user.";
-          if (!fromPanel) {
+          if (!_fromPanel) {
             vscode.window.showWarningMessage(msg);
             const channel = vscode.window.createOutputChannel("Salesforce Apex Execution");
             channel.clear();
@@ -429,7 +410,7 @@ async function executeContent(text: string, fromPanel?: boolean, targetOrg?: str
         }
       } catch (e: any) {
         if (e.cancelled) return;
-        if (fromPanel) throw e;
+        if (_fromPanel) throw e;
         const details = e?.stderr || e?.message || String(e);
         vscode.window.showErrorMessage(
           'Anonymous Apex execution failed. See "Salesforce Apex Execution" output for details.'

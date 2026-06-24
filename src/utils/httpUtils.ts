@@ -76,6 +76,50 @@ export function httpsGet(url: string, token: string): Promise<string> {
     return httpsRequestWithRetry('GET', url, token);
 }
 
+/**
+ * POST with a request body and custom headers (e.g. SOAP). Resolves with the
+ * response text on 2xx; rejects with `HTTP <status>: <body>` otherwise. The
+ * caller supplies any auth header it needs.
+ */
+export function httpsPost(
+    url: string,
+    body: string,
+    headers: Record<string, string>,
+    timeoutMs?: number
+): Promise<string> {
+    const timeout = timeoutMs ?? getHttpTimeout();
+    return new Promise((resolve, reject) => {
+        const parsed = new URL(url);
+        const data = Buffer.from(body, 'utf8');
+        const options = {
+            hostname: parsed.hostname,
+            path: parsed.pathname + parsed.search,
+            method: 'POST',
+            headers: { ...headers, 'Content-Length': data.length },
+            timeout,
+        };
+        const req = https.request(options, (res) => {
+            const chunks: any[] = [];
+            res.on('data', (d) => chunks.push(d));
+            res.on('end', () => {
+                const text = Buffer.concat(chunks).toString();
+                if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+                    resolve(text);
+                } else {
+                    reject(new Error(`HTTP ${res.statusCode}: ${text.slice(0, 1000)}`));
+                }
+            });
+        });
+        req.on('timeout', () => {
+            req.destroy();
+            reject(new Error(`Request timed out after ${timeout}ms: POST ${url}`));
+        });
+        req.on('error', (e) => reject(e));
+        req.write(data);
+        req.end();
+    });
+}
+
 export function httpsDelete(url: string, token: string): Promise<string> {
     return httpsRequest('DELETE', url, token);
 }

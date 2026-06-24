@@ -2,7 +2,6 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { executeAnonymousForPanel, getAnonymousApexOrgList } from '../commands/executeAnonymous';
-import { openLogById } from '../commands/listLogs';
 import { isSalesforceProject } from '../utils/projectUtils';
 
 const BUFFER_RELATIVE_PATH = '.vscode/anon-apex-buffer.apex';
@@ -22,6 +21,7 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 	private _view?: vscode.WebviewView;
 	private _messageListener?: vscode.Disposable;
 	private _bufferDoc?: vscode.TextDocument;
+	private _lastLog = '';
 
 	constructor(private readonly _extensionUri: vscode.Uri) {}
 
@@ -262,11 +262,12 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 					}
 					this._post('executeStarted', {});
 					const result = await executeAnonymousForPanel(data.code || '', data.targetOrg || undefined);
+					this._lastLog = result.log || '';
 					this._post('executeResult', {
 						success: result.success,
 						error: result.errorMessage || '',
 						log: result.log || '',
-						logId: result.logId || '',
+						hasLog: !!(result.log && result.log.trim()),
 					});
 					if (result.success) {
 						this._post('historyUpdated', { history: await this.saveApexOnExecute(data.code || '') });
@@ -274,8 +275,10 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 					break;
 				}
 				case 'openLog': {
-					if (typeof data.logId === 'string' && data.logId) {
-						await openLogById(data.logId, vscode.ViewColumn.Beside, 'sf-anon-log', true, data.targetOrg || undefined);
+					// Open the inline debug log (from the SOAP response) in an editor.
+					if (this._lastLog.trim()) {
+						const doc = await vscode.workspace.openTextDocument({ content: this._lastLog, language: 'salesforce-log' });
+						await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Beside, preview: false });
 					}
 					break;
 				}
@@ -392,7 +395,6 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 	const resultContent = document.getElementById('result-content');
 	const resultsTitle = document.getElementById('results-title');
 	const openLogBtn = document.getElementById('open-log-btn');
-	let currentLogId = '';
 	let editor = null;
 	let saveTimer = null;
 	let initial = { lastCode: '', history: [] };
@@ -438,17 +440,16 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 		else if (d.type === 'completionResult') { const cb = pending[d.requestId]; if (cb) { delete pending[d.requestId]; cb(d.items || []); } }
 		else if (d.type === 'hoverResult') { const cb = pending[d.requestId]; if (cb) { delete pending[d.requestId]; cb(d.hover || null); } }
 		else if (d.type === 'flush') flushContent();
-		else if (d.type === 'executeStarted') { resultsTitle.textContent = 'Running…'; openLogBtn.style.display = 'none'; currentLogId = ''; setResult('Executing…', 'muted'); }
+		else if (d.type === 'executeStarted') { resultsTitle.textContent = 'Running…'; openLogBtn.style.display = 'none'; setResult('Executing…', 'muted'); }
 		else if (d.type === 'executeResult') {
 			if (!d.success) {
 				resultsTitle.textContent = 'Error';
 				setResult(d.error || 'Execution failed.', 'error');
 				openLogBtn.style.display = 'none';
 			} else {
-				resultsTitle.textContent = d.log ? 'Debug log' : 'Result';
-				setResult(d.log || 'Executed successfully. (No debug log — enable trace logging to capture one.)', d.log ? null : 'muted');
-				currentLogId = d.logId || '';
-				openLogBtn.style.display = currentLogId ? '' : 'none';
+				resultsTitle.textContent = d.hasLog ? 'Debug log' : 'Result';
+				setResult(d.log || 'Executed successfully.', d.hasLog ? null : 'muted');
+				openLogBtn.style.display = d.hasLog ? '' : 'none';
 				// Jump to the end of the log (most recent output).
 				resultContent.scrollTop = resultContent.scrollHeight;
 			}
@@ -583,7 +584,7 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 		if (code && editor) { editor.setValue(code); editor.focus(); }
 		historySelect.selectedIndex = 0;
 	});
-	openLogBtn.onclick = function () { if (currentLogId) vscode.postMessage({ type: 'openLog', logId: currentLogId, targetOrg: (orgSelect.value || '').trim() || undefined }); };
+	openLogBtn.onclick = function () { vscode.postMessage({ type: 'openLog' }); };
 	document.getElementById('execute-btn').onclick = doExecute;
 	document.getElementById('open-editor-btn').onclick = function () { vscode.postMessage({ type: 'openInEditor', code: editor ? editor.getValue() : '' }); };
 	document.getElementById('clear-btn').onclick = function () { if (editor) { editor.setValue(''); editor.focus(); } showError(''); vscode.postMessage({ type: 'contentChanged', code: '' }); };
