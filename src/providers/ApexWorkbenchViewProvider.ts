@@ -479,6 +479,8 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 
 	// ── messages ────────────────────────────────────────────────────────────────
 	window.addEventListener('message', function(e){ const d=e.data; if(!d) return;
+		if(d.type==='completionResult'){ const cb=pending[d.requestId]; if(cb){ delete pending[d.requestId]; cb(d.items||[]); } return; }
+		if(d.type==='hoverResult'){ const cb=pending[d.requestId]; if(cb){ delete pending[d.requestId]; cb(d.hover||null); } return; }
 		if(d.type==='orgList'){ const orgs=d.orgs||[];
 			orgSel.innerHTML=orgs.length?orgs.map(function(o){ const def=(o.label||'').indexOf('(default)')>=0; const v=def?'':(o.username||''); return '<option value="'+v.replace(/"/g,'&quot;')+'">'+(o.label||o.username||'').replace(/</g,'&lt;')+'</option>'; }).join(''):'<option value="">No orgs</option>';
 			vscode.postMessage({type:'warmOrg', org:orgVal()}); loadLogs(); }
