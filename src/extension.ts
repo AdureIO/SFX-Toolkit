@@ -43,6 +43,7 @@ import { ScratchOrgDefEditorProvider } from "./editors/ScratchOrgDefEditorProvid
 import { SOQLEditorProvider } from "./providers/SOQLEditorProvider";
 import { AnonymousApexViewProvider } from "./providers/AnonymousApexViewProvider";
 import { registerApexLogDecorator } from "./providers/ApexLogDecorator";
+import { ApexWorkbenchViewProvider } from "./providers/ApexWorkbenchViewProvider";
 import { Logger, outputChannel } from "./utils/outputChannel";
 import { metadataDiff } from "./commands/metadataDiff";
 import { OrgHealthProvider } from "./commands/orgHealth";
@@ -361,6 +362,15 @@ export function activate(context: vscode.ExtensionContext) {
         // panel is hidden or focus moves away, instead of tearing it down.
         webviewOptions: { retainContextWhenHidden: true },
       })
+    );
+
+    // 8b. Apex Workbench panel (org-switchable log browser + viewer).
+    context.subscriptions.push(
+      vscode.window.registerWebviewViewProvider(
+        "adure-sfx-toolkit.apexWorkbench",
+        new ApexWorkbenchViewProvider(context.extensionUri),
+        { webviewOptions: { retainContextWhenHidden: true } }
+      )
     );
 
     // 9. Development Actions

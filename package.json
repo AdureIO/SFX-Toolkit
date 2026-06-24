@@ -436,6 +436,12 @@
           "id": "adure-sfx-toolkit.anonymousApexPanel",
           "name": "Apex",
           "when": "adure-sfx-toolkit:isSalesforceProject"
+        },
+        {
+          "type": "webview",
+          "id": "adure-sfx-toolkit.apexWorkbench",
+          "name": "Workbench",
+          "when": "adure-sfx-toolkit:isSalesforceProject"
         }
       ]
     },
