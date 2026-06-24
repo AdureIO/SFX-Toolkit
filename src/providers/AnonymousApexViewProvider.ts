@@ -194,6 +194,28 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 		}
 	}
 
+	/** Resolve a definition location from the real providers and open it in an editor. */
+	private async gotoDefinition(text: string, line: number, character: number): Promise<void> {
+		const doc = await this.syncBufferDoc(text);
+		if (!doc) return;
+		try {
+			const res = await vscode.commands.executeCommand<(vscode.Location | vscode.LocationLink)[]>(
+				'vscode.executeDefinitionProvider',
+				doc.uri,
+				new vscode.Position(line, character),
+			);
+			const first = (res ?? [])[0];
+			if (!first) return;
+			const uri = 'targetUri' in first ? first.targetUri : first.uri;
+			const range = 'targetUri' in first ? (first.targetSelectionRange ?? first.targetRange) : first.range;
+			// Skip self-references into the hidden buffer (can't reveal a webview editor).
+			if (uri.toString() === doc.uri.toString()) return;
+			await vscode.window.showTextDocument(uri, { selection: range, preview: false });
+		} catch {
+			/* no definition */
+		}
+	}
+
 	/** Resolve hover info from the real editor providers for the current buffer text/position. */
 	private async getRealHover(text: string, line: number, character: number): Promise<{ contents: string[] } | null> {
 		const doc = await this.syncBufferDoc(text);
@@ -253,6 +275,10 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 				case 'getHover': {
 					const hover = await this.getRealHover(data.text || '', data.line || 0, data.character || 0);
 					this._post('hoverResult', { requestId: data.requestId, hover });
+					break;
+				}
+				case 'gotoDefinition': {
+					await this.gotoDefinition(data.text || '', data.line || 0, data.character || 0);
 					break;
 				}
 				case 'execute': {
@@ -558,6 +584,14 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 		editor.onDidChangeModelContent(function () {
 			if (saveTimer) clearTimeout(saveTimer);
 			saveTimer = setTimeout(function () { vscode.postMessage({ type: 'contentChanged', code: editor.getValue() }); }, 500);
+		});
+		// Ctrl/Cmd+click → go to definition (resolved by the host's real providers,
+		// opened in a regular editor since the webview can't host VS Code editors).
+		editor.onMouseDown(function (e) {
+			if ((e.event.ctrlKey || e.event.metaKey) && e.target && e.target.position) {
+				const p = e.target.position;
+				vscode.postMessage({ type: 'gotoDefinition', text: editor.getValue(), line: p.lineNumber - 1, character: p.column - 1 });
+			}
 		});
 		// Flush immediately when focus leaves the editor, so edits persist even if
 		// the panel is hidden/disposed before the debounce fires.
