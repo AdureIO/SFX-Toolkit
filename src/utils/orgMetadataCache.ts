@@ -2,6 +2,7 @@ import { AuthInfo } from "./authInfo";
 import { getToolingApiVersion } from "./constants";
 import { outputChannel } from "./outputChannel";
 import { isSalesforceProject } from "./projectUtils";
+import { DescribeStore } from "./describeStore";
 
 const CACHE_KEY_DEFAULT = "__default__";
 
@@ -97,12 +98,10 @@ class OrgMetadataCacheImpl {
 
 
 	private async fetchDescribe(org: string | null, sobject: string): Promise<SObjectDescribe | null> {
-		const version = getToolingApiVersion();
 		try {
-			const { body } = await AuthInfo.get(org, (a) =>
-				`${a.instanceUrl.replace(/\/$/, "")}/services/data/${version}/sobjects/${encodeURIComponent(sobject)}/describe`
-			);
-			const data = JSON.parse(body);
+			// Shared raw describe (one network call across all schema caches).
+			const data = await DescribeStore.getRaw(org, sobject);
+			if (!data) return null;
 			const fields = Array.isArray(data.fields)
 				? data.fields.map((f: any) => ({
 						name: f.name as string,
@@ -258,6 +257,7 @@ class OrgMetadataCacheImpl {
 		entry.describes.clear();
 		entry.sobjects = null;
 		entry.sobjectsFetchedAt = 0;
+		DescribeStore.invalidate(org);
 		this.emitChange(org);
 
 		const doRefresh = async () => {
@@ -284,6 +284,7 @@ class OrgMetadataCacheImpl {
 		const key = cacheKey(org);
 		this.cache.delete(key);
 		this.fetchLocks.delete(key);
+		DescribeStore.invalidate(org);
 		this.emitChange(org);
 	}
 

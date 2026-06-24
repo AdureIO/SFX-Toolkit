@@ -159,11 +159,13 @@ export function startLanguageServer(context: vscode.ExtensionContext): void {
 	const unsubscribe = OrgMetadataCache.onChange(() => {
 		SoqlSchemaProvider.invalidateAll();
 		void client?.sendNotification(NOTE_REFRESH).catch(() => {});
-		// Regenerate SObject schema stubs after org switch / pull / refresh.
-		scheduleStubSync();
+		// Regenerate ALL SObject schema stubs after org switch / pull / refresh
+		// (force: the schema may have changed, so don't trust existing stubs).
+		scheduleStubSync({ force: true });
 	});
 
-	// Initial background stub generation (debounced; safe no-op if disabled).
+	// Initial background stub generation: incremental — only create stubs that
+	// don't exist yet, so a reload with stubs already on disk does almost no work.
 	scheduleStubSync();
 
 	// Watch the Salesforce Apex LS and auto-restart it if it gets stuck stopped.

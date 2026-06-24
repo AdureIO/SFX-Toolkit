@@ -261,6 +261,7 @@ async function syncProject(
 	projectDir: string,
 	org: string | null,
 	scope: "referenced" | "all",
+	force: boolean,
 	report?: (msg: string) => void,
 ): Promise<number> {
 	// Lazy-require vscode-dependent modules so the pure helpers stay testable.
@@ -291,12 +292,22 @@ async function syncProject(
 
 	let written = 0;
 	let done = 0;
+	let skipped = 0;
 	for (const name of targets) {
-		report?.(`${++done}/${targets.length} ${name}`);
 		const dir = path.join(base, isCustomObject(name) ? "customObjects" : "standardObjects");
 		const file = path.join(dir, `${name}.cls`);
 		const before = readFileOrEmpty(file);
 		const isSalesforceOwned = !!before && !before.startsWith(STUB_MARKER);
+
+		// Incremental (non-forced) sync: a stub already on disk is assumed current,
+		// so we skip the describe + rebuild entirely. The 99%-already-exists case
+		// on activation/window-reload thus does almost no work. A forced sync
+		// (refresh / pull / org switch) regenerates everything to pick up changes.
+		if (!force && before) {
+			skipped++;
+			continue;
+		}
+		report?.(`${++done}/${targets.length} ${name}`);
 
 		let content: string;
 		if (used.has(name)) {
@@ -319,20 +330,30 @@ async function syncProject(
 	// Remove our managed stubs that are stale (object gone, or no longer used in
 	// "referenced" mode).
 	cleanupStaleManaged(base, scope === "all" ? liveSet : new Set(used));
-	outputChannel.appendLine(`SObjectStubSync: ${projectDir} — ${written} stub(s) written/extended (${used.size} referenced, scope=${scope}).`);
+	outputChannel.appendLine(
+		`SObjectStubSync: ${projectDir} — ${written} stub(s) written/extended, ${skipped} up-to-date skipped (${used.size} referenced, scope=${scope}, ${force ? "forced" : "incremental"}).`,
+	);
 	return written;
 }
 
 let timer: NodeJS.Timeout | undefined;
+let pendingForce = false;
 
 /**
  * Debounced background sync for all SFDX projects in the workspace. Safe no-op
  * when disabled or outside an SFDX project. Never throws into the caller.
+ *
+ * `force` (refresh / pull / org switch) regenerates every stub; the default
+ * incremental run only creates stubs that don't exist yet. If any call within
+ * the debounce window asks to force, the coalesced run is forced.
  */
-export function scheduleStubSync(): void {
+export function scheduleStubSync(opts?: { force?: boolean }): void {
+	if (opts?.force) pendingForce = true;
 	if (timer) clearTimeout(timer);
 	timer = setTimeout(() => {
-		void runStubSync();
+		const force = pendingForce;
+		pendingForce = false;
+		void runStubSync(force);
 	}, 1500);
 }
 
@@ -344,7 +365,7 @@ export function getInitialSyncState(): { done: boolean; wrote: boolean } {
 	return { done: firstSyncDone, wrote: firstSyncWrote };
 }
 
-async function runStubSync(): Promise<void> {
+async function runStubSync(force = false): Promise<void> {
 	try {
 		const vscode = require("vscode");
 		const enabled = vscode.workspace
@@ -364,7 +385,7 @@ async function runStubSync(): Promise<void> {
 					// Sync the workspace root project and any nested sfdx-project.json dirs.
 					for (const projectDir of findSfdxProjectDirs(root)) {
 						const org = resolveDefaultTargetOrgUsernameSync(projectDir) ?? null;
-						changed += await syncProject(projectDir, org, scope, (msg) => progress.report({ message: msg }));
+						changed += await syncProject(projectDir, org, scope, force, (msg) => progress.report({ message: msg }));
 					}
 				}
 			},

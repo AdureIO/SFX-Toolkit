@@ -7,9 +7,7 @@
  * Complements OrgMetadataCache (which serves the lighter SOQL-completion describe)
  * with the richer schema information needed by data operations.
  */
-import { AuthInfo } from "./authInfo";
-import { getToolingApiVersion } from "./constants";
-import { outputChannel } from "./outputChannel";
+import { DescribeStore } from "./describeStore";
 import type { SObjectDescribe, FieldDescribe, ChildRelationship } from "./dataMigration";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -56,20 +54,12 @@ class SchemaCacheImpl {
       return entry.describe;
     }
 
-    const version = getToolingApiVersion();
-    try {
-      const { body } = await AuthInfo.get(org, (a) =>
-        `${a.instanceUrl.replace(/\/$/, "")}/services/data/${version}/sobjects/${encodeURIComponent(sobject)}/describe`
-      );
-      const raw = JSON.parse(body) as Record<string, unknown>;
-      const describe = this.parseDescribe(raw);
-      map.set(sobject, { describe, fetchedAt: Date.now() });
-      return describe;
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      outputChannel.appendLine(`SchemaCache: describe ${sobject} failed: ${msg}`);
-      return null;
-    }
+    // Shared raw describe (one network call across all schema caches).
+    const raw = (await DescribeStore.getRaw(org, sobject)) as Record<string, unknown> | null;
+    if (!raw) return null;
+    const describe = this.parseDescribe(raw);
+    map.set(sobject, { describe, fetchedAt: Date.now() });
+    return describe;
   }
 
   private parseDescribe(raw: Record<string, unknown>): SObjectDescribe {
@@ -116,16 +106,19 @@ class SchemaCacheImpl {
    */
   invalidate(org: string | null): void {
     this.cache.delete(orgKey(org));
+    DescribeStore.invalidate(org);
   }
 
   /** Invalidate a specific sobject's cached describe. */
   invalidateSObject(org: string | null, sobject: string): void {
     this.getOrgMap(org).delete(sobject);
+    DescribeStore.invalidateSObject(org, sobject);
   }
 
   /** Clear all cached describes across all orgs. */
   clear(): void {
     this.cache.clear();
+    DescribeStore.invalidateAll();
   }
 
   /** Stats for a given org: how many describes are currently cached. */

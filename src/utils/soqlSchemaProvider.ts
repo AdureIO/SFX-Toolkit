@@ -12,6 +12,7 @@ import { AuthInfo } from "./authInfo";
 import { getToolingApiVersion } from "./constants";
 import { outputChannel } from "./outputChannel";
 import { OrgMetadataCache } from "./orgMetadataCache";
+import { DescribeStore } from "./describeStore";
 
 export interface SoqlHostField {
 	name: string;
@@ -113,19 +114,12 @@ class SoqlSchemaProviderImpl {
 		const hit = map.get(sobject);
 		if (hit && Date.now() - hit.fetchedAt < CACHE_TTL_MS) return hit.describe;
 
-		const version = getToolingApiVersion();
-		try {
-			const { body } = await AuthInfo.get(org, (a) =>
-				`${a.instanceUrl.replace(/\/$/, "")}/services/data/${version}/sobjects/${encodeURIComponent(sobject)}/describe`
-			);
-			const raw = JSON.parse(body);
-			const describe = this.parse(raw);
-			map.set(sobject, { describe, fetchedAt: Date.now() });
-			return describe;
-		} catch (e: any) {
-			outputChannel.appendLine(`SoqlSchemaProvider: describe ${sobject} failed: ${e?.message ?? e}`);
-			return null;
-		}
+		// Shared raw describe (one network call across all schema caches).
+		const raw = await DescribeStore.getRaw(org, sobject);
+		if (!raw) return null;
+		const describe = this.parse(raw);
+		map.set(sobject, { describe, fetchedAt: Date.now() });
+		return describe;
 	}
 
 	private parse(raw: any): SoqlHostDescribe {
@@ -176,12 +170,14 @@ class SoqlSchemaProviderImpl {
 
 	invalidate(org: string | null): void {
 		this.cache.delete(org || CACHE_KEY_DEFAULT);
+		DescribeStore.invalidate(org);
 	}
 
 	invalidateAll(): void {
 		this.cache.clear();
 		this.descriptionCache.clear();
 		this.descriptionUnavailable.clear();
+		DescribeStore.invalidateAll();
 	}
 }
 
