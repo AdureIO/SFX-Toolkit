@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { getAnonymousApexOrgList, executeAnonymousForPanel } from '../commands/executeAnonymous';
-import { listApexLogs, fetchApexLogBody, listActiveTraceFlags } from '../utils/apexLogApi';
+import { listApexLogs, fetchApexLogBody, listActiveTraceFlags, deleteAllApexLogs, createUserTrace } from '../utils/apexLogApi';
 import { getHighlightPatterns } from '../utils/apexLogHighlight';
 import { getSalesforceLogDirectory } from '../utils/logPaths';
 import { AuthInfo } from '../utils/authInfo';
@@ -60,18 +60,32 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 				case 'listTraces':
 					this._post('traceInfo', { org: data.org || '', ...(await listActiveTraceFlags(data.org || null)) });
 					break;
-				case 'quickTrace':
-					await vscode.commands.executeCommand('adure-sfx-toolkit.quickTrace');
+				case 'quickTrace': {
+					const ok = await createUserTrace(data.org || null);
+					vscode.window.showInformationMessage(ok ? 'Quick trace started for the selected org.' : 'Could not start the trace.');
 					this._post('traceInfo', { org: data.org || '', ...(await listActiveTraceFlags(data.org || null)) });
 					break;
-				case 'newTrace':
-					await vscode.commands.executeCommand('adure-sfx-toolkit.addDebugTrace');
+				}
+				case 'newTrace': {
+					const input = await vscode.window.showInputBox({
+						prompt: 'Debug trace duration (minutes) for the selected org',
+						value: '60', validateInput: (v) => (/^\d+$/.test(v) && +v > 0 ? null : 'Enter a positive number of minutes'),
+					});
+					if (input === undefined) break;
+					const ok = await createUserTrace(data.org || null, parseInt(input, 10));
+					vscode.window.showInformationMessage(ok ? `Trace created (${input} min) for the selected org.` : 'Could not create the trace.');
 					this._post('traceInfo', { org: data.org || '', ...(await listActiveTraceFlags(data.org || null)) });
 					break;
-				case 'deleteAllLogs':
-					await vscode.commands.executeCommand('adure-sfx-toolkit.deleteAllLogs');
+				}
+				case 'deleteAllLogs': {
+					const pick = await vscode.window.showWarningMessage(
+						'Delete all debug logs for the selected org?', { modal: true }, 'Delete all');
+					if (pick !== 'Delete all') break;
+					const n = await deleteAllApexLogs(data.org || null);
+					vscode.window.showInformationMessage(`Deleted ${n} log${n === 1 ? '' : 's'}.`);
 					this._post('logList', { org: data.org || '', rows: await listApexLogs(data.org || null) });
 					break;
+				}
 				case 'openLog': {
 					this._post('logLoading', { id: data.id });
 					this._post('logBody', { id: data.id, text: await fetchApexLogBody(data.org || null, data.id) });
@@ -312,6 +326,19 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	document.getElementById('refreshTraces').onclick=function(){ vscode.postMessage({type:'listTraces', org:orgVal()}); };
 	document.getElementById('deleteAll').onclick=function(){ vscode.postMessage({type:'deleteAllLogs', org:orgVal()}); };
 	document.getElementById('refresh').onclick=loadLogs;
+
+	// Switching org: clear the loaded data, then warm + auto-refresh for the new org.
+	orgSel.addEventListener('change', function(){
+		currentId='';
+		logView.setText('Select a log to view it.', true);
+		execView.setText('Run code to see the result and debug log here.', true);
+		document.getElementById('execTitle').textContent='Result';
+		document.getElementById('execOpen').style.display='none';
+		document.querySelector('input[data-pane="exec"]').style.display='none';
+		const pill=document.getElementById('tracePill'); pill.classList.remove('on'); pill.textContent='Trace: —';
+		vscode.postMessage({type:'warmOrg', org:orgVal()});
+		loadLogs();
+	});
 
 	// Listen for new logs: poll the selected org's log list on an interval.
 	let listenTimer=null; const pollMs=Math.max(2,(initial.pollSeconds||5))*1000;

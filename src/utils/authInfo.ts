@@ -1,5 +1,5 @@
 import { runCommandArgs } from "./commandRunner";
-import { httpsGet, httpsDelete } from "./httpUtils";
+import { httpsGet, httpsDelete, httpsPost } from "./httpUtils";
 import { Logger, outputChannel } from "./outputChannel";
 import { isSalesforceProject } from "./projectUtils";
 
@@ -257,6 +257,23 @@ export class AuthInfo {
 			httpsGet(buildUrl(a), a.accessToken)
 		);
 		return { body, auth };
+	}
+
+	/**
+	 * Authenticated POST with a JSON body. On 401, forces CLI token refresh and
+	 * retries once. Returns the response text.
+	 */
+	public static async post(
+		org: string | null,
+		buildUrl: (auth: OrgAuth) => string,
+		body: unknown,
+		contentType = "application/json"
+	): Promise<string> {
+		const payload = typeof body === "string" ? body : JSON.stringify(body);
+		const { result } = await this.withRetry(org, (a) =>
+			httpsPost(buildUrl(a), payload, { Authorization: `Bearer ${a.accessToken}`, "Content-Type": contentType })
+		);
+		return result;
 	}
 
 	/**
