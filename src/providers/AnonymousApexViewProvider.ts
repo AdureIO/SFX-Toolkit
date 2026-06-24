@@ -41,16 +41,6 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 		}
 	}
 
-	private async writeBuffer(content: string): Promise<void> {
-		const uri = this.getBufferUri();
-		if (!uri) return;
-		try {
-			await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(uri, '..'));
-			await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(content));
-		} catch {
-			/* best-effort persist */
-		}
-	}
 
 	private getApexStorageDir(): string | null {
 		const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -113,13 +103,25 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 		}
 	}
 
-	/** Keep the persisted buffer document open & in sync so completion providers see current text. */
+	/**
+	 * Keep a single backing document for the buffer file open & in sync so the
+	 * completion/hover providers see the current text. This document is the ONLY
+	 * writer of the file: we never fs-write it while it's open (doing both caused
+	 * "the content of the file is newer" save conflicts). Updates go through
+	 * applyEdit + save; durable panel state lives separately in apex-last.txt.
+	 */
 	private async syncBufferDoc(text: string): Promise<vscode.TextDocument | undefined> {
 		const uri = this.getBufferUri();
 		if (!uri) return undefined;
 		if (!this._bufferDoc || this._bufferDoc.isClosed) {
 			try {
-				await this.writeBuffer(this._bufferDoc ? text : await this.readBuffer());
+				// Create the file once if it doesn't exist (providers need a real URI).
+				try {
+					await vscode.workspace.fs.stat(uri);
+				} catch {
+					await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(uri, '..'));
+					await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(''));
+				}
 				this._bufferDoc = await vscode.workspace.openTextDocument(uri);
 			} catch {
 				return undefined;
@@ -132,6 +134,7 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 			edit.replace(uri, full, text);
 			try {
 				await vscode.workspace.applyEdit(edit);
+				await doc.save(); // keep disk in sync via the document itself (no rival fs writer)
 			} catch {
 				/* ignore */
 			}
@@ -257,7 +260,6 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 						this._post('showError', { message: 'Open an SFDX project (folder containing sfdx-project.json) to use this feature.' });
 						return;
 					}
-					await this.writeBuffer(data.code || '');
 					this._post('executeStarted', {});
 					const result = await executeAnonymousForPanel(data.code || '', data.targetOrg || undefined);
 					this._post('executeResult', {
@@ -278,22 +280,22 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 					break;
 				}
 				case 'openInEditor': {
-					const bufferUri = this.getBufferUri();
-					if (bufferUri) {
-						await this.writeBuffer(data.code || (await this.readBuffer()));
+					// Open the single backing document (kept in sync via syncBufferDoc),
+					// never an independent fs write, to avoid save conflicts.
+					const doc = await this.syncBufferDoc(typeof data.code === 'string' ? data.code : await this.readBuffer());
+					if (doc) {
 						try {
-							const doc = await vscode.workspace.openTextDocument(bufferUri);
 							await vscode.window.showTextDocument(doc, { preview: false });
 						} catch {
-							await vscode.commands.executeCommand('vscode.open', bufferUri);
+							await vscode.commands.executeCommand('vscode.open', doc.uri);
 						}
 					}
 					break;
 				}
 				case 'contentChanged': {
 					if (typeof data.code === 'string') {
-						await this.writeBuffer(data.code);   // for completion/hover providers
-						this.saveLastCode(data.code);        // restored-on-reload snapshot
+						await this.syncBufferDoc(data.code);   // single-writer update for completion/hover
+						this.saveLastCode(data.code);          // restored-on-reload snapshot
 					}
 					break;
 				}
