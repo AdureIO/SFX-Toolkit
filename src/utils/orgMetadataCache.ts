@@ -39,6 +39,30 @@ function cacheKey(org: string | null): string {
 class OrgMetadataCacheImpl {
 	private cache = new Map<string, OrgCache>();
 	private fetchLocks = new Map<string, Promise<string[]>>();
+	private changeListeners: ((org: string | null) => void)[] = [];
+
+	/**
+	 * Subscribe to cache invalidation/refresh events (org switch, pull, refresh
+	 * metadata). Used by the SOQL language server to drop its describe cache.
+	 * Returns a disposer.
+	 */
+	onChange(listener: (org: string | null) => void): () => void {
+		this.changeListeners.push(listener);
+		return () => {
+			const i = this.changeListeners.indexOf(listener);
+			if (i >= 0) this.changeListeners.splice(i, 1);
+		};
+	}
+
+	private emitChange(org: string | null): void {
+		for (const l of this.changeListeners) {
+			try {
+				l(org);
+			} catch {
+				/* listener errors must not break cache ops */
+			}
+		}
+	}
 
 	private getOrCreateOrgCache(key: string): OrgCache {
 		let entry = this.cache.get(key);
@@ -234,6 +258,7 @@ class OrgMetadataCacheImpl {
 		entry.describes.clear();
 		entry.sobjects = null;
 		entry.sobjectsFetchedAt = 0;
+		this.emitChange(org);
 
 		const doRefresh = async () => {
 			try {
@@ -259,6 +284,7 @@ class OrgMetadataCacheImpl {
 		const key = cacheKey(org);
 		this.cache.delete(key);
 		this.fetchLocks.delete(key);
+		this.emitChange(org);
 	}
 
 	/**

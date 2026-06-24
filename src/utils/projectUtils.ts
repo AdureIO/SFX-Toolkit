@@ -20,6 +20,22 @@ export function isSalesforceProject(): boolean {
     return false;
 }
 
+/**
+ * Walk up from a file path to the nearest directory containing sfdx-project.json.
+ * Lets nested/sub-projects (e.g. adcore/force-app/...) resolve their own org/config
+ * instead of always using the workspace root. Returns null if none is found.
+ */
+export function findSfdxProjectDir(filePath: string): string | null {
+    let dir = path.dirname(filePath);
+    for (let i = 0; i < 100; i++) {
+        if (fs.existsSync(path.join(dir, 'sfdx-project.json'))) return dir;
+        const parent = path.dirname(dir);
+        if (parent === dir) break;
+        dir = parent;
+    }
+    return null;
+}
+
 const CONTEXT_KEY = 'adure-sfx-toolkit:isSalesforceProject';
 
 /** Update the context key so views/commands can use "when" clauses. Call on activation and on workspace folder change. */

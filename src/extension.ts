@@ -68,6 +68,7 @@ import { DataMigrationPanelProvider } from "./providers/DataMigrationPanelProvid
 import * as path from "path";
 import * as fs from "fs";
 import { getPollingInterval } from "./utils/constants";
+import { startLanguageServer, stopLanguageServer } from "./languageClient";
 import { isSalesforceProject, updateSalesforceProjectContext, NOT_SFDX_PROJECT_MESSAGE } from "./utils/projectUtils";
 import { OrgMetadataCache } from "./utils/orgMetadataCache";
 import { AuthInfo } from "./utils/authInfo";
@@ -137,13 +138,28 @@ export function activate(context: vscode.ExtensionContext) {
 
   // Set context so panels can show placeholder when not in SFDX project; update when workspace changes
   updateSalesforceProjectContext();
-  context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => updateSalesforceProjectContext()));
+  context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => {
+    updateSalesforceProjectContext();
+    // Start the language server if an SFDX project was just added (idempotent).
+    try {
+      startLanguageServer(context);
+    } catch {
+      /* ignore */
+    }
+  }));
 
   try {
     Logger.info("Extension activation starting...");
 
     // 0. Bootstrap persistent state stores
     initDeployHistory(context);
+
+    // Org-aware SOQL language server (JVM-free). Safe no-op outside SFDX projects.
+    try {
+      startLanguageServer(context);
+    } catch (e) {
+      Logger.error(`Failed to start SFX language server: ${e instanceof Error ? e.message : String(e)}`);
+    }
     setOpenDeployPanelCallback((entry) => {
       const preset = {
         name: entry.presetName || "Re-deploy",
@@ -642,6 +658,7 @@ export function activate(context: vscode.ExtensionContext) {
   }
 }
 
-export function deactivate() {
+export function deactivate(): Thenable<void> | undefined {
   Logger.info('Extension "adure-sfx-toolkit" is deactivating...');
+  return stopLanguageServer();
 }
