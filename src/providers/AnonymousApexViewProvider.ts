@@ -1,9 +1,11 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 import { executeAnonymousForPanel, getAnonymousApexOrgList } from '../commands/executeAnonymous';
 import { isSalesforceProject } from '../utils/projectUtils';
 import { getHighlightPatterns } from '../utils/apexLogHighlight';
+import { getSalesforceLogDirectory } from '../utils/logPaths';
 import { AuthInfo } from '../utils/authInfo';
 
 const BUFFER_RELATIVE_PATH = '.vscode/anon-apex-buffer.apex';
@@ -309,10 +311,21 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 					break;
 				}
 				case 'openLog': {
-					// Open the inline debug log (from the SOAP response) in an editor.
+					// Write the inline debug log to a real .log file and open that, so the
+					// salesforce-log editor (syntax + highlight decorations) applies.
 					if (this._lastLog.trim()) {
-						const doc = await vscode.workspace.openTextDocument({ content: this._lastLog, language: 'salesforce-log' });
-						await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Beside, preview: false });
+						try {
+							const dir = getSalesforceLogDirectory() || os.tmpdir();
+							if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+							const file = path.join(dir, `anon-apex-${Date.now()}.log`);
+							fs.writeFileSync(file, this._lastLog, 'utf8');
+							const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+							await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Beside, preview: false });
+						} catch {
+							// Fallback: open as an in-memory salesforce-log document.
+							const doc = await vscode.workspace.openTextDocument({ content: this._lastLog, language: 'salesforce-log' });
+							await vscode.window.showTextDocument(doc, { viewColumn: vscode.ViewColumn.Beside, preview: false });
+						}
 					}
 					break;
 				}
