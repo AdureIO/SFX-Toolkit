@@ -4,6 +4,7 @@ import * as fs from 'fs';
 import { executeAnonymousForPanel, getAnonymousApexOrgList } from '../commands/executeAnonymous';
 import { isSalesforceProject } from '../utils/projectUtils';
 import { getHighlightPatterns } from '../utils/apexLogHighlight';
+import { AuthInfo } from '../utils/authInfo';
 
 const BUFFER_RELATIVE_PATH = '.vscode/anon-apex-buffer.apex';
 const ASFX_DIR = '.sfdx/asfx';
@@ -266,6 +267,12 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 			switch (data?.type) {
 				case 'getOrgs': {
 					this._post('orgList', { orgs: await getAnonymousApexOrgList() });
+					break;
+				}
+				case 'warmOrg': {
+					// Pre-fetch the selected org's token so the first run isn't cold
+					// (the panel targets a specific org username, not the default key).
+					if (isSalesforceProject()) AuthInfo.warmAuthForOrg(typeof data.org === 'string' && data.org ? data.org : null);
 					break;
 				}
 				case 'getCompletions': {
@@ -551,6 +558,8 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 			orgSelect.innerHTML = orgs.length
 				? orgs.map(o => '<option value="' + (o.username || '').replace(/"/g, '&quot;') + '">' + (o.label || o.username || '').replace(/</g, '&lt;') + '</option>').join('')
 				: '<option value="">No orgs</option>';
+			// Warm the (default-)selected org's token so the first run is fast.
+			vscode.postMessage({ type: 'warmOrg', org: (orgSelect.value || '').trim() });
 		} else if (d.type === 'historyUpdated') setHistory(d.history || []);
 		else if (d.type === 'completionResult') { const cb = pending[d.requestId]; if (cb) { delete pending[d.requestId]; cb(d.items || []); } }
 		else if (d.type === 'hoverResult') { const cb = pending[d.requestId]; if (cb) { delete pending[d.requestId]; cb(d.hover || null); } }
@@ -752,6 +761,7 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 			try { const s = vscode.getState() || {}; s.resultsWidth = resultsPane.getBoundingClientRect().width; vscode.setState(s); } catch (e) {}
 		});
 	})();
+	orgSelect.addEventListener('change', function () { vscode.postMessage({ type: 'warmOrg', org: (orgSelect.value || '').trim() }); });
 	document.getElementById('execute-btn').onclick = doExecute;
 	document.getElementById('open-editor-btn').onclick = function () { vscode.postMessage({ type: 'openInEditor', code: editor ? editor.getValue() : '' }); };
 	document.getElementById('clear-btn').onclick = function () { if (editor) { editor.setValue(''); editor.focus(); } showError(''); vscode.postMessage({ type: 'contentChanged', code: '' }); };
