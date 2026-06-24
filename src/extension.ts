@@ -136,6 +136,11 @@ function register(command: string, callback: (...args: any[]) => any, thisArg?: 
 export function activate(context: vscode.ExtensionContext) {
   Logger.info('Extension "adure-sfx-toolkit" is starting activation...');
 
+  // Warm the default-org auth token as the very first thing (the initial fetch
+  // shells out to the CLI). Kicking it off here means it runs concurrently with
+  // the rest of activation, so every AuthInfo-based feature finds it cached.
+  if (isSalesforceProject()) AuthInfo.warmAuthForOrg(null);
+
   // Set context so panels can show placeholder when not in SFDX project; update when workspace changes
   updateSalesforceProjectContext();
   context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => {
@@ -643,8 +648,8 @@ export function activate(context: vscode.ExtensionContext) {
 
     if (isSalesforceProject()) {
       warmOrgListCache();
-      AuthInfo.warmAuthForOrg(null);       // pre-fetch token so first API call doesn't start cold
       OrgMetadataCache.warmDefaultOrg();   // pre-load sobject list for SOQL completion
+      // (auth token already warmed at the top of activate)
     }
     context.subscriptions.push(
       vscode.workspace.onDidChangeWorkspaceFolders(() => {

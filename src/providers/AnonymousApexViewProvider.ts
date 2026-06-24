@@ -3,7 +3,6 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { executeAnonymousForPanel, getAnonymousApexOrgList } from '../commands/executeAnonymous';
 import { openLogById } from '../commands/listLogs';
-import { AuthInfo } from '../utils/authInfo';
 import { isSalesforceProject } from '../utils/projectUtils';
 
 const BUFFER_RELATIVE_PATH = '.vscode/anon-apex-buffer.apex';
@@ -232,10 +231,6 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 				vscode.Uri.joinPath(this._extensionUri, 'node_modules', 'monaco-editor', 'min'),
 			],
 		};
-
-		// Warm the default-org auth token now (first call shells out to the CLI),
-		// so the first execution doesn't pay that cost.
-		if (isSalesforceProject()) AuthInfo.warmAuthForOrg(null);
 
 		const { lastCode, history } = await this.loadApexState();
 		webviewView.webview.html = this._getHtmlForWebview(webviewView.webview, lastCode, history);
