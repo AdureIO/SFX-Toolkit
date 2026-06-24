@@ -396,6 +396,7 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 	#filter-presets .qf { font-size: 11px; padding: 2px 7px; border: none; border-radius: 4px; cursor: pointer;
 		background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
 	#filter-presets .qf:hover { background: var(--vscode-button-hoverBackground); }
+	#filter-presets .qf.active { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
 	#open-log-btn { display: none; font-size: 11px; padding: 2px 8px; border: none; border-radius: 4px; cursor: pointer;
 		background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
 	#result-content { flex: 1; margin: 0; padding: 8px; overflow: auto; white-space: pre-wrap; word-break: break-word;
@@ -429,9 +430,8 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 			<span id="results-title">Result</span>
 			<div class="results-tools">
 				<span id="filter-presets">
-					<button class="qf" data-f="debug" title="Show USER_DEBUG, exceptions and errors">Debug</button>
-					<button class="qf" data-f="soql" title="Show SOQL and DML operations">SOQL/DML</button>
-					<button class="qf" data-f="all" title="Show all lines">All</button>
+					<button class="qf" data-f="debug" title="Toggle: USER_DEBUG, exceptions and errors">Debug</button>
+					<button class="qf" data-f="soql" title="Toggle: SOQL and DML operations">SOQL/DML</button>
 				</span>
 				<input id="result-filter" type="text" placeholder="Filter (regex)…" title="Show only log lines matching this regular expression; matches are highlighted" spellcheck="false" />
 				<button id="open-log-btn" title="Open the full debug log in an editor">Open log</button>
@@ -505,8 +505,32 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 		return '';
 	}
 
-	// Render the debug log: apply the regex filter (line-level) + match highlight +
-	// the configured per-line color rules.
+	// Combinable category toggles (union), aligned with the .log Debug / SOQL filters.
+	const activeToggles = { debug: false, soql: false };
+	const EVENT_START = /^\\d{2}:\\d{2}:\\d{2}\\./;
+	// Event-aware union filter: keep an event's start line if it matches an active
+	// toggle, plus its continuation lines (stack traces, JSON bodies).
+	function applyToggles(lines) {
+		if (!activeToggles.debug && !activeToggles.soql) return lines;
+		const out = [];
+		let keep = false;
+		for (let i = 0; i < lines.length; i++) {
+			const line = lines[i];
+			if (EVENT_START.test(line)) {
+				let m = false;
+				if (activeToggles.debug && (line.indexOf('|USER_DEBUG|') >= 0 || line.indexOf('FATAL_ERROR') >= 0 || line.indexOf('EXCEPTION_THROWN') >= 0 || line.indexOf('|ERROR|') >= 0)) m = true;
+				if (!m && activeToggles.soql && (line.indexOf('|SOQL_EXECUTE') >= 0 || line.indexOf('|DML_') >= 0)) m = true;
+				keep = m;
+				if (m) out.push(line);
+			} else if (keep) {
+				out.push(line);
+			}
+		}
+		return out;
+	}
+
+	// Render the debug log: category toggles (union), then the user's regex search
+	// box (line-level + match highlight), then the configured per-line color rules.
 	function renderLog() {
 		resultContent.classList.remove('error', 'muted');
 		const q = (resultFilter.value || '').trim();
@@ -517,7 +541,7 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 		} else {
 			resultFilter.classList.remove('invalid');
 		}
-		const lines = rawLog.split('\\n');
+		const lines = applyToggles(rawLog.split('\\n'));
 		const out = [];
 		for (let i = 0; i < lines.length; i++) {
 			const line = lines[i];
@@ -526,7 +550,7 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 			const style = lineStyle(line);
 			out.push(style ? '<span style="' + style + '">' + inner + '</span>' : inner);
 		}
-		resultContent.innerHTML = out.length ? out.join('\\n') : '<span style="opacity:0.6">No lines match the filter.</span>';
+		resultContent.innerHTML = out.length ? out.join('\\n') : '<span style="opacity:0.6">No matching lines.</span>';
 	}
 	function setHistory(items) {
 		while (historySelect.options.length > 1) historySelect.remove(1);
@@ -738,10 +762,15 @@ export class AnonymousApexViewProvider implements vscode.WebviewViewProvider {
 		filterPresets.style.display = on ? 'inline-flex' : 'none';
 	}
 
-	// Quick-filter presets, aligned with the .log DEBUG / SOQL filters.
-	const PRESET = { debug: 'USER_DEBUG|FATAL_ERROR|EXCEPTION_THROWN', soql: 'SOQL_EXECUTE|DML_', all: '' };
+	// Category toggles (combinable, like the .log filters). They do NOT touch the
+	// search box — that stays free for the user's own regex.
 	Array.prototype.forEach.call(document.querySelectorAll('.qf'), function (b) {
-		b.onclick = function () { resultFilter.value = PRESET[b.getAttribute('data-f')] || ''; renderLog(); };
+		b.onclick = function () {
+			const f = b.getAttribute('data-f');
+			activeToggles[f] = !activeToggles[f];
+			b.classList.toggle('active', activeToggles[f]);
+			renderLog();
+		};
 	});
 
 	// ── results pane: drag the splitter to resize its width (persisted) ───────
