@@ -970,6 +970,7 @@
     "fast-xml-parser": "^5.5.7",
     "glob": "^8.1.0",
     "minimatch": "^10.2.5",
+    "monaco-editor": "^0.52.2",
     "vscode-languageclient": "^9.0.1",
     "vscode-languageserver": "^9.0.1",
     "vscode-languageserver-textdocument": "^1.0.12"
