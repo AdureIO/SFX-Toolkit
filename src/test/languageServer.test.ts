@@ -24,8 +24,8 @@ const rpc = require("vscode-jsonrpc/node");
 // ─── Fixtures (the "org" the fake host serves) ──────────────────────────────────
 
 const OBJECTS = [
-  "Account", "Contact", "Opportunity", "sfy24__ProductionOrder__c",
-  "AccountHistory", "AccountShare", "My_Setting__mdt", "sfy24__ProductionOrder__History",
+  "Account", "Contact", "Opportunity", "acme__Widget__c",
+  "AccountHistory", "AccountShare", "My_Setting__mdt", "acme__Widget__History",
 ];
 
 type Field = Record<string, unknown> & { name: string; type: string };
@@ -59,13 +59,13 @@ const DESCRIBES: Record<string, Describe> = {
     ],
     childRelationships: [],
   },
-  sfy24__ProductionOrder__c: {
-    name: "sfy24__ProductionOrder__c",
-    label: "Production Order",
+  acme__Widget__c: {
+    name: "acme__Widget__c",
+    label: "Widget",
     fields: [
       { name: "Id", type: "id" },
       { name: "Name", type: "string" },
-      { name: "sfy24__Amount__c", type: "currency", label: "Amount" },
+      { name: "acme__Amount__c", type: "currency", label: "Amount" },
     ],
     childRelationships: [],
   },
@@ -108,12 +108,12 @@ before(async function () {
   conn.onRequest("sfx/describe", ({ uri, sobject }: { uri?: string; sobject: string }) => {
     const d = DESCRIBES[sobject];
     if (!d) return null;
-    if (uri && uri.includes("adcore") && sobject === "Account") {
-      return { ...d, fields: [...d.fields, { name: "Adcore__c", type: "string", sortable: true }] };
+    if (uri && uri.includes("billing") && sobject === "Account") {
+      return { ...d, fields: [...d.fields, { name: "Billing__c", type: "string", sortable: true }] };
     }
     return d;
   });
-  conn.onRequest("sfx/projectInfo", () => ({ namespace: "sfy24" }));
+  conn.onRequest("sfx/projectInfo", () => ({ namespace: "acme" }));
   conn.onRequest("sfx/objectInfo", ({ sobject }: { sobject: string }) =>
     sobject === "Account" ? { description: "Customer accounts and prospects." } : { description: null },
   );
@@ -191,23 +191,23 @@ describe("SOQL in Apex", () => {
 
   it("completes SObject type names in a declaration position (namespace-optional)", async () => {
     // Typing a type name without its namespace prefix should match.
-    const src = "public class C {\n  void m() {\n    ProductionOrder__c\n  }\n}\n";
-    const col = src.split("\n")[2].length; // end of "    ProductionOrder__c"
+    const src = "public class C {\n  void m() {\n    Widget__c\n  }\n}\n";
+    const col = src.split("\n")[2].length; // end of "    Widget__c"
     const items = itemsOf(await complete(src, 2, col, "apex"));
-    const obj = items.find((i) => i.label === "sfy24__ProductionOrder__c");
+    const obj = items.find((i) => i.label === "acme__Widget__c");
     assert.ok(obj, "namespaced object offered as a type");
-    assert.strictEqual(obj.filterText, "ProductionOrder__c", "matches without the namespace");
+    assert.strictEqual(obj.filterText, "Widget__c", "matches without the namespace");
   });
 
   it("suggests the assigned type first after `new`", async () => {
-    const src = "public class C {\n  void m() {\n    sfy24__ProductionOrder__c po = new \n  }\n}\n";
+    const src = "public class C {\n  void m() {\n    acme__Widget__c po = new \n  }\n}\n";
     const col = src.split("\n")[2].length; // end of "    ... = new "
     const items = itemsOf(await complete(src, 2, col, "apex"));
-    const top = items.find((i) => i.label === "sfy24__ProductionOrder__c");
+    const top = items.find((i) => i.label === "acme__Widget__c");
     assert.ok(top, "expected type is in the list");
-    assert.strictEqual(top.sortText, "0_sfy24__ProductionOrder__c", "ranked first");
-    assert.ok(top.insertText.startsWith("sfy24__ProductionOrder__c("), "inserts a constructor call");
-    assert.strictEqual(top.filterText, "ProductionOrder__c", "namespace-optional match");
+    assert.strictEqual(top.sortText, "0_acme__Widget__c", "ranked first");
+    assert.ok(top.insertText.startsWith("acme__Widget__c("), "inserts a constructor call");
+    assert.strictEqual(top.filterText, "Widget__c", "namespace-optional match");
   });
 });
 
@@ -244,9 +244,9 @@ describe("Apex language features", () => {
   it("resolves the receiver type even with a nearby parse error (text fallback)", async () => {
     // The `Integer x = ;` line breaks parsing of the method body, but the
     // receiver's type must still resolve via the text scan.
-    const src = "public class C {\n  void m() {\n    Integer x = ;\n    sfy24__ProductionOrder__c po = new sfy24__ProductionOrder__c();\n    po.\n  }\n}\n";
+    const src = "public class C {\n  void m() {\n    Integer x = ;\n    acme__Widget__c po = new acme__Widget__c();\n    po.\n  }\n}\n";
     const labels = labelsOf(await complete(src, 4, 7, "apex"));
-    assert.ok(labels.includes("Name") && labels.includes("sfy24__Amount__c"));
+    assert.ok(labels.includes("Name") && labels.includes("acme__Amount__c"));
   });
 
   it("go-to-definition lands on in-file declarations", async () => {
@@ -338,10 +338,10 @@ describe("Completion item layout", () => {
 
 describe("Per-document org resolution", () => {
   it("resolves a sub-project's own org from the document path", async () => {
-    const adcore = labelsOf(await openAndComplete("file:///repo/adcore/force-app/main/default/q.soql", "soql", "SELECT  FROM Account", 0, 7));
+    const billing = labelsOf(await openAndComplete("file:///repo/billing/force-app/main/default/q.soql", "soql", "SELECT  FROM Account", 0, 7));
     const root = labelsOf(await openAndComplete("file:///repo/force-app/main/default/q.soql", "soql", "SELECT  FROM Account", 0, 7));
-    assert.ok(adcore.includes("Adcore__c"), "adcore path sees its sub-project field");
-    assert.ok(!root.includes("Adcore__c"), "root path does not");
+    assert.ok(billing.includes("Billing__c"), "billing path sees its sub-project field");
+    assert.ok(!root.includes("Billing__c"), "root path does not");
   });
 });
 
@@ -350,15 +350,15 @@ describe("Per-document org resolution", () => {
 describe("Namespace-optional matching", () => {
   it("sets filterText to the un-prefixed name (label keeps the namespace)", async () => {
     const items = itemsOf(await complete("SELECT Id FROM ", 0, 15));
-    const obj = items.find((i) => i.label === "sfy24__ProductionOrder__c");
-    assert.strictEqual(obj.filterText, "ProductionOrder__c");
+    const obj = items.find((i) => i.label === "acme__Widget__c");
+    assert.strictEqual(obj.filterText, "Widget__c");
   });
 
   it("resolves an object typed without its namespace prefix", async () => {
-    const labels = labelsOf(await complete("SELECT  FROM ProductionOrder__c", 0, 7));
-    assert.ok(labels.includes("Id") && labels.includes("sfy24__Amount__c"));
-    const items = itemsOf(await complete("SELECT  FROM ProductionOrder__c", 0, 7));
-    const fld = items.find((i) => i.label === "sfy24__Amount__c");
+    const labels = labelsOf(await complete("SELECT  FROM Widget__c", 0, 7));
+    assert.ok(labels.includes("Id") && labels.includes("acme__Amount__c"));
+    const items = itemsOf(await complete("SELECT  FROM Widget__c", 0, 7));
+    const fld = items.find((i) => i.label === "acme__Amount__c");
     assert.strictEqual(fld.filterText, "Amount__c");
   });
 });
@@ -370,11 +370,11 @@ describe("Completion weighting", () => {
     const items = itemsOf(await complete("SELECT Id FROM ", 0, 15));
     const tier = (l: string) => items.find((i) => i.label === l)?.sortText?.[0];
     assert.strictEqual(tier("Account"), "0");
-    assert.strictEqual(tier("sfy24__ProductionOrder__c"), "0");
+    assert.strictEqual(tier("acme__Widget__c"), "0");
     assert.strictEqual(tier("My_Setting__mdt"), "1");
     assert.strictEqual(tier("AccountHistory"), "2");
     assert.strictEqual(tier("AccountShare"), "2");
-    assert.strictEqual(tier("sfy24__ProductionOrder__History"), "2");
+    assert.strictEqual(tier("acme__Widget__History"), "2");
   });
 
   it("sorts audit fields below business fields", async () => {
@@ -401,7 +401,7 @@ describe("Org-aware member completion with Apex features off", () => {
     conn2 = rpc.createMessageConnection(new rpc.StreamMessageReader(child2.stdout!), new rpc.StreamMessageWriter(child2.stdin!));
     conn2.onRequest("sfx/objectList", () => OBJECTS);
     conn2.onRequest("sfx/describe", ({ sobject }: { sobject: string }) => DESCRIBES[sobject] || null);
-    conn2.onRequest("sfx/projectInfo", () => ({ namespace: "sfy24" }));
+    conn2.onRequest("sfx/projectInfo", () => ({ namespace: "acme" }));
     conn2.listen();
     await conn2.sendRequest("initialize", {
       processId: process.pid, rootUri: null, capabilities: {},
@@ -416,19 +416,19 @@ describe("Org-aware member completion with Apex features off", () => {
 
   it("completes SObject fields on a typed local even with apexFeatures off", async () => {
     const uri = "file:///tmp/off1.cls";
-    const src = "public class C {\n  void m() {\n    sfy24__ProductionOrder__c po = new sfy24__ProductionOrder__c();\n    po.\n  }\n}\n";
+    const src = "public class C {\n  void m() {\n    acme__Widget__c po = new acme__Widget__c();\n    po.\n  }\n}\n";
     await conn2.sendNotification("textDocument/didOpen", { textDocument: { uri, languageId: "apex", version: 1, text: src } });
     const res = await conn2.sendRequest("textDocument/completion", { textDocument: { uri }, position: { line: 3, character: 7 } });
     const labels = (Array.isArray(res) ? res : res.items).map((i: any) => i.label);
-    assert.ok(labels.includes("Name") && labels.includes("sfy24__Amount__c"));
+    assert.ok(labels.includes("Name") && labels.includes("acme__Amount__c"));
   });
 
   it("shows SObject field hover even with apexFeatures off", async () => {
     const uri = "file:///tmp/offh.cls";
-    const src = "public class C {\n  void m() {\n    sfy24__ProductionOrder__c po = new sfy24__ProductionOrder__c();\n    po.sfy24__Amount__c = 1;\n  }\n}\n";
+    const src = "public class C {\n  void m() {\n    acme__Widget__c po = new acme__Widget__c();\n    po.acme__Amount__c = 1;\n  }\n}\n";
     await conn2.sendNotification("textDocument/didOpen", { textDocument: { uri, languageId: "apex", version: 1, text: src } });
     const res: any = await conn2.sendRequest("textDocument/hover", { textDocument: { uri }, position: { line: 3, character: 10 } });
     const value = res && res.contents ? res.contents.value : "";
-    assert.ok(value.includes("sfy24__Amount__c") && value.includes("Amount"), `hover: ${JSON.stringify(value)}`);
+    assert.ok(value.includes("acme__Amount__c") && value.includes("Amount"), `hover: ${JSON.stringify(value)}`);
   });
 });

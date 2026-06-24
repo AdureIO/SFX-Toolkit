@@ -83,7 +83,7 @@ export function startLanguageServer(context: vscode.ExtensionContext): void {
 	);
 
 	// Resolve which org a request's document belongs to. Walks up to the nearest
-	// sfdx-project.json so nested sub-projects (e.g. adcore/force-app/...) use their
+	// sfdx-project.json so nested sub-projects (e.g. billing/force-app/...) use their
 	// own default org instead of always the workspace root's. Null = default org.
 	const orgForUri = (uri?: string): string | null => {
 		if (!uri) return null;

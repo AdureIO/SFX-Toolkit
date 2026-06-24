@@ -914,7 +914,7 @@
             "type": "string"
           },
           "default": [],
-          "description": "Workspace-relative globs (forward-slash separated) selecting which files participate. A document is only stripped if it matches at least one of these globs. Example: [\"force-app/main/Polca/components/lwc/**/*.js\", \"force-app/main/Polca/components/lwc/**/*.html\", \"force-app/main/Polca/components/lwc/**/*.css\"]."
+          "description": "Workspace-relative globs (forward-slash separated) selecting which files participate. A document is only stripped if it matches at least one of these globs. Example: [\"force-app/main/default/components/lwc/**/*.js\", \"force-app/main/default/components/lwc/**/*.html\", \"force-app/main/default/components/lwc/**/*.css\"]."
         },
         "adure-sfx-toolkit.removeFinalNewline.languages": {
           "type": "array",

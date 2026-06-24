@@ -30,8 +30,8 @@ A built-in, **JVM-free** language server (pure Node, shipped inside the extensio
 
 **Org-aware extras:**
 
-- **Namespace-optional matching** — when your `sfdx-project.json` defines a namespace, typing `ProductionOrder__c` matches `ns__ProductionOrder__c` (the namespace stays in the inserted code; matching is what's optional).
-- **Per-document org resolution** — nested / multi-package projects each resolve their own default org, so `adcore/force-app/...` uses adcore's org.
+- **Namespace-optional matching** — when your `sfdx-project.json` defines a namespace, typing `Widget__c` matches `ns__Widget__c` (the namespace stays in the inserted code; matching is what's optional).
+- **Per-document org resolution** — nested / multi-package projects each resolve their own default org, so `billing/force-app/...` uses billing's org.
 - **Result weighting** — auxiliary objects (`*History`, `*Share`, `*Feed`, `*ChangeEvent`) and standard audit fields sink below the business objects/fields you actually use.
 - **Schema stubs** generated in the background for go-to-definition and to ground AI tooling; refreshed on org switch, pull, and Refresh Metadata.
 - **Self-healing** — if the Salesforce Apex Language Server gets stuck, it's restarted (bounded), with a clear notification if it keeps failing.

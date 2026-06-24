@@ -18,9 +18,9 @@ describe("sobjectStubSync (pure helpers)", () => {
   });
 
   it("classifies custom / namespaced objects", () => {
-    assert.ok(isCustomObject("sfy24__ProductionOrder__c"));
+    assert.ok(isCustomObject("acme__Widget__c"));
     assert.ok(isCustomObject("My_Setting__mdt"));
-    assert.ok(isCustomObject("sfy24__Thing__e"));
+    assert.ok(isCustomObject("acme__Thing__e"));
     assert.ok(!isCustomObject("Account"));
     assert.ok(!isCustomObject("Contact"));
   });
@@ -38,7 +38,7 @@ describe("sobjectStubSync (pure helpers)", () => {
       fields: [
         { name: "Id", type: "id" },
         { name: "AccountId", type: "reference", relationshipName: "Account", referenceTo: ["Account"] },
-        { name: "sfy24__Score__c", type: "double", label: "Score" },
+        { name: "acme__Score__c", type: "double", label: "Score" },
       ],
       childRelationships: [{ name: "Cases", childSObject: "Case" }],
     });
@@ -46,7 +46,7 @@ describe("sobjectStubSync (pure helpers)", () => {
     assert.ok(s.includes("global Id Id;"));
     assert.ok(s.includes("global Id AccountId;"));
     assert.ok(s.includes("global Account Account;"));
-    assert.ok(s.includes("global Decimal sfy24__Score__c;"));
+    assert.ok(s.includes("global Decimal acme__Score__c;"));
     assert.ok(s.includes("global List<Case> Cases;"));
   });
 
@@ -57,14 +57,14 @@ describe("sobjectStubSync (pure helpers)", () => {
       fields: [
         { name: "Id", type: "id" },                       // already declared
         { name: "Name", type: "string" },                 // already declared
-        { name: "sfy24__Region__c", type: "picklist", label: "Region" }, // missing
+        { name: "acme__Region__c", type: "picklist", label: "Region" }, // missing
       ],
       childRelationships: [{ name: "Contacts", childSObject: "Contact" }], // missing
     };
     const out = augmentExistingStub(sfStub, d);
     assert.ok(out.includes("global String Name;"), "preserves Salesforce content");
     assert.ok(out.includes("ASFX-AUGMENTED-START"));
-    assert.ok(out.includes("global String sfy24__Region__c;"), "adds missing field");
+    assert.ok(out.includes("global String acme__Region__c;"), "adds missing field");
     assert.ok(out.includes("global List<Contact> Contacts;"), "adds missing child relationship");
     assert.ok(!/Id;[\s\S]*global Id Id;/.test(out), "does not duplicate existing fields");
 
@@ -75,13 +75,13 @@ describe("sobjectStubSync (pure helpers)", () => {
   });
 
   it("detects used objects, including namespace-optional references", () => {
-    const objectNames = ["Account", "sfy24__ProductionOrder__c", "Unused__c"];
+    const objectNames = ["Account", "acme__Widget__c", "Unused__c"];
     const texts = [
-      "public class C { void m() { Account a; List<sfy24__ProductionOrder__c> p; ProductionOrder__c q; } }",
+      "public class C { void m() { Account a; List<acme__Widget__c> p; Widget__c q; } }",
     ];
-    const used = collectUsedObjectsFromTexts(texts, objectNames, "sfy24");
+    const used = collectUsedObjectsFromTexts(texts, objectNames, "acme");
     assert.ok(used.has("Account"));
-    assert.ok(used.has("sfy24__ProductionOrder__c"), "matched full and un-prefixed references");
+    assert.ok(used.has("acme__Widget__c"), "matched full and un-prefixed references");
     assert.ok(!used.has("Unused__c"));
   });
 });

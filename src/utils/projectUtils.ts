@@ -22,7 +22,7 @@ export function isSalesforceProject(): boolean {
 
 /**
  * Walk up from a file path to the nearest directory containing sfdx-project.json.
- * Lets nested/sub-projects (e.g. adcore/force-app/...) resolve their own org/config
+ * Lets nested/sub-projects (e.g. billing/force-app/...) resolve their own org/config
  * instead of always using the workspace root. Returns null if none is found.
  */
 export function findSfdxProjectDir(filePath: string): string | null {

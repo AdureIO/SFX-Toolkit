@@ -200,8 +200,8 @@ async function fetchDescribe(docUri: string, sobject: string): Promise<HostDescr
 
 // Cached per document+sobject so a different sub-project (different org) doesn't
 // reuse another project's describe. Host also caches by org with a TTL.
-// Namespace-aware: in a namespaced project, `ProductionOrder__c` resolves to
-// `ns__ProductionOrder__c` when the bare name isn't found.
+// Namespace-aware: in a namespaced project, `Widget__c` resolves to
+// `ns__Widget__c` when the bare name isn't found.
 const describeCache = new Map<string, HostDescribe | null>();
 async function describe(docUri: string, sobject: string): Promise<HostDescribe | null> {
     const key = `${docUri}|${sobject}`;
@@ -219,7 +219,7 @@ async function describe(docUri: string, sobject: string): Promise<HostDescribe |
 
 /**
  * In a namespaced project, the org returns API names with the namespace prefix
- * (`ns__ProductionOrder__c`) but it's optional to type. Set filterText to the
+ * (`ns__Widget__c`) but it's optional to type. Set filterText to the
  * unprefixed name so typing `Prod` matches; label/insertText keep the namespace.
  */
 function applyNamespace(items: CompletionItem[], ns: string | null): CompletionItem[] {
@@ -678,7 +678,7 @@ function newTypeItem(typeName: string, tier: string): CompletionItem {
 
 /**
  * Complete after `new ` in Apex. Prioritizes the type being assigned — e.g.
- * `sfy24__ProductionOrder__c po = new |` → `sfy24__ProductionOrder__c()` first —
+ * `acme__Widget__c po = new |` → `acme__Widget__c()` first —
  * then offers constructable SObjects. Returns [] when not in a `new` context.
  */
 async function apexNewCompletion(doc: TextDocument, offset: number): Promise<CompletionItem[]> {
@@ -760,7 +760,7 @@ async function apexMemberCompletion(
 /**
  * SObject type-name completion in Apex type positions (variable declarations,
  * generics, casts, `return`, `instanceof`). This is what gives namespace-optional
- * matching for types in Apex — typing `ProductionOrder__c` matches the namespaced
+ * matching for types in Apex — typing `Widget__c` matches the namespaced
  * object via filterText. Conservative: only fires with a >=2 char prefix and in a
  * plausible type position, and items are deprioritized so locals stay on top.
  */

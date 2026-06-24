@@ -163,7 +163,7 @@ function matchTokensInto(text: string, lookup: NameLookup, used: Set<string>): v
 /**
  * From workspace file contents, the set of object API names that are referenced.
  * Matches both the full API name and (when a namespace is given) the un-prefixed
- * form so `ProductionOrder__c` counts as using `ns__ProductionOrder__c`.
+ * form so `Widget__c` counts as using `ns__Widget__c`.
  * (Pure; used by tests. The sync uses the streaming walker below.)
  */
 export function collectUsedObjectsFromTexts(texts: string[], objectNames: string[], namespace: string | null): Set<string> {
