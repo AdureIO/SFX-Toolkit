@@ -158,6 +158,19 @@ export async function createUserTrace(org: string | null, durationMinutes?: numb
 	}
 }
 
+/**
+ * The entry-point code unit of a debug log (what was actually run) from the first
+ * CODE_UNIT_STARTED line — e.g. "MyClass.myMethod", "execute_anonymous_apex",
+ * "MyTrigger on Account trigger event BeforeInsert". Null if not present.
+ */
+export function extractCodeUnit(logBody: string): string | null {
+	const line = /^.*\|CODE_UNIT_STARTED\|.*$/m.exec(logBody)?.[0];
+	if (!line) return null;
+	const parts = line.split("|");
+	const name = (parts[parts.length - 1] || "").trim();
+	return name || null;
+}
+
 /** Raw debug-log body for a log id on an org. */
 export async function fetchApexLogBody(org: string | null, logId: string): Promise<string> {
 	const version = getToolingApiVersion();

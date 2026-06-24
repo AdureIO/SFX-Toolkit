@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { getAnonymousApexOrgList, executeAnonymousForPanel } from '../commands/executeAnonymous';
-import { listApexLogs, fetchApexLogBody, listActiveTraceFlags, deleteAllApexLogs, createUserTrace } from '../utils/apexLogApi';
+import { listApexLogs, fetchApexLogBody, listActiveTraceFlags, deleteAllApexLogs, createUserTrace, extractCodeUnit } from '../utils/apexLogApi';
 import { getHighlightPatterns } from '../utils/apexLogHighlight';
 import { getSalesforceLogDirectory } from '../utils/logPaths';
 import { AuthInfo } from '../utils/authInfo';
@@ -28,6 +28,8 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	private _listener?: vscode.Disposable;
 	private _lastLog = '';
 	private readonly _bridge = new ApexBufferBridge(WORKBENCH_BUFFER);
+	/** Cache of fetched log bodies (id → { text, unit }) so re-opening is instant. */
+	private readonly _bodyCache = new Map<string, { text: string; unit: string | null }>();
 
 	constructor(private readonly _extensionUri: vscode.Uri) {}
 
@@ -119,8 +121,14 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 					break;
 				}
 				case 'openLog': {
+					const cached = this._bodyCache.get(data.id);
+					if (cached) { this._post('logBody', { id: data.id, text: cached.text, unit: cached.unit }); break; }
 					this._post('logLoading', { id: data.id });
-					this._post('logBody', { id: data.id, text: await fetchApexLogBody(data.org || null, data.id) });
+					const text = await fetchApexLogBody(data.org || null, data.id);
+					const unit = extractCodeUnit(text);
+					if (this._bodyCache.size > 20) this._bodyCache.delete(this._bodyCache.keys().next().value as string);
+					this._bodyCache.set(data.id, { text, unit });
+					this._post('logBody', { id: data.id, text, unit });
 					break;
 				}
 				case 'openLogInEditor': {
@@ -353,13 +361,14 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	Array.prototype.forEach.call(document.querySelectorAll('.tab'), function(el){ el.onclick=function(){ setTab(el.getAttribute('data-t')); }; });
 
 	// ── logs ──────────────────────────────────────────────────────────────────
-	const listRows=document.getElementById('listRows'); let currentId='';
+	const listRows=document.getElementById('listRows'); let currentId=''; let lastRows=[]; const unitById={};
 	function fmtTime(s){ try{const d=new Date(s); return isNaN(d)?s:d.toLocaleTimeString();}catch(e){return s;} }
 	function fmtSize(n){ if(!n) return ''; if(n<1024) return n+' B'; if(n<1048576) return Math.round(n/1024)+' KB'; return (n/1048576).toFixed(1)+' MB'; }
-	function renderList(rows){ document.getElementById('logCount').textContent=(rows&&rows.length)?rows.length:'';
+	function renderList(rows){ lastRows=rows||[]; document.getElementById('logCount').textContent=(rows&&rows.length)?rows.length:'';
 		if(!rows||!rows.length){ listRows.innerHTML='<div class="muted" style="padding:8px;">No logs.</div>'; return; }
-		listRows.innerHTML=rows.map(function(r){ const err=r.status&&r.status.toLowerCase()!=='success';
-			return '<div class="row" data-id="'+r.id+'">'+fmtTime(r.startTime)+'<div class="meta'+(err?' err':'')+'">'+esc((r.operation||'')+' · '+(r.status||''))+' · '+fmtSize(r.length)+'</div></div>'; }).join('');
+		listRows.innerHTML=rows.map(function(r){ const err=r.status&&r.status.toLowerCase()!=='success'; const unit=unitById[r.id];
+			const head = unit ? esc(unit) : (esc(r.operation||'')||fmtTime(r.startTime));
+			return '<div class="row" data-id="'+r.id+'"><div style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">'+head+'</div><div class="meta'+(err?' err':'')+'">'+fmtTime(r.startTime)+' · '+esc(r.status||'')+' · '+fmtSize(r.length)+'</div></div>'; }).join('');
 		Array.prototype.forEach.call(listRows.querySelectorAll('.row'), function(el){
 			if(el.getAttribute('data-id')===currentId) el.classList.add('sel'); // keep selection across refreshes
 			el.onclick=function(){
@@ -444,7 +453,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 			vscode.postMessage({type:'warmOrg', org:orgVal()}); loadLogs(); }
 		else if(d.type==='logList'){ if((d.org||'')===orgVal()) renderList(d.rows||[]); }
 		else if(d.type==='logLoading'){ if(d.id===currentId) logView.setText('Loading log…', true); }
-		else if(d.type==='logBody'){ if(d.id===currentId) logView.setLog(d.text||''); }
+		else if(d.type==='logBody'){ if(d.unit){ unitById[d.id]=d.unit; renderList(lastRows); } if(d.id===currentId) logView.setLog(d.text||''); }
 		else if(d.type==='historyUpdated'){ setHistory(d.history||[]); }
 		else if(d.type==='traceInfo'){ if((d.org||'')!==orgVal()) return;
 			const pill=document.getElementById('tracePill'); pill.classList.toggle('on', d.count>0); pill.textContent= d.count>0 ? ('Trace: '+d.count+' on') : 'Trace: off'; }
