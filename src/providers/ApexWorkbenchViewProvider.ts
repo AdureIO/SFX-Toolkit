@@ -351,7 +351,6 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	<span style="flex:1;"></span>
 	<select id="org" title="Target org for logs, execution and queries"><option value="">Loading…</option></select>
 	<span id="tracePill" title="Active debug traces">Trace: —</span>
-	<button id="refresh" class="icon" title="Refresh" aria-label="Refresh"><svg viewBox="0 0 16 16"><path d="M13.6 8a5.6 5.6 0 1 1-1.7-4"/><path d="M13.9 2.3v3.2h-3.2"/></svg></button>
 </div>
 
 <div id="page-logs" class="page active">
@@ -360,6 +359,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 			<span>Debug logs <span id="logCount"></span></span>
 			<span style="display:inline-flex; gap:4px;">
 				<button id="listen" class="icon" title="Listen for new logs (poll)" aria-label="Listen for new logs"><svg viewBox="0 0 16 16"><circle class="fill" cx="8" cy="8" r="1.6"/><path d="M4.8 4.8a4.5 4.5 0 0 0 0 6.4"/><path d="M11.2 4.8a4.5 4.5 0 0 1 0 6.4"/></svg></button>
+				<button id="refresh" class="icon" title="Refresh logs &amp; traces" aria-label="Refresh"><svg viewBox="0 0 16 16"><path d="M13.6 8a5.6 5.6 0 1 1-1.7-4"/><path d="M13.9 2.3v3.2h-3.2"/></svg></button>
 				<button id="deleteAll" class="icon" title="Delete all logs" aria-label="Delete all logs"><svg viewBox="0 0 16 16"><path d="M2.8 4.2h10.4"/><path d="M6 4.2V2.6h4v1.6"/><path d="M4.6 4.2l.6 9.2h5.6l.6-9.2"/></svg></button>
 			</span>
 		</div>
@@ -475,7 +475,9 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	function setTab(t){ Array.prototype.forEach.call(document.querySelectorAll('.tab'),function(el){el.classList.toggle('active',el.getAttribute('data-t')===t);});
 		document.getElementById('page-logs').classList.toggle('active', t==='logs');
 		document.getElementById('page-exec').classList.toggle('active', t==='exec');
-		document.getElementById('page-soql').classList.toggle('active', t==='soql'); }
+		document.getElementById('page-soql').classList.toggle('active', t==='soql');
+		// Monaco editors created in a hidden tab lay out at 0px — relayout on show.
+		setTimeout(function(){ if(t==='exec'&&editor) editor.layout(); if(t==='soql'&&soqlEd) soqlEd.layout(); }, 0); }
 	Array.prototype.forEach.call(document.querySelectorAll('.tab'), function(el){ el.onclick=function(){ setTab(el.getAttribute('data-t')); }; });
 
 	// ── logs ──────────────────────────────────────────────────────────────────
