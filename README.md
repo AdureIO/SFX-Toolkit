@@ -120,10 +120,6 @@ All calls are made server-side (Node `https`) — no CORS issues.
 - **Output Logging**: detailed logs in the **ASFX Toolkit** output channel (suppressed during deploys, opened on errors).
 - **Configurable**: see [Settings](#settings).
 
-### 🧹 Remove Final Newline on Save
-
-Prettier always writes a final EOF newline for JS/CSS/HTML with no opt-out. This **opt-in**, workspace-driven step strips that trailing newline for matching files (runs after `formatOnSave`, before the write). A document is only touched when the feature is enabled, its language id is eligible, and its path matches a configured glob. Only trailing `\n` / `\r\n` is removed; the operation is idempotent. See the `removeFinalNewline.*` settings below.
-
 ## Keyboard Shortcuts
 
 | Shortcut | Action |
@@ -163,28 +159,6 @@ All settings live under the `adure-sfx-toolkit.*` namespace.
 | `testRunTimeoutMinutes` | — | Timeout for test runs. |
 | `autoSaveBeforePush` | — | Save dirty editors before a push. |
 
-### Remove Final Newline on Save
-
-| Setting | Default | Description |
-| --- | --- | --- |
-| `removeFinalNewline.enabled` | `false` | Master switch. |
-| `removeFinalNewline.patterns` | `[]` | Workspace-relative globs; at least one must match. |
-| `removeFinalNewline.languages` | `["javascript","javascriptreact","html","css"]` | Eligible language ids. |
-| `removeFinalNewline.runOnSave` | `true` | Run as part of the save lifecycle. |
-
-Sample workspace config:
-
-```json
-{
-  "adure-sfx-toolkit.removeFinalNewline.enabled": true,
-  "adure-sfx-toolkit.removeFinalNewline.patterns": [
-    "force-app/**/*.js",
-    "force-app/**/*.html",
-    "force-app/**/*.css"
-  ]
-}
-```
-
 ## Requirements
 
 - A Salesforce **DX project** (`sfdx-project.json` in the workspace).
@@ -209,6 +183,15 @@ SOQL/Apex text, query results, or any personal data.
 To opt out, set `adure-sfx-toolkit.telemetry.enabled` to `false`. Telemetry also
 honors VS Code's global `telemetry.telemetryLevel` setting — disabling either turns
 it off.
+
+## 💜 Support / Sponsor
+
+Adure SFX Toolkit is free and open source, built and maintained in our spare time.
+If it saves you time, please consider [**sponsoring its development**](https://github.com/sponsors/AdureIO).
+Sponsorships fund ongoing maintenance, new features, and faster bug fixes — and are
+hugely appreciated. ⭐ Starring the [repository](https://github.com/AdureIO/SFX-Toolkit)
+and leaving a [Marketplace review](https://marketplace.visualstudio.com/items?itemName=AdureIO.sfx-toolkit&ssr=false#review-details)
+helps too.
 
 ## Open Source
 

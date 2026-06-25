@@ -13,6 +13,9 @@
     "type": "git",
     "url": "https://github.com/AdureIO/SFX-Toolkit.git"
   },
+  "sponsor": {
+    "url": "https://github.com/sponsors/AdureIO"
+  },
   "categories": [
     "Programming Languages",
     "Debuggers",
@@ -916,37 +919,6 @@
           "type": "boolean",
           "default": true,
           "description": "Show a confirmation dialog before deploying metadata, pushing source, or executing Apex against a non-sandbox org (production, Developer Edition, or Dev Hub)."
-        },
-        "adure-sfx-toolkit.removeFinalNewline.enabled": {
-          "type": "boolean",
-          "default": false,
-          "description": "When enabled, the toolkit strips the trailing end-of-file newline(s) from saved documents whose language is in 'languages' AND whose workspace-relative path matches at least one glob in 'patterns'. Useful when Prettier insists on appending a final newline that you do not want for specific files (e.g., LWC bundles)."
-        },
-        "adure-sfx-toolkit.removeFinalNewline.patterns": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "Workspace-relative globs (forward-slash separated) selecting which files participate. A document is only stripped if it matches at least one of these globs. Example: [\"force-app/main/default/components/lwc/**/*.js\", \"force-app/main/default/components/lwc/**/*.html\", \"force-app/main/default/components/lwc/**/*.css\"]."
-        },
-        "adure-sfx-toolkit.removeFinalNewline.languages": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [
-            "javascript",
-            "javascriptreact",
-            "html",
-            "css"
-          ],
-          "description": "VS Code language identifiers eligible for trailing-newline stripping. A document must have one of these language ids in addition to matching a configured pattern."
-        },
-        "adure-sfx-toolkit.removeFinalNewline.runOnSave": {
-          "type": "boolean",
-          "default": true,
-          "description": "When true, strip trailing newlines automatically as part of the save lifecycle (onWillSaveTextDocument). Set to false to disable the save-time behaviour while keeping the feature configured."
         },
         "adure-sfx-toolkit.telemetry.enabled": {
           "type": "boolean",

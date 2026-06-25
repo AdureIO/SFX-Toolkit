@@ -44,25 +44,6 @@ export function getHttpTimeout(): number {
   return getConfig().get<number>("httpTimeoutMs", 30000);
 }
 
-export function getRemoveFinalNewlineEnabled(): boolean {
-  return getConfig().get<boolean>("removeFinalNewline.enabled", false);
-}
-
-export function getRemoveFinalNewlinePatterns(): string[] {
-  const value = getConfig().get<string[]>("removeFinalNewline.patterns", []);
-  return Array.isArray(value) ? value.filter((p) => typeof p === "string" && p.length > 0) : [];
-}
-
-export function getRemoveFinalNewlineLanguages(): string[] {
-  const defaults = ["javascript", "javascriptreact", "html", "css"];
-  const value = getConfig().get<string[]>("removeFinalNewline.languages", defaults);
-  return Array.isArray(value) ? value.filter((l) => typeof l === "string" && l.length > 0) : defaults;
-}
-
-export function getRemoveFinalNewlineRunOnSave(): boolean {
-  return getConfig().get<boolean>("removeFinalNewline.runOnSave", true);
-}
-
 export function getWarnOnProductionOrg(): boolean {
   return getConfig().get<boolean>("warnOnProductionOrg", true);
 }

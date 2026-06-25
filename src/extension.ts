@@ -75,7 +75,6 @@ import { OrgMetadataCache } from "./utils/orgMetadataCache";
 import { AuthInfo } from "./utils/authInfo";
 import { getDeployDiagnosticCollection } from "./utils/deployDiagnostics";
 import { warmOrgListCache, invalidateOrgListCache, refreshOrgListCache } from "./utils/orgListCache";
-import { registerRemoveFinalNewlineHook } from "./utils/removeFinalNewlineHook";
 
 function updateLwcContext(editor: vscode.TextEditor | undefined): void {
   if (!editor) {
@@ -185,9 +184,6 @@ export function activate(context: vscode.ExtensionContext) {
       };
       void DeployMetadataPanelProvider.show(preset);
     });
-
-    // Remove-final-newline save hook (config-gated; safe to register before SFDX checks)
-    registerRemoveFinalNewlineHook(context);
 
     // 1. Filter Logs Commands
     // 1. Filter Logs Commands (Normal and Active versions point to same handler)
