@@ -208,7 +208,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 					break;
 				}
 				case 'openSoqlWorkbench':
-					await vscode.commands.executeCommand('adure-sfx-toolkit.openSOQLEditor', typeof data.query === 'string' ? data.query : undefined);
+					await vscode.commands.executeCommand('adure-sfx-toolkit.openSOQLEditor', typeof data.query === 'string' ? data.query : undefined, data.org || '');
 					break;
 			}
 		});
@@ -568,7 +568,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	// ── SOQL tab actions ────────────────────────────────────────────────────────
 	function doRunSoql(){ if(!soqlEd) return; vscode.postMessage({type:'runSoql', org:orgVal()||undefined, query:soqlEd.getValue()}); }
 	document.getElementById('runSoql').onclick=doRunSoql;
-	document.getElementById('openSoqlWb').onclick=function(){ vscode.postMessage({type:'openSoqlWorkbench', query:soqlEd?soqlEd.getValue():''}); };
+	document.getElementById('openSoqlWb').onclick=function(){ vscode.postMessage({type:'openSoqlWorkbench', query:soqlEd?soqlEd.getValue():'', org:orgVal()}); };
 	document.getElementById('clearSoql').onclick=function(){ if(soqlEd){soqlEd.setValue('');soqlEd.focus();} vscode.postMessage({type:'soqlChanged',query:''}); };
 	(function(){ const sp=document.getElementById('soqlSplit'); const ed=document.getElementById('soqlEditor'); let drag=false,sx=0,sw=0;
 		sp.addEventListener('mousedown',function(e){drag=true;sx=e.clientX;sw=ed.getBoundingClientRect().width;document.body.style.cursor='col-resize';document.body.style.userSelect='none';e.preventDefault();});

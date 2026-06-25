@@ -44,7 +44,7 @@ export class SOQLEditorProvider {
     return { auth, result };
   }
 
-  public static async show(extensionUri: vscode.Uri, initialQuery?: string) {
+  public static async show(extensionUri: vscode.Uri, initialQuery?: string, initialOrg?: string) {
     const column = vscode.window.activeTextEditor ? vscode.window.activeTextEditor.viewColumn : undefined;
 
     const panel = vscode.window.createWebviewPanel(
@@ -58,7 +58,7 @@ export class SOQLEditorProvider {
       }
     );
 
-    await SOQLEditorProvider.attach(panel, extensionUri, initialQuery);
+    await SOQLEditorProvider.attach(panel, extensionUri, initialQuery, initialOrg);
   }
 
   /**
@@ -75,10 +75,10 @@ export class SOQLEditorProvider {
   }
 
   /** Wire HTML + message handling onto a (new or restored) panel. */
-  private static async attach(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, initialQuery?: string) {
+  private static async attach(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, initialQuery?: string, initialOrg?: string) {
     const { lastQuery, history } = await SOQLEditorProvider.loadSoqlState();
     const saved = SOQLEditorProvider.loadSavedQueries();
-    panel.webview.html = this._getHtmlForWebview(panel.webview, extensionUri, initialQuery || lastQuery, history, saved);
+    panel.webview.html = this._getHtmlForWebview(panel.webview, extensionUri, initialQuery || lastQuery, history, saved, initialOrg);
 
     AuthInfo.warmAuthForOrg(null);
     OrgMetadataCache.warmDefaultOrg();
@@ -726,12 +726,14 @@ export class SOQLEditorProvider {
     extensionUri: vscode.Uri,
     lastQuery: string = "",
     history: string[] = [],
-    saved: SavedQuery[] = []
+    saved: SavedQuery[] = [],
+    initialOrg?: string
   ) {
     const initialData = JSON.stringify({
       lastQuery: lastQuery || "",
       history: Array.isArray(history) ? history : [],
-      saved: Array.isArray(saved) ? saved : []
+      saved: Array.isArray(saved) ? saved : [],
+      initialOrg: initialOrg || ""
     });
     const initialDataEscaped = initialData.replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
     return `<!DOCTYPE html>
@@ -1055,6 +1057,7 @@ export class SOQLEditorProvider {
         const builderChildChips = document.getElementById('builder-child-chips');
         const builderFromQueryBtn = document.getElementById('builder-from-query-btn');
         const orgSelect = document.getElementById('org-select');
+        let initialOrgPreset = '';
         const historySelect = document.getElementById('history-select');
         const historyClearBtn = document.getElementById('history-clear-btn');
         const savedSelect = document.getElementById('saved-select');
@@ -1083,6 +1086,7 @@ export class SOQLEditorProvider {
                     savedQueries = data.saved;
                     renderSavedOptions(savedQueries);
                 }
+                if (data.initialOrg) { initialOrgPreset = data.initialOrg; vscode.postMessage({ command: 'getOrgList' }); }
             } catch (e) {}
         }
 
@@ -1972,6 +1976,12 @@ export class SOQLEditorProvider {
                         opt.textContent = o.label || ((o.alias || o.username || '') + (o.isDefault ? ' (default)' : ''));
                         orgSelect.appendChild(opt);
                     });
+                    // Preselect the org carried over from the workbench (once available).
+                    if (initialOrgPreset) {
+                        const has = Array.prototype.some.call(orgSelect.options, o => o.value === initialOrgPreset);
+                        if (has) { orgSelect.value = initialOrgPreset; orgSelect.dispatchEvent(new Event('change')); }
+                        initialOrgPreset = '';
+                    }
                     break;
                 case 'historyUpdated':
                     setHistoryDropdown(message.history || []);
