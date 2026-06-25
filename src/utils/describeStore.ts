@@ -17,9 +17,10 @@ import { getToolingApiVersion } from "./constants";
 import { outputChannel } from "./outputChannel";
 
 const CACHE_KEY_DEFAULT = "__default__";
-/** Retained for API compatibility; a successful describe is now cached indefinitely
- *  (until an explicit invalidate), so this TTL no longer expires positive entries. */
-export const DESCRIBE_TTL_MS = 15 * 60 * 1000;
+/** Freshness window for a successful describe. One full describe per object serves all
+ *  fields + relationships from cache for this long; after it elapses the next use
+ *  refetches once. Short-lived so schema edits surface without a manual refresh. */
+export const DESCRIBE_TTL_MS = 10 * 60 * 1000;
 /** Short window to cache a miss (object not found / fetch failed) so completion
  *  and validation don't re-hit the org on every keystroke while typing a partial
  *  or misspelled name — yet a genuinely new object appears after it expires. */
@@ -58,13 +59,11 @@ class DescribeStoreImpl {
 		const map = this.orgMap(org);
 		const hit = map.get(sobject);
 		if (hit) {
-			// A successful describe is kept indefinitely (until the user runs Refresh Metadata
-			// or a push/pull invalidates it) — we never silently re-fetch the same org's schema.
-			// Only misses expire, on a short TTL, so a genuinely new/correctly-typed name resolves.
-			if (hit.raw !== null) return hit.raw;
-			if (Date.now() - hit.fetchedAt < NEGATIVE_TTL_MS) return hit.raw;
+			// Hits live for ttlMs (~10 min); misses for a shorter window so a genuinely
+			// new / correctly-typed name resolves soon after a typo.
+			const effectiveTtl = hit.raw === null ? NEGATIVE_TTL_MS : ttlMs;
+			if (Date.now() - hit.fetchedAt < effectiveTtl) return hit.raw;
 		}
-		void ttlMs;
 
 		const lockKey = `${orgKey(org)}|${sobject}`;
 		const inflight = this.locks.get(lockKey);
@@ -87,11 +86,10 @@ class DescribeStoreImpl {
 		return promise;
 	}
 
-	/** Whether a successful raw describe is already cached (no network). */
+	/** Whether a fresh, successful raw describe is already cached (no network). */
 	hasFresh(org: string | null, sobject: string, ttlMs: number = DESCRIBE_TTL_MS): boolean {
-		void ttlMs;
 		const hit = this.orgMap(org).get(sobject);
-		return !!hit && hit.raw !== null; // kept indefinitely until invalidate
+		return !!hit && hit.raw !== null && Date.now() - hit.fetchedAt < ttlMs;
 	}
 
 	private async fetch(org: string | null, sobject: string): Promise<any | null> {

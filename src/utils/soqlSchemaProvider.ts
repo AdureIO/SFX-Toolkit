@@ -48,30 +48,13 @@ export interface SoqlHostDescribe {
 	childRelationships: SoqlHostChildRelationship[];
 }
 
-const CACHE_TTL_MS = 15 * 60 * 1000;
 const CACHE_KEY_DEFAULT = "__default__";
 
-interface Entry {
-	describe: SoqlHostDescribe;
-	fetchedAt: number;
-}
-
 class SoqlSchemaProviderImpl {
-	private cache = new Map<string, Map<string, Entry>>();
 	/** org+sobject → admin description (null = none). */
 	private descriptionCache = new Map<string, string | null>();
 	/** orgs where EntityDefinition.Description isn't queryable — stop retrying. */
 	private descriptionUnavailable = new Set<string>();
-
-	private orgMap(org: string | null): Map<string, Entry> {
-		const key = org || CACHE_KEY_DEFAULT;
-		let m = this.cache.get(key);
-		if (!m) {
-			m = new Map();
-			this.cache.set(key, m);
-		}
-		return m;
-	}
 
 	/** SObject names for completion (delegates to the shared lightweight cache). */
 	async getObjectList(org: string | null): Promise<string[]> {
@@ -107,19 +90,13 @@ class SoqlSchemaProviderImpl {
 		}
 	}
 
-	/** Server-shaped describe for a single sobject (cached, 15-min TTL). */
+	/** Server-shaped describe for a single sobject. Sourced from the shared DescribeStore
+	 *  (the single per-org, ~10-min cache); parsed per call so it can't outlive that TTL. */
 	async getDescribe(org: string | null, sobject: string): Promise<SoqlHostDescribe | null> {
 		if (!sobject) return null;
-		const map = this.orgMap(org);
-		const hit = map.get(sobject);
-		if (hit && Date.now() - hit.fetchedAt < CACHE_TTL_MS) return hit.describe;
-
-		// Shared raw describe (one network call across all schema caches).
 		const raw = await DescribeStore.getRaw(org, sobject);
 		if (!raw) return null;
-		const describe = this.parse(raw);
-		map.set(sobject, { describe, fetchedAt: Date.now() });
-		return describe;
+		return this.parse(raw);
 	}
 
 	private parse(raw: any): SoqlHostDescribe {
@@ -169,12 +146,14 @@ class SoqlSchemaProviderImpl {
 	}
 
 	invalidate(org: string | null): void {
-		this.cache.delete(org || CACHE_KEY_DEFAULT);
+		// Drop admin descriptions for this org (key prefix `org|…`); describes live in DescribeStore.
+		const prefix = `${org || CACHE_KEY_DEFAULT}|`;
+		for (const k of [...this.descriptionCache.keys()]) if (k.startsWith(prefix)) this.descriptionCache.delete(k);
+		this.descriptionUnavailable.delete(org || CACHE_KEY_DEFAULT);
 		DescribeStore.invalidate(org);
 	}
 
 	invalidateAll(): void {
-		this.cache.clear();
 		this.descriptionCache.clear();
 		this.descriptionUnavailable.clear();
 		DescribeStore.invalidateAll();

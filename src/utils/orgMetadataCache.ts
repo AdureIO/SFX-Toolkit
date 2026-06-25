@@ -154,13 +154,10 @@ class OrgMetadataCacheImpl {
 	 */
 	async getDescribe(org: string | null, sobject: string): Promise<SObjectDescribe | null> {
 		if (!isSalesforceProject() || !sobject) return null;
-		const key = cacheKey(org);
-		const entry = this.getOrCreateOrgCache(key);
-		const cached = entry.describes.get(sobject);
-		if (cached) return cached;
-		const desc = await this.fetchDescribe(org, sobject);
-		if (desc) entry.describes.set(sobject, desc);
-		return desc;
+		// Source from the shared DescribeStore (the single per-org, ~10-min cache). We
+		// don't keep our own parsed copy — that would outlive the store's TTL and serve
+		// stale fields/relationships. Parsing a cached describe is cheap.
+		return this.fetchDescribe(org, sobject);
 	}
 
 	/**

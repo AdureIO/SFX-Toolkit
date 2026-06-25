@@ -42,24 +42,15 @@ class SchemaCacheImpl {
 
   /**
    * Get a rich SObject describe (fields with createable, externalId, unique, nillable, etc).
-   * Cached per org+sobject indefinitely — kept until an explicit Refresh Metadata / invalidate,
-   * never silently re-fetched.
+   * Sourced from the shared DescribeStore (the single per-org, ~10-min cache); we parse on
+   * each call rather than keeping a parsed copy that could outlive the store's TTL.
    * Uses AuthInfo for authenticated REST calls with automatic 401 retry.
    */
   async getRichDescribe(org: string | null, sobject: string): Promise<SObjectDescribe | null> {
     if (!sobject) return null;
-    const map = this.getOrgMap(org);
-    const entry = map.get(sobject);
-    if (entry) {
-      return entry.describe;
-    }
-
-    // Shared raw describe (one network call across all schema caches).
     const raw = (await DescribeStore.getRaw(org, sobject)) as Record<string, unknown> | null;
     if (!raw) return null;
-    const describe = this.parseDescribe(raw);
-    map.set(sobject, { describe, fetchedAt: Date.now() });
-    return describe;
+    return this.parseDescribe(raw);
   }
 
   private parseDescribe(raw: Record<string, unknown>): SObjectDescribe {
