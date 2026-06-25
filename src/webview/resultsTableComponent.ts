@@ -129,6 +129,8 @@ export function resultsTableScript(): string {
 		function render(){ renderControls();
 			mount.classList.add('rt-host');
 			if(!records.length){ mount.innerHTML='<div style="padding:8px;opacity:.6">No rows.</div>'; return; }
+			// Preserve scroll position across re-renders (an edit rebuilds the table; without this it jumps to top-left).
+			var prev=mount.querySelector('.rt-scroll'); var sl=prev?prev.scrollLeft:0, st=prev?prev.scrollTop:0;
 			var html='<div class="rt-scroll"><table class="rt"><thead><tr><th class="rt-num">#</th>'+columns.map(function(c){return '<th>'+esc(c)+'</th>';}).join('')+'</tr></thead><tbody>';
 			for(var i=0;i<records.length;i++){ var r=records[i];
 				html+='<tr><td class="rt-num">'+(i+1)+'</td>'+columns.map(function(c){ var v=r[c]; var sub=subRecords(v); if(sub) return '<td class="rt-sub">'+cellHtml(r,c)+'</td>'; if(isRelObj(v)) return '<td>'+cellHtml(r,c)+'</td>'; return scalarTd(r,c); }).join('')+'</tr>'; }
@@ -137,6 +139,7 @@ export function resultsTableScript(): string {
 			// Safety net: auto table-layout can under-size a cell holding a nested table, clipping it.
 			// Force each subquery column to at least its nested table's real width so the row widens and scrolls.
 			mount.querySelectorAll('td.rt-sub').forEach(function(td){ var nt=td.querySelector('.rt-nested'); if(nt){ var w=nt.scrollWidth; if(w) td.style.minWidth=(w+6)+'px'; } });
+			var now=mount.querySelector('.rt-scroll'); if(now){ now.scrollLeft=sl; now.scrollTop=st; }
 			requestNames();
 		}
 
