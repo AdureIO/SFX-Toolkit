@@ -12,3 +12,6 @@ settings.md
 *.vsix
 # Project uses npm (package-lock.json)
 yarn.lock
+
+# Claude worktrees (local only)
+.claude/worktrees/

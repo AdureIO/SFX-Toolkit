@@ -16,6 +16,7 @@ import { handleResultsTableMessage } from '../utils/resultsTableHost';
 import { resultsTableCss, resultsTableScript } from '../webview/resultsTableComponent';
 import { refreshLanguageServerSchema, setEphemeralBuffers } from '../languageClient';
 import { ApexBufferBridge } from './apexBufferBridge';
+import { Telemetry } from '../utils/telemetry';
 
 const WORKBENCH_BUFFER = '.vscode/anon-workbench-buffer.apex';
 const SOQL_BUFFER = '.vscode/workbench-soql-buffer.soql';
@@ -190,6 +191,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 					break;
 				case 'execute': {
 					if (!isSalesforceProject()) { this._post('execResult', { success: false, error: 'Open an SFDX project to use this feature.' }); return; }
+					Telemetry.event('apexExecute', { surface: 'panel' });
 					this._post('execStarted', {});
 					const result = await executeAnonymousForPanel(data.code || '', data.org || undefined);
 					this._lastLog = result.log || '';

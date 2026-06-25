@@ -199,7 +199,9 @@ use it and which features are valuable, so development can be prioritized. We co
 - Extension activation and an anonymous, randomly generated install id
 - Which commands and panels are used, with execution duration and success/failure
 - Coarse error categories (e.g. `auth`, `network`, `cli`) — never raw messages
-- Deploy / test / SOQL outcomes as categorical flags and counts
+- Key feature actions: running a SOQL query, sending a REST request, exporting/
+  importing data, running a migration, executing anonymous Apex
+- Deploy / test outcomes as categorical flags and counts
 
 We **never** collect access tokens, usernames, org ids, record ids, file paths,
 SOQL/Apex text, query results, or any personal data.

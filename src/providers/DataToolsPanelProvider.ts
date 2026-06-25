@@ -8,6 +8,7 @@ import { SchemaCache } from "../utils/schemaCache";
 import { getCachedOrgList, refreshOrgListCache, warmOrgListCache } from "../utils/orgListCache";
 import { generateApexDataFactory, recommendedSelectFields, type RefMapping } from "../utils/apexDataFactory";
 import { extractSObjectFromQuery, queryAllRecords, sfRequest, resolveOrgToInfo, type OrgInfo } from "../utils/dataMigration";
+import { Telemetry } from "../utils/telemetry";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -260,6 +261,7 @@ export class DataToolsPanelProvider {
         const { query = "", org = "", format = "csv" } = msg;
         if (!query.trim()) { panel.webview.postMessage({ command: "exportError", error: "SOQL query is required." }); return; }
         if (!org) { panel.webview.postMessage({ command: "exportError", error: "Select a target org." }); return; }
+        Telemetry.event("dataExport", { format: format === "json" ? "json" : "csv" });
         panel.webview.postMessage({ command: "exportProgress", message: "Running query…" });
         try {
           const resultFormat = format === "json" ? "json" : "csv";
@@ -407,6 +409,7 @@ export class DataToolsPanelProvider {
         }
         const csvData = DataToolsPanelProvider._lastCsvData;
         if (!csvData.rows.length) { panel.webview.postMessage({ command: "importError", error: "File contains no data rows." }); return; }
+        Telemetry.event("dataImport", { operation: String(operation) });
         panel.webview.postMessage({ command: "importProgress", done: 0, total: csvData.rows.length, inserted: 0, updated: 0, failed: 0 });
 
         try {

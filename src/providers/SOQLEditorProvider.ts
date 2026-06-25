@@ -13,6 +13,7 @@ import { getSoqlMarkers } from "../utils/soqlMarkers";
 import { parseSoqlError } from "../utils/soqlError";
 import { handleResultsTableMessage } from "../utils/resultsTableHost";
 import { resultsTableCss, resultsTableScript } from "../webview/resultsTableComponent";
+import { Telemetry } from "../utils/telemetry";
 
 const SOQL_WB_BUFFER = ".vscode/soql-wb-buffer.soql";
 const SOQL_HISTORY_MAX = 50;
@@ -114,6 +115,7 @@ export class SOQLEditorProvider {
         if (await handleResultsTableMessage(message, (m) => panel.webview.postMessage(m))) return;
         switch (message.command) {
           case "execute":
+            Telemetry.event("soqlExecute", { surface: "builder" });
             await this.executeQuery(panel, message.query, message.targetOrg || null);
             break;
           case "wbCompletions":

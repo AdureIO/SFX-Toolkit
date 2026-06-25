@@ -7,6 +7,7 @@ import { OrgMetadataCache } from "../utils/orgMetadataCache";
 import { getCachedOrgList, refreshOrgListCache, warmOrgListCache } from "../utils/orgListCache";
 import { getToolingApiVersion } from "../utils/constants";
 import { scanApexRestResources } from "../utils/apexRestScanner";
+import { Telemetry } from "../utils/telemetry";
 
 /** Persisted UI state so the panel survives close/reopen and window reload. */
 export interface RestExplorerState {
@@ -206,6 +207,8 @@ export class RestExplorerPanelProvider {
         const { method, url, headers: rawHeaders, body } = request;
 
         if (!url) { panel.webview.postMessage({ command: "responseError", error: "URL is required." }); return; }
+
+        Telemetry.event("restRequest", { method: String(method || "GET").toUpperCase() });
 
         // Bare version number — templates already include the 'v' (e.g. /v{version}/).
         const apiVersion = (msg.apiVersion || getToolingApiVersion()).replace(/^v/, "");
