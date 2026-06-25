@@ -362,7 +362,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 <body>
 <script type="application/json" id="wb-data">${data}</script>
 <div id="bar">
-	<span class="tabs"><span class="tab active" data-t="logs">Logs</span><span class="tab" data-t="exec">Execute</span><span class="tab" data-t="soql">SOQL</span></span>
+	<span class="tabs"><span class="tab active" data-t="logs">Logs</span><span class="tab" data-t="exec">Anonymous Apex</span><span class="tab" data-t="soql">SOQL</span></span>
 	<span style="flex:1;"></span>
 	<span id="busy" title="Loading schema from the org…"><span class="spinner"></span>schema…</span>
 	<select id="org" title="Target org for logs, execution and queries"><option value="">Loading…</option></select>
@@ -417,7 +417,6 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	</div>
 	<div id="execActions">
 		<button id="run" class="primary" title="Execute (Ctrl+Enter)">Execute</button>
-		<button id="openEditor">Open in editor</button>
 		<button id="clear">Clear</button>
 		<select id="history" title="Reopen a previous snippet" style="margin-left:auto; max-width:240px;"><option value="">History</option></select>
 	</div>
@@ -564,8 +563,9 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 		editor=monaco.editor.create(document.getElementById('editor'),{ value:initial.code||'', language:'apex', theme:dark?'vs-dark':'vs', automaticLayout:true, minimap:{enabled:false}, scrollBeyondLastLine:false, fontSize:13, tabSize:4, quickSuggestions:true, quickSuggestionsDelay:200, fixedOverflowWidgets:true });
 		editor.onDidChangeModelContent(function(){ if(saveTimer) clearTimeout(saveTimer); saveTimer=setTimeout(function(){ vscode.postMessage({type:'contentChanged',code:editor.getValue()}); },500); });
 		editor.onMouseDown(function(e){ if((e.event.ctrlKey||e.event.metaKey)&&e.target&&e.target.position){ const p=e.target.position; vscode.postMessage({type:'gotoDefinition',text:editor.getValue(),line:p.lineNumber-1,character:p.column-1}); } });
-		editor.addCommand(monaco.KeyMod.CtrlCmd|monaco.KeyCode.Enter, doRun);
-		editor.addCommand(monaco.KeyMod.WinCtrl|monaco.KeyCode.Enter, doRun); // Ctrl+Enter on macOS too
+		// addAction (not addCommand) scopes the keybinding to THIS editor instance; with two
+		// editors, addCommand's shared registry let the SOQL editor clobber Cmd+Enter here.
+		editor.addAction({ id:'asfx.execApex', label:'Execute Anonymous Apex', keybindings:[monaco.KeyMod.CtrlCmd|monaco.KeyCode.Enter, monaco.KeyMod.WinCtrl|monaco.KeyCode.Enter], run:function(){ doRun(); } });
 
 		// ── SOQL editor ───────────────────────────────────────────────────────
 		monaco.languages.register({ id:'soql' });
@@ -576,8 +576,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 		soqlEd.onDidChangeModelContent(function(){ if(soqlTimer) clearTimeout(soqlTimer); soqlTimer=setTimeout(function(){ vscode.postMessage({type:'soqlChanged',query:soqlEd.getValue()}); },500); });
 		soqlEd.onDidChangeModelContent(scheduleSoqlValidate);
 		scheduleSoqlValidate();
-		soqlEd.addCommand(monaco.KeyMod.CtrlCmd|monaco.KeyCode.Enter, doRunSoql);
-		soqlEd.addCommand(monaco.KeyMod.WinCtrl|monaco.KeyCode.Enter, doRunSoql);
+		soqlEd.addAction({ id:'asfx.runSoql', label:'Run SOQL Query', keybindings:[monaco.KeyMod.CtrlCmd|monaco.KeyCode.Enter, monaco.KeyMod.WinCtrl|monaco.KeyCode.Enter], run:function(){ doRunSoql(); } });
 		monaco.languages.registerCompletionItemProvider('soql',{ triggerCharacters:['.',' ',',','('], provideCompletionItems:function(model,pos){ return new Promise(function(resolve){ const id=++reqId; pending[id]=function(items){ const w=model.getWordUntilPosition(pos); const range={startLineNumber:pos.lineNumber,endLineNumber:pos.lineNumber,startColumn:w.startColumn,endColumn:w.endColumn}; resolve({suggestions:items.map(function(it){ return {label:it.label,kind:mapKind(it.kind),insertText:it.insertText||it.label,insertTextRules:it.isSnippet?monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet:undefined,detail:it.detail,documentation:it.documentation?{value:it.documentation}:undefined,sortText:it.sortText,filterText:it.filterText,range:range}; })}); }; setBusy(1); vscode.postMessage({type:'getSoqlCompletions',requestId:id,text:model.getValue(),line:pos.lineNumber-1,character:pos.column-1}); }); } });
 		monaco.languages.registerHoverProvider('soql',{ provideHover:function(model,pos){ return new Promise(function(resolve){ const id=++reqId; pending[id]=function(h){ if(!h||!h.contents||!h.contents.length){resolve(null);return;} resolve({contents:h.contents.map(function(v){return{value:v};})}); }; setBusy(1); vscode.postMessage({type:'getSoqlHover',requestId:id,text:model.getValue(),line:pos.lineNumber-1,character:pos.column-1}); }); } });
 	});
@@ -585,7 +584,6 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	window.addEventListener('blur', flush);
 	function doRun(){ vscode.postMessage({type:'execute', code:editor?editor.getValue():'', org:orgVal()||undefined}); }
 	document.getElementById('run').onclick=doRun;
-	document.getElementById('openEditor').onclick=function(){ vscode.postMessage({type:'openInEditor', code:editor?editor.getValue():''}); };
 	document.getElementById('clear').onclick=function(){ if(editor){editor.setValue('');editor.focus();} vscode.postMessage({type:'contentChanged',code:''}); };
 
 	// ── SOQL tab actions ────────────────────────────────────────────────────────
