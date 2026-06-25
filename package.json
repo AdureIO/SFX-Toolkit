@@ -101,16 +101,6 @@
         "icon": "$(trash)"
       },
       {
-        "command": "adure-sfx-toolkit.startPolling",
-        "title": "ASFXT: Start Polling",
-        "icon": "$(play)"
-      },
-      {
-        "command": "adure-sfx-toolkit.stopPolling",
-        "title": "ASFXT: Stop Polling",
-        "icon": "$(debug-stop)"
-      },
-      {
         "command": "adure-sfx-toolkit.deleteTrace",
         "title": "ASFXT: Delete Trace",
         "icon": "$(trash)"
@@ -495,16 +485,6 @@
         {
           "command": "adure-sfx-toolkit.deleteAllLogs",
           "when": "view == adure-sfx-toolkit.logs",
-          "group": "navigation"
-        },
-        {
-          "command": "adure-sfx-toolkit.startPolling",
-          "when": "view == adure-sfx-toolkit.logs && !adure-sfx-toolkit:polling",
-          "group": "navigation"
-        },
-        {
-          "command": "adure-sfx-toolkit.stopPolling",
-          "when": "view == adure-sfx-toolkit.logs && adure-sfx-toolkit:polling",
           "group": "navigation"
         },
         {

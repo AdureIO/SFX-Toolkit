@@ -17,6 +17,7 @@ import { resultsTableCss, resultsTableScript } from '../webview/resultsTableComp
 import { refreshLanguageServerSchema, setEphemeralBuffers } from '../languageClient';
 import { ApexBufferBridge } from './apexBufferBridge';
 import { Telemetry } from '../utils/telemetry';
+import { logTreeProvider } from './LogTreeProvider';
 
 const WORKBENCH_BUFFER = '.vscode/anon-workbench-buffer.apex';
 const SOQL_BUFFER = '.vscode/workbench-soql-buffer.soql';
@@ -198,7 +199,10 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 					const result = await executeAnonymousForPanel(data.code || '', data.org || undefined);
 					this._lastLog = result.log || '';
 					this._post('execResult', { success: result.success, error: result.errorMessage || '', log: result.log || '', hasLog: !!(result.log && result.log.trim()) });
-					if (result.success) this._post('historyUpdated', { history: this._saveHistory(data.code || '') });
+					if (result.success) {
+						this._post('historyUpdated', { history: this._saveHistory(data.code || '') });
+						logTreeProvider.refresh(); // sidebar Logs list picks up the new log
+					}
 					break;
 				}
 				case 'openExecLog':

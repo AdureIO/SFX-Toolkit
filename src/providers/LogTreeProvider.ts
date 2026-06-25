@@ -14,9 +14,6 @@ export class LogTreeProvider implements vscode.TreeDataProvider<LogItem> {
     private _onDidChangeTreeData = new vscode.EventEmitter<LogItem | undefined | null | void>();
     readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
-    /** Set by polling commands so the view can show polling state. */
-    public isPolling = false;
-
     /** Cached current listing + resolved entry-point names (in-memory only). */
     private rows: ApexLogRow[] | null = null;
     private readonly units = new Map<string, string>();

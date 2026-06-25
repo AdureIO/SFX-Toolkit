@@ -68,7 +68,6 @@ import { RestExplorerPanelProvider } from "./providers/RestExplorerPanelProvider
 import { DataMigrationPanelProvider } from "./providers/DataMigrationPanelProvider";
 import * as path from "path";
 import * as fs from "fs";
-import { getPollingInterval } from "./utils/constants";
 import { startLanguageServer, stopLanguageServer } from "./languageClient";
 import { isSalesforceProject, updateSalesforceProjectContext, NOT_SFDX_PROJECT_MESSAGE } from "./utils/projectUtils";
 import { OrgMetadataCache } from "./utils/orgMetadataCache";
@@ -263,23 +262,27 @@ export function activate(context: vscode.ExtensionContext) {
 
     // 7. Side Bar Log Provider (lists the org's Apex logs over REST via apexLogApi —
     //    same path as the ASFX Workbench; no local files or CLI download).
-    vscode.window.registerTreeDataProvider("adure-sfx-toolkit.logs", logTreeProvider);
+    //    Discovery is event-driven (no fixed-interval polling): the list re-fetches
+    //    the moment the view becomes visible, when the window regains focus, and right
+    //    after Apex runs — so new logs surface immediately instead of up to N seconds later.
+    const logsView = vscode.window.createTreeView("adure-sfx-toolkit.logs", { treeDataProvider: logTreeProvider });
+    context.subscriptions.push(logsView);
 
-    const refreshLogsCmd = register("adure-sfx-toolkit.refreshLogs", async () => {
-      await logTreeProvider.fetchNewLogsFromOrg();
-      logTreeProvider.refresh();
-    });
+    const refreshLogsCmd = register("adure-sfx-toolkit.refreshLogs", () => logTreeProvider.refresh());
 
-    // A new log file written by the Salesforce extensions is a cheap signal that the
-    // org has fresh logs — use it to trigger a re-list (the tree itself reads from REST).
+    context.subscriptions.push(
+      logsView.onDidChangeVisibility((e) => { if (e.visible) logTreeProvider.refresh(); }),
+      vscode.window.onDidChangeWindowState((s) => { if (s.focused && logsView.visible) logTreeProvider.refresh(); })
+    );
+
+    // A new log file written by the Salesforce extensions is a cheap extra signal that
+    // the org has fresh logs — trigger a re-list (the tree itself reads from REST).
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
     if (workspaceFolder) {
       const logWatcher = vscode.workspace.createFileSystemWatcher(
         new vscode.RelativePattern(workspaceFolder, ".sfdx/tools/debug/logs/*.log")
       );
-      logWatcher.onDidCreate(() => logTreeProvider.refresh());
-      logWatcher.onDidChange(() => logTreeProvider.refresh());
-      logWatcher.onDidDelete(() => logTreeProvider.refresh());
+      logWatcher.onDidCreate(() => { if (logsView.visible) logTreeProvider.refresh(); });
       context.subscriptions.push(logWatcher);
     }
 
@@ -421,47 +424,8 @@ export function activate(context: vscode.ExtensionContext) {
       })
     );
 
-    // 12. Polling Logic (clear interval on deactivate to avoid leak)
-    const pollingIntervalRef = { current: undefined as NodeJS.Timeout | undefined };
-
-    const startPollingCmd = register("adure-sfx-toolkit.startPolling", async () => {
-      logTreeProvider.isPolling = true;
-      await vscode.commands.executeCommand("setContext", "adure-sfx-toolkit:polling", true);
-
-      if (!pollingIntervalRef.current) {
-        // Immediate fetch from org, then every N seconds
-        logTreeProvider.fetchNewLogsFromOrg().then(() => logTreeProvider.refresh());
-        pollingIntervalRef.current = setInterval(() => {
-          if (logTreeProvider.isPolling) {
-            logTreeProvider.fetchNewLogsFromOrg();
-          }
-        }, getPollingInterval() * 1000);
-      }
-      vscode.window.showInformationMessage(`Log polling started: retrieving logs every ${getPollingInterval()}s`);
-    });
-
-    const stopPollingCmd = register("adure-sfx-toolkit.stopPolling", async () => {
-      logTreeProvider.isPolling = false;
-      await vscode.commands.executeCommand("setContext", "adure-sfx-toolkit:polling", false);
-
-      if (pollingIntervalRef.current) {
-        clearInterval(pollingIntervalRef.current);
-        pollingIntervalRef.current = undefined;
-      }
-      vscode.window.showInformationMessage("Log Polling Stopped");
-    });
-
-    context.subscriptions.push(
-      new vscode.Disposable(() => {
-        if (pollingIntervalRef.current) {
-          clearInterval(pollingIntervalRef.current);
-          pollingIntervalRef.current = undefined;
-        }
-      })
-    );
-
-    // Initialize context
-    vscode.commands.executeCommand("setContext", "adure-sfx-toolkit:polling", false);
+    // (Log discovery is now event-driven — see the Logs view registration above.
+    //  The old fixed-interval polling has been retired.)
 
     // 13. SOQL Editor
     const openSOQLEditorCmd = register("adure-sfx-toolkit.openSOQLEditor", (query?: unknown, org?: unknown) => {
@@ -610,8 +574,6 @@ export function activate(context: vscode.ExtensionContext) {
       refreshTracesCmd,
       quickTraceCmd,
       deleteTraceCmd,
-      startPollingCmd,
-      stopPollingCmd,
       refreshOrgsCmd,
       openOrgCmd,
       setAsDefaultCmd,

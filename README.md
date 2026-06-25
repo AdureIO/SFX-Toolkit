@@ -63,20 +63,16 @@ A unified bottom panel (sidebar **Tools → ASFX Workbench**) that brings Apex e
 - **Live Polling**: automatically poll for new debug logs in the background.
 - **Trace Flags**: one-click **Quick Trace** for the current user; view, manage and delete existing trace flags.
 
-![Sidebar with logs, traces, orgs and tools](docs/screenshots/sidebar.png)
-![Log filtering for debug and SOQL/DML](docs/screenshots/filter-logs.png)
-![Create debug trace flow](docs/screenshots/create-trace.png)
-
 ### ⚡ Apex & SOQL Tools
 
-- **Execute Anonymous**: Run Apex from the editor (`.apex` files or selections). Output appears in the **Execute Apex** bottom panel with history.
+- **Execute Anonymous**: Run Apex from the editor (`.apex` files or selections) or the **ASFX Workbench** Execute tab, with live debug log, governor limits, and history.
 - **Rerun Last**: Re-run the last executed Apex without re-selecting code.
-- **SOQL Builder & Editor** (`ASFXT: Open SOQL Builder & Editor`): build and run SOQL with object/field completion, view results in an interactive table, **edit records inline**, **save** changes back to Salesforce (`sf data update record`, with quote-escaping), or **discard** edits. Query history is kept per workspace.
+- **SOQL Builder & Editor** (`ASFXT: Open SOQL Builder & Editor`): build and run SOQL with object/field completion and an optional visual builder, view results in an interactive table, **edit records inline**, **save** changes back to Salesforce, or **discard** edits. Export results to **CSV / JSON**; query history and saved queries are kept per workspace.
 - **Apex CodeLens**: Run a specific test method or an entire test class straight from the code.
 - **Apex Snippets**: Save, organize, run, edit, and delete reusable Apex snippets from the sidebar and overview panel.
 
-![SOQL builder and results table](docs/screenshots/soql-builder.png)
-![Apex snippets panel](docs/screenshots/apex-snippets.png)
+![SOQL Builder & Editor with results table and CSV/JSON export](docs/screenshots/SOQL-workbench.png)
+![Apex snippets quick-pick](docs/screenshots/apex-snippets.png)
 
 ### ☁️ Org Management
 
@@ -127,6 +123,14 @@ Auth is resolved automatically from `sf org display`.
 - **Response viewer**: colour-coded status badge with timing, resolved URL, pretty syntax-highlighted JSON, response headers table, copy-body.
 
 All calls are made server-side (Node `https`) — no CORS issues.
+
+![REST API Explorer — request builder, templates and JSON response](docs/screenshots/REST-explorer.png)
+
+### 🩺 Org Health Dashboard
+
+`ASFXT: Org Health` — a sortable, filterable dashboard of your org's **limits** (API requests, storage, async Apex, streaming events, and more), each with used/max, remaining, and a colour-coded usage bar so you can spot what's running hot at a glance.
+
+![Org Health Dashboard — org limits with usage bars](docs/screenshots/ORG-limits.png)
 
 ### ⚙️ System & Setup
 

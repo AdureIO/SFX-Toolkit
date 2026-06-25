@@ -8,6 +8,7 @@ import { confirmProductionOrgOperation } from "../utils/orgSafety";
 
 export type { OrgOption };
 import { openLogById } from "./listLogs";
+import { logTreeProvider } from "../providers/LogTreeProvider";
 import { AuthInfo } from "../utils/authInfo";
 import { getToolingApiVersion } from "../utils/constants";
 import { httpsPost } from "../utils/httpUtils";
@@ -394,6 +395,7 @@ async function executeContent(text: string, _fromPanel?: boolean, targetOrg?: st
           }
 
           await openLogById(logId, targetColumn, "sf-anon-log", true, targetOrg);
+          logTreeProvider.refresh(); // new log just generated — surface it in the sidebar immediately
           vscode.window.showInformationMessage("Anonymous Apex executed successfully.");
         } else {
           const msg =
