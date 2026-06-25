@@ -595,7 +595,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 		window.addEventListener('mouseup',function(){drag=false;document.body.style.cursor='';document.body.style.userSelect='';}); })();
 	function setSoqlErrMarker(line,col,text){ if(!soqlEd||!line) return; try{ const model=soqlEd.getModel(); let c=col||1,e=c+1; const w=model.getWordAtPosition({lineNumber:line,column:c}); if(w){c=w.startColumn;e=w.endColumn;} monaco.editor.setModelMarkers(model,'asfx-soql-error',[{severity:monaco.MarkerSeverity.Error,message:text,startLineNumber:line,startColumn:c,endLineNumber:line,endColumn:e}]); }catch(x){} }
 	function clearSoqlErrMarker(){ if(soqlEd) try{ monaco.editor.setModelMarkers(soqlEd.getModel(),'asfx-soql-error',[]); }catch(x){} }
-	const soqlTable = ASFXResults({ mount: document.getElementById('soqlResults'), controls: document.getElementById('soqlCtl'), post: vscode.postMessage, getOrg: function(){ return orgVal(); } });
+	const soqlTable = ASFXResults({ mount: document.getElementById('soqlResults'), controls: document.getElementById('soqlCtl'), post: vscode.postMessage, getOrg: function(){ return orgVal(); }, onRefresh: function(){ doRunSoql(); } });
 	function renderSoql(d){ const status=document.getElementById('soqlStatus');
 		if(d.error){ status.className=''; status.style.color='var(--vscode-errorForeground)'; status.textContent=d.error;
 			document.getElementById('soqlResults').innerHTML = d.errorDetails ? '<pre style="white-space:pre-wrap;word-break:break-word;margin:0;padding:8px;font-family:var(--vscode-editor-font-family,monospace);font-size:12px;opacity:0.85;">'+esc(d.errorDetails)+'</pre>' : '';

@@ -21,7 +21,9 @@ export function resultsTableCss(): string {
 	.rt-save { background:var(--vscode-button-background); color:var(--vscode-button-foreground); }
 	.rt-discard { background:var(--vscode-button-secondaryBackground); color:var(--vscode-button-secondaryForeground); }
 	.rt-err { color:var(--vscode-errorForeground); }
-	.rt-scroll { overflow:auto; max-width:100%; }
+	.rt-scroll { overflow:auto; max-width:100%; max-height:100%; }
+	.rt-ok { color:var(--vscode-testing-iconPassed, #3fb950); }
+	.rt-refresh { background:var(--vscode-button-secondaryBackground); color:var(--vscode-button-secondaryForeground); font-size:12px !important; line-height:1; padding:2px 7px !important; }
 	table.rt { border-collapse:collapse; width:max-content; min-width:100%; font-size:12px; }
 	table.rt th, table.rt td { border:1px solid var(--vscode-panel-border, rgba(128,128,128,0.25)); padding:3px 8px; text-align:left; white-space:nowrap; vertical-align:top; max-width:380px; overflow:hidden; text-overflow:ellipsis; }
 	table.rt th { position:sticky; top:0; background:var(--vscode-editor-background); z-index:1; }
@@ -53,8 +55,8 @@ export function resultsTableCss(): string {
 export function resultsTableScript(): string {
 	return `
 	window.ASFXResults = function (opts) {
-		var mount = opts.mount, controls = opts.controls, post = opts.post, getOrg = opts.getOrg;
-		var records = [], columns = [], meta = {}, rootType = '', changes = {}, lookupSeq = 0, lookupCbs = {}, saveErrors = [], nameById = {}, namesRequested = {};
+		var mount = opts.mount, controls = opts.controls, post = opts.post, getOrg = opts.getOrg, onRefresh = opts.onRefresh;
+		var records = [], columns = [], meta = {}, rootType = '', changes = {}, lookupSeq = 0, lookupCbs = {}, saveErrors = [], nameById = {}, namesRequested = {}, saveOk = false;
 		function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 		function subRecords(v){ return (v && typeof v==='object' && Array.isArray(v.records)) ? v.records : null; }
 		function isRelObj(v){ return v && typeof v==='object' && v.attributes && !Array.isArray(v.records); }
@@ -103,10 +105,16 @@ export function resultsTableScript(): string {
 			return h+'</tbody></table>'; }
 
 		function renderControls(){ if(!controls) return;
-			var on = dirtyCount() || saveErrors.length;
-			controls.className = 'rt-ctl'+(on?' on':'');
-			controls.innerHTML = on ? ('<span>'+dirtyCount()+' change(s)</span><button class="rt-save">Save</button><button class="rt-discard">Discard</button>'+(saveErrors.length?'<span class="rt-err">'+esc(saveErrors.join(' · '))+'</span>':'')) : '';
-			var s=controls.querySelector('.rt-save'); if(s) s.onclick=save; var d=controls.querySelector('.rt-discard'); if(d) d.onclick=function(){ changes={}; saveErrors=[]; render(); };
+			var dc=dirtyCount(); var html='';
+			if(onRefresh) html += '<button class="rt-refresh" title="Refresh results">↻ Refresh</button>';
+			if(dc) html += '<span>'+dc+' change(s)</span><button class="rt-save">Save</button><button class="rt-discard">Discard</button>';
+			if(saveErrors.length) html += '<span class="rt-err">'+esc(saveErrors.join(' · '))+'</span>';
+			else if(saveOk) html += '<span class="rt-ok">✓ Saved</span>';
+			controls.className = 'rt-ctl'+(html?' on':'');
+			controls.innerHTML = html;
+			var rf=controls.querySelector('.rt-refresh'); if(rf) rf.onclick=function(){ saveOk=false; onRefresh(); };
+			var s=controls.querySelector('.rt-save'); if(s) s.onclick=save;
+			var d=controls.querySelector('.rt-discard'); if(d) d.onclick=function(){ changes={}; saveErrors=[]; render(); };
 		}
 
 		function scalarTd(r, c){ var v=r[c]; var rid=idOf(r); var fm=fmeta(rootType, c); var editable = rid && fm && fm.updateable && c.indexOf('.')===-1;
@@ -126,7 +134,11 @@ export function resultsTableScript(): string {
 
 		function setChange(id, type, field, val){ if(!changes[id]) changes[id]={ type:type, fields:{} }; changes[id].fields[field]=val; }
 
+		// Freeze the cell's current width so swapping text for an input doesn't reflow the column (no jump).
+		function lockWidth(el){ var w=Math.ceil(el.getBoundingClientRect().width); if(w){ el.style.boxSizing='border-box'; el.style.width=w+'px'; el.style.minWidth=w+'px'; } }
+
 		function beginEdit(el){ if(el.querySelector('input,select')) return;
+			lockWidth(el);
 			var id=el.getAttribute('data-rec'), type=el.getAttribute('data-type'), field=el.getAttribute('data-field'); var fm=fmeta(type, field)||{type:'string'};
 			var cur = changedVal(id, field); if(cur===undefined) cur = rawValue(id, field);
 			var commit=function(val){ setChange(id, type, field, val); render(); };
@@ -162,7 +174,8 @@ export function resultsTableScript(): string {
 		function rawValue(id, field){ var r=findRecDeep(id); if(!r) return ''; var v=r[field]; return (typeof v==='object')?'':v; }
 
 		function save(){ saveErrors=[]; var payload=[]; for(var id in changes){ if(Object.keys(changes[id].fields).length) payload.push({ id:id, sobjectType:changes[id].type, fields:changes[id].fields }); } if(!payload.length) return; post({ type:'rt:save', org:getOrg(), changes:payload }); }
-		function onSaveDone(results){ saveErrors=[]; (results||[]).forEach(function(rr){ if(rr.error) saveErrors.push(rr.id+': '+rr.error); else delete changes[rr.id]; }); render(); }
+		function onSaveDone(results){ saveErrors=[]; (results||[]).forEach(function(rr){ if(rr.error) saveErrors.push(rr.id+': '+rr.error); else delete changes[rr.id]; });
+			if(!saveErrors.length){ saveOk=true; setTimeout(function(){ saveOk=false; renderControls(); }, 4000); } render(); }
 
 		function handleMessage(msg){ if(msg.type==='rt:colMeta'){ meta=msg.meta||{}; render(); }
 			else if(msg.type==='rt:lookupResult'){ var cb=lookupCbs[msg.requestId]; if(cb){ delete lookupCbs[msg.requestId]; cb(msg.hits||[]); } }

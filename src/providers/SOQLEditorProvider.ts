@@ -2414,7 +2414,7 @@ export class SOQLEditorProvider {
         // Rendering + type-aware inline editing now go through the shared component
         // (same one the ASFX Workbench SOQL tab uses). We keep currentRecords for
         // pagination/export; the component owns the table, editors and Save bar.
-        const soqlTable = ASFXResults({ mount: resultsContainer, controls: document.getElementById('rt-controls'), post: vscode.postMessage, getOrg: function () { return currentTargetOrg(); } });
+        const soqlTable = ASFXResults({ mount: resultsContainer, controls: document.getElementById('rt-controls'), post: vscode.postMessage, getOrg: function () { return currentTargetOrg(); }, onRefresh: function () { runQuery(); } });
         function renderTable(records) {
             currentRecords = records || [];
             soqlTable.setData(currentRecords);
