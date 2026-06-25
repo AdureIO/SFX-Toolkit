@@ -767,12 +767,12 @@
     "configuration": {
       "title": "Adure SFX Toolkit",
       "properties": {
-        "adure-sfx-toolkit.pollingIntervalSeconds": {
+        "adure-sfx-toolkit.liveLogIntervalSeconds": {
           "type": "number",
-          "default": 5,
-          "minimum": 1,
+          "default": 3,
+          "minimum": 2,
           "maximum": 60,
-          "description": "Interval in seconds for polling new debug logs from the org."
+          "description": "How often (seconds) the log views refresh while live — i.e. while a debug trace is active. Logs are not polled when no trace is active."
         },
         "adure-sfx-toolkit.maxLogFiles": {
           "type": "number",

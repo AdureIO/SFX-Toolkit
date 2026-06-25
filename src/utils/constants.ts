@@ -8,10 +8,6 @@ function getConfig(): vscode.WorkspaceConfiguration {
   return vscode.workspace.getConfiguration("adure-sfx-toolkit");
 }
 
-export function getPollingInterval(): number {
-  return getConfig().get<number>("pollingIntervalSeconds", 5);
-}
-
 export function getMaxLogFiles(): number {
   return getConfig().get<number>("maxLogFiles", 20);
 }

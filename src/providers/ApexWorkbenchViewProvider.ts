@@ -3,7 +3,8 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { getAnonymousApexOrgList, executeAnonymousForPanel } from '../commands/executeAnonymous';
-import { listApexLogs, fetchApexLogBody, fetchApexLogHead, listActiveTraceFlags, deleteAllApexLogs, createUserTrace, extractCodeUnit, type ApexLogRow } from '../utils/apexLogApi';
+import { fetchApexLogBody, listActiveTraceFlags, deleteAllApexLogs, createUserTrace, extractCodeUnit } from '../utils/apexLogApi';
+import { LiveLogService } from '../utils/liveLogService';
 import { getHighlightPatterns } from '../utils/apexLogHighlight';
 import { getSalesforceLogDirectory } from '../utils/logPaths';
 import { AuthInfo } from '../utils/authInfo';
@@ -43,10 +44,9 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	private readonly _soqlBridge = new ApexBufferBridge(SOQL_BUFFER, 'soql');
 	/** Cache of fetched log bodies (id → { text, unit }) so re-opening is instant. */
 	private readonly _bodyCache = new Map<string, { text: string; unit: string | null }>();
-	/** Cache of parsed entry-point code units (id → unit) for the list. */
-	private readonly _unitCache = new Map<string, string | null>();
-	/** Bumped on each list load so stale background enrichment self-cancels. */
-	private _enrichGen = 0;
+	/** Live-log subscription for the Logs tab's current org (shared LiveLogService). */
+	private _logSub?: vscode.Disposable;
+	private _logOrg: string | null = null;
 
 	constructor(private readonly _extensionUri: vscode.Uri) {
 		// When the default org changes, re-send the org list so the selector realigns
@@ -91,6 +91,11 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 
 	public async resolveWebviewView(view: vscode.WebviewView): Promise<void> {
 		this._view = view;
+		// Stop live log discovery while the panel is hidden; resume (re-subscribe) when shown.
+		view.onDidChangeVisibility(() => {
+			if (view.visible) { if (this._logSub) this._subscribeLogs(this._logOrg); }
+			else { this._logSub?.dispose(); this._logSub = undefined; }
+		});
 		view.webview.options = {
 			enableScripts: true,
 			localResourceRoots: [
@@ -126,12 +131,12 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 				}
 				// ── Logs ────────────────────────────────────────────────────────────
 				case 'listLogs': {
-					const rows = await listApexLogs(data.org || null);
-					// Send cached code units up front so already-known names show instantly.
-					const units: Record<string, string> = {};
-					for (const r of rows) { const u = this._unitCache.get(r.id); if (u) units[r.id] = u; }
-					this._post('logList', { org: data.org || '', rows, units });
-					void this._enrichUnits(data.org || null, rows, ++this._enrichGen);
+					// Route the Logs tab through the shared LiveLogService (same source as the
+					// sidebar). Subscribe to the selected org (auto goes live while a trace is
+					// active); a repeat request just forces an immediate re-list.
+					const org = data.org || null;
+					if (!this._logSub || org !== this._logOrg) this._subscribeLogs(org);
+					else void LiveLogService.refresh(org);
 					break;
 				}
 				case 'listTraces':
@@ -142,6 +147,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 					const ok = await createUserTrace(data.org || null);
 					vscode.window.showInformationMessage(ok ? 'Quick trace started for the selected org.' : 'Could not start the trace.');
 					this._post('traceInfo', { org: data.org || '', ...(await listActiveTraceFlags(data.org || null)) });
+					if (ok) void LiveLogService.refresh(data.org || null); // go live now that a trace is active
 					break;
 				}
 				case 'newTrace': {
@@ -154,6 +160,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 					const ok = await createUserTrace(data.org || null, parseInt(input, 10));
 					vscode.window.showInformationMessage(ok ? `Trace created (${input} min) for the selected org.` : 'Could not create the trace.');
 					this._post('traceInfo', { org: data.org || '', ...(await listActiveTraceFlags(data.org || null)) });
+					if (ok) void LiveLogService.refresh(data.org || null); // go live now that a trace is active
 					break;
 				}
 				case 'deleteAllLogs': {
@@ -162,7 +169,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 					if (pick !== 'Delete all') break;
 					const n = await deleteAllApexLogs(data.org || null);
 					vscode.window.showInformationMessage(`Deleted ${n} log${n === 1 ? '' : 's'}.`);
-					this._post('logList', { org: data.org || '', rows: await listApexLogs(data.org || null) });
+					void LiveLogService.refresh(data.org || null);
 					break;
 				}
 				case 'openLog': {
@@ -173,7 +180,6 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 					const unit = extractCodeUnit(text);
 					if (this._bodyCache.size > 20) this._bodyCache.delete(this._bodyCache.keys().next().value as string);
 					this._bodyCache.set(data.id, { text, unit });
-					this._unitCache.set(data.id, unit);
 					this._post('logBody', { id: data.id, text, unit });
 					break;
 				}
@@ -244,23 +250,16 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	}
 
 	/**
-	 * Fill in each log's executed code unit in the background: fetch just the head
-	 * of each body (Range request) in small concurrent batches and stream the
-	 * parsed name to the webview. Self-cancels when a newer list load supersedes it.
+	 * Point the Logs tab at an org via the shared LiveLogService: one source feeds both
+	 * this tab and the sidebar tree, enriches code units once, and goes live while a
+	 * trace is active. Pushes the full list (+ resolved units + live flag) on each update.
 	 */
-	private async _enrichUnits(org: string | null, rows: ApexLogRow[], gen: number): Promise<void> {
-		const ids = rows.map((r) => r.id).filter((id) => !this._unitCache.has(id)).slice(0, 50);
-		for (let i = 0; i < ids.length; i += 4) {
-			if (gen !== this._enrichGen) return; // a newer list load took over
-			await Promise.all(
-				ids.slice(i, i + 4).map(async (id) => {
-					const head = await fetchApexLogHead(org, id);
-					const unit = head ? extractCodeUnit(head) : null;
-					this._unitCache.set(id, unit);
-					if (unit && gen === this._enrichGen) this._post('logUnit', { org: org ?? '', id, unit });
-				})
-			);
-		}
+	private _subscribeLogs(org: string | null): void {
+		this._logSub?.dispose();
+		this._logOrg = org;
+		this._logSub = LiveLogService.subscribe(org, (snap) => {
+			this._post('logList', { org: org ?? '', rows: snap.rows, units: snap.units, live: snap.live });
+		});
 	}
 
 	/** Run a SOQL query against `org` and return the raw records for the shared table. */
@@ -297,8 +296,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	private _html(webview: vscode.Webview, initialCode: string, initialSoql: string): string {
 		const monacoBase = webview.asWebviewUri(vscode.Uri.joinPath(this._extensionUri, 'node_modules', 'monaco-editor', 'min', 'vs'));
 		const cspSource = webview.cspSource;
-		const pollSeconds = vscode.workspace.getConfiguration('adure-sfx-toolkit').get<number>('pollingIntervalSeconds', 5);
-		const data = JSON.stringify({ highlightPatterns: getHighlightPatterns(), code: initialCode || '', soql: initialSoql || '', pollSeconds, history: this._loadHistory() })
+		const data = JSON.stringify({ highlightPatterns: getHighlightPatterns(), code: initialCode || '', soql: initialSoql || '', history: this._loadHistory() })
 			.replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
 		return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8">
@@ -546,14 +544,12 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 		loadLogs();
 	});
 
-	// Listen for new logs: poll the selected org's log list on an interval.
-	let listenTimer=null; const pollMs=Math.max(2,(initial.pollSeconds||5))*1000;
+	// Live state is automatic: the host live-polls while a debug trace is active and
+	// pushes updates. This button is now a live indicator (lights up while live) that
+	// also forces a manual refresh when clicked.
 	const listenBtn=document.getElementById('listen');
-	listenBtn.onclick=function(){
-		if(listenTimer){ clearInterval(listenTimer); listenTimer=null; listenBtn.classList.remove('on'); listenBtn.title='Listen for new logs (poll)'; }
-		else { listenBtn.classList.add('on'); listenBtn.title='Listening… (click to stop)'; vscode.postMessage({type:'listLogs', org:orgVal()});
-			listenTimer=setInterval(function(){ vscode.postMessage({type:'listLogs', org:orgVal()}); }, pollMs); }
-	};
+	listenBtn.title='Logs update live while a trace is active — click to refresh';
+	listenBtn.onclick=loadLogs;
 
 	// ── execute editor ─────────────────────────────────────────────────────────
 	let editor=null, saveTimer=null, reqId=0; const pending={};
@@ -651,8 +647,8 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 			// Keep the user's explicit selection across refreshes; '' (default) naturally follows a default-org change.
 			if(Array.prototype.some.call(orgSel.options, function(o){return o.value===prev;})) orgSel.value=prev;
 			vscode.postMessage({type:'warmOrg', org:orgVal()}); loadLogs(); }
-		else if(d.type==='logList'){ if((d.org||'')!==orgVal()) return; if(d.units){ for(const k in d.units) unitById[k]=d.units[k]; } renderList(d.rows||[]); }
-		else if(d.type==='logUnit'){ if((d.org||'')!==orgVal()||!d.unit) return; unitById[d.id]=d.unit; const row=listRows.querySelector('.row[data-id="'+d.id+'"]'); if(row&&row.firstElementChild) row.firstElementChild.textContent=d.unit; }
+		else if(d.type==='logList'){ if((d.org||'')!==orgVal()) return; if(d.units){ for(const k in d.units) unitById[k]=d.units[k]; } renderList(d.rows||[]);
+			const lb=document.getElementById('listen'); if(lb) lb.classList.toggle('on', !!d.live); }
 		else if(d.type==='logLoading'){ if(d.id===currentId) logView.setText('Loading log…', true); }
 		else if(d.type==='logBody'){ if(d.unit){ unitById[d.id]=d.unit; const r=listRows.querySelector('.row[data-id="'+d.id+'"]'); if(r&&r.firstElementChild) r.firstElementChild.textContent=d.unit; } if(d.id===currentId) logView.setLog(d.text||''); }
 		else if(d.type==='historyUpdated'){ setHistory(d.history||[]); }

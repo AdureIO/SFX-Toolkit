@@ -272,11 +272,13 @@ export function activate(context: vscode.ExtensionContext) {
     //    after Apex runs — so new logs surface immediately instead of up to N seconds later.
     const logsView = vscode.window.createTreeView("adure-sfx-toolkit.logs", { treeDataProvider: logTreeProvider });
     context.subscriptions.push(logsView);
+    // Only discover (and live-poll while a trace is active) while the view is shown.
+    logTreeProvider.setActive(logsView.visible);
 
     const refreshLogsCmd = register("adure-sfx-toolkit.refreshLogs", () => logTreeProvider.refresh());
 
     context.subscriptions.push(
-      logsView.onDidChangeVisibility((e) => { if (e.visible) logTreeProvider.refresh(); }),
+      logsView.onDidChangeVisibility((e) => logTreeProvider.setActive(e.visible)),
       vscode.window.onDidChangeWindowState((s) => { if (s.focused && logsView.visible) logTreeProvider.refresh(); })
     );
 

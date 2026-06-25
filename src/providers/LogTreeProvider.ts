@@ -1,36 +1,47 @@
 import * as vscode from 'vscode';
-import { outputChannel } from '../utils/outputChannel';
 import { isSalesforceProject } from '../utils/projectUtils';
-import { listApexLogs, fetchApexLogHead, extractCodeUnit, type ApexLogRow } from '../utils/apexLogApi';
+import { type ApexLogRow } from '../utils/apexLogApi';
+import { LiveLogService, type LogSnapshot } from '../utils/liveLogService';
 
 /**
- * Sidebar Apex-log list. Sources logs straight from the org over REST (the same
- * apexLogApi the ASFX Workbench uses) — no local .sfdx/tools/debug/logs files, no
- * CLI download/polling, no on-disk cache. Entry-point names are enriched lazily by
- * reading just the head of each log (Range request) and parsing CODE_UNIT_STARTED,
- * mirroring the workbench's logic.
+ * Sidebar Apex-log list. Backed by the shared LiveLogService (the same source the
+ * ASFX Workbench Logs tab uses) — REST only, no local files. The list is event-driven
+ * and goes live automatically while a debug trace is active. The provider just renders
+ * the latest snapshot the service pushes for the default org.
  */
 export class LogTreeProvider implements vscode.TreeDataProvider<LogItem> {
     private _onDidChangeTreeData = new vscode.EventEmitter<LogItem | undefined | null | void>();
     readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
-    /** Cached current listing + resolved entry-point names (in-memory only). */
-    private rows: ApexLogRow[] | null = null;
-    private readonly units = new Map<string, string>();
-    /** Bumped on each (re)list so stale background enrichment self-cancels. */
-    private enrichGen = 0;
+    private snapshot: LogSnapshot = { rows: [], units: {}, live: false };
+    private sub?: vscode.Disposable;
+
+    /**
+     * Subscribe/unsubscribe to the live service based on view visibility, so we only
+     * discover (and live-poll) while the Logs view is actually shown.
+     */
+    setActive(active: boolean): void {
+        if (active && !this.sub) {
+            this.sub = LiveLogService.subscribe(null, (snap) => {
+                this.snapshot = snap;
+                this._onDidChangeTreeData.fire();
+            });
+        } else if (!active && this.sub) {
+            this.sub.dispose();
+            this.sub = undefined;
+        }
+    }
 
     clearCache(): void {
         this.refresh();
     }
 
-    /** Re-list from the org on the next render. */
+    /** Force an immediate re-list (event-driven trigger). */
     refresh(): void {
-        this.rows = null;
-        this._onDidChangeTreeData.fire();
+        void LiveLogService.refresh(null);
     }
 
-    /** Kept for callers (refresh command / polling): just re-list over REST. */
+    /** Kept for callers (refresh command): re-list now. */
     async fetchNewLogsFromOrg(): Promise<void> {
         this.refresh();
     }
@@ -44,44 +55,15 @@ export class LogTreeProvider implements vscode.TreeDataProvider<LogItem> {
         if (!isSalesforceProject()) {
             return [new LogItem('Open an SFDX project', '', '', vscode.TreeItemCollapsibleState.None)];
         }
-
-        // Re-list only when invalidated; an enrichment refresh rebuilds from cache (no network).
-        if (this.rows === null) {
-            try {
-                this.rows = await listApexLogs(null);
-            } catch (e: any) {
-                outputChannel.appendLine(`LogTreeProvider: listApexLogs failed: ${e?.message ?? e}`);
-                this.rows = [];
-            }
-            void this.enrichUnits(this.rows, ++this.enrichGen);
-        }
-
-        if (!this.rows.length) {
+        const rows = this.snapshot.rows;
+        if (!rows.length) {
             return [new LogItem('No debug logs', 'No Apex logs in this org (run code or enable a trace).', '', vscode.TreeItemCollapsibleState.None)];
         }
-
-        return this.rows.map((r) => this.buildItem(r));
-    }
-
-    /** Fetch each log's head and parse its entry-point code unit, in the background. */
-    private async enrichUnits(rows: ApexLogRow[], gen: number): Promise<void> {
-        for (const r of rows) {
-            if (gen !== this.enrichGen) return; // superseded by a newer list
-            if (this.units.has(r.id)) continue;
-            try {
-                const unit = extractCodeUnit(await fetchApexLogHead(null, r.id));
-                if (unit) {
-                    this.units.set(r.id, unit);
-                    if (gen === this.enrichGen) this._onDidChangeTreeData.fire();
-                }
-            } catch {
-                /* ignore — keep the operation label */
-            }
-        }
+        return rows.map((r) => this.buildItem(r));
     }
 
     private buildItem(r: ApexLogRow): LogItem {
-        const label = this.units.get(r.id) || r.operation || r.id;
+        const label = this.snapshot.units[r.id] || r.operation || r.id;
         const failed = !!r.status && r.status.toLowerCase() !== 'success';
         const description = `${this.formatBytes(r.length)} · ${this.formatRelativeTime(r.startTime)}`;
         const tooltip =
