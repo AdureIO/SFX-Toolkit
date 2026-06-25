@@ -119,11 +119,21 @@ export class OrgTreeProvider implements vscode.TreeDataProvider<OrgItem> {
       if (this._rootItems.length > 0) {
         return this._rootItems;
       }
+      // Expand only the groups that hold an org actually in use (the current
+      // default org and the default dev hub); collapse the rest to reduce clutter.
+      const ns: any[] = this.data?.nonScratchOrgs || [];
+      const scratch: any[] = this.data?.scratchOrgs || [];
+      const E = vscode.TreeItemCollapsibleState.Expanded;
+      const C = vscode.TreeItemCollapsibleState.Collapsed;
+      const devHubState = ns.some((o) => o.isDevHub && o.isDefaultDevHubUsername) ? E : C;
+      const prodState = ns.some((o) => !o.isDevHub && !o.isSandbox && o.isDefaultUsername) ? E : C;
+      const sandboxState = ns.some((o) => !o.isDevHub && o.isSandbox && o.isDefaultUsername) ? E : C;
+      const scratchState = scratch.some((o) => o.isDefaultUsername) ? E : C;
       this._rootItems = [
-        new OrgItem("Dev Hubs", vscode.TreeItemCollapsibleState.Expanded, null, "GROUP", "group-devhub"),
-        new OrgItem("Production", vscode.TreeItemCollapsibleState.Expanded, null, "GROUP", "group-production"),
-        new OrgItem("Sandboxes", vscode.TreeItemCollapsibleState.Expanded, null, "GROUP", "group-sandbox"),
-        new OrgItem("Scratch Orgs", vscode.TreeItemCollapsibleState.Expanded, null, "GROUP", "group-scratch")
+        new OrgItem("Dev Hubs", devHubState, null, "GROUP", "group-devhub"),
+        new OrgItem("Production", prodState, null, "GROUP", "group-production"),
+        new OrgItem("Sandboxes", sandboxState, null, "GROUP", "group-sandbox"),
+        new OrgItem("Scratch Orgs", scratchState, null, "GROUP", "group-scratch")
       ];
       return this._rootItems;
     }

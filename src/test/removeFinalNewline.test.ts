@@ -90,21 +90,21 @@ describe('removeFinalNewline.computeTrailingNewlineLength', () => {
 
 describe('removeFinalNewline.matchesAnyPattern', () => {
     const patterns = [
-        'force-app/main/Polca/components/lwc/**/*.js',
-        'force-app/main/Polca/components/lwc/**/*.html',
-        'force-app/main/Polca/components/lwc/**/*.css'
+        'force-app/main/default/components/lwc/**/*.js',
+        'force-app/main/default/components/lwc/**/*.html',
+        'force-app/main/default/components/lwc/**/*.css'
     ];
 
     it('matches LWC js path', () => {
         assert.strictEqual(
-            matchesAnyPattern('force-app/main/Polca/components/lwc/foo/foo.js', patterns),
+            matchesAnyPattern('force-app/main/default/components/lwc/foo/foo.js', patterns),
             true
         );
     });
 
     it('matches LWC html path', () => {
         assert.strictEqual(
-            matchesAnyPattern('force-app/main/Polca/components/lwc/foo/foo.html', patterns),
+            matchesAnyPattern('force-app/main/default/components/lwc/foo/foo.html', patterns),
             true
         );
     });
@@ -122,7 +122,7 @@ describe('removeFinalNewline.matchesAnyPattern', () => {
 
     it('normalizes Windows backslashes to forward slashes', () => {
         assert.strictEqual(
-            matchesAnyPattern('force-app\\main\\Polca\\components\\lwc\\foo\\foo.js', patterns),
+            matchesAnyPattern('force-app\\main\\default\\components\\lwc\\foo\\foo.js', patterns),
             true
         );
     });
@@ -136,9 +136,9 @@ describe('removeFinalNewline.shouldStripFor', () => {
     const baseInput = {
         enabled: true,
         languageId: 'javascript',
-        relPath: 'force-app/main/Polca/components/lwc/foo/foo.js',
+        relPath: 'force-app/main/default/components/lwc/foo/foo.js',
         languages: ['javascript', 'javascriptreact', 'html', 'css'],
-        patterns: ['force-app/main/Polca/components/lwc/**/*.js']
+        patterns: ['force-app/main/default/components/lwc/**/*.js']
     };
 
     it('returns false when enabled=false', () => {

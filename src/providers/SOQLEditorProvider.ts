@@ -6,7 +6,15 @@ import { getToolingApiVersion } from "../utils/constants";
 import { OrgMetadataCache } from "../utils/orgMetadataCache";
 import { sfRequest } from "../utils/dataMigration";
 import { getCachedOrgList, refreshOrgListCache, warmOrgListCache } from "../utils/orgListCache";
+import { ApexBufferBridge } from "./apexBufferBridge";
+import { setBufferOrgOverride } from "../utils/bufferOrgOverride";
+import { refreshLanguageServerSchema, setEphemeralBuffers } from "../languageClient";
+import { getSoqlMarkers } from "../utils/soqlMarkers";
+import { parseSoqlError } from "../utils/soqlError";
+import { handleResultsTableMessage } from "../utils/resultsTableHost";
+import { resultsTableCss, resultsTableScript } from "../webview/resultsTableComponent";
 
+const SOQL_WB_BUFFER = ".vscode/soql-wb-buffer.soql";
 const SOQL_HISTORY_MAX = 50;
 const SOQL_LAST_FILE = "soql-last.txt";
 const SOQL_HISTORY_FILE = "soql-history.json";
@@ -20,6 +28,9 @@ interface SavedQuery {
 
 export class SOQLEditorProvider {
   public static readonly viewType = "adure-sfx-toolkit.soqlEditor";
+
+  /** Backing buffer for the Monaco editor's language-server completion/hover. */
+  private static readonly _bridge = new ApexBufferBridge(SOQL_WB_BUFFER, "soql");
 
   private static async runSoqlQuery(query: string, targetOrg: string | null) {
     const apiVersion = getToolingApiVersion();
@@ -44,7 +55,7 @@ export class SOQLEditorProvider {
     return { auth, result };
   }
 
-  public static async show(extensionUri: vscode.Uri, initialQuery?: string) {
+  public static async show(extensionUri: vscode.Uri, initialQuery?: string, initialOrg?: string) {
     const column = vscode.window.activeTextEditor ? vscode.window.activeTextEditor.viewColumn : undefined;
 
     const panel = vscode.window.createWebviewPanel(
@@ -54,11 +65,14 @@ export class SOQLEditorProvider {
       {
         enableScripts: true,
         retainContextWhenHidden: true,
-        localResourceRoots: [vscode.Uri.joinPath(extensionUri, "resources")]
+        localResourceRoots: [
+        vscode.Uri.joinPath(extensionUri, "resources"),
+        vscode.Uri.joinPath(extensionUri, "node_modules", "monaco-editor", "min")
+      ]
       }
     );
 
-    await SOQLEditorProvider.attach(panel, extensionUri, initialQuery);
+    await SOQLEditorProvider.attach(panel, extensionUri, initialQuery, initialOrg);
   }
 
   /**
@@ -69,26 +83,62 @@ export class SOQLEditorProvider {
   public static async revive(panel: vscode.WebviewPanel, extensionUri: vscode.Uri) {
     panel.webview.options = {
       enableScripts: true,
-      localResourceRoots: [vscode.Uri.joinPath(extensionUri, "resources")]
+      localResourceRoots: [
+        vscode.Uri.joinPath(extensionUri, "resources"),
+        vscode.Uri.joinPath(extensionUri, "node_modules", "monaco-editor", "min")
+      ]
     };
     await SOQLEditorProvider.attach(panel, extensionUri);
   }
 
   /** Wire HTML + message handling onto a (new or restored) panel. */
-  private static async attach(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, initialQuery?: string) {
+  private static async attach(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, initialQuery?: string, initialOrg?: string) {
     const { lastQuery, history } = await SOQLEditorProvider.loadSoqlState();
     const saved = SOQLEditorProvider.loadSavedQueries();
-    panel.webview.html = this._getHtmlForWebview(panel.webview, extensionUri, initialQuery || lastQuery, history, saved);
+    panel.webview.html = this._getHtmlForWebview(panel.webview, extensionUri, initialQuery || lastQuery, history, saved, initialOrg);
 
     AuthInfo.warmAuthForOrg(null);
     OrgMetadataCache.warmDefaultOrg();
     warmOrgListCache();
 
+    // Point the editor's IntelliSense buffer at the initial org and ensure no
+    // SObject stubs are ever written for it (its org may be non-default).
+    const wbUri = SOQLEditorProvider._bridge.getBufferUri();
+    if (wbUri) {
+      setBufferOrgOverride(wbUri.fsPath, initialOrg || null);
+      setEphemeralBuffers([wbUri.toString()]);
+    }
+
     const messageListener = panel.webview.onDidReceiveMessage(
       async (message) => {
+        if (await handleResultsTableMessage(message, (m) => panel.webview.postMessage(m))) return;
         switch (message.command) {
           case "execute":
             await this.executeQuery(panel, message.query, message.targetOrg || null);
+            break;
+          case "wbCompletions":
+            panel.webview.postMessage({
+              command: "wbCompletions", requestId: message.requestId,
+              items: await SOQLEditorProvider._bridge.completions(message.text || "", message.line || 0, message.character || 0)
+            });
+            break;
+          case "wbHover":
+            panel.webview.postMessage({
+              command: "wbHover", requestId: message.requestId,
+              hover: await SOQLEditorProvider._bridge.hover(message.text || "", message.line || 0, message.character || 0)
+            });
+            break;
+          case "wbSetOrg": {
+            const u = SOQLEditorProvider._bridge.getBufferUri();
+            if (u) setBufferOrgOverride(u.fsPath, (typeof message.org === "string" && message.org) ? message.org : null);
+            refreshLanguageServerSchema();
+            break;
+          }
+          case "validateSoql":
+            panel.webview.postMessage({
+              command: "soqlMarkers",
+              markers: await getSoqlMarkers((typeof message.org === "string" && message.org) ? message.org : null, message.text || "")
+            });
             break;
           case "queryMore":
             await this.queryMore(panel, message.nextRecordsUrl, message.targetOrg || null);
@@ -495,14 +545,20 @@ export class SOQLEditorProvider {
       } else {
         const err = result[0] || result;
         const message = err.message || err.errorDescription || JSON.stringify(result);
-        panel.webview.postMessage({ command: "error", text: message });
+        SOQLEditorProvider.postQueryError(panel, message);
       }
     } catch (e: any) {
-      const errorMsg = e.message || e.stderr || JSON.stringify(e);
-      panel.webview.postMessage({ command: "error", text: errorMsg });
+      SOQLEditorProvider.postQueryError(panel, e.message || e.stderr || JSON.stringify(e));
     } finally {
       panel.webview.postMessage({ command: "loading", value: false });
     }
+  }
+
+  /** Parse a SOQL error and surface it cleanly + inline (marker at Row:Column). */
+  private static postQueryError(panel: vscode.WebviewPanel, raw: string): void {
+    const parsed = parseSoqlError(raw);
+    const label = parsed.code ? `${parsed.code}: ${parsed.message}` : parsed.message;
+    panel.webview.postMessage({ command: "error", text: label, details: parsed.details, line: parsed.line, column: parsed.column });
   }
 
   /** Load the next page of records for the current result set (pagination). */
@@ -726,18 +782,23 @@ export class SOQLEditorProvider {
     extensionUri: vscode.Uri,
     lastQuery: string = "",
     history: string[] = [],
-    saved: SavedQuery[] = []
+    saved: SavedQuery[] = [],
+    initialOrg?: string
   ) {
     const initialData = JSON.stringify({
       lastQuery: lastQuery || "",
       history: Array.isArray(history) ? history : [],
-      saved: Array.isArray(saved) ? saved : []
+      saved: Array.isArray(saved) ? saved : [],
+      initialOrg: initialOrg || ""
     });
     const initialDataEscaped = initialData.replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
+    const monacoBase = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, "node_modules", "monaco-editor", "min", "vs"));
+    const cspSource = webview.cspSource;
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${cspSource} 'unsafe-eval' 'unsafe-inline'; style-src ${cspSource} 'unsafe-inline'; font-src ${cspSource}; img-src ${cspSource} data:; worker-src blob:; connect-src ${cspSource};">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SOQL Builder &amp; Editor</title>
     <style>
@@ -769,6 +830,11 @@ export class SOQLEditorProvider {
         .rb-spacer { flex: 1; min-width: 12px; }
         .rb-sep { width: 1px; align-self: stretch; margin: 2px 4px; background: var(--asfx-border); }
         #saved-select { padding: 6px 8px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, var(--asfx-border)); border-radius: var(--asfx-radius-sm); font-size: 12px; min-width: 130px; max-width: 220px; outline: none; cursor: pointer; }
+        .wb-spinner { width: 11px; height: 11px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; display: inline-block; animation: wb-spin .8s linear infinite; }
+        @keyframes wb-spin { to { transform: rotate(360deg); } }
+        /* Let the completion popup grow tall even when the editor is short. */
+        .monaco-editor .suggest-widget { max-height: 360px !important; }
+        .monaco-editor .suggest-widget .monaco-list { max-height: 340px !important; }
         #org-select { padding: 6px 8px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, var(--asfx-border)); border-radius: var(--asfx-radius-sm); font-size: 12px; min-width: 160px; outline: none; cursor: pointer; }
         #org-select:focus { border-color: var(--vscode-focusBorder); }
         #history-select { padding: 6px 8px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, var(--asfx-border)); border-radius: var(--asfx-radius-sm); font-size: 12px; min-width: 150px; max-width: 260px; outline: none; cursor: pointer; }
@@ -891,6 +957,7 @@ export class SOQLEditorProvider {
         #results-container a { color: var(--vscode-textLink-foreground); text-decoration: none; }
         #results-container a:hover { color: var(--vscode-textLink-activeForeground); text-decoration: underline; }
         td.readonly-cell { background: var(--asfx-card-bg); color: var(--vscode-descriptionForeground); cursor: not-allowed; border-left: 2px solid var(--asfx-border); }
+        ${resultsTableCss()}
     </style>
 </head>
 <body>
@@ -973,12 +1040,13 @@ export class SOQLEditorProvider {
                 <span class="card-title">Query</span>
                 <span class="query-hint"><kbd>⌘/Ctrl+Enter</kbd> run · <kbd>Ctrl+Space</kbd> complete</span>
                 <span class="bsection-spacer" style="flex:1;"></span>
+                <span id="wb-busy" title="Loading schema from the org…" style="display:none; align-items:center; gap:5px; font-size:11px; opacity:0.85; margin-right:8px;"><span class="wb-spinner"></span>schema…</span>
                 <button type="button" id="format-btn" class="btn-secondary btn-sm" title="Format / prettify (Shift+Alt+F)" onclick="formatSoql()">✨ Format</button>
             </div>
             <div class="card-body" style="gap:8px;">
                 <div class="query-wrap">
-                    <textarea id="query-input" placeholder="SELECT Id, Name FROM Account LIMIT 10">SELECT Id, Name FROM Account LIMIT 10</textarea>
-                    <ul id="completion-list"></ul>
+                    <div id="query-editor" style="height:220px; width:100%; border:1px solid var(--asfx-border); border-radius:var(--asfx-radius-sm); overflow:hidden;"></div>
+                    <ul id="completion-list" style="display:none;"></ul>
                 </div>
             </div>
         </div>
@@ -1008,31 +1076,90 @@ export class SOQLEditorProvider {
             <div class="card-head" style="cursor:default;">
                 <span class="card-title">Results</span>
                 <div class="card-actions results-toolbar" id="results-toolbar" style="display:none;">
-                    <span id="results-count" class="results-count"></span>
-                    <button type="button" id="load-more-btn" class="btn-mini" style="display:none;" title="Load the next page of records">⬇ Load more</button>
-                    <button id="save-btn" class="btn-mini" style="display:none;">💾 Save edits</button>
-                    <button id="discard-btn" class="btn-mini" style="display:none;">Discard</button>
                     <button type="button" class="btn-mini" onclick="exportResults('csv')" title="Download results as CSV">⬇ CSV</button>
                     <button type="button" class="btn-mini" onclick="exportResults('json')" title="Download results as JSON">⬇ JSON</button>
+                    <span id="results-count" class="results-count"></span>
+                    <button type="button" id="load-more-btn" class="btn-mini" style="display:none;" title="Load the next page of records">⬇ Load more</button>
+                    <span id="rt-controls" class="rt-ctl"></span>
                 </div>
             </div>
             <div class="results-wrap">
                 <div id="results-container"></div>
-                <div class="status-bar" id="status-bar"></div>
+                <div class="status-bar" id="status-bar"><span id="status-text"></span></div>
             </div>
         </div>
     </div>
 
+    <script src="${monacoBase}/loader.js"></script>
+    <script>${resultsTableScript()}</script>
     <script>
         const vscode = acquireVsCodeApi();
-        const queryInput = document.getElementById('query-input');
+        const MONACO_BASE = '${monacoBase}';
+        // ── Monaco-backed query editor with a textarea-compatible shim ──────────
+        // The rest of this view (builder, results, history) reads/writes
+        // queryInput.value; we back it with a Monaco 'soql' editor whose completion
+        // and hover come from the shared language server (single implementation).
+        let soqlEditor = null, _pendingValue = null, _onChangeCb = null;
+        const queryInput = {
+            get value() { return soqlEditor ? soqlEditor.getValue() : (_pendingValue || ''); },
+            set value(v) { if (soqlEditor) soqlEditor.setValue(v || ''); else _pendingValue = v || ''; },
+            focus() { if (soqlEditor) soqlEditor.focus(); },
+            get selectionStart() { try { return soqlEditor ? soqlEditor.getModel().getOffsetAt(soqlEditor.getPosition()) : 0; } catch (e) { return 0; } },
+            get selectionEnd() { return this.selectionStart; },
+            setSelectionRange(s) { try { if (soqlEditor) { const p = soqlEditor.getModel().getPositionAt(s); soqlEditor.setPosition(p); soqlEditor.revealPositionInCenterIfOutsideViewport(p); } } catch (e) {} },
+            addEventListener() { /* legacy textarea listeners are no-ops; Monaco handles input */ }
+        };
+        let _reqId = 0; const _pending = {};
+        let _busy = 0; function setBusy(d){ _busy = Math.max(0, _busy + d); const b = document.getElementById('wb-busy'); if (b) b.style.display = _busy > 0 ? 'inline-flex' : 'none'; }
+        require.config({ paths: { vs: MONACO_BASE } });
+        self.MonacoEnvironment = { getWorkerUrl: function () { return URL.createObjectURL(new Blob(["self.MonacoEnvironment={baseUrl:'" + MONACO_BASE + "/'};importScripts('" + MONACO_BASE + "/base/worker/workerMain.js');"], { type: 'text/javascript' })); } };
+        require(['vs/editor/editor.main'], function () {
+            function mapKind(k){ const M=monaco.languages.CompletionItemKind; const T={0:M.Text,1:M.Method,2:M.Function,3:M.Constructor,4:M.Field,5:M.Variable,6:M.Class,7:M.Interface,8:M.Module,9:M.Property,10:M.Unit,11:M.Value,12:M.Enum,13:M.Keyword,14:M.Snippet,17:M.Reference,19:M.EnumMember,20:M.Constant,21:M.Struct}; return T[k]!=null?T[k]:M.Text; }
+            monaco.languages.register({ id: 'soql' });
+            monaco.languages.setMonarchTokensProvider('soql', { ignoreCase: true,
+                keywords: ['select','from','where','limit','offset','order','by','group','having','asc','desc','nulls','first','last','and','or','not','like','in','includes','excludes','null','true','false','count','count_distinct','sum','avg','min','max','using','scope','with','data','category','for','view','reference','update','tracking','viewstat','typeof','when','then','else','end'],
+                tokenizer: { root: [ [/'(?:[^'\\\\]|\\\\.)*'/, 'string'], [/\\b\\d+(\\.\\d+)?\\b/, 'number'], [/[a-zA-Z_][\\w.]*/, { cases: { '@keywords': 'keyword', '@default': 'identifier' } }] ] } });
+            monaco.languages.registerCompletionItemProvider('soql', { triggerCharacters: ['.', ' ', ',', '('], provideCompletionItems: function (model, pos) {
+                return new Promise(function (resolve) { const id = ++_reqId; _pending[id] = function (items) { const w = model.getWordUntilPosition(pos); const range = { startLineNumber: pos.lineNumber, endLineNumber: pos.lineNumber, startColumn: w.startColumn, endColumn: w.endColumn }; resolve({ suggestions: items.map(function (it) { return { label: it.label, kind: mapKind(it.kind), insertText: it.insertText || it.label, insertTextRules: it.isSnippet ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet : undefined, detail: it.detail, documentation: it.documentation ? { value: it.documentation } : undefined, sortText: it.sortText, filterText: it.filterText, range: range }; }) }); }; setBusy(1); vscode.postMessage({ command: 'wbCompletions', requestId: id, text: model.getValue(), line: pos.lineNumber - 1, character: pos.column - 1 }); });
+            } });
+            monaco.languages.registerHoverProvider('soql', { provideHover: function (model, pos) {
+                return new Promise(function (resolve) { const id = ++_reqId; _pending[id] = function (h) { if (!h || !h.contents || !h.contents.length) { resolve(null); return; } resolve({ contents: h.contents.map(function (v) { return { value: v }; }) }); }; setBusy(1); vscode.postMessage({ command: 'wbHover', requestId: id, text: model.getValue(), line: pos.lineNumber - 1, character: pos.column - 1 }); });
+            } });
+            const dark = document.body.classList.contains('vscode-dark') || document.body.classList.contains('vscode-high-contrast');
+            soqlEditor = monaco.editor.create(document.getElementById('query-editor'), { value: _pendingValue || '', language: 'soql', theme: dark ? 'vs-dark' : 'vs', automaticLayout: true, minimap: { enabled: false }, scrollBeyondLastLine: false, fontSize: 13, quickSuggestions: true, quickSuggestionsDelay: 200, fixedOverflowWidgets: true });
+            _pendingValue = null;
+            soqlEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, function () { runQuery(); });
+            soqlEditor.addCommand(monaco.KeyMod.WinCtrl | monaco.KeyCode.Enter, function () { runQuery(); });
+            if (_onChangeCb) soqlEditor.onDidChangeModelContent(_onChangeCb);
+            // Validate fields against the schema (debounced) → red squiggles.
+            let _valTimer = null;
+            function scheduleValidate() { if (_valTimer) clearTimeout(_valTimer); _valTimer = setTimeout(function () { vscode.postMessage({ command: 'validateSoql', org: currentTargetOrg(), text: soqlEditor.getValue() }); }, 400); }
+            soqlEditor.onDidChangeModelContent(scheduleValidate);
+            soqlEditor.onDidChangeModelContent(clearSoqlErrorMarker); // stale once edited
+            scheduleValidate();
+            window.__soqlScheduleValidate = scheduleValidate;
+        });
+        // Inline marker for a run-time query error (from the API's Row:Column).
+        function setSoqlErrorMarker(line, column, text) {
+            if (!soqlEditor || !line) return;
+            try {
+                const model = soqlEditor.getModel();
+                let col = column || 1, endCol = col + 1;
+                const w = model.getWordAtPosition({ lineNumber: line, column: col });
+                if (w) { col = w.startColumn; endCol = w.endColumn; }
+                monaco.editor.setModelMarkers(model, 'asfx-soql-error', [{ severity: monaco.MarkerSeverity.Error, message: text, startLineNumber: line, startColumn: col, endLineNumber: line, endColumn: endCol }]);
+            } catch (e) {}
+        }
+        function clearSoqlErrorMarker() { if (soqlEditor) { try { monaco.editor.setModelMarkers(soqlEditor.getModel(), 'asfx-soql-error', []); } catch (e) {} } }
         const completionList = document.getElementById('completion-list');
         const executeBtn = document.getElementById('execute-btn');
-        const saveBtn = document.getElementById('save-btn');
-        const discardBtn = document.getElementById('discard-btn');
+        // Save/Discard now live in the shared results component (top-right toolbar).
+        // These detached fallbacks keep the dormant legacy edit code harmless.
+        const saveBtn = document.getElementById('save-btn') || document.createElement('button');
+        const discardBtn = document.getElementById('discard-btn') || document.createElement('button');
         const resultsContainer = document.getElementById('results-container');
         const errorMsg = document.getElementById('error-msg');
-        const statusBar = document.getElementById('status-bar');
+        const statusBar = document.getElementById('status-text');
         const builderToggleBtn = document.getElementById('builder-toggle-btn');
         const builderPanel = document.getElementById('builder-panel');
         const builderObject = document.getElementById('builder-object');
@@ -1055,6 +1182,7 @@ export class SOQLEditorProvider {
         const builderChildChips = document.getElementById('builder-child-chips');
         const builderFromQueryBtn = document.getElementById('builder-from-query-btn');
         const orgSelect = document.getElementById('org-select');
+        let initialOrgPreset = '';
         const historySelect = document.getElementById('history-select');
         const historyClearBtn = document.getElementById('history-clear-btn');
         const savedSelect = document.getElementById('saved-select');
@@ -1083,6 +1211,7 @@ export class SOQLEditorProvider {
                     savedQueries = data.saved;
                     renderSavedOptions(savedQueries);
                 }
+                if (data.initialOrg) { initialOrgPreset = data.initialOrg; vscode.postMessage({ command: 'getOrgList' }); }
             } catch (e) {}
         }
 
@@ -1200,6 +1329,9 @@ export class SOQLEditorProvider {
 
         orgSelect.addEventListener('change', () => {
             relationshipCache = {};
+            // Point editor completion/hover at the selected org (server-side override).
+            vscode.postMessage({ command: 'wbSetOrg', org: currentTargetOrg() });
+            if (window.__soqlScheduleValidate) window.__soqlScheduleValidate();
             if (builderPanel.classList.contains('visible')) {
                 vscode.postMessage({ command: 'getBuilderObjectList', targetOrg: currentTargetOrg() });
             }
@@ -1929,6 +2061,10 @@ export class SOQLEditorProvider {
 
         window.addEventListener('message', event => {
             const message = event.data;
+            if (message.type && String(message.type).indexOf('rt:') === 0) { soqlTable.handleMessage(message); return; }
+            if (message.command === 'wbCompletions') { setBusy(-1); const cb = _pending[message.requestId]; if (cb) { delete _pending[message.requestId]; cb(message.items || []); } return; }
+            if (message.command === 'wbHover') { setBusy(-1); const cb = _pending[message.requestId]; if (cb) { delete _pending[message.requestId]; cb(message.hover || null); } return; }
+            if (message.command === 'soqlMarkers') { if (soqlEditor) { try { monaco.editor.setModelMarkers(soqlEditor.getModel(), 'asfx-soql', (message.markers || []).map(function (m) { return { severity: monaco.MarkerSeverity.Error, message: m.message, startLineNumber: m.line + 1, startColumn: m.startCol + 1, endLineNumber: m.line + 1, endColumn: m.endCol + 1 }; })); } catch (e) {} } return; }
             switch (message.command) {
                 case 'loading':
                     executeBtn.disabled = message.value;
@@ -1941,6 +2077,7 @@ export class SOQLEditorProvider {
                     saveBtn.textContent = message.value ? 'Saving...' : 'Save';
                     break;
                 case 'results':
+                    clearSoqlErrorMarker();
                     if (message.instanceUrl) currentInstanceUrl = message.instanceUrl;
                     if (message.editableFields) editableFieldsByType = message.editableFields;
                     nextRecordsUrl = message.nextRecordsUrl || null;
@@ -1972,15 +2109,32 @@ export class SOQLEditorProvider {
                         opt.textContent = o.label || ((o.alias || o.username || '') + (o.isDefault ? ' (default)' : ''));
                         orgSelect.appendChild(opt);
                     });
+                    // Preselect the org carried over from the workbench (once available).
+                    if (initialOrgPreset) {
+                        const has = Array.prototype.some.call(orgSelect.options, o => o.value === initialOrgPreset);
+                        if (has) { orgSelect.value = initialOrgPreset; orgSelect.dispatchEvent(new Event('change')); }
+                        initialOrgPreset = '';
+                    }
                     break;
                 case 'historyUpdated':
                     setHistoryDropdown(message.history || []);
                     break;
-                case 'error':
+                case 'error': {
                     errorMsg.textContent = message.text;
-                    resultsContainer.innerHTML = '';
                     statusBar.textContent = '';
+                    // Also show the full, polished Salesforce error (not the raw JSON).
+                    if (message.details) {
+                        const pre = document.createElement('pre');
+                        pre.style.cssText = 'white-space:pre-wrap;word-break:break-word;margin:8px 0 0;padding:8px;font-family:var(--vscode-editor-font-family,monospace);font-size:12px;opacity:0.85;';
+                        pre.textContent = message.details;
+                        resultsContainer.innerHTML = '';
+                        resultsContainer.appendChild(pre);
+                    } else {
+                        resultsContainer.innerHTML = '';
+                    }
+                    setSoqlErrorMarker(message.line, message.column, message.text);
                     break;
+                }
                 case 'saveErrors':
                     errorMsg.textContent = 'Save errors:\\n' + (message.errors || []).join('\\n');
                     break;
@@ -2258,73 +2412,13 @@ export class SOQLEditorProvider {
             return !!map[field];
         }
 
+        // Rendering + type-aware inline editing now go through the shared component
+        // (same one the ASFX Workbench SOQL tab uses). We keep currentRecords for
+        // pagination/export; the component owns the table, editors and Save bar.
+        const soqlTable = ASFXResults({ mount: resultsContainer, controls: document.getElementById('rt-controls'), post: vscode.postMessage, getOrg: function () { return currentTargetOrg(); }, onRefresh: function () { runQuery(); } });
         function renderTable(records) {
-            currentRecords = records;
-            resultsContainer.innerHTML = '';
-            if (!records || records.length === 0) {
-                resultsContainer.textContent = 'No records found.';
-                return;
-            }
-
-            const columns = new Set();
-            records.forEach(r => {
-                Object.keys(r).forEach(k => { if (k !== 'attributes') columns.add(k); });
-            });
-            const headers = Array.from(columns);
-
-            const table = document.createElement('table');
-            const thead = document.createElement('thead');
-            const trHead = document.createElement('tr');
-            headers.forEach(h => {
-                const th = document.createElement('th');
-                th.textContent = h;
-                trHead.appendChild(th);
-            });
-            thead.appendChild(trHead);
-            table.appendChild(thead);
-
-            const tbody = document.createElement('tbody');
-            records.forEach(r => {
-                const tr = document.createElement('tr');
-                const recId = recordIdOf(r);
-                const type = (r.attributes && r.attributes.type) ? r.attributes.type : null;
-
-                headers.forEach(h => {
-                    const td = document.createElement('td');
-                    const value = r[h];
-                    const isObject = typeof value === 'object' && value !== null;
-
-                    if (isObject) {
-                        td.appendChild(renderCellValue(value, recId, type, h, changes));
-                    } else {
-                        const link = currentInstanceUrl && (h === 'Id' || isSalesforceId(value)) ? makeRecordLink(String(value), currentInstanceUrl) : null;
-                        if (link) td.appendChild(link);
-                        else td.textContent = value === null ? '' : value;
-                    }
-
-                    const isEditable = recId && type && h !== 'Id' && !isObject && isFieldEditable(type, h);
-                    if (isEditable) {
-                        td.contentEditable = true;
-                        td.classList.add('editable-cell');
-                        td.dataset.recId = recId;
-                        td.title = 'Editable — click to change, then Save edits';
-                        td.addEventListener('input', () => {
-                            const newValue = td.textContent.trim();
-                            if (!changes[recId]) changes[recId] = { _type: type };
-                            changes[recId][h] = newValue;
-                            td.classList.add('changed');
-                            updateSaveButton();
-                        });
-                    } else if (recId && type && h !== 'Id' && !isObject) {
-                        td.classList.add('readonly-cell');
-                        td.title = 'Read-only (formula, system field, or no edit permission)';
-                    }
-                    tr.appendChild(td);
-                });
-                tbody.appendChild(tr);
-            });
-            table.appendChild(tbody);
-            resultsContainer.appendChild(table);
+            currentRecords = records || [];
+            soqlTable.setData(currentRecords);
         }
 
         function updateSaveButton() {

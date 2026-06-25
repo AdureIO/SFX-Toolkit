@@ -14,6 +14,19 @@
             "preLaunchTask": "${defaultBuildTask}"
         },
         {
+            "name": "Run Extension (ISOLATED - only SFX)",
+            "type": "extensionHost",
+            "request": "launch",
+            "args": [
+                "--extensionDevelopmentPath=${workspaceFolder}",
+                "--disable-extensions"
+            ],
+            "outFiles": [
+                "${workspaceFolder}/out/**/*.js"
+            ],
+            "preLaunchTask": "npm: compile"
+        },
+        {
             "name": "Extension Tests",
             "type": "extensionHost",
             "request": "launch",

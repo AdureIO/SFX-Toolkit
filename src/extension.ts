@@ -35,13 +35,13 @@ import {
   pullSource,
   deployCurrentFile,
   retrieveCurrentFile,
-  runLocalTests,
   resetSourceTracking
 } from "./commands/devCommands";
 import { PermissionSetEditorProvider } from "./editors/PermissionSetEditorProvider";
 import { ScratchOrgDefEditorProvider } from "./editors/ScratchOrgDefEditorProvider";
 import { SOQLEditorProvider } from "./providers/SOQLEditorProvider";
-import { AnonymousApexViewProvider } from "./providers/AnonymousApexViewProvider";
+import { registerApexLogDecorator } from "./providers/ApexLogDecorator";
+import { ApexWorkbenchViewProvider } from "./providers/ApexWorkbenchViewProvider";
 import { Logger, outputChannel } from "./utils/outputChannel";
 import { Telemetry, categorizeError } from "./utils/telemetry";
 import { metadataDiff } from "./commands/metadataDiff";
@@ -69,6 +69,7 @@ import { DataMigrationPanelProvider } from "./providers/DataMigrationPanelProvid
 import * as path from "path";
 import * as fs from "fs";
 import { getPollingInterval } from "./utils/constants";
+import { startLanguageServer, stopLanguageServer } from "./languageClient";
 import { isSalesforceProject, updateSalesforceProjectContext, NOT_SFDX_PROJECT_MESSAGE } from "./utils/projectUtils";
 import { OrgMetadataCache } from "./utils/orgMetadataCache";
 import { AuthInfo } from "./utils/authInfo";
@@ -141,9 +142,22 @@ function register(command: string, callback: (...args: any[]) => any, thisArg?: 
 export function activate(context: vscode.ExtensionContext) {
   Logger.info('Extension "adure-sfx-toolkit" is starting activation...');
 
+  // Warm the default-org auth token as the very first thing (the initial fetch
+  // shells out to the CLI). Kicking it off here means it runs concurrently with
+  // the rest of activation, so every AuthInfo-based feature finds it cached.
+  if (isSalesforceProject()) AuthInfo.warmAuthForOrg(null);
+
   // Set context so panels can show placeholder when not in SFDX project; update when workspace changes
   updateSalesforceProjectContext();
-  context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => updateSalesforceProjectContext()));
+  context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => {
+    updateSalesforceProjectContext();
+    // Start the language server if an SFDX project was just added (idempotent).
+    try {
+      startLanguageServer(context);
+    } catch {
+      /* ignore */
+    }
+  }));
 
   try {
     Logger.info("Extension activation starting...");
@@ -154,6 +168,13 @@ export function activate(context: vscode.ExtensionContext) {
 
     // 0. Bootstrap persistent state stores
     initDeployHistory(context);
+
+    // Org-aware SOQL language server (JVM-free). Safe no-op outside SFDX projects.
+    try {
+      startLanguageServer(context);
+    } catch (e) {
+      Logger.error(`Failed to start SFX language server: ${e instanceof Error ? e.message : String(e)}`);
+    }
     setOpenDeployPanelCallback((entry) => {
       const preset = {
         name: entry.presetName || "Re-deploy",
@@ -338,10 +359,16 @@ export function activate(context: vscode.ExtensionContext) {
     const createScratchCmd = register("adure-sfx-toolkit.createScratch", createScratch);
     const quickScratchCmd = register("adure-sfx-toolkit.quickScratch", quickScratch);
 
-    // 8. Execute Apex panel (bottom panel only; content persisted in .vscode/anon-apex-buffer.apex)
-    const anonymousApexProvider = new AnonymousApexViewProvider(context.extensionUri);
+    // 8. Highlight Salesforce debug logs (.log + opened logs) per the configured rules.
+    registerApexLogDecorator(context);
+
+    // 8b. Apex Workbench panel (org-switchable logs, traces & execute).
     context.subscriptions.push(
-      vscode.window.registerWebviewViewProvider("adure-sfx-toolkit.anonymousApexPanel", anonymousApexProvider)
+      vscode.window.registerWebviewViewProvider(
+        "adure-sfx-toolkit.apexWorkbench",
+        new ApexWorkbenchViewProvider(context.extensionUri),
+        { webviewOptions: { retainContextWhenHidden: true } }
+      )
     );
 
     // 9. Development Actions
@@ -353,7 +380,6 @@ export function activate(context: vscode.ExtensionContext) {
     const pullCmd = register("adure-sfx-toolkit.pullSource", pullSource);
     const deployFileCmd = register("adure-sfx-toolkit.deployCurrentFile", deployCurrentFile);
     const retrieveFileCmd = register("adure-sfx-toolkit.retrieveCurrentFile", retrieveCurrentFile);
-    const runTestsCmd = register("adure-sfx-toolkit.runLocalTests", runLocalTests);
     const resetTrackingCmd = register("adure-sfx-toolkit.resetSourceTracking", resetSourceTracking);
     const refreshMetadataCmd = register("adure-sfx-toolkit.refreshMetadata", async () => {
       await vscode.window.withProgress(
@@ -440,8 +466,12 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.commands.executeCommand("setContext", "adure-sfx-toolkit:polling", false);
 
     // 13. SOQL Editor
-    const openSOQLEditorCmd = register("adure-sfx-toolkit.openSOQLEditor", () => {
-      SOQLEditorProvider.show(context.extensionUri);
+    const openSOQLEditorCmd = register("adure-sfx-toolkit.openSOQLEditor", (query?: unknown, org?: unknown) => {
+      SOQLEditorProvider.show(
+        context.extensionUri,
+        typeof query === "string" ? query : undefined,
+        typeof org === "string" && org ? org : undefined
+      );
     });
     // Restore the SOQL panel after a window reload (so its tab doesn't vanish).
     context.subscriptions.push(
@@ -600,7 +630,6 @@ export function activate(context: vscode.ExtensionContext) {
       pullCmd,
       deployFileCmd,
       retrieveFileCmd,
-      runTestsCmd,
       resetTrackingCmd,
       refreshMetadataCmd,
       openSOQLEditorCmd,
@@ -633,8 +662,8 @@ export function activate(context: vscode.ExtensionContext) {
 
     if (isSalesforceProject()) {
       warmOrgListCache();
-      AuthInfo.warmAuthForOrg(null);       // pre-fetch token so first API call doesn't start cold
       OrgMetadataCache.warmDefaultOrg();   // pre-load sobject list for SOQL completion
+      // (auth token already warmed at the top of activate)
     }
     context.subscriptions.push(
       vscode.workspace.onDidChangeWorkspaceFolders(() => {
@@ -652,6 +681,7 @@ export function activate(context: vscode.ExtensionContext) {
   }
 }
 
-export function deactivate() {
+export function deactivate(): Thenable<void> | undefined {
   Logger.info('Extension "adure-sfx-toolkit" is deactivating...');
+  return stopLanguageServer();
 }

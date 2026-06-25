@@ -2,6 +2,7 @@ import { AuthInfo } from "./authInfo";
 import { getToolingApiVersion } from "./constants";
 import { outputChannel } from "./outputChannel";
 import { isSalesforceProject } from "./projectUtils";
+import { DescribeStore } from "./describeStore";
 
 const CACHE_KEY_DEFAULT = "__default__";
 
@@ -19,13 +20,10 @@ export interface SObjectDescribe {
 
 interface OrgCache {
 	sobjects: string[] | null;
-	describes: Map<string, SObjectDescribe>;
 	/** When sobject list was last fetched (for background refresh). */
 	sobjectsFetchedAt: number;
 }
 
-/** TTL for sobject list: refresh if older than this (ms). Describe cache is indefinite until invalidate. */
-const SOBJECT_LIST_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 function cacheKey(org: string | null): string {
 	return org === null || org === "" ? CACHE_KEY_DEFAULT : org;
@@ -39,13 +37,36 @@ function cacheKey(org: string | null): string {
 class OrgMetadataCacheImpl {
 	private cache = new Map<string, OrgCache>();
 	private fetchLocks = new Map<string, Promise<string[]>>();
+	private changeListeners: ((org: string | null) => void)[] = [];
+
+	/**
+	 * Subscribe to cache invalidation/refresh events (org switch, pull, refresh
+	 * metadata). Used by the SOQL language server to drop its describe cache.
+	 * Returns a disposer.
+	 */
+	onChange(listener: (org: string | null) => void): () => void {
+		this.changeListeners.push(listener);
+		return () => {
+			const i = this.changeListeners.indexOf(listener);
+			if (i >= 0) this.changeListeners.splice(i, 1);
+		};
+	}
+
+	private emitChange(org: string | null): void {
+		for (const l of this.changeListeners) {
+			try {
+				l(org);
+			} catch {
+				/* listener errors must not break cache ops */
+			}
+		}
+	}
 
 	private getOrCreateOrgCache(key: string): OrgCache {
 		let entry = this.cache.get(key);
 		if (!entry) {
 			entry = {
 				sobjects: null,
-				describes: new Map(),
 				sobjectsFetchedAt: 0,
 			};
 			this.cache.set(key, entry);
@@ -73,12 +94,10 @@ class OrgMetadataCacheImpl {
 
 
 	private async fetchDescribe(org: string | null, sobject: string): Promise<SObjectDescribe | null> {
-		const version = getToolingApiVersion();
 		try {
-			const { body } = await AuthInfo.get(org, (a) =>
-				`${a.instanceUrl.replace(/\/$/, "")}/services/data/${version}/sobjects/${encodeURIComponent(sobject)}/describe`
-			);
-			const data = JSON.parse(body);
+			// Shared raw describe (one network call across all schema caches).
+			const data = await DescribeStore.getRaw(org, sobject);
+			if (!data) return null;
 			const fields = Array.isArray(data.fields)
 				? data.fields.map((f: any) => ({
 						name: f.name as string,
@@ -105,7 +124,8 @@ class OrgMetadataCacheImpl {
 		const key = cacheKey(org);
 		const entry = this.getOrCreateOrgCache(key);
 		const now = Date.now();
-		if (entry.sobjects !== null && now - entry.sobjectsFetchedAt < SOBJECT_LIST_TTL_MS) {
+		// Kept indefinitely once fetched — only Refresh Metadata / push-pull invalidation re-fetches.
+		if (entry.sobjects !== null) {
 			return entry.sobjects;
 		}
 		const existing = this.fetchLocks.get(key);
@@ -132,13 +152,10 @@ class OrgMetadataCacheImpl {
 	 */
 	async getDescribe(org: string | null, sobject: string): Promise<SObjectDescribe | null> {
 		if (!isSalesforceProject() || !sobject) return null;
-		const key = cacheKey(org);
-		const entry = this.getOrCreateOrgCache(key);
-		const cached = entry.describes.get(sobject);
-		if (cached) return cached;
-		const desc = await this.fetchDescribe(org, sobject);
-		if (desc) entry.describes.set(sobject, desc);
-		return desc;
+		// Source from the shared DescribeStore (the single per-org, ~10-min cache). We
+		// don't keep our own parsed copy — that would outlive the store's TTL and serve
+		// stale fields/relationships. Parsing a cached describe is cheap.
+		return this.fetchDescribe(org, sobject);
 	}
 
 	/**
@@ -231,9 +248,10 @@ class OrgMetadataCacheImpl {
 		if (!isSalesforceProject()) return;
 		const key = cacheKey(org);
 		const entry = this.getOrCreateOrgCache(key);
-		entry.describes.clear();
 		entry.sobjects = null;
 		entry.sobjectsFetchedAt = 0;
+		DescribeStore.invalidate(org);
+		this.emitChange(org);
 
 		const doRefresh = async () => {
 			try {
@@ -259,6 +277,8 @@ class OrgMetadataCacheImpl {
 		const key = cacheKey(org);
 		this.cache.delete(key);
 		this.fetchLocks.delete(key);
+		DescribeStore.invalidate(org);
+		this.emitChange(org);
 	}
 
 	/**
