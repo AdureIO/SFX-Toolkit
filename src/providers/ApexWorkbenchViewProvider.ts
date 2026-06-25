@@ -10,7 +10,7 @@ import { AuthInfo } from '../utils/authInfo';
 import { getToolingApiVersion } from '../utils/constants';
 import { isSalesforceProject } from '../utils/projectUtils';
 import { setBufferOrgOverride } from '../utils/bufferOrgOverride';
-import { refreshLanguageServerSchema } from '../languageClient';
+import { refreshLanguageServerSchema, setEphemeralBuffers } from '../languageClient';
 import { ApexBufferBridge } from './apexBufferBridge';
 
 const WORKBENCH_BUFFER = '.vscode/anon-workbench-buffer.apex';
@@ -119,6 +119,8 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 					const soqlUri = this._soqlBridge.getBufferUri();
 					if (apexUri) setBufferOrgOverride(apexUri.fsPath, org);
 					if (soqlUri) setBufferOrgOverride(soqlUri.fsPath, org);
+					// Mark these buffers ephemeral so go-to-def never writes stubs for them.
+					setEphemeralBuffers([apexUri?.toString(), soqlUri?.toString()].filter((u): u is string => !!u));
 					refreshLanguageServerSchema();
 					break;
 				}

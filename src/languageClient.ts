@@ -27,6 +27,7 @@ const REQ_DESCRIBE = "sfx/describe";
 const REQ_PROJECT_INFO = "sfx/projectInfo";
 const REQ_OBJECT_INFO = "sfx/objectInfo";
 const NOTE_REFRESH = "sfx/refreshSchema";
+const NOTE_EPHEMERAL = "sfx/ephemeralBuffers";
 
 let client: LanguageClient | undefined;
 
@@ -191,6 +192,15 @@ export function stopLanguageServer(): Thenable<void> | undefined {
  */
 export function refreshLanguageServerSchema(): void {
 	void client?.sendNotification(NOTE_REFRESH).catch(() => {});
+}
+
+/**
+ * Register buffer document URIs that must never have SObject stub files written
+ * for them (their IntelliSense org may be non-default). Go-to-definition on an
+ * SObject in these buffers won't generate stubs into the shared .sfdx folder.
+ */
+export function setEphemeralBuffers(uris: string[]): void {
+	void client?.sendNotification(NOTE_EPHEMERAL, { uris }).catch(() => {});
 }
 
 /**

@@ -39,6 +39,12 @@ const REQ_DESCRIBE = 'sfx/describe';        // ({ uri, sobject }) => HostDescrib
 const REQ_PROJECT_INFO = 'sfx/projectInfo'; // ({ uri }) => { namespace: string | null }
 const REQ_OBJECT_INFO = 'sfx/objectInfo';   // ({ uri, sobject }) => { description: string | null }
 const NOTE_REFRESH = 'sfx/refreshSchema';   // host → server: org/schema changed
+const NOTE_EPHEMERAL = 'sfx/ephemeralBuffers'; // host → server: docs that must never write stubs
+
+// Buffer documents (e.g. the ASFX Workbench's hidden editors) whose IntelliSense
+// may target a non-default org — we must NOT write SObject stub files for them,
+// or a non-default org's schema would leak into the shared .sfdx stub folder.
+const ephemeralDocs = new Set<string>();
 
 interface HostField {
     name: string;
@@ -530,6 +536,11 @@ connection.onNotification(NOTE_REFRESH, () => {
     for (const doc of documents.all()) publishApexDiagnostics(doc);
 });
 
+connection.onNotification(NOTE_EPHEMERAL, (params: { uris?: string[] }) => {
+    ephemeralDocs.clear();
+    for (const u of params?.uris ?? []) ephemeralDocs.add(u);
+});
+
 connection.onCompletion(async (params) => {
     const doc = documents.get(params.textDocument.uri);
     if (!doc) return [];
@@ -918,6 +929,9 @@ connection.onDocumentSymbol((params) => {
 
 /** A Location into a generated SObject schema stub (object or specific field). */
 async function stubLocation(docUri: string, sobject: string, field: string | null): Promise<Location | null> {
+    // Never write/generate stub files for ephemeral buffers (their org may be
+    // non-default — writing would contaminate the shared .sfdx stubs).
+    if (ephemeralDocs.has(docUri)) return null;
     const d = await describe(docUri, sobject);
     if (!d) return null;
     const info = getStub(sobject, d);
