@@ -9,6 +9,7 @@ import { getCachedOrgList, refreshOrgListCache, warmOrgListCache } from "../util
 import { ApexBufferBridge } from "./apexBufferBridge";
 import { setBufferOrgOverride } from "../utils/bufferOrgOverride";
 import { refreshLanguageServerSchema, setEphemeralBuffers } from "../languageClient";
+import { getSoqlMarkers } from "../utils/soqlMarkers";
 
 const SOQL_WB_BUFFER = ".vscode/soql-wb-buffer.soql";
 const SOQL_HISTORY_MAX = 50;
@@ -129,6 +130,12 @@ export class SOQLEditorProvider {
             refreshLanguageServerSchema();
             break;
           }
+          case "validateSoql":
+            panel.webview.postMessage({
+              command: "soqlMarkers",
+              markers: await getSoqlMarkers((typeof message.org === "string" && message.org) ? message.org : null, message.text || "")
+            });
+            break;
           case "queryMore":
             await this.queryMore(panel, message.nextRecordsUrl, message.targetOrg || null);
             break;
@@ -1110,6 +1117,12 @@ export class SOQLEditorProvider {
             soqlEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, function () { runQuery(); });
             soqlEditor.addCommand(monaco.KeyMod.WinCtrl | monaco.KeyCode.Enter, function () { runQuery(); });
             if (_onChangeCb) soqlEditor.onDidChangeModelContent(_onChangeCb);
+            // Validate fields against the schema (debounced) → red squiggles.
+            let _valTimer = null;
+            function scheduleValidate() { if (_valTimer) clearTimeout(_valTimer); _valTimer = setTimeout(function () { vscode.postMessage({ command: 'validateSoql', org: currentTargetOrg(), text: soqlEditor.getValue() }); }, 400); }
+            soqlEditor.onDidChangeModelContent(scheduleValidate);
+            scheduleValidate();
+            window.__soqlScheduleValidate = scheduleValidate;
         });
         const completionList = document.getElementById('completion-list');
         const executeBtn = document.getElementById('execute-btn');
@@ -1289,6 +1302,7 @@ export class SOQLEditorProvider {
             relationshipCache = {};
             // Point editor completion/hover at the selected org (server-side override).
             vscode.postMessage({ command: 'wbSetOrg', org: currentTargetOrg() });
+            if (window.__soqlScheduleValidate) window.__soqlScheduleValidate();
             if (builderPanel.classList.contains('visible')) {
                 vscode.postMessage({ command: 'getBuilderObjectList', targetOrg: currentTargetOrg() });
             }
@@ -2020,6 +2034,7 @@ export class SOQLEditorProvider {
             const message = event.data;
             if (message.command === 'wbCompletions') { setBusy(-1); const cb = _pending[message.requestId]; if (cb) { delete _pending[message.requestId]; cb(message.items || []); } return; }
             if (message.command === 'wbHover') { setBusy(-1); const cb = _pending[message.requestId]; if (cb) { delete _pending[message.requestId]; cb(message.hover || null); } return; }
+            if (message.command === 'soqlMarkers') { if (soqlEditor) { try { monaco.editor.setModelMarkers(soqlEditor.getModel(), 'asfx-soql', (message.markers || []).map(function (m) { return { severity: monaco.MarkerSeverity.Error, message: m.message, startLineNumber: m.line + 1, startColumn: m.startCol + 1, endLineNumber: m.line + 1, endColumn: m.endCol + 1 }; })); } catch (e) {} } return; }
             switch (message.command) {
                 case 'loading':
                     executeBtn.disabled = message.value;

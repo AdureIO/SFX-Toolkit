@@ -10,6 +10,7 @@ import { AuthInfo } from '../utils/authInfo';
 import { getToolingApiVersion } from '../utils/constants';
 import { isSalesforceProject } from '../utils/projectUtils';
 import { setBufferOrgOverride } from '../utils/bufferOrgOverride';
+import { getSoqlMarkers } from '../utils/soqlMarkers';
 import { refreshLanguageServerSchema, setEphemeralBuffers } from '../languageClient';
 import { ApexBufferBridge } from './apexBufferBridge';
 
@@ -222,6 +223,9 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 				}
 				case 'openSoqlWorkbench':
 					await vscode.commands.executeCommand('adure-sfx-toolkit.openSOQLEditor', typeof data.query === 'string' ? data.query : undefined, data.org || '');
+					break;
+				case 'validateSoql':
+					this._post('soqlMarkers', { markers: await getSoqlMarkers(data.org || null, data.query || '') });
 					break;
 			}
 		});
@@ -529,6 +533,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 		document.querySelector('input[data-pane="exec"]').style.display='none';
 		const pill=document.getElementById('tracePill'); pill.classList.remove('on'); pill.textContent='Trace: —';
 		vscode.postMessage({type:'warmOrg', org:orgVal()});
+		scheduleSoqlValidate();
 		loadLogs();
 	});
 
@@ -573,6 +578,8 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 			tokenizer:{ root:[[/'(?:[^'\\\\]|\\\\.)*'/,'string'],[/\\b\\d+(\\.\\d+)?\\b/,'number'],[/[a-zA-Z_][\\w.]*/,{cases:{'@keywords':'keyword','@default':'identifier'}}]] } });
 		soqlEd=monaco.editor.create(document.getElementById('soqlEditor'),{ value:initial.soql||'SELECT Id, Name FROM Account ORDER BY CreatedDate DESC LIMIT 50', language:'soql', theme:dark?'vs-dark':'vs', automaticLayout:true, minimap:{enabled:false}, scrollBeyondLastLine:false, fontSize:13, quickSuggestions:true, quickSuggestionsDelay:200, fixedOverflowWidgets:true });
 		soqlEd.onDidChangeModelContent(function(){ if(soqlTimer) clearTimeout(soqlTimer); soqlTimer=setTimeout(function(){ vscode.postMessage({type:'soqlChanged',query:soqlEd.getValue()}); },500); });
+		soqlEd.onDidChangeModelContent(scheduleSoqlValidate);
+		scheduleSoqlValidate();
 		soqlEd.addCommand(monaco.KeyMod.CtrlCmd|monaco.KeyCode.Enter, doRunSoql);
 		soqlEd.addCommand(monaco.KeyMod.WinCtrl|monaco.KeyCode.Enter, doRunSoql);
 		monaco.languages.registerCompletionItemProvider('soql',{ triggerCharacters:['.',' ',',','('], provideCompletionItems:function(model,pos){ return new Promise(function(resolve){ const id=++reqId; pending[id]=function(items){ const w=model.getWordUntilPosition(pos); const range={startLineNumber:pos.lineNumber,endLineNumber:pos.lineNumber,startColumn:w.startColumn,endColumn:w.endColumn}; resolve({suggestions:items.map(function(it){ return {label:it.label,kind:mapKind(it.kind),insertText:it.insertText||it.label,insertTextRules:it.isSnippet?monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet:undefined,detail:it.detail,documentation:it.documentation?{value:it.documentation}:undefined,sortText:it.sortText,filterText:it.filterText,range:range}; })}); }; setBusy(1); vscode.postMessage({type:'getSoqlCompletions',requestId:id,text:model.getValue(),line:pos.lineNumber-1,character:pos.column-1}); }); } });
@@ -587,6 +594,8 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 
 	// ── SOQL tab actions ────────────────────────────────────────────────────────
 	function doRunSoql(){ if(!soqlEd) return; vscode.postMessage({type:'runSoql', org:orgVal()||undefined, query:soqlEd.getValue()}); }
+	let soqlValTimer=null;
+	function scheduleSoqlValidate(){ if(soqlValTimer) clearTimeout(soqlValTimer); soqlValTimer=setTimeout(function(){ if(soqlEd) vscode.postMessage({type:'validateSoql', org:orgVal(), query:soqlEd.getValue()}); },400); }
 	document.getElementById('runSoql').onclick=doRunSoql;
 	document.getElementById('openSoqlWb').onclick=function(){ vscode.postMessage({type:'openSoqlWorkbench', query:soqlEd?soqlEd.getValue():'', org:orgVal()}); };
 	document.getElementById('clearSoql').onclick=function(){ if(soqlEd){soqlEd.setValue('');soqlEd.focus();} vscode.postMessage({type:'soqlChanged',query:''}); };
@@ -621,6 +630,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	window.addEventListener('message', function(e){ const d=e.data; if(!d) return;
 		if(d.type==='completionResult'){ setBusy(-1); const cb=pending[d.requestId]; if(cb){ delete pending[d.requestId]; cb(d.items||[]); } return; }
 		if(d.type==='hoverResult'){ setBusy(-1); const cb=pending[d.requestId]; if(cb){ delete pending[d.requestId]; cb(d.hover||null); } return; }
+		if(d.type==='soqlMarkers'){ if(soqlEd){ try{ monaco.editor.setModelMarkers(soqlEd.getModel(),'asfx-soql',(d.markers||[]).map(function(m){ return {severity:monaco.MarkerSeverity.Error,message:m.message,startLineNumber:m.line+1,startColumn:m.startCol+1,endLineNumber:m.line+1,endColumn:m.endCol+1}; })); }catch(e){} } return; }
 		if(d.type==='soqlStarted'){ const s=document.getElementById('soqlStatus'); s.className='muted'; s.style.color=''; s.textContent='Running…'; document.getElementById('soqlResults').innerHTML=''; return; }
 		if(d.type==='soqlResult'){ renderSoql(d); return; }
 		if(d.type==='orgList'){ const orgs=d.orgs||[];
