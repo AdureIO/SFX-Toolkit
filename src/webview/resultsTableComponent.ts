@@ -139,7 +139,11 @@ export function resultsTableScript(): string {
 			// Safety net: auto table-layout can under-size a cell holding a nested table, clipping it.
 			// Force each subquery column to at least its nested table's real width so the row widens and scrolls.
 			mount.querySelectorAll('td.rt-sub').forEach(function(td){ var nt=td.querySelector('.rt-nested'); if(nt){ var w=nt.scrollWidth; if(w) td.style.minWidth=(w+6)+'px'; } });
-			var now=mount.querySelector('.rt-scroll'); if(now){ now.scrollLeft=sl; now.scrollTop=st; }
+			var now=mount.querySelector('.rt-scroll'); var tbl=mount.querySelector('table.rt');
+			// Deterministically fill the visible width (CSS min-width:100% behaves inconsistently across the two
+			// container layouts); the table still grows past this when its content is wider, so scroll is preserved.
+			if(now && tbl){ tbl.style.minWidth=now.clientWidth+'px'; }
+			if(now){ now.scrollLeft=sl; now.scrollTop=st; }
 			requestNames();
 		}
 
