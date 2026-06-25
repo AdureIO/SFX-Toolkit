@@ -23,7 +23,8 @@ export function resultsTableCss(): string {
 	.rt-save { background:var(--vscode-button-background); color:var(--vscode-button-foreground); }
 	.rt-discard { background:var(--vscode-button-secondaryBackground); color:var(--vscode-button-secondaryForeground); }
 	.rt-err { color:var(--vscode-errorForeground); }
-	.rt-scroll { overflow:auto; max-width:100%; max-height:100%; }
+	.rt-host { position:relative; }
+	.rt-scroll { position:absolute; inset:0; overflow:auto; }
 	.rt-ok { color:var(--vscode-testing-iconPassed, #3fb950); }
 	.rt-refresh { background:var(--vscode-button-secondaryBackground); color:var(--vscode-button-secondaryForeground); }
 	table.rt { border-collapse:collapse; width:max-content; min-width:100%; font-size:12px; }
@@ -126,6 +127,7 @@ export function resultsTableScript(): string {
 			return '<td>'+valueDisplay(rootType,c,v)+'</td>'; }
 
 		function render(){ renderControls();
+			mount.classList.add('rt-host');
 			if(!records.length){ mount.innerHTML='<div style="padding:8px;opacity:.6">No rows.</div>'; return; }
 			var html='<div class="rt-scroll"><table class="rt"><thead><tr><th class="rt-num">#</th>'+columns.map(function(c){return '<th>'+esc(c)+'</th>';}).join('')+'</tr></thead><tbody>';
 			for(var i=0;i<records.length;i++){ var r=records[i];
