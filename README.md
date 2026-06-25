@@ -7,6 +7,8 @@ ASFX Toolkit is an open-source VS Code / Cursor extension that supercharges your
 
 > Works on VS Code 1.80+ and Cursor. Activates automatically in any folder containing an `sfdx-project.json`; outside SFDX projects it stays completely inert.
 
+![ASFX Toolkit sidebar — orgs, source, deploy, tests, query/API and tools](docs/screenshots/sidebar.png)
+
 ## Features
 
 ### 🧠 Apex & SOQL IntelliSense
@@ -37,6 +39,18 @@ A built-in, **JVM-free** language server (pure Node, shipped inside the extensio
 - **Self-healing** — if the Salesforce Apex Language Server gets stuck, it's restarted (bounded), with a clear notification if it keeps failing.
 
 Schema is read from your **default org** via the REST describe API (auth resolved from `sf org display`); the language server itself stays credential-free. Everything is gated to SFDX projects and individually toggleable — see [Settings](#settings).
+
+### 🧰 ASFX Workbench
+
+A unified bottom panel (sidebar **Tools → ASFX Workbench**) that brings Apex execution, ad-hoc SOQL, and debug logs together, each on its own tab, with a shared org selector and trace indicator.
+
+- **Execute** — run **anonymous Apex** with org-aware completion; the live **debug log** and **governor limits** render side-by-side as it runs. Execute with `Cmd/Ctrl+Enter`, open the result in an editor, or replay from history.
+- **SOQL** — fire a quick query against the selected org and browse results in a table; export, or jump to the full **SOQL Builder & Editor**.
+- **Logs** — browse the org's debug logs in a syntax-highlighted viewer that colour-codes `USER_DEBUG`, execution markers, and limit usage.
+
+![ASFX Workbench — execute anonymous Apex with live debug log and governor limits](docs/screenshots/ASFX-Workbench-apex.png)
+![ASFX Workbench — SOQL tab with results table](docs/screenshots/ASFX-Workbench-soql.png)
+![ASFX Workbench — debug log viewer](docs/screenshots/ASFX-Workbench-logs.png)
 
 ### 🔍 Log Management & Filtering
 

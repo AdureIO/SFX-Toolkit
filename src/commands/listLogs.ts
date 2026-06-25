@@ -1,45 +1,23 @@
 import * as vscode from 'vscode';
-import * as path from 'path';
-import * as fs from 'fs';
-import { getSalesforceLogDirectory } from '../utils/logPaths';
-import { AuthInfo } from '../utils/authInfo';
 import { logContentProvider } from '../providers/LogContentProvider';
+import { listApexLogs, fetchApexLogBody } from '../utils/apexLogApi';
 
 /**
- * List log files from .sfdx/tools/debug/logs (where Salesforce extensions save logs)
- * and let the user pick one to open.
+ * List the org's recent Apex logs (over REST, same as the sidebar/workbench) and
+ * let the user pick one to open. No dependency on local .sfdx/tools/debug/logs files.
  */
 export async function listLogs() {
-    const logDir = getSalesforceLogDirectory();
-    if (!logDir || !fs.existsSync(logDir)) {
-        vscode.window.showInformationMessage(
-            'No log folder found. Logs appear in .sfdx/tools/debug/logs when Salesforce extensions save them.'
-        );
-        return;
-    }
-
-    const names = fs.readdirSync(logDir).filter((n) => n.endsWith('.log'));
-    if (names.length === 0) {
-        vscode.window.showInformationMessage('No debug logs in .sfdx/tools/debug/logs.');
-        return;
-    }
-
     type LogPickItem = vscode.QuickPickItem & { logId: string };
-    const items: LogPickItem[] = names
-        .map((name): LogPickItem | null => {
-            const full = path.join(logDir, name);
-            try {
-                const stat = fs.statSync(full);
-                return {
-                    label: name,
-                    description: `${(stat.size / 1024).toFixed(1)} KB · ${stat.mtime.toLocaleString()}`,
-                    logId: name.replace(/\.log$/i, '')
-                };
-            } catch {
-                return null;
-            }
-        })
-        .filter((i): i is LogPickItem => i !== null);
+    const rows = await listApexLogs(null);
+    if (!rows.length) {
+        vscode.window.showInformationMessage('No Apex logs in this org (run code or enable a trace).');
+        return;
+    }
+    const items: LogPickItem[] = rows.map((r) => ({
+        label: r.operation || r.id,
+        description: `${(r.length / 1024).toFixed(1)} KB · ${r.status || ''} · ${r.startTime ? new Date(r.startTime).toLocaleString() : ''}`,
+        logId: r.id,
+    }));
 
     const selected = await vscode.window.showQuickPick(items, {
         placeHolder: 'Select a log to open',
@@ -51,13 +29,12 @@ export async function listLogs() {
     }
 }
 
-import { getToolingApiVersion } from '../utils/constants';
-
 /**
- * Open a log by id (filename without .log).
- * Uses REST to fetch log body when auth is available and targetOrg not set; otherwise uses CLI.
- * @param skipProgress - when true, do not show "Opening Log..." (e.g. when already in execute flow)
- * @param targetOrg - when set, fetch log from this org via CLI (required when log is from non-default org)
+ * Open a log by id. Fetches the body over REST via apexLogApi (default org, or
+ * `targetOrg` when the log belongs to another environment) and feeds it to the
+ * shared content provider — no local files, no CLI.
+ * @param skipProgress - when true, do not show "Opening Log..." (e.g. already in execute flow)
+ * @param targetOrg - when set, fetch the log from this org (non-default)
  */
 export async function openLogById(
     logId: string,
@@ -66,72 +43,37 @@ export async function openLogById(
     skipProgress?: boolean,
     targetOrg?: string
 ) {
-    const { runCommand } = await import('../utils/commandRunner');
-    const logDir = getSalesforceLogDirectory();
-    if (!logDir) {
-        vscode.window.showErrorMessage('Open a workspace folder to open logs.');
-        return;
-    }
-    const dir: string = logDir;
-    const orgFlag = targetOrg ? ` -o ${targetOrg}` : '';
-    async function doOpen(token?: vscode.CancellationToken): Promise<void> {
-        if (!fs.existsSync(dir)) {
-            fs.mkdirSync(dir, { recursive: true });
+    async function doOpen(): Promise<void> {
+        const body = await fetchApexLogBody(targetOrg ?? null, logId);
+        if (!body) throw new Error('Log body could not be retrieved.');
+        const scheme = _scheme || 'sf-log';
+        const uri = vscode.Uri.parse(`${scheme}://log/${logId}`);
+        logContentProvider.setContent(uri, body);
+        const doc = await vscode.workspace.openTextDocument(uri);
+        try {
+            vscode.languages.setTextDocumentLanguage(doc, 'salesforce-log');
+        } catch {
+            // ignore
         }
-        const logPath = path.join(dir, `${logId}.log`);
-        const needFetch = targetOrg || !fs.existsSync(logPath);
-
-        if (needFetch) {
-            if (targetOrg) {
-                await runCommand(`sf apex get log -i ${logId} -d "${dir}"${orgFlag}`, undefined, undefined, true, token);
-            } else {
-                try {
-                    const version = getToolingApiVersion();
-                    const { body } = await AuthInfo.get(null, (a) =>
-                        `${a.instanceUrl.replace(/\/$/, "")}/services/data/${version}/tooling/sobjects/ApexLog/${logId}/Body`
-                    );
-                    fs.writeFileSync(logPath, body);
-                } catch {
-                    await runCommand(`sf apex get log -i ${logId} -d "${dir}"`, undefined, undefined, true, token);
-                }
-            }
-        }
-
-        if (fs.existsSync(logPath)) {
-            const content = fs.readFileSync(logPath, 'utf-8');
-            const scheme = _scheme || 'sf-log';
-            const uri = vscode.Uri.parse(`${scheme}://log/${logId}`);
-            logContentProvider.setContent(uri, content);
-            const doc = await vscode.workspace.openTextDocument(uri);
-            try {
-                vscode.languages.setTextDocumentLanguage(doc, 'salesforce-log');
-            } catch {
-                // ignore
-            }
-            await vscode.window.showTextDocument(doc, { preview: false, viewColumn: viewColumn ?? vscode.ViewColumn.Active });
-            return;
-        }
-
-        throw new Error('Log file could not be found or retrieved.');
+        await vscode.window.showTextDocument(doc, { preview: false, viewColumn: viewColumn ?? vscode.ViewColumn.Active });
     }
 
     if (skipProgress) {
         try {
             await doOpen();
         } catch (e: any) {
-            if (!e.cancelled) vscode.window.showErrorMessage(`Error opening log: ${e.stderr ?? e.message ?? e}`);
+            vscode.window.showErrorMessage(`Error opening log: ${e?.message ?? e}`);
         }
         return;
     }
 
     await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: 'Opening Log...', cancellable: true },
-        async (_progress, token) => {
+        { location: vscode.ProgressLocation.Notification, title: 'Opening Log...', cancellable: false },
+        async () => {
             try {
-                await doOpen(token);
+                await doOpen();
             } catch (e: any) {
-                if (e.cancelled) return;
-                vscode.window.showErrorMessage(`Error opening log: ${e.stderr ?? e.message ?? e}`);
+                vscode.window.showErrorMessage(`Error opening log: ${e?.message ?? e}`);
             }
         }
     );

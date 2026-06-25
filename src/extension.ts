@@ -261,7 +261,8 @@ export function activate(context: vscode.ExtensionContext) {
     // 6. Execute SOQL
     const executeSOQLCmd = register("adure-sfx-toolkit.executeSOQL", executeSOQL);
 
-    // 7. Side Bar Log Provider (shows logs from .sfdx/tools/debug/logs, no own download)
+    // 7. Side Bar Log Provider (lists the org's Apex logs over REST via apexLogApi —
+    //    same path as the ASFX Workbench; no local files or CLI download).
     vscode.window.registerTreeDataProvider("adure-sfx-toolkit.logs", logTreeProvider);
 
     const refreshLogsCmd = register("adure-sfx-toolkit.refreshLogs", async () => {
@@ -269,7 +270,8 @@ export function activate(context: vscode.ExtensionContext) {
       logTreeProvider.refresh();
     });
 
-    // Watch .sfdx/tools/debug/logs so the tree updates when Salesforce extensions add/change/remove logs
+    // A new log file written by the Salesforce extensions is a cheap signal that the
+    // org has fresh logs — use it to trigger a re-list (the tree itself reads from REST).
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
     if (workspaceFolder) {
       const logWatcher = vscode.workspace.createFileSystemWatcher(

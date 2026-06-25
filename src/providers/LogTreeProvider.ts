@@ -1,121 +1,41 @@
 import * as vscode from 'vscode';
-import * as fs from 'fs';
-import * as path from 'path';
 import { outputChannel } from '../utils/outputChannel';
-import { getSalesforceLogDirectory } from '../utils/logPaths';
 import { isSalesforceProject } from '../utils/projectUtils';
-import { runCommand } from '../utils/commandRunner';
-import { getMaxLogFiles } from '../utils/constants';
+import { listApexLogs, fetchApexLogHead, extractCodeUnit, type ApexLogRow } from '../utils/apexLogApi';
 
-/** Regex to derive a short label from log body (e.g. trigger or class name). */
-const CODE_UNIT_STARTED = /\|CODE_UNIT_STARTED\|\[.*?\]\|.*?\|(.*)$/m;
-const LOG_PREVIEW_BYTES = 64 * 1024;
-
-function readFilePreview(fullPath: string, maxBytes: number): string {
-    const fd = fs.openSync(fullPath, 'r');
-    try {
-        const buffer = new Uint8Array(maxBytes);
-        const bytesRead = fs.readSync(fd, buffer, 0, maxBytes, 0);
-        if (bytesRead <= 0) return '';
-        return Buffer.from(buffer.subarray(0, bytesRead)).toString('utf8');
-    } finally {
-        fs.closeSync(fd);
-    }
-}
-
-/** Returns true if the log body indicates execution failure (exception/fatal). */
-function isLogFailure(body: string): boolean {
-    return /FATAL_ERROR|EXCEPTION_THROWN|\|ERROR\|/.test(body);
-}
-
+/**
+ * Sidebar Apex-log list. Sources logs straight from the org over REST (the same
+ * apexLogApi the ASFX Workbench uses) — no local .sfdx/tools/debug/logs files, no
+ * CLI download/polling, no on-disk cache. Entry-point names are enriched lazily by
+ * reading just the head of each log (Range request) and parsing CODE_UNIT_STARTED,
+ * mirroring the workbench's logic.
+ */
 export class LogTreeProvider implements vscode.TreeDataProvider<LogItem> {
-    private _onDidChangeTreeData: vscode.EventEmitter<LogItem | undefined | null | void> = new vscode.EventEmitter<LogItem | undefined | null | void>();
-    readonly onDidChangeTreeData: vscode.Event<LogItem | undefined | null | void> = this._onDidChangeTreeData.event;
+    private _onDidChangeTreeData = new vscode.EventEmitter<LogItem | undefined | null | void>();
+    readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
     /** Set by polling commands so the view can show polling state. */
     public isPolling = false;
 
-    private fetchInProgress = false;
-
-    constructor() {}
+    /** Cached current listing + resolved entry-point names (in-memory only). */
+    private rows: ApexLogRow[] | null = null;
+    private readonly units = new Map<string, string>();
+    /** Bumped on each (re)list so stale background enrichment self-cancels. */
+    private enrichGen = 0;
 
     clearCache(): void {
         this.refresh();
     }
 
+    /** Re-list from the org on the next render. */
     refresh(): void {
+        this.rows = null;
         this._onDidChangeTreeData.fire();
     }
 
-    /**
-     * When polling is enabled: query the org for recent ApexLog IDs and download any that
-     * are not yet in .sfdx/tools/debug/logs, then refresh the tree.
-     * Shows a progress notification (loading bar) while retrieving.
-     */
+    /** Kept for callers (refresh command / polling): just re-list over REST. */
     async fetchNewLogsFromOrg(): Promise<void> {
-        if (this.fetchInProgress) return;
-        this.fetchInProgress = true;
-        try {
-        const logDir = getSalesforceLogDirectory();
-        if (!logDir || !isSalesforceProject()) return;
-        if (!fs.existsSync(logDir)) {
-            try {
-                fs.mkdirSync(logDir, { recursive: true });
-            } catch (e) {
-                outputChannel.appendLine(`LogTreeProvider: Could not create log dir: ${e}`);
-                return;
-            }
-        }
-
-        await vscode.window.withProgress(
-            {
-                location: vscode.ProgressLocation.Window,
-                title: 'Retrieving logs',
-                cancellable: false
-            },
-            async (progress) => {
-                try {
-                    progress.report({ message: 'Querying org…' });
-                    const query = `SELECT Id FROM ApexLog ORDER BY StartTime DESC LIMIT ${getMaxLogFiles()}`;
-                    const result = await runCommand(`sf data query -q "${query}" -t --json`);
-                    const parsed = JSON.parse(result);
-                    if (parsed.status !== 0 || !parsed.result?.records?.length) return;
-                    const ids: string[] = parsed.result.records.map((r: { Id: string }) => r.Id);
-                    const toFetch = ids.filter((id) => !fs.existsSync(path.join(logDir, `${id}.log`)));
-                    if (toFetch.length === 0) {
-                        progress.report({ message: 'Up to date' });
-                        return;
-                    }
-                    let fetched = 0;
-                    for (let i = 0; i < toFetch.length; i++) {
-                        const id = toFetch[i];
-                        progress.report({ message: `Downloading ${i + 1}/${toFetch.length}…` });
-                        try {
-                            await runCommand(`sf apex get log -i ${id} -d "${logDir}"`);
-                            fetched++;
-                        } catch (e: any) {
-                            if (!e?.message?.includes('does not exist')) {
-                                outputChannel.appendLine(`LogTreeProvider: Failed to get log ${id}: ${e?.message ?? e}`);
-                            }
-                        }
-                    }
-                    if (fetched > 0) {
-                        outputChannel.appendLine(`LogTreeProvider: Polling fetched ${fetched} new log(s).`);
-                        this.refresh();
-                    }
-                } catch (e: any) {
-                    const msg = e?.message ?? String(e);
-                    if (msg.includes('not found') || msg.includes('ENOENT')) {
-                        outputChannel.appendLine('LogTreeProvider: Salesforce CLI (sf) not found — polling skipped.');
-                    } else {
-                        outputChannel.appendLine(`LogTreeProvider: Polling query failed: ${msg}`);
-                    }
-                }
-            }
-        );
-        } finally {
-            this.fetchInProgress = false;
-        }
+        this.refresh();
     }
 
     getTreeItem(element: LogItem): vscode.TreeItem {
@@ -123,90 +43,62 @@ export class LogTreeProvider implements vscode.TreeDataProvider<LogItem> {
     }
 
     async getChildren(element?: LogItem): Promise<LogItem[]> {
-        if (element) {
-            return [];
-        }
+        if (element) return [];
         if (!isSalesforceProject()) {
             return [new LogItem('Open an SFDX project', '', '', vscode.TreeItemCollapsibleState.None)];
         }
 
-        const logDir = getSalesforceLogDirectory();
-        if (!logDir) {
-            return [new LogItem('Open a workspace folder', '', '', vscode.TreeItemCollapsibleState.None)];
-        }
-        if (!fs.existsSync(logDir)) {
-            return [new LogItem('No log folder yet', 'Logs appear when Salesforce extensions save to .sfdx/tools/debug/logs', '', vscode.TreeItemCollapsibleState.None)];
-        }
-
-        try {
-            const names = fs.readdirSync(logDir);
-            const logFiles = names
-                .filter((n) => n.endsWith('.log'))
-                .map((name) => {
-                    const full = path.join(logDir, name);
-                    try {
-                        const stat = fs.statSync(full);
-                        return { name, full, mtime: stat.mtime.getTime(), size: stat.size };
-                    } catch {
-                        return null;
-                    }
-                })
-                .filter((f): f is { name: string; full: string; mtime: number; size: number } => f !== null);
-
-            logFiles.sort((a, b) => b.mtime - a.mtime);
-
-            if (logFiles.length === 0) {
-                return [new LogItem('No debug logs', 'Save logs to .sfdx/tools/debug/logs (e.g. via Salesforce extensions)', '', vscode.TreeItemCollapsibleState.None)];
+        // Re-list only when invalidated; an enrichment refresh rebuilds from cache (no network).
+        if (this.rows === null) {
+            try {
+                this.rows = await listApexLogs(null);
+            } catch (e: any) {
+                outputChannel.appendLine(`LogTreeProvider: listApexLogs failed: ${e?.message ?? e}`);
+                this.rows = [];
             }
-
-            const items: LogItem[] = logFiles.map((f) => {
-                const logId = f.name.replace(/\.log$/i, '');
-                let label = logId;
-                let preview = '';
-                let tooltip = `File: ${f.name}\nSize: ${this.formatBytes(f.size)}\nModified: ${new Date(f.mtime).toLocaleString()}`;
-                try {
-                    preview = readFilePreview(f.full, LOG_PREVIEW_BYTES);
-                    const match = preview.match(CODE_UNIT_STARTED);
-                    if (match && match[1]) {
-                        label = match[1].trim();
-                    }
-                    tooltip += `\n\nID: ${logId}`;
-                } catch {
-                    // keep label as logId
-                }
-                const description = `${this.formatBytes(f.size)} · ${this.formatRelativeTime(f.mtime)}`;
-                const item = new LogItem(
-                    label,
-                    description,
-                    logId,
-                    vscode.TreeItemCollapsibleState.None,
-                    {
-                        command: 'adure-sfx-toolkit.openLog',
-                        title: 'Open Log',
-                        arguments: [logId]
-                    },
-                    tooltip
-                );
-                item.resourceUri = vscode.Uri.file(f.full);
-
-                let failed = false;
-                if (preview) {
-                    failed = isLogFailure(preview);
-                }
-
-                if (failed) {
-                    item.iconPath = new vscode.ThemeIcon('circle-slash', new vscode.ThemeColor('testing.iconFailed'));
-                } else {
-                    item.iconPath = new vscode.ThemeIcon('check', new vscode.ThemeColor('testing.iconPassed'));
-                }
-                return item;
-            });
-
-            return items;
-        } catch (e: any) {
-            outputChannel.appendLine(`LogTreeProvider: ${e?.message ?? e}`);
-            return [new LogItem('Error reading log folder', String(e?.message ?? e), '', vscode.TreeItemCollapsibleState.None)];
+            void this.enrichUnits(this.rows, ++this.enrichGen);
         }
+
+        if (!this.rows.length) {
+            return [new LogItem('No debug logs', 'No Apex logs in this org (run code or enable a trace).', '', vscode.TreeItemCollapsibleState.None)];
+        }
+
+        return this.rows.map((r) => this.buildItem(r));
+    }
+
+    /** Fetch each log's head and parse its entry-point code unit, in the background. */
+    private async enrichUnits(rows: ApexLogRow[], gen: number): Promise<void> {
+        for (const r of rows) {
+            if (gen !== this.enrichGen) return; // superseded by a newer list
+            if (this.units.has(r.id)) continue;
+            try {
+                const unit = extractCodeUnit(await fetchApexLogHead(null, r.id));
+                if (unit) {
+                    this.units.set(r.id, unit);
+                    if (gen === this.enrichGen) this._onDidChangeTreeData.fire();
+                }
+            } catch {
+                /* ignore — keep the operation label */
+            }
+        }
+    }
+
+    private buildItem(r: ApexLogRow): LogItem {
+        const label = this.units.get(r.id) || r.operation || r.id;
+        const failed = !!r.status && r.status.toLowerCase() !== 'success';
+        const description = `${this.formatBytes(r.length)} · ${this.formatRelativeTime(r.startTime)}`;
+        const tooltip =
+            `Operation: ${r.operation || '—'}\nStatus: ${r.status || '—'}\nUser: ${r.user || '—'}\n` +
+            `Size: ${this.formatBytes(r.length)}\nStarted: ${r.startTime ? new Date(r.startTime).toLocaleString() : '—'}\n\nID: ${r.id}`;
+        const item = new LogItem(label, description, r.id, vscode.TreeItemCollapsibleState.None, {
+            command: 'adure-sfx-toolkit.openLog',
+            title: 'Open Log',
+            arguments: [r.id],
+        }, tooltip);
+        item.iconPath = failed
+            ? new vscode.ThemeIcon('circle-slash', new vscode.ThemeColor('testing.iconFailed'))
+            : new vscode.ThemeIcon('check', new vscode.ThemeColor('testing.iconPassed'));
+        return item;
     }
 
     private formatBytes(bytes: number, decimals = 2): string {
@@ -218,8 +110,10 @@ export class LogTreeProvider implements vscode.TreeDataProvider<LogItem> {
         return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
     }
 
-    private formatRelativeTime(mtime: number): string {
-        const diff = Date.now() - mtime;
+    private formatRelativeTime(startTime: string): string {
+        const t = startTime ? Date.parse(startTime) : NaN;
+        if (Number.isNaN(t)) return '';
+        const diff = Date.now() - t;
         const seconds = Math.floor(diff / 1000);
         if (seconds < 60) return 'just now';
         const minutes = Math.floor(seconds / 60);
@@ -228,7 +122,7 @@ export class LogTreeProvider implements vscode.TreeDataProvider<LogItem> {
         if (hours < 24) return `${hours}h ago`;
         const days = Math.floor(hours / 24);
         if (days < 7) return `${days}d ago`;
-        return new Date(mtime).toLocaleDateString();
+        return new Date(t).toLocaleDateString();
     }
 }
 
