@@ -960,7 +960,7 @@
     "test": "node ./out/test/runTest.js",
     "package": "vsce package",
     "test:unit": "npm run compile && mocha --reporter spec --timeout 15000 \"out/test/**/*.test.js\"",
-    "test:server": "npm run compile && mocha --reporter spec --timeout 15000 out/test/languageServer.test.js out/test/sobjectStubSync.test.js out/test/soqlValidate.test.js out/test/nameMatch.test.js out/test/apexLogParse.test.js out/test/soqlError.test.js",
+    "test:server": "npm run compile && mocha --reporter spec --timeout 15000 out/test/languageServer.test.js out/test/sobjectStubSync.test.js out/test/soqlValidate.test.js out/test/nameMatch.test.js out/test/apexLogParse.test.js out/test/soqlError.test.js out/test/soqlEdit.test.js",
     "bundle": "node esbuild.js --production",
     "bundle:dev": "node esbuild.js"
   },
