@@ -1086,7 +1086,7 @@ export class SOQLEditorProvider {
             </div>
             <div class="results-wrap">
                 <div id="results-container"></div>
-                <div class="status-bar" id="status-bar"></div>
+                <div class="status-bar" id="status-bar"><span id="status-text"></span><span id="rt-controls" class="rt-ctl"></span></div>
             </div>
         </div>
     </div>
@@ -1158,7 +1158,7 @@ export class SOQLEditorProvider {
         const discardBtn = document.getElementById('discard-btn');
         const resultsContainer = document.getElementById('results-container');
         const errorMsg = document.getElementById('error-msg');
-        const statusBar = document.getElementById('status-bar');
+        const statusBar = document.getElementById('status-text');
         const builderToggleBtn = document.getElementById('builder-toggle-btn');
         const builderPanel = document.getElementById('builder-panel');
         const builderObject = document.getElementById('builder-object');
@@ -2060,7 +2060,7 @@ export class SOQLEditorProvider {
 
         window.addEventListener('message', event => {
             const message = event.data;
-            if (message.command && message.command.indexOf('rt:') === 0) { soqlTable.handleMessage(message); return; }
+            if (message.type && String(message.type).indexOf('rt:') === 0) { soqlTable.handleMessage(message); return; }
             if (message.command === 'wbCompletions') { setBusy(-1); const cb = _pending[message.requestId]; if (cb) { delete _pending[message.requestId]; cb(message.items || []); } return; }
             if (message.command === 'wbHover') { setBusy(-1); const cb = _pending[message.requestId]; if (cb) { delete _pending[message.requestId]; cb(message.hover || null); } return; }
             if (message.command === 'soqlMarkers') { if (soqlEditor) { try { monaco.editor.setModelMarkers(soqlEditor.getModel(), 'asfx-soql', (message.markers || []).map(function (m) { return { severity: monaco.MarkerSeverity.Error, message: m.message, startLineNumber: m.line + 1, startColumn: m.startCol + 1, endLineNumber: m.line + 1, endColumn: m.endCol + 1 }; })); } catch (e) {} } return; }
@@ -2414,7 +2414,7 @@ export class SOQLEditorProvider {
         // Rendering + type-aware inline editing now go through the shared component
         // (same one the ASFX Workbench SOQL tab uses). We keep currentRecords for
         // pagination/export; the component owns the table, editors and Save bar.
-        const soqlTable = ASFXResults({ mount: resultsContainer, post: vscode.postMessage, getOrg: function () { return currentTargetOrg(); } });
+        const soqlTable = ASFXResults({ mount: resultsContainer, controls: document.getElementById('rt-controls'), post: vscode.postMessage, getOrg: function () { return currentTargetOrg(); } });
         function renderTable(records) {
             currentRecords = records || [];
             soqlTable.setData(currentRecords);
