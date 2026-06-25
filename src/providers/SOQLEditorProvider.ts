@@ -813,6 +813,8 @@ export class SOQLEditorProvider {
         .rb-spacer { flex: 1; min-width: 12px; }
         .rb-sep { width: 1px; align-self: stretch; margin: 2px 4px; background: var(--asfx-border); }
         #saved-select { padding: 6px 8px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, var(--asfx-border)); border-radius: var(--asfx-radius-sm); font-size: 12px; min-width: 130px; max-width: 220px; outline: none; cursor: pointer; }
+        .wb-spinner { width: 11px; height: 11px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; display: inline-block; animation: wb-spin .8s linear infinite; }
+        @keyframes wb-spin { to { transform: rotate(360deg); } }
         #org-select { padding: 6px 8px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, var(--asfx-border)); border-radius: var(--asfx-radius-sm); font-size: 12px; min-width: 160px; outline: none; cursor: pointer; }
         #org-select:focus { border-color: var(--vscode-focusBorder); }
         #history-select { padding: 6px 8px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, var(--asfx-border)); border-radius: var(--asfx-radius-sm); font-size: 12px; min-width: 150px; max-width: 260px; outline: none; cursor: pointer; }
@@ -1017,6 +1019,7 @@ export class SOQLEditorProvider {
                 <span class="card-title">Query</span>
                 <span class="query-hint"><kbd>⌘/Ctrl+Enter</kbd> run · <kbd>Ctrl+Space</kbd> complete</span>
                 <span class="bsection-spacer" style="flex:1;"></span>
+                <span id="wb-busy" title="Loading schema from the org…" style="display:none; align-items:center; gap:5px; font-size:11px; opacity:0.85; margin-right:8px;"><span class="wb-spinner"></span>schema…</span>
                 <button type="button" id="format-btn" class="btn-secondary btn-sm" title="Format / prettify (Shift+Alt+F)" onclick="formatSoql()">✨ Format</button>
             </div>
             <div class="card-body" style="gap:8px;">
@@ -1086,6 +1089,7 @@ export class SOQLEditorProvider {
             addEventListener() { /* legacy textarea listeners are no-ops; Monaco handles input */ }
         };
         let _reqId = 0; const _pending = {};
+        let _busy = 0; function setBusy(d){ _busy = Math.max(0, _busy + d); const b = document.getElementById('wb-busy'); if (b) b.style.display = _busy > 0 ? 'inline-flex' : 'none'; }
         require.config({ paths: { vs: MONACO_BASE } });
         self.MonacoEnvironment = { getWorkerUrl: function () { return URL.createObjectURL(new Blob(["self.MonacoEnvironment={baseUrl:'" + MONACO_BASE + "/'};importScripts('" + MONACO_BASE + "/base/worker/workerMain.js');"], { type: 'text/javascript' })); } };
         require(['vs/editor/editor.main'], function () {
@@ -1095,13 +1099,13 @@ export class SOQLEditorProvider {
                 keywords: ['select','from','where','limit','offset','order','by','group','having','asc','desc','nulls','first','last','and','or','not','like','in','includes','excludes','null','true','false','count','count_distinct','sum','avg','min','max','using','scope','with','data','category','for','view','reference','update','tracking','viewstat','typeof','when','then','else','end'],
                 tokenizer: { root: [ [/'(?:[^'\\\\]|\\\\.)*'/, 'string'], [/\\b\\d+(\\.\\d+)?\\b/, 'number'], [/[a-zA-Z_][\\w.]*/, { cases: { '@keywords': 'keyword', '@default': 'identifier' } }] ] } });
             monaco.languages.registerCompletionItemProvider('soql', { triggerCharacters: ['.', ' ', ',', '('], provideCompletionItems: function (model, pos) {
-                return new Promise(function (resolve) { const id = ++_reqId; _pending[id] = function (items) { const w = model.getWordUntilPosition(pos); const range = { startLineNumber: pos.lineNumber, endLineNumber: pos.lineNumber, startColumn: w.startColumn, endColumn: w.endColumn }; resolve({ suggestions: items.map(function (it) { return { label: it.label, kind: mapKind(it.kind), insertText: it.insertText || it.label, insertTextRules: it.isSnippet ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet : undefined, detail: it.detail, documentation: it.documentation ? { value: it.documentation } : undefined, sortText: it.sortText, filterText: it.filterText, range: range }; }) }); }; vscode.postMessage({ command: 'wbCompletions', requestId: id, text: model.getValue(), line: pos.lineNumber - 1, character: pos.column - 1 }); });
+                return new Promise(function (resolve) { const id = ++_reqId; _pending[id] = function (items) { const w = model.getWordUntilPosition(pos); const range = { startLineNumber: pos.lineNumber, endLineNumber: pos.lineNumber, startColumn: w.startColumn, endColumn: w.endColumn }; resolve({ suggestions: items.map(function (it) { return { label: it.label, kind: mapKind(it.kind), insertText: it.insertText || it.label, insertTextRules: it.isSnippet ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet : undefined, detail: it.detail, documentation: it.documentation ? { value: it.documentation } : undefined, sortText: it.sortText, filterText: it.filterText, range: range }; }) }); }; setBusy(1); vscode.postMessage({ command: 'wbCompletions', requestId: id, text: model.getValue(), line: pos.lineNumber - 1, character: pos.column - 1 }); });
             } });
             monaco.languages.registerHoverProvider('soql', { provideHover: function (model, pos) {
-                return new Promise(function (resolve) { const id = ++_reqId; _pending[id] = function (h) { if (!h || !h.contents || !h.contents.length) { resolve(null); return; } resolve({ contents: h.contents.map(function (v) { return { value: v }; }) }); }; vscode.postMessage({ command: 'wbHover', requestId: id, text: model.getValue(), line: pos.lineNumber - 1, character: pos.column - 1 }); });
+                return new Promise(function (resolve) { const id = ++_reqId; _pending[id] = function (h) { if (!h || !h.contents || !h.contents.length) { resolve(null); return; } resolve({ contents: h.contents.map(function (v) { return { value: v }; }) }); }; setBusy(1); vscode.postMessage({ command: 'wbHover', requestId: id, text: model.getValue(), line: pos.lineNumber - 1, character: pos.column - 1 }); });
             } });
             const dark = document.body.classList.contains('vscode-dark') || document.body.classList.contains('vscode-high-contrast');
-            soqlEditor = monaco.editor.create(document.getElementById('query-editor'), { value: _pendingValue || '', language: 'soql', theme: dark ? 'vs-dark' : 'vs', automaticLayout: true, minimap: { enabled: false }, scrollBeyondLastLine: false, fontSize: 13, quickSuggestions: true, fixedOverflowWidgets: true });
+            soqlEditor = monaco.editor.create(document.getElementById('query-editor'), { value: _pendingValue || '', language: 'soql', theme: dark ? 'vs-dark' : 'vs', automaticLayout: true, minimap: { enabled: false }, scrollBeyondLastLine: false, fontSize: 13, quickSuggestions: true, quickSuggestionsDelay: 200, fixedOverflowWidgets: true });
             _pendingValue = null;
             soqlEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, function () { runQuery(); });
             soqlEditor.addCommand(monaco.KeyMod.WinCtrl | monaco.KeyCode.Enter, function () { runQuery(); });
@@ -2014,8 +2018,8 @@ export class SOQLEditorProvider {
 
         window.addEventListener('message', event => {
             const message = event.data;
-            if (message.command === 'wbCompletions') { const cb = _pending[message.requestId]; if (cb) { delete _pending[message.requestId]; cb(message.items || []); } return; }
-            if (message.command === 'wbHover') { const cb = _pending[message.requestId]; if (cb) { delete _pending[message.requestId]; cb(message.hover || null); } return; }
+            if (message.command === 'wbCompletions') { setBusy(-1); const cb = _pending[message.requestId]; if (cb) { delete _pending[message.requestId]; cb(message.items || []); } return; }
+            if (message.command === 'wbHover') { setBusy(-1); const cb = _pending[message.requestId]; if (cb) { delete _pending[message.requestId]; cb(message.hover || null); } return; }
             switch (message.command) {
                 case 'loading':
                     executeBtn.disabled = message.value;
