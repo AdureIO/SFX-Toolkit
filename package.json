@@ -795,7 +795,7 @@
         },
         "adure-sfx-toolkit.toolingApiVersion": {
           "type": "string",
-          "default": "v60.0",
+          "default": "v67.0",
           "description": "Salesforce Tooling API version."
         },
         "adure-sfx-toolkit.apexLog.highlightPatterns": {
@@ -832,8 +832,8 @@
             "on",
             "off"
           ],
-          "default": "auto",
-          "markdownDescription": "Apex *semantic* features (outline, syntax diagnostics, go-to-definition for your own classes, signature help) from the SFX language server. `auto`: enabled only when the official Salesforce Apex extension is not installed (avoids duplicates). `on`: always enabled. `off`: disabled."
+          "default": "on",
+          "markdownDescription": "Apex *semantic* features (outline, syntax diagnostics, go-to-definition for your own classes, signature help) from the SFX language server. `on` (default): always enabled. `auto`: enabled only when the official Salesforce Apex extension is not installed (avoids duplicates). `off`: disabled."
         },
         "adure-sfx-toolkit.apex.enableCompletion": {
           "type": "boolean",

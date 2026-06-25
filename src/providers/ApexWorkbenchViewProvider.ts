@@ -18,6 +18,7 @@ import { refreshLanguageServerSchema, setEphemeralBuffers } from '../languageCli
 import { ApexBufferBridge } from './apexBufferBridge';
 import { Telemetry } from '../utils/telemetry';
 import { logTreeProvider } from './LogTreeProvider';
+import { onDidChangeDefaultOrg } from '../utils/defaultOrgEvents';
 
 const WORKBENCH_BUFFER = '.vscode/anon-workbench-buffer.apex';
 const SOQL_BUFFER = '.vscode/workbench-soql-buffer.soql';
@@ -47,7 +48,13 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	/** Bumped on each list load so stale background enrichment self-cancels. */
 	private _enrichGen = 0;
 
-	constructor(private readonly _extensionUri: vscode.Uri) {}
+	constructor(private readonly _extensionUri: vscode.Uri) {
+		// When the default org changes, re-send the org list so the selector realigns
+		// (the "(default)" marker follows, and a default-selected user follows along).
+		onDidChangeDefaultOrg(async () => {
+			if (this._view) this._post('orgList', { orgs: await getAnonymousApexOrgList(), defaultChanged: true });
+		});
+	}
 
 	private _post(type: string, payload: Record<string, unknown> = {}): void {
 		this._view?.webview.postMessage({ type, ...payload });
@@ -639,8 +646,10 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 		if(d.type==='soqlMarkers'){ if(soqlEd){ try{ monaco.editor.setModelMarkers(soqlEd.getModel(),'asfx-soql',(d.markers||[]).map(function(m){ return {severity:monaco.MarkerSeverity.Error,message:m.message,startLineNumber:m.line+1,startColumn:m.startCol+1,endLineNumber:m.line+1,endColumn:m.endCol+1}; })); }catch(e){} } return; }
 		if(d.type==='soqlStarted'){ const s=document.getElementById('soqlStatus'); s.className='muted'; s.style.color=''; s.textContent='Running…'; document.getElementById('soqlResults').innerHTML=''; return; }
 		if(d.type==='soqlResult'){ renderSoql(d); return; }
-		if(d.type==='orgList'){ const orgs=d.orgs||[];
+		if(d.type==='orgList'){ const orgs=d.orgs||[]; const prev=orgSel.value;
 			orgSel.innerHTML=orgs.length?orgs.map(function(o){ const def=(o.label||'').indexOf('(default)')>=0; const v=def?'':(o.username||''); return '<option value="'+v.replace(/"/g,'&quot;')+'">'+(o.label||o.username||'').replace(/</g,'&lt;')+'</option>'; }).join(''):'<option value="">No orgs</option>';
+			// Keep the user's explicit selection across refreshes; '' (default) naturally follows a default-org change.
+			if(Array.prototype.some.call(orgSel.options, function(o){return o.value===prev;})) orgSel.value=prev;
 			vscode.postMessage({type:'warmOrg', org:orgVal()}); loadLogs(); }
 		else if(d.type==='logList'){ if((d.org||'')!==orgVal()) return; if(d.units){ for(const k in d.units) unitById[k]=d.units[k]; } renderList(d.rows||[]); }
 		else if(d.type==='logUnit'){ if((d.org||'')!==orgVal()||!d.unit) return; unitById[d.id]=d.unit; const row=listRows.querySelector('.row[data-id="'+d.id+'"]'); if(row&&row.firstElementChild) row.firstElementChild.textContent=d.unit; }

@@ -14,6 +14,7 @@ import { parseSoqlError } from "../utils/soqlError";
 import { handleResultsTableMessage } from "../utils/resultsTableHost";
 import { resultsTableCss, resultsTableScript } from "../webview/resultsTableComponent";
 import { Telemetry } from "../utils/telemetry";
+import { onDidChangeDefaultOrg } from "../utils/defaultOrgEvents";
 
 const SOQL_WB_BUFFER = ".vscode/soql-wb-buffer.soql";
 const SOQL_HISTORY_MAX = 50;
@@ -232,8 +233,12 @@ export class SOQLEditorProvider {
       []
     );
 
+    // Realign the org selector when the default org changes (extension command or external).
+    const defaultOrgSub = onDidChangeDefaultOrg(() => { void SOQLEditorProvider.sendOrgList(panel, true); });
+
     panel.onDidDispose(() => {
       messageListener.dispose();
+      defaultOrgSub.dispose();
       SOQLEditorProvider.editableFieldsCache = {};
     });
   }
@@ -507,12 +512,13 @@ export class SOQLEditorProvider {
     return null;
   }
 
-  private static async sendOrgList(panel: vscode.WebviewPanel) {
+  private static async sendOrgList(panel: vscode.WebviewPanel, defaultChanged = false) {
     const toWebview = (orgs: { username: string; label: string }[]) =>
-      panel.webview.postMessage({ command: "orgList", orgs });
+      panel.webview.postMessage({ command: "orgList", orgs, defaultChanged });
 
     const cached = getCachedOrgList();
-    if (cached) {
+    if (cached && !defaultChanged) {
+      // On a default-org change skip the (now stale) cached list; wait for the fresh one.
       toWebview(cached);
     }
 
@@ -2103,7 +2109,8 @@ export class SOQLEditorProvider {
                         loadMoreBtn.textContent = message.value ? 'Loading…' : '⬇ Load more';
                     }
                     break;
-                case 'orgList':
+                case 'orgList': {
+                    const prevOrg = orgSelect.value;
                     orgSelect.innerHTML = '<option value="">Default org</option>';
                     (message.orgs || []).forEach(o => {
                         const opt = document.createElement('option');
@@ -2111,13 +2118,18 @@ export class SOQLEditorProvider {
                         opt.textContent = o.label || ((o.alias || o.username || '') + (o.isDefault ? ' (default)' : ''));
                         orgSelect.appendChild(opt);
                     });
-                    // Preselect the org carried over from the workbench (once available).
-                    if (initialOrgPreset) {
-                        const has = Array.prototype.some.call(orgSelect.options, o => o.value === initialOrgPreset);
-                        if (has) { orgSelect.value = initialOrgPreset; orgSelect.dispatchEvent(new Event('change')); }
-                        initialOrgPreset = '';
+                    // Keep the user's explicit selection across refreshes; '' (Default org) stays default.
+                    const hadPreset = !!initialOrgPreset;
+                    const target = initialOrgPreset || prevOrg;
+                    if (target && Array.prototype.some.call(orgSelect.options, o => o.value === target)) {
+                        orgSelect.value = target;
                     }
+                    initialOrgPreset = '';
+                    // Apply the carried-over org on first load, and re-sync IntelliSense/labels
+                    // for the (possibly unchanged) selection when the default org changed.
+                    if (hadPreset || message.defaultChanged) { orgSelect.dispatchEvent(new Event('change')); }
                     break;
+                }
                 case 'historyUpdated':
                     setHistoryDropdown(message.history || []);
                     break;

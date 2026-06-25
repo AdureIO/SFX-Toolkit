@@ -50,11 +50,12 @@ export function startLanguageServer(context: vscode.ExtensionContext): void {
 		},
 	};
 
-	// Apex semantic features (outline, diagnostics) default off when the official
-	// Salesforce Apex extension is present, to avoid duplicate results.
+	// Apex semantic features (outline, diagnostics). Default "on" — always enabled;
+	// "auto" enables them only when the official Salesforce Apex extension is absent
+	// (avoids duplicate results); "off" disables them.
 	const apexMode = vscode.workspace
 		.getConfiguration("adure-sfx-toolkit")
-		.get<string>("apex.languageServer", "auto");
+		.get<string>("apex.languageServer", "on");
 	const hasSalesforceApex = !!vscode.extensions.getExtension("salesforce.salesforcedx-vscode-apex");
 	const apexFeatures = apexMode === "on" || (apexMode === "auto" && !hasSalesforceApex);
 	// Org-aware Apex completion (SObject fields, `new`, type names) is additive and

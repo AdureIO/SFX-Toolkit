@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 
-export const TOOLING_API_VERSION = "v60.0";
+export const TOOLING_API_VERSION = "v67.0";
 export const ASFX_DIR = ".sfdx/asfx";
 export const SF_DEBUG_LOGS_DIR = ".sfdx/tools/debug/logs";
 
@@ -25,7 +25,7 @@ export function getQuickTraceDebugLevel(): string {
 }
 
 export function getToolingApiVersion(): string {
-  return getConfig().get<string>("toolingApiVersion", "v60.0");
+  return getConfig().get<string>("toolingApiVersion", "v67.0");
 }
 
 export function getParallelDeletes(): number {

@@ -74,6 +74,7 @@ import { OrgMetadataCache } from "./utils/orgMetadataCache";
 import { AuthInfo } from "./utils/authInfo";
 import { getDeployDiagnosticCollection } from "./utils/deployDiagnostics";
 import { warmOrgListCache, invalidateOrgListCache, refreshOrgListCache } from "./utils/orgListCache";
+import { initDefaultOrgWatcher } from "./utils/defaultOrgEvents";
 
 function updateLwcContext(editor: vscode.TextEditor | undefined): void {
   if (!editor) {
@@ -144,6 +145,10 @@ export function activate(context: vscode.ExtensionContext) {
   // shells out to the CLI). Kicking it off here means it runs concurrently with
   // the rest of activation, so every AuthInfo-based feature finds it cached.
   if (isSalesforceProject()) AuthInfo.warmAuthForOrg(null);
+
+  // Watch for default (target) org changes — extension command or external `sf config set` —
+  // so the workbenches can realign their selected org and we drop stale default-org caches.
+  initDefaultOrgWatcher(context);
 
   // Set context so panels can show placeholder when not in SFDX project; update when workspace changes
   updateSalesforceProjectContext();

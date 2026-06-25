@@ -157,7 +157,7 @@ All settings live under the `adure-sfx-toolkit.*` namespace.
 | --- | --- | --- |
 | `soql.enableCompletion` | `true` | Org-aware SOQL completion in `.soql` files (and inline SOQL in Apex). |
 | `apex.enableCompletion` | `true` | Org-aware Apex completion (SObject fields on `var.`, `new` constructors, type names). Turn off to defer entirely to the Salesforce extension. |
-| `apex.languageServer` | `auto` | Apex *semantic* features (outline, syntax diagnostics, go-to-definition for your classes, signature help). `auto` enables them only when the Salesforce Apex extension is **not** installed; `on` / `off` force it. |
+| `apex.languageServer` | `on` | Apex *semantic* features (outline, syntax diagnostics, go-to-definition for your classes, signature help). `on` (default) always enables them; `auto` enables them only when the Salesforce Apex extension is **not** installed; `off` disables. |
 | `apex.generateSObjectStubs` | `true` | Generate SObject schema stubs in the background (go-to-definition + AI grounding), refreshed on org switch / pull / Refresh Metadata. |
 | `apex.stubScope` | `referenced` | `referenced` (lean) generates stubs only for objects used in your code; `all` also writes type-only stubs for every org object (heavier). |
 | `apex.restartAfterInitialLoad` | `true` | Once, after the Salesforce Apex LS finishes loading, do a single clean restart so newly generated stub types are indexed (never restarts mid-index). |
@@ -172,7 +172,7 @@ All settings live under the `adure-sfx-toolkit.*` namespace.
 | `maxLogFiles` | — | Maximum number of logs to fetch. |
 | `quickTraceDurationMinutes` | — | Quick Trace duration. |
 | `quickTraceDebugLevel` | — | Debug level used by Quick Trace. |
-| `toolingApiVersion` | `v60.0` | Salesforce API version for REST/Tooling calls and `{version}` substitution. |
+| `toolingApiVersion` | `v67.0` | Salesforce API version for REST/Tooling calls and `{version}` substitution. |
 | `parallelDeletes` | `8` | Parallel API calls when deleting logs. |
 | `testRunTimeoutMinutes` | — | Timeout for test runs. |
 | `autoSaveBeforePush` | — | Save dirty editors before a push. |
