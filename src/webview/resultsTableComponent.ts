@@ -134,6 +134,9 @@ export function resultsTableScript(): string {
 				html+='<tr><td class="rt-num">'+(i+1)+'</td>'+columns.map(function(c){ var v=r[c]; var sub=subRecords(v); if(sub) return '<td class="rt-sub">'+cellHtml(r,c)+'</td>'; if(isRelObj(v)) return '<td>'+cellHtml(r,c)+'</td>'; return scalarTd(r,c); }).join('')+'</tr>'; }
 			mount.innerHTML=html+'</tbody></table></div>';
 			mount.querySelectorAll('.rt-edit').forEach(function(el){ el.ondblclick=function(e){ e.stopPropagation(); beginEdit(el); }; });
+			// Safety net: auto table-layout can under-size a cell holding a nested table, clipping it.
+			// Force each subquery column to at least its nested table's real width so the row widens and scrolls.
+			mount.querySelectorAll('td.rt-sub').forEach(function(td){ var nt=td.querySelector('.rt-nested'); if(nt){ var w=nt.scrollWidth; if(w) td.style.minWidth=(w+6)+'px'; } });
 			requestNames();
 		}
 
