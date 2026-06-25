@@ -19,10 +19,10 @@ export class LogContentProvider implements vscode.TextDocumentContentProvider {
     }
 
     private parseLogId(uri: vscode.Uri): string | undefined {
-        // Expected shape: sf-log://log/<logId>
+        // Expected shape: sf-log://log/<logId>.log
         if (uri.scheme !== 'sf-log') return undefined;
         const authority = (uri.authority || '').toLowerCase();
-        const logId = uri.path.replace(/^\/+/, '');
+        const logId = uri.path.replace(/^\/+/, '').replace(/\.log$/i, '');
         if (authority !== 'log' || !logId) return undefined;
         return logId;
     }

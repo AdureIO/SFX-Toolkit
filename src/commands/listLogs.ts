@@ -47,7 +47,9 @@ export async function openLogById(
         const body = await fetchApexLogBody(targetOrg ?? null, logId);
         if (!body) throw new Error('Log body could not be retrieved.');
         const scheme = _scheme || 'sf-log';
-        const uri = vscode.Uri.parse(`${scheme}://log/${logId}`);
+        // Give the virtual doc a `.log` path so it's recognized as a Salesforce log
+        // (language/highlighting + the log filter buttons). The id is parsed back out.
+        const uri = vscode.Uri.parse(`${scheme}://log/${logId}.log`);
         logContentProvider.setContent(uri, body);
         const doc = await vscode.workspace.openTextDocument(uri);
         try {
