@@ -10,36 +10,12 @@
 import { DescribeStore } from "./describeStore";
 import type { SObjectDescribe, FieldDescribe, ChildRelationship } from "./dataMigration";
 
-// ─── Constants ────────────────────────────────────────────────────────────────
-
-const CACHE_KEY_DEFAULT = "__default__";
-
-// ─── Internal types ────────────────────────────────────────────────────────────
-
-interface CacheEntry {
-  describe: SObjectDescribe;
-  fetchedAt: number;
-}
-
-function orgKey(org: string | null): string {
-  return org === null || org === "" ? CACHE_KEY_DEFAULT : org;
-}
-
 // ─── Cache implementation ─────────────────────────────────────────────────────
 
+// Rich describes are not cached here — they're parsed on demand from the shared
+// DescribeStore (the single per-org, ~10-min cache). This class only adds the
+// richer parsing shape on top.
 class SchemaCacheImpl {
-  private cache = new Map<string, Map<string, CacheEntry>>();
-
-  private getOrgMap(org: string | null): Map<string, CacheEntry> {
-    const key = orgKey(org);
-    let m = this.cache.get(key);
-    if (!m) {
-      m = new Map();
-      this.cache.set(key, m);
-    }
-    return m;
-  }
-
   /**
    * Get a rich SObject describe (fields with createable, externalId, unique, nillable, etc).
    * Sourced from the shared DescribeStore (the single per-org, ~10-min cache); we parse on
@@ -96,26 +72,17 @@ class SchemaCacheImpl {
    * Call after the user refreshes metadata or after a deploy that changed field definitions.
    */
   invalidate(org: string | null): void {
-    this.cache.delete(orgKey(org));
     DescribeStore.invalidate(org);
   }
 
   /** Invalidate a specific sobject's cached describe. */
   invalidateSObject(org: string | null, sobject: string): void {
-    this.getOrgMap(org).delete(sobject);
     DescribeStore.invalidateSObject(org, sobject);
   }
 
   /** Clear all cached describes across all orgs. */
   clear(): void {
-    this.cache.clear();
     DescribeStore.invalidateAll();
-  }
-
-  /** Stats for a given org: how many describes are currently cached. */
-  stats(org: string | null): { count: number; sobjects: string[] } {
-    const map = this.getOrgMap(org);
-    return { count: map.size, sobjects: Array.from(map.keys()) };
   }
 }
 

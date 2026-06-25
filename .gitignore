@@ -10,3 +10,5 @@ functions.md
 settings.md
 
 *.vsix
+# Project uses npm (package-lock.json)
+yarn.lock

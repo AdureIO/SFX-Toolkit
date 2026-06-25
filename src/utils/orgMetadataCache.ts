@@ -20,7 +20,6 @@ export interface SObjectDescribe {
 
 interface OrgCache {
 	sobjects: string[] | null;
-	describes: Map<string, SObjectDescribe>;
 	/** When sobject list was last fetched (for background refresh). */
 	sobjectsFetchedAt: number;
 }
@@ -68,7 +67,6 @@ class OrgMetadataCacheImpl {
 		if (!entry) {
 			entry = {
 				sobjects: null,
-				describes: new Map(),
 				sobjectsFetchedAt: 0,
 			};
 			this.cache.set(key, entry);
@@ -250,7 +248,6 @@ class OrgMetadataCacheImpl {
 		if (!isSalesforceProject()) return;
 		const key = cacheKey(org);
 		const entry = this.getOrCreateOrgCache(key);
-		entry.describes.clear();
 		entry.sobjects = null;
 		entry.sobjectsFetchedAt = 0;
 		DescribeStore.invalidate(org);
