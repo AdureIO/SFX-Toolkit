@@ -19,6 +19,10 @@ import { outputChannel } from "./outputChannel";
 const CACHE_KEY_DEFAULT = "__default__";
 /** Default freshness window for a raw describe. */
 export const DESCRIBE_TTL_MS = 15 * 60 * 1000;
+/** Short window to cache a miss (object not found / fetch failed) so completion
+ *  and validation don't re-hit the org on every keystroke while typing a partial
+ *  or misspelled name — yet a genuinely new object appears after it expires. */
+const NEGATIVE_TTL_MS = 60 * 1000;
 
 function orgKey(org: string | null): string {
 	return org === null || org === "" ? CACHE_KEY_DEFAULT : org;
@@ -52,7 +56,11 @@ class DescribeStoreImpl {
 		if (!sobject) return null;
 		const map = this.orgMap(org);
 		const hit = map.get(sobject);
-		if (hit && Date.now() - hit.fetchedAt < ttlMs) return hit.raw;
+		if (hit) {
+			// Misses get a short TTL; hits the full one.
+			const effectiveTtl = hit.raw === null ? NEGATIVE_TTL_MS : ttlMs;
+			if (Date.now() - hit.fetchedAt < effectiveTtl) return hit.raw;
+		}
 
 		const lockKey = `${orgKey(org)}|${sobject}`;
 		const inflight = this.locks.get(lockKey);
@@ -60,11 +68,13 @@ class DescribeStoreImpl {
 
 		const promise = this.fetch(org, sobject)
 			.then((raw) => {
-				if (raw) map.set(sobject, { raw, fetchedAt: Date.now() });
+				// Cache the result either way (null = negative cache) to avoid re-fetching.
+				map.set(sobject, { raw: raw ?? null, fetchedAt: Date.now() });
 				this.locks.delete(lockKey);
 				return raw;
 			})
 			.catch((e: any) => {
+				map.set(sobject, { raw: null, fetchedAt: Date.now() });
 				this.locks.delete(lockKey);
 				outputChannel.appendLine(`DescribeStore: describe ${sobject} failed: ${e?.message ?? e}`);
 				return null;

@@ -11,6 +11,15 @@ const nsless = (s: string) => s.replace(/^[a-z0-9]+__/i, "");
 export async function getSoqlMarkers(org: string | null, text: string): Promise<SoqlMarker[]> {
 	const obj = topLevelFromObject(text);
 	if (!obj) return [];
+	// Only describe objects that actually exist (from the cached list) — avoids a
+	// doomed fetch while the user is still typing the object name, and avoids
+	// flagging fields on an unknown object.
+	const objects = await OrgMetadataCache.getObjectList(org);
+	if (objects.length) {
+		const want = nsless(obj).toLowerCase();
+		const exists = objects.some((o) => o.toLowerCase() === obj.toLowerCase() || nsless(o).toLowerCase() === want);
+		if (!exists) return [];
+	}
 	const fr = await OrgMetadataCache.getFieldsAndRelations(org, obj);
 	if (!fr.length) return []; // unknown object or schema unavailable → don't flag anything
 	const fields = new Set<string>();
