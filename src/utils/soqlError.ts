@@ -11,6 +11,7 @@ export interface ParsedSoqlError {
 	code?: string;
 	line?: number; // 1-based, as reported by the API
 	column?: number; // 1-based
+	details?: string; // the full original Salesforce message (unescaped), for display
 }
 
 export function parseSoqlError(raw: string): ParsedSoqlError {
@@ -49,5 +50,5 @@ export function parseSoqlError(raw: string): ParsedSoqlError {
 			.pop() || payloadMessage.trim();
 	}
 
-	return { message, code, line, column };
+	return { message, code, line, column, details: payloadMessage.trim() };
 }

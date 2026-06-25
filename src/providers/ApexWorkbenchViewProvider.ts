@@ -274,7 +274,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 			return { columns, rows, total: data.totalSize ?? rows.length, returned: rows.length, done: data.done !== false };
 		} catch (e: any) {
 			const p = parseSoqlError(e?.message ?? String(e));
-			return { error: p.code ? `${p.code}: ${p.message}` : p.message, errorLine: p.line, errorColumn: p.column };
+			return { error: p.code ? `${p.code}: ${p.message}` : p.message, errorDetails: p.details, errorLine: p.line, errorColumn: p.column };
 		}
 	}
 
@@ -314,6 +314,9 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	#busy { display:none; align-items:center; gap:5px; font-size:11px; opacity:0.85; white-space:nowrap; }
 	.spinner { width:11px; height:11px; border:2px solid currentColor; border-top-color:transparent; border-radius:50%; display:inline-block; animation:asfx-spin .8s linear infinite; }
 	@keyframes asfx-spin { to { transform:rotate(360deg); } }
+	/* Let the completion popup grow tall even when the editor is short. */
+	.monaco-editor .suggest-widget { max-height:360px !important; }
+	.monaco-editor .suggest-widget .monaco-list { max-height:340px !important; }
 	button { font-size:11px; padding:4px 10px; border:none; border-radius:6px; cursor:pointer; background:var(--vscode-button-secondaryBackground); color:var(--vscode-button-secondaryForeground); }
 	button:hover { background:var(--vscode-button-hoverBackground); }
 	button.primary { background:var(--vscode-button-background); color:var(--vscode-button-foreground); }
@@ -605,7 +608,9 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	function setSoqlErrMarker(line,col,text){ if(!soqlEd||!line) return; try{ const model=soqlEd.getModel(); let c=col||1,e=c+1; const w=model.getWordAtPosition({lineNumber:line,column:c}); if(w){c=w.startColumn;e=w.endColumn;} monaco.editor.setModelMarkers(model,'asfx-soql-error',[{severity:monaco.MarkerSeverity.Error,message:text,startLineNumber:line,startColumn:c,endLineNumber:line,endColumn:e}]); }catch(x){} }
 	function clearSoqlErrMarker(){ if(soqlEd) try{ monaco.editor.setModelMarkers(soqlEd.getModel(),'asfx-soql-error',[]); }catch(x){} }
 	function renderSoql(d){ const status=document.getElementById('soqlStatus'); const out=document.getElementById('soqlResults');
-		if(d.error){ status.className=''; status.style.color='var(--vscode-errorForeground)'; status.textContent=d.error; out.innerHTML=''; setSoqlErrMarker(d.errorLine,d.errorColumn,d.error); return; }
+		if(d.error){ status.className=''; status.style.color='var(--vscode-errorForeground)'; status.textContent=d.error;
+			out.innerHTML = d.errorDetails ? '<pre style="white-space:pre-wrap;word-break:break-word;margin:0;padding:8px;font-family:var(--vscode-editor-font-family,monospace);font-size:12px;opacity:0.85;">'+esc(d.errorDetails)+'</pre>' : '';
+			setSoqlErrMarker(d.errorLine,d.errorColumn,d.error); return; }
 		clearSoqlErrMarker();
 		status.style.color=''; status.className='muted';
 		const cols=d.columns||[]; const rows=d.rows||[];

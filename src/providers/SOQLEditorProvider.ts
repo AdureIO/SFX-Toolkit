@@ -555,7 +555,7 @@ export class SOQLEditorProvider {
   private static postQueryError(panel: vscode.WebviewPanel, raw: string): void {
     const parsed = parseSoqlError(raw);
     const label = parsed.code ? `${parsed.code}: ${parsed.message}` : parsed.message;
-    panel.webview.postMessage({ command: "error", text: label, line: parsed.line, column: parsed.column });
+    panel.webview.postMessage({ command: "error", text: label, details: parsed.details, line: parsed.line, column: parsed.column });
   }
 
   /** Load the next page of records for the current result set (pagination). */
@@ -829,6 +829,9 @@ export class SOQLEditorProvider {
         #saved-select { padding: 6px 8px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, var(--asfx-border)); border-radius: var(--asfx-radius-sm); font-size: 12px; min-width: 130px; max-width: 220px; outline: none; cursor: pointer; }
         .wb-spinner { width: 11px; height: 11px; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; display: inline-block; animation: wb-spin .8s linear infinite; }
         @keyframes wb-spin { to { transform: rotate(360deg); } }
+        /* Let the completion popup grow tall even when the editor is short. */
+        .monaco-editor .suggest-widget { max-height: 360px !important; }
+        .monaco-editor .suggest-widget .monaco-list { max-height: 340px !important; }
         #org-select { padding: 6px 8px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, var(--asfx-border)); border-radius: var(--asfx-radius-sm); font-size: 12px; min-width: 160px; outline: none; cursor: pointer; }
         #org-select:focus { border-color: var(--vscode-focusBorder); }
         #history-select { padding: 6px 8px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, var(--asfx-border)); border-radius: var(--asfx-radius-sm); font-size: 12px; min-width: 150px; max-width: 260px; outline: none; cursor: pointer; }
@@ -1038,7 +1041,7 @@ export class SOQLEditorProvider {
             </div>
             <div class="card-body" style="gap:8px;">
                 <div class="query-wrap">
-                    <div id="query-editor" style="height:170px; width:100%; border:1px solid var(--asfx-border); border-radius:var(--asfx-radius-sm); overflow:hidden;"></div>
+                    <div id="query-editor" style="height:220px; width:100%; border:1px solid var(--asfx-border); border-radius:var(--asfx-radius-sm); overflow:hidden;"></div>
                     <ul id="completion-list" style="display:none;"></ul>
                 </div>
             </div>
@@ -2109,12 +2112,22 @@ export class SOQLEditorProvider {
                 case 'historyUpdated':
                     setHistoryDropdown(message.history || []);
                     break;
-                case 'error':
+                case 'error': {
                     errorMsg.textContent = message.text;
-                    resultsContainer.innerHTML = '';
                     statusBar.textContent = '';
+                    // Also show the full, polished Salesforce error (not the raw JSON).
+                    if (message.details) {
+                        const pre = document.createElement('pre');
+                        pre.style.cssText = 'white-space:pre-wrap;word-break:break-word;margin:8px 0 0;padding:8px;font-family:var(--vscode-editor-font-family,monospace);font-size:12px;opacity:0.85;';
+                        pre.textContent = message.details;
+                        resultsContainer.innerHTML = '';
+                        resultsContainer.appendChild(pre);
+                    } else {
+                        resultsContainer.innerHTML = '';
+                    }
                     setSoqlErrorMarker(message.line, message.column, message.text);
                     break;
+                }
                 case 'saveErrors':
                     errorMsg.textContent = 'Save errors:\\n' + (message.errors || []).join('\\n');
                     break;
