@@ -108,7 +108,10 @@ export function startLanguageServer(context: vscode.ExtensionContext): void {
 
 	client.onRequest(REQ_OBJECT_LIST, async (params: { uri?: string }) => {
 		try {
-			return await SoqlSchemaProvider.getObjectList(orgForUri(params?.uri));
+			const org = orgForUri(params?.uri);
+			const list = await SoqlSchemaProvider.getObjectList(org);
+			outputChannel.appendLine(`languageClient: objectList org=${org ?? "default"} → ${list.length} objects`);
+			return list;
 		} catch (e: any) {
 			outputChannel.appendLine(`languageClient: objectList failed: ${e?.message ?? e}`);
 			return [];
