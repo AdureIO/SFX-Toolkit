@@ -33,8 +33,7 @@ export function resultsTableCss(): string {
 	td.rt-edit { min-width:42px; }
 	.rt-edit:hover { outline:1px solid var(--vscode-focusBorder); outline-offset:-1px; }
 	span.rt-edit { display:inline-block; min-width:28px; min-height:1em; }
-	.rt-dirty { background:var(--vscode-inputValidation-warningBackground, rgba(255,200,0,0.3)) !important; box-shadow: inset 3px 0 0 var(--vscode-editorWarning-foreground, #cca700); }
-	td.rt-dirty { background:var(--vscode-inputValidation-warningBackground, rgba(255,200,0,0.3)) !important; }
+	.rt-dirty, td.rt-dirty { background:rgba(204,167,0,0.16) !important; box-shadow: inset 3px 0 0 var(--vscode-editorWarning-foreground, #cca700); }
 	.rt-ref-id { display:block; font-family:var(--vscode-editor-font-family, monospace); opacity:.6; font-size:11px; }
 	.rt-ref-name { display:block; }
 	table.rt input, table.rt select { width:100%; box-sizing:border-box; font:inherit; padding:1px 3px; background:var(--vscode-input-background); color:var(--vscode-input-foreground); border:1px solid var(--vscode-focusBorder); border-radius:2px; }
@@ -101,7 +100,9 @@ export function resultsTableScript(): string {
 		function nestedTable(sub){ var sc=[],s={}; sub.forEach(function(rr){ Object.keys(rr).forEach(function(k){ if(k!=='attributes'&&!s[k]){s[k]=1;sc.push(k);} }); });
 			var ct=typeOf(sub[0])||'';
 			var h='<table class="rt-nested"><thead><tr>'+sc.map(function(c){return '<th>'+esc(c)+'</th>';}).join('')+'</tr></thead><tbody>';
-			sub.forEach(function(rr){ var cid=idOf(rr); h+='<tr>'+sc.map(function(c){ var v=rr[c]; if(typeof v==='object') return '<td>'+esc(displayValue(v))+'</td>'; var fm=fmeta(ct,c); var ed=cid&&fm&&fm.updateable&&c!=='Id'; return '<td>'+(ed?editSpan(cid,ct,c,v):valueDisplay(ct,c,v))+'</td>'; }).join('')+'</tr>'; });
+			sub.forEach(function(rr){ var cid=idOf(rr); h+='<tr>'+sc.map(function(c){ var v=rr[c]; if(typeof v==='object') return '<td>'+esc(displayValue(v))+'</td>'; var fm=fmeta(ct,c); var ed=cid&&fm&&fm.updateable&&c!=='Id';
+				if(ed){ var dirty=changedVal(cid,c)!==undefined; var shown=dirty?changes[cid].fields[c]:v; return '<td class="rt-edit'+(dirty?' rt-dirty':'')+'" title="Double-click to edit" data-rec="'+esc(cid)+'" data-type="'+esc(ct)+'" data-field="'+esc(c)+'">'+valueDisplay(ct,c,shown)+'</td>'; }
+				return '<td>'+valueDisplay(ct,c,v)+'</td>'; }).join('')+'</tr>'; });
 			return h+'</tbody></table>'; }
 
 		function renderControls(){ if(!controls) return;
@@ -133,6 +134,10 @@ export function resultsTableScript(): string {
 		}
 
 		function setChange(id, type, field, val){ if(!changes[id]) changes[id]={ type:type, fields:{} }; changes[id].fields[field]=val; }
+		function normVal(v){ return v==null ? '' : String(v); }
+		// Record a change only if it actually differs from the original value; otherwise clear it
+		// (so merely opening an editor and leaving it untouched never marks the cell dirty).
+		function applyChange(id, type, field, val){ if(normVal(val)===normVal(rawValue(id, field))){ if(changes[id]){ delete changes[id].fields[field]; if(!Object.keys(changes[id].fields).length) delete changes[id]; } } else setChange(id, type, field, val); render(); }
 
 		// Freeze the cell's current width so swapping text for an input doesn't reflow the column (no jump).
 		function lockWidth(el){ var w=Math.ceil(el.getBoundingClientRect().width); if(w){ el.style.boxSizing='border-box'; el.style.width=w+'px'; el.style.minWidth=w+'px'; } }
@@ -141,7 +146,7 @@ export function resultsTableScript(): string {
 			lockWidth(el);
 			var id=el.getAttribute('data-rec'), type=el.getAttribute('data-type'), field=el.getAttribute('data-field'); var fm=fmeta(type, field)||{type:'string'};
 			var cur = changedVal(id, field); if(cur===undefined) cur = rawValue(id, field);
-			var commit=function(val){ setChange(id, type, field, val); render(); };
+			var commit=function(val){ applyChange(id, type, field, val); };
 			if(fm.type==='boolean'){ var sel=mkSelect(['true','false'], String(cur)); replace(el, sel); sel.onchange=function(){ commit(sel.value==='true'); }; sel.onblur=render; return; }
 			if((fm.type==='picklist'||fm.type==='multipicklist') && fm.picklistValues){ var s2=mkSelect([''].concat(fm.picklistValues), cur==null?'':String(cur)); replace(el, s2); s2.onchange=function(){ commit(s2.value||null); }; s2.onblur=render; return; }
 			if(fm.type==='reference' && fm.referenceTo && fm.referenceTo.length){ beginLookup(el, fm.referenceTo[0], commit); return; }
