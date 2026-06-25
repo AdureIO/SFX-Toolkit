@@ -167,6 +167,13 @@ describe("SOQL completion", () => {
     assert.ok(fields.includes("LastName"));
   });
 
+  it("completes objects (not relationships) in a WHERE semi-join subquery", async () => {
+    const src = "SELECT Id FROM Account WHERE Id IN (SELECT AccountId FROM )";
+    const col = src.indexOf("FROM )") + "FROM ".length;
+    const labels = labelsOf(await complete(src, 0, col));
+    assert.ok(labels.includes("Account") && labels.includes("Contact"), `expected objects, got: ${labels.slice(0, 5)}`);
+  });
+
   it("completes picklist values in WHERE", async () => {
     const vals = labelsOf(await complete("SELECT Id FROM Account WHERE Industry = ", 0, 40));
     assert.ok(vals.includes("'Banking'") && vals.includes("'Technology'"));

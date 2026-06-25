@@ -365,22 +365,26 @@ async function resolveRelationshipTarget(docUri: string, base: string, segments:
 // Expand one placeholder item into concrete, org-aware completion items.
 // `relSegments` is the parent-relationship path typed before the cursor (e.g.
 // `SELECT Account.Owner.|` → ['Account','Owner']), used to traverse for fields.
-async function expand(item: CompletionItem, relSegments: string[], docUri: string): Promise<CompletionItem[]> {
+async function sobjectsCompletion(docUri: string): Promise<CompletionItem[]> {
+    return (await objectList(docUri)).map((name) =>
+        withSchemaDoc(
+            {
+                label: name,
+                kind: CompletionItemKind.Class,
+                labelDetails: { description: 'SObject' },
+                sortText: objectSortTier(name) + '_' + name,
+            },
+            [`\`${name}\` — SObject`],
+        ),
+    );
+}
+
+async function expand(item: CompletionItem, relSegments: string[], docUri: string, forceObjects = false): Promise<CompletionItem[]> {
     const label = item.label as string;
     const c = ctxOf(item);
 
     if (label === '__SOBJECTS_PLACEHOLDER') {
-        return (await objectList(docUri)).map((name) =>
-            withSchemaDoc(
-                {
-                    label: name,
-                    kind: CompletionItemKind.Class,
-                    labelDetails: { description: 'SObject' },
-                    sortText: objectSortTier(name) + '_' + name,
-                },
-                [`\`${name}\` — SObject`],
-            ),
-        );
+        return sobjectsCompletion(docUri);
     }
 
     if (label === '__SOBJECT_FIELDS_PLACEHOLDER') {
@@ -394,6 +398,9 @@ async function expand(item: CompletionItem, relSegments: string[], docUri: strin
     }
 
     if (label === '__RELATIONSHIPS_PLACEHOLDER') {
+        // A WHERE/value-position subquery (`… IN (SELECT Id FROM |)`) is a semi-join
+        // over an SObject, not a child-relationship subquery — offer objects.
+        if (forceObjects) return sobjectsCompletion(docUri);
         const d = c?.sobjectName ? await describe(docUri, c.sobjectName) : null;
         if (!d) return [];
         return d.childRelationships.map((r) =>
@@ -613,16 +620,39 @@ connection.onCompletion(async (params) => {
         return [];
     }
 
+    const forceObjects = inSemiJoinSubquery(text, line, column);
     const out: CompletionItem[] = [];
     for (const item of raw) {
         if (isPlaceholder(item)) {
-            out.push(...(await expand(item, relSegments, docUri)));
+            out.push(...(await expand(item, relSegments, docUri, forceObjects)));
         } else {
             out.push(item);
         }
     }
     return sfxTag(applyNamespace(out, ns));
 });
+
+/**
+ * True when the cursor sits inside a value-position subquery — `… IN (SELECT … FROM |)`
+ * (a semi/anti-join). The enclosing `(` is preceded by IN / NOT IN, so the inner
+ * FROM ranges over an SObject, not a child relationship.
+ */
+function inSemiJoinSubquery(text: string, line: number, column: number): boolean {
+    const lines = text.split('\n');
+    let offset = 0;
+    for (let i = 0; i < line - 1 && i < lines.length; i++) offset += lines[i].length + 1;
+    offset += column - 1;
+    let depth = 0;
+    for (let i = offset - 1; i >= 0; i--) {
+        const ch = text[i];
+        if (ch === ')') depth++;
+        else if (ch === '(') {
+            if (depth === 0) return /\b(?:not\s+in|in)\s*$/i.test(text.slice(0, i));
+            depth--;
+        }
+    }
+    return false;
+}
 
 /**
  * Parent-relationship path typed before the cursor in a SOQL field position.
