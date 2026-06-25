@@ -92,10 +92,15 @@ export class ApexBufferBridge {
 			// capping, honoring the namespace-optional filterText.
 			const prefix = ApexBufferBridge.prefixAt(text, line, character);
 			if (prefix) {
-				const matches = (s?: string) => !!s && s.toLowerCase().startsWith(prefix);
+				// Keep items where the typed text matches at the start OR right after a
+				// namespace boundary (`__`), so typing an object/field name without its
+				// `ns__` prefix still surfaces it (namespace-optional matching) — even
+				// when the server didn't attach a namespaceless filterText.
+				const esc = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+				const re = new RegExp('(^|__)' + esc, 'i');
 				items = items.filter((it) => {
 					const label = typeof it.label === 'string' ? it.label : it.label.label;
-					return matches(it.filterText) || matches(label) || (it.filterText ?? '').toLowerCase().includes(prefix);
+					return re.test(label) || re.test(it.filterText ?? '');
 				});
 			}
 			return items.slice(0, 200).map((it) => {
