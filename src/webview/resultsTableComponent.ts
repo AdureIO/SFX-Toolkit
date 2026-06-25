@@ -18,12 +18,14 @@ export function resultsTableCss(): string {
 	.rt-ctl { display:none; align-items:center; gap:6px; }
 	.rt-ctl.on { display:inline-flex; }
 	.rt-ctl button { font-size:11px; padding:2px 9px; border:none; border-radius:4px; cursor:pointer; }
+	.rt-iconbtn { display:inline-flex; align-items:center; justify-content:center; min-width:24px; height:22px; padding:0 6px !important; font-size:13px !important; line-height:1; }
+	.rt-badge { font-size:10px; font-weight:600; min-width:16px; height:16px; padding:0 4px; border-radius:8px; display:inline-flex; align-items:center; justify-content:center; background:var(--vscode-editorWarning-foreground, #cca700); color:#000; }
 	.rt-save { background:var(--vscode-button-background); color:var(--vscode-button-foreground); }
 	.rt-discard { background:var(--vscode-button-secondaryBackground); color:var(--vscode-button-secondaryForeground); }
 	.rt-err { color:var(--vscode-errorForeground); }
 	.rt-scroll { overflow:auto; max-width:100%; max-height:100%; }
 	.rt-ok { color:var(--vscode-testing-iconPassed, #3fb950); }
-	.rt-refresh { background:var(--vscode-button-secondaryBackground); color:var(--vscode-button-secondaryForeground); font-size:12px !important; line-height:1; padding:2px 7px !important; }
+	.rt-refresh { background:var(--vscode-button-secondaryBackground); color:var(--vscode-button-secondaryForeground); }
 	table.rt { border-collapse:collapse; width:max-content; min-width:100%; font-size:12px; }
 	table.rt th, table.rt td { border:1px solid var(--vscode-panel-border, rgba(128,128,128,0.25)); padding:3px 8px; text-align:left; white-space:nowrap; vertical-align:top; max-width:380px; overflow:hidden; text-overflow:ellipsis; }
 	table.rt th { position:sticky; top:0; background:var(--vscode-editor-background); z-index:1; }
@@ -107,10 +109,10 @@ export function resultsTableScript(): string {
 
 		function renderControls(){ if(!controls) return;
 			var dc=dirtyCount(); var html='';
-			if(onRefresh) html += '<button class="rt-refresh" title="Refresh results">↻ Refresh</button>';
-			if(dc) html += '<span>'+dc+' change(s)</span><button class="rt-save">Save</button><button class="rt-discard">Discard</button>';
+			if(onRefresh) html += '<button class="rt-refresh rt-iconbtn" title="Refresh results">↻</button>';
+			if(dc) html += '<span class="rt-badge" title="'+dc+' unsaved change(s)">'+dc+'</span><button class="rt-save rt-iconbtn" title="Save changes">💾</button><button class="rt-discard rt-iconbtn" title="Discard changes">✕</button>';
 			if(saveErrors.length) html += '<span class="rt-err">'+esc(saveErrors.join(' · '))+'</span>';
-			else if(saveOk) html += '<span class="rt-ok">✓ Saved</span>';
+			else if(saveOk) html += '<span class="rt-ok" title="Changes saved">✓</span>';
 			controls.className = 'rt-ctl'+(html?' on':'');
 			controls.innerHTML = html;
 			var rf=controls.querySelector('.rt-refresh'); if(rf) rf.onclick=function(){ saveOk=false; onRefresh(); };

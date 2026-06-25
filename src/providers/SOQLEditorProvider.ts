@@ -1076,11 +1076,11 @@ export class SOQLEditorProvider {
             <div class="card-head" style="cursor:default;">
                 <span class="card-title">Results</span>
                 <div class="card-actions results-toolbar" id="results-toolbar" style="display:none;">
+                    <button type="button" class="btn-mini" onclick="exportResults('csv')" title="Download results as CSV">⬇ CSV</button>
+                    <button type="button" class="btn-mini" onclick="exportResults('json')" title="Download results as JSON">⬇ JSON</button>
                     <span id="results-count" class="results-count"></span>
                     <button type="button" id="load-more-btn" class="btn-mini" style="display:none;" title="Load the next page of records">⬇ Load more</button>
                     <span id="rt-controls" class="rt-ctl"></span>
-                    <button type="button" class="btn-mini" onclick="exportResults('csv')" title="Download results as CSV">⬇ CSV</button>
-                    <button type="button" class="btn-mini" onclick="exportResults('json')" title="Download results as JSON">⬇ JSON</button>
                 </div>
             </div>
             <div class="results-wrap">
