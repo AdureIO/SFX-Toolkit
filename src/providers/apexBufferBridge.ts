@@ -13,7 +13,11 @@ import * as vscode from 'vscode';
 export class ApexBufferBridge {
 	private _doc?: vscode.TextDocument;
 
-	constructor(private readonly bufferRelativePath: string) {}
+	/**
+	 * @param languageId force the backing document's language (e.g. 'soql') so the
+	 *   server uses the right completion path regardless of file-association quirks.
+	 */
+	constructor(private readonly bufferRelativePath: string, private readonly languageId?: string) {}
 
 	getBufferUri(): vscode.Uri | undefined {
 		const root = vscode.workspace.workspaceFolders?.[0]?.uri;
@@ -43,6 +47,10 @@ export class ApexBufferBridge {
 					await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(''));
 				}
 				this._doc = await vscode.workspace.openTextDocument(uri);
+				// Force the language so the server picks the right (SOQL vs Apex) path.
+				if (this.languageId && this._doc.languageId !== this.languageId) {
+					try { this._doc = await vscode.languages.setTextDocumentLanguage(this._doc, this.languageId); } catch { /* ignore */ }
+				}
 			} catch {
 				return undefined;
 			}

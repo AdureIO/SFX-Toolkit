@@ -26,7 +26,7 @@ export class SOQLEditorProvider {
   public static readonly viewType = "adure-sfx-toolkit.soqlEditor";
 
   /** Backing buffer for the Monaco editor's language-server completion/hover. */
-  private static readonly _bridge = new ApexBufferBridge(SOQL_WB_BUFFER);
+  private static readonly _bridge = new ApexBufferBridge(SOQL_WB_BUFFER, "soql");
 
   private static async runSoqlQuery(query: string, targetOrg: string | null) {
     const apiVersion = getToolingApiVersion();

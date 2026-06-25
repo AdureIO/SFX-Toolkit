@@ -48,7 +48,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	private _listener?: vscode.Disposable;
 	private _lastLog = '';
 	private readonly _bridge = new ApexBufferBridge(WORKBENCH_BUFFER);
-	private readonly _soqlBridge = new ApexBufferBridge(SOQL_BUFFER);
+	private readonly _soqlBridge = new ApexBufferBridge(SOQL_BUFFER, 'soql');
 	/** Cache of fetched log bodies (id → { text, unit }) so re-opening is instant. */
 	private readonly _bodyCache = new Map<string, { text: string; unit: string | null }>();
 	/** Cache of parsed entry-point code units (id → unit) for the list. */
