@@ -178,9 +178,13 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 				case 'getHover':
 					this._post('hoverResult', { requestId: data.requestId, hover: await this._bridge.hover(data.text || '', data.line || 0, data.character || 0) });
 					break;
-				case 'gotoDefinition':
-					await this._bridge.gotoDefinition(data.text || '', data.line || 0, data.character || 0);
+				case 'gotoDefinition': {
+					const inBuf = await this._bridge.gotoDefinition(data.text || '', data.line || 0, data.character || 0);
+					// In-buffer target (a function/class declared in the same anonymous block):
+					// move the webview editor's cursor instead of opening the hidden doc.
+					if (inBuf) this._post('revealDefinition', { line: inBuf.line, character: inBuf.character });
 					break;
+				}
 				case 'contentChanged':
 					if (typeof data.code === 'string') await this._bridge.update(data.code);
 					break;
@@ -624,6 +628,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 		if(d.type && d.type.indexOf('rt:')===0){ soqlTable.handleMessage(d); return; }
 		if(d.type==='completionResult'){ setBusy(-1); const cb=pending[d.requestId]; if(cb){ delete pending[d.requestId]; cb(d.items||[]); } return; }
 		if(d.type==='hoverResult'){ setBusy(-1); const cb=pending[d.requestId]; if(cb){ delete pending[d.requestId]; cb(d.hover||null); } return; }
+		if(d.type==='revealDefinition'){ if(editor){ const ln=(d.line||0)+1, col=(d.character||0)+1; editor.setPosition({lineNumber:ln,column:col}); editor.revealLineInCenter(ln); editor.focus(); } return; }
 		if(d.type==='soqlMarkers'){ if(soqlEd){ try{ monaco.editor.setModelMarkers(soqlEd.getModel(),'asfx-soql',(d.markers||[]).map(function(m){ return {severity:monaco.MarkerSeverity.Error,message:m.message,startLineNumber:m.line+1,startColumn:m.startCol+1,endLineNumber:m.line+1,endColumn:m.endCol+1}; })); }catch(e){} } return; }
 		if(d.type==='soqlStarted'){ const s=document.getElementById('soqlStatus'); s.className='muted'; s.style.color=''; s.textContent='Running…'; document.getElementById('soqlResults').innerHTML=''; return; }
 		if(d.type==='soqlResult'){ renderSoql(d); return; }

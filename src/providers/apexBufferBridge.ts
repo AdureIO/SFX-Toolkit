@@ -143,21 +143,31 @@ export class ApexBufferBridge {
 		}
 	}
 
-	async gotoDefinition(text: string, line: number, character: number): Promise<void> {
+	/**
+	 * Resolve go-to-definition for the cursor. A definition in another file opens a real
+	 * editor tab. A definition INSIDE the buffer (a method/inner class declared in the same
+	 * anonymous block) can't open the hidden doc — return its position so the caller can move
+	 * the webview editor's own cursor there. Returns null when there's nothing to navigate to.
+	 */
+	async gotoDefinition(text: string, line: number, character: number): Promise<{ line: number; character: number } | null> {
 		const doc = await this.update(text);
-		if (!doc) return;
+		if (!doc) return null;
 		try {
 			const res = await vscode.commands.executeCommand<(vscode.Location | vscode.LocationLink)[]>(
 				'vscode.executeDefinitionProvider', doc.uri, new vscode.Position(line, character),
 			);
 			const first = (res ?? [])[0];
-			if (!first) return;
+			if (!first) return null;
 			const uri = 'targetUri' in first ? first.targetUri : first.uri;
 			const range = 'targetUri' in first ? (first.targetSelectionRange ?? first.targetRange) : first.range;
-			if (uri.toString() === doc.uri.toString()) return; // self-ref into the hidden buffer
+			if (uri.toString() === doc.uri.toString()) {
+				// In-buffer definition → tell the caller to reveal it in the webview editor.
+				return { line: range.start.line, character: range.start.character };
+			}
 			await vscode.window.showTextDocument(uri, { selection: range, preview: false });
+			return null;
 		} catch {
-			/* no definition */
+			return null;
 		}
 	}
 
