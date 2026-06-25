@@ -704,7 +704,10 @@ function childSubqueryParent(text: string, line: number, column: number): string
  * subquery's closing paren isn't typed yet.
  */
 function outerFromObject(text: string): string | null {
-    const re = /\(|\)|\bFROM\s+([A-Za-z_]\w*)/gi;
+    // The negative lookahead stops `FROM` from capturing a following keyword as the object
+    // name — e.g. while typing `(SELECT Id FROM  FROM Outer` the inner FROM must not eat the
+    // outer FROM keyword, or the real outer object would be missed.
+    const re = /\(|\)|\bFROM\s+(?!(?:FROM|WHERE|SELECT|LIMIT|OFFSET|GROUP|ORDER|HAVING|AND|OR|NULL)\b)([A-Za-z_]\w*)/gi;
     let depth = 0;
     let best: string | null = null;
     let bestDepth = Infinity;

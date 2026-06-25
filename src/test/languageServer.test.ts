@@ -177,6 +177,16 @@ describe("SOQL completion", () => {
     assert.ok(!labels.includes("Account"), `should not offer SObjects, got: ${labels.slice(0, 5)}`);
   });
 
+  it("forces child relationships in a subquery FROM even with an unclosed paren mid-typing", async () => {
+    // `SELECT Id, (SELECT Id FROM | FROM Account` — no closing paren yet; the outer object
+    // must still be resolved (the inner FROM must not swallow the outer FROM keyword).
+    const src = "SELECT Id, (SELECT Id FROM FROM Account";
+    const col = src.indexOf("FROM FROM") + "FROM ".length;
+    const labels = labelsOf(await complete(src, 0, col));
+    assert.ok(labels.includes("Contacts"), `expected child relationship, got: ${labels.slice(0, 5)}`);
+    assert.ok(!labels.includes("Account"), `should not offer SObjects, got: ${labels.slice(0, 5)}`);
+  });
+
   it("completes objects (not relationships) in a WHERE semi-join subquery", async () => {
     const src = "SELECT Id FROM Account WHERE Id IN (SELECT AccountId FROM )";
     const col = src.indexOf("FROM )") + "FROM ".length;
