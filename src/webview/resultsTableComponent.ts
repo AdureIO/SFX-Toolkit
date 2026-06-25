@@ -42,7 +42,7 @@ export function resultsTableCss(): string {
 	table.rt input, table.rt select { width:100%; box-sizing:border-box; font:inherit; padding:1px 3px; background:var(--vscode-input-background); color:var(--vscode-input-foreground); border:1px solid var(--vscode-focusBorder); border-radius:2px; }
 	table.rt .rt-nested { border-collapse:collapse; width:max-content; min-width:100%; font-size:11px; }
 	table.rt .rt-nested th, table.rt .rt-nested td { border:1px solid var(--vscode-panel-border, rgba(128,128,128,0.2)); padding:2px 6px; position:static; background:transparent; white-space:nowrap; }
-	td.rt-sub { white-space:normal; max-width:none; padding:2px; }
+	table.rt td.rt-sub { white-space:normal; max-width:none; overflow:visible; text-overflow:clip; padding:2px; }
 	.rt-relfield { display:block; }
 	.rt-relfield .k { opacity:.65; }
 	.rt-lookup { position:relative; }
