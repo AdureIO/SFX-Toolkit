@@ -19,6 +19,7 @@ import { OrgMetadataCache } from "./utils/orgMetadataCache";
 import { findSfdxProjectDir, isSalesforceProject } from "./utils/projectUtils";
 import { resolveDefaultTargetOrgUsernameSync } from "./utils/defaultOrg";
 import { scheduleStubSync, cleanRestartApex, getInitialSyncState } from "./utils/sobjectStubSync";
+import { getBufferOrgOverride } from "./utils/bufferOrgOverride";
 import { outputChannel } from "./utils/outputChannel";
 
 const REQ_OBJECT_LIST = "sfx/objectList";
@@ -94,6 +95,9 @@ export function startLanguageServer(context: vscode.ExtensionContext): void {
 		if (!uri) return null;
 		try {
 			const fsPath = vscode.Uri.parse(uri).fsPath;
+			// A webview buffer (ASFX Workbench) may pin its IntelliSense to a chosen org.
+			const ov = getBufferOrgOverride(fsPath);
+			if (ov.has) return ov.org;
 			const projectDir = findSfdxProjectDir(fsPath) ?? undefined;
 			return resolveDefaultTargetOrgUsernameSync(projectDir) ?? null;
 		} catch {
@@ -178,6 +182,15 @@ export function startLanguageServer(context: vscode.ExtensionContext): void {
 
 export function stopLanguageServer(): Thenable<void> | undefined {
 	return client?.stop();
+}
+
+/**
+ * Tell the language server to drop its cached schema so subsequent completion/
+ * hover re-fetch it — used when a webview buffer's org override changes, since the
+ * server caches describes by object name (not per org).
+ */
+export function refreshLanguageServerSchema(): void {
+	void client?.sendNotification(NOTE_REFRESH).catch(() => {});
 }
 
 /**

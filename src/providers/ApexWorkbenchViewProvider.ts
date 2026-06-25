@@ -9,6 +9,8 @@ import { getSalesforceLogDirectory } from '../utils/logPaths';
 import { AuthInfo } from '../utils/authInfo';
 import { getToolingApiVersion } from '../utils/constants';
 import { isSalesforceProject } from '../utils/projectUtils';
+import { setBufferOrgOverride } from '../utils/bufferOrgOverride';
+import { refreshLanguageServerSchema } from '../languageClient';
 import { ApexBufferBridge } from './apexBufferBridge';
 
 const WORKBENCH_BUFFER = '.vscode/anon-workbench-buffer.apex';
@@ -108,9 +110,18 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 				case 'getOrgs':
 					this._post('orgList', { orgs: await getAnonymousApexOrgList() });
 					break;
-				case 'warmOrg':
-					if (isSalesforceProject()) AuthInfo.warmAuthForOrg(data.org || null);
+				case 'warmOrg': {
+					const org = (typeof data.org === 'string' && data.org) ? data.org : null;
+					if (isSalesforceProject()) AuthInfo.warmAuthForOrg(org);
+					// Point both workbench buffers' IntelliSense at the selected org and
+					// clear the server's schema cache so completion reflects it.
+					const apexUri = this._bridge.getBufferUri();
+					const soqlUri = this._soqlBridge.getBufferUri();
+					if (apexUri) setBufferOrgOverride(apexUri.fsPath, org);
+					if (soqlUri) setBufferOrgOverride(soqlUri.fsPath, org);
+					refreshLanguageServerSchema();
 					break;
+				}
 				// ── Logs ────────────────────────────────────────────────────────────
 				case 'listLogs': {
 					const rows = await listApexLogs(data.org || null);
@@ -546,6 +557,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 		editor.onDidChangeModelContent(function(){ if(saveTimer) clearTimeout(saveTimer); saveTimer=setTimeout(function(){ vscode.postMessage({type:'contentChanged',code:editor.getValue()}); },500); });
 		editor.onMouseDown(function(e){ if((e.event.ctrlKey||e.event.metaKey)&&e.target&&e.target.position){ const p=e.target.position; vscode.postMessage({type:'gotoDefinition',text:editor.getValue(),line:p.lineNumber-1,character:p.column-1}); } });
 		editor.addCommand(monaco.KeyMod.CtrlCmd|monaco.KeyCode.Enter, doRun);
+		editor.addCommand(monaco.KeyMod.WinCtrl|monaco.KeyCode.Enter, doRun); // Ctrl+Enter on macOS too
 
 		// ── SOQL editor ───────────────────────────────────────────────────────
 		monaco.languages.register({ id:'soql' });
@@ -555,6 +567,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 		soqlEd=monaco.editor.create(document.getElementById('soqlEditor'),{ value:initial.soql||'SELECT Id, Name FROM Account ORDER BY CreatedDate DESC LIMIT 50', language:'soql', theme:dark?'vs-dark':'vs', automaticLayout:true, minimap:{enabled:false}, scrollBeyondLastLine:false, fontSize:13, quickSuggestions:true, fixedOverflowWidgets:true });
 		soqlEd.onDidChangeModelContent(function(){ if(soqlTimer) clearTimeout(soqlTimer); soqlTimer=setTimeout(function(){ vscode.postMessage({type:'soqlChanged',query:soqlEd.getValue()}); },500); });
 		soqlEd.addCommand(monaco.KeyMod.CtrlCmd|monaco.KeyCode.Enter, doRunSoql);
+		soqlEd.addCommand(monaco.KeyMod.WinCtrl|monaco.KeyCode.Enter, doRunSoql);
 		monaco.languages.registerCompletionItemProvider('soql',{ triggerCharacters:['.',' ',',','('], provideCompletionItems:function(model,pos){ return new Promise(function(resolve){ const id=++reqId; pending[id]=function(items){ const w=model.getWordUntilPosition(pos); const range={startLineNumber:pos.lineNumber,endLineNumber:pos.lineNumber,startColumn:w.startColumn,endColumn:w.endColumn}; resolve({suggestions:items.map(function(it){ return {label:it.label,kind:mapKind(it.kind),insertText:it.insertText||it.label,insertTextRules:it.isSnippet?monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet:undefined,detail:it.detail,documentation:it.documentation?{value:it.documentation}:undefined,sortText:it.sortText,filterText:it.filterText,range:range}; })}); }; vscode.postMessage({type:'getSoqlCompletions',requestId:id,text:model.getValue(),line:pos.lineNumber-1,character:pos.column-1}); }); } });
 		monaco.languages.registerHoverProvider('soql',{ provideHover:function(model,pos){ return new Promise(function(resolve){ const id=++reqId; pending[id]=function(h){ if(!h||!h.contents||!h.contents.length){resolve(null);return;} resolve({contents:h.contents.map(function(v){return{value:v};})}); }; vscode.postMessage({type:'getSoqlHover',requestId:id,text:model.getValue(),line:pos.lineNumber-1,character:pos.column-1}); }); } });
 	});
