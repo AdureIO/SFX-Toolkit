@@ -27,9 +27,14 @@ export function resultsTableCss(): string {
 	table.rt th { position:sticky; top:0; background:var(--vscode-editor-background); z-index:1; }
 	table.rt tr:nth-child(even) > td { background:rgba(128,128,128,0.06); }
 	table.rt td.rt-num { color:var(--vscode-descriptionForeground); text-align:right; }
-	.rt-edit { cursor:text; }
+	.rt-edit { cursor:pointer; }
+	td.rt-edit { min-width:42px; }
 	.rt-edit:hover { outline:1px solid var(--vscode-focusBorder); outline-offset:-1px; }
-	.rt-dirty { background:var(--vscode-inputValidation-warningBackground, rgba(255,200,0,0.22)) !important; box-shadow: inset 2px 0 0 var(--vscode-editorWarning-foreground, #cca700); }
+	span.rt-edit { display:inline-block; min-width:28px; min-height:1em; }
+	.rt-dirty { background:var(--vscode-inputValidation-warningBackground, rgba(255,200,0,0.3)) !important; box-shadow: inset 3px 0 0 var(--vscode-editorWarning-foreground, #cca700); }
+	td.rt-dirty { background:var(--vscode-inputValidation-warningBackground, rgba(255,200,0,0.3)) !important; }
+	.rt-ref-id { display:block; font-family:var(--vscode-editor-font-family, monospace); opacity:.6; font-size:11px; }
+	.rt-ref-name { display:block; }
 	table.rt input, table.rt select { width:100%; box-sizing:border-box; font:inherit; padding:1px 3px; background:var(--vscode-input-background); color:var(--vscode-input-foreground); border:1px solid var(--vscode-focusBorder); border-radius:2px; }
 	table.rt .rt-nested { border-collapse:collapse; width:100%; font-size:11px; }
 	table.rt .rt-nested th, table.rt .rt-nested td { border:1px solid var(--vscode-panel-border, rgba(128,128,128,0.2)); padding:2px 6px; position:static; background:transparent; }
@@ -49,7 +54,7 @@ export function resultsTableScript(): string {
 	return `
 	window.ASFXResults = function (opts) {
 		var mount = opts.mount, controls = opts.controls, post = opts.post, getOrg = opts.getOrg;
-		var records = [], columns = [], meta = {}, rootType = '', changes = {}, lookupSeq = 0, lookupCbs = {}, saveErrors = [];
+		var records = [], columns = [], meta = {}, rootType = '', changes = {}, lookupSeq = 0, lookupCbs = {}, saveErrors = [], nameById = {}, namesRequested = {};
 		function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 		function subRecords(v){ return (v && typeof v==='object' && Array.isArray(v.records)) ? v.records : null; }
 		function isRelObj(v){ return v && typeof v==='object' && v.attributes && !Array.isArray(v.records); }
@@ -62,33 +67,39 @@ export function resultsTableScript(): string {
 
 		function collectTypes(recs, set){ recs.forEach(function(r){ var t=typeOf(r); if(t) set[t]=1; Object.keys(r||{}).forEach(function(k){ if(k==='attributes') return; var v=r[k]; var sub=subRecords(v); if(sub) collectTypes(sub,set); else if(isRelObj(v)){ var pt=typeOf(v); if(pt) set[pt]=1; } }); }); }
 
-		function setData(recs){ records=recs||[]; rootType=typeOf(records[0])||''; columns=deriveColumns(records); changes={}; saveErrors=[]; render();
+		function setData(recs){ records=recs||[]; rootType=typeOf(records[0])||''; columns=deriveColumns(records); changes={}; saveErrors=[]; nameById={}; namesRequested={}; render();
 			var set={}; collectTypes(records, set); post({ type:'rt:colMeta', org:getOrg(), sobjects:Object.keys(set) }); }
 
 		function displayValue(v){ if(v==null) return ''; if(typeof v==='object') return ''; return String(v); }
+		function isRef(type, field){ var fm=fmeta(type, field); return fm && fm.type==='reference' && fm.referenceTo && fm.referenceTo.length===1 ? fm.referenceTo[0] : null; }
+		// Stacked id (line 1) + resolved Name (line 2) for a lookup/master-detail value.
+		function refDisplay(id){ if(!id) return ''; var nm=nameById[id]; return '<span class="rt-ref-id">'+esc(id)+'</span>'+(nm?'<span class="rt-ref-name">'+esc(nm)+'</span>':''); }
+		function valueDisplay(type, field, value){ var ref=isRef(type, field); if(ref && value && typeof value!=='object') return refDisplay(String(value)); return esc(displayValue(value)); }
+
+		// Resolve the Name of every lookup/MD value on screen, one request per target object.
+		function requestNames(){ var byObj={}; function scan(type, field, value){ var ref=isRef(type, field); if(!ref || !value || typeof value==='object') return; var id=String(value); if(nameById[id]!==undefined || namesRequested[id]) return; (byObj[ref]=byObj[ref]||[]).push(id); namesRequested[id]=1; }
+			records.forEach(function(r){ var rt=typeOf(r); columns.forEach(function(c){ var v=r[c]; if(isRelObj(v)){ var pt=typeOf(v); Object.keys(v).forEach(function(k){ if(k!=='attributes') scan(pt,k,v[k]); }); } else { var sub=subRecords(v); if(sub){ sub.forEach(function(rr){ var ct=typeOf(rr); Object.keys(rr).forEach(function(k){ if(k!=='attributes') scan(ct,k,rr[k]); }); }); } else scan(rt,c,v); } }); });
+			Object.keys(byObj).forEach(function(ref){ post({ type:'rt:resolveNames', org:getOrg(), refObject:ref, ids:byObj[ref] }); }); }
 
 		// An editable inline element carrying its record id/type/field.
 		function editSpan(id, type, field, value){
 			var dirty = changedVal(id, field) !== undefined;
 			var shown = dirty ? changes[id].fields[field] : value;
-			return '<span class="rt-edit'+(dirty?' rt-dirty':'')+'" data-rec="'+esc(id)+'" data-type="'+esc(type)+'" data-field="'+esc(field)+'">'+esc(shown==null?'':shown)+'</span>';
+			return '<span class="rt-edit'+(dirty?' rt-dirty':'')+'" data-rec="'+esc(id)+'" data-type="'+esc(type)+'" data-field="'+esc(field)+'">'+valueDisplay(type,field,shown)+'</span>';
 		}
-		function readonlySpan(value){ return esc(displayValue(value)); }
 
 		function cellHtml(r, col){ var v=r[col]; var sub=subRecords(v);
 			if(sub){ if(!sub.length) return '<span style="opacity:.6">0 rows</span>'; return nestedTable(sub); }
 			if(isRelObj(v)){ // related (parent) object — edit selected sub-fields if its Id is present
 				var pid=idOf(v), pt=typeOf(v); var keys=Object.keys(v).filter(function(k){ return k!=='attributes' && k!=='Id' && k!=='id'; });
 				return keys.map(function(k){ var sv=v[k]; var fm=pid&&fmeta(pt,k); var ed = fm && fm.updateable && typeof sv!=='object';
-					return '<span class="rt-relfield"><span class="k">'+esc(k)+': </span>'+(ed?editSpan(pid,pt,k,sv):readonlySpan(sv))+'</span>'; }).join('') || readonlySpan(v); }
-			// scalar top-level field
-			var rid=idOf(r); var fm=fmeta(rootType, col); var editable = rid && fm && fm.updateable && col.indexOf('.')===-1;
-			return editable ? editSpan(rid, rootType, col, v) : esc(displayValue(v)); }
+					return '<span class="rt-relfield"><span class="k">'+esc(k)+': </span>'+(ed?editSpan(pid,pt,k,sv):valueDisplay(pt,k,sv))+'</span>'; }).join('') || esc(displayValue(v)); }
+			return ''; }
 
 		function nestedTable(sub){ var sc=[],s={}; sub.forEach(function(rr){ Object.keys(rr).forEach(function(k){ if(k!=='attributes'&&!s[k]){s[k]=1;sc.push(k);} }); });
 			var ct=typeOf(sub[0])||'';
 			var h='<table class="rt-nested"><thead><tr>'+sc.map(function(c){return '<th>'+esc(c)+'</th>';}).join('')+'</tr></thead><tbody>';
-			sub.forEach(function(rr){ var cid=idOf(rr); h+='<tr>'+sc.map(function(c){ var v=rr[c]; if(typeof v==='object') return '<td>'+esc(displayValue(v))+'</td>'; var fm=fmeta(ct,c); var ed=cid&&fm&&fm.updateable&&c!=='Id'; return '<td>'+(ed?editSpan(cid,ct,c,v):esc(displayValue(v)))+'</td>'; }).join('')+'</tr>'; });
+			sub.forEach(function(rr){ var cid=idOf(rr); h+='<tr>'+sc.map(function(c){ var v=rr[c]; if(typeof v==='object') return '<td>'+esc(displayValue(v))+'</td>'; var fm=fmeta(ct,c); var ed=cid&&fm&&fm.updateable&&c!=='Id'; return '<td>'+(ed?editSpan(cid,ct,c,v):valueDisplay(ct,c,v))+'</td>'; }).join('')+'</tr>'; });
 			return h+'</tbody></table>'; }
 
 		function renderControls(){ if(!controls) return;
@@ -98,13 +109,19 @@ export function resultsTableScript(): string {
 			var s=controls.querySelector('.rt-save'); if(s) s.onclick=save; var d=controls.querySelector('.rt-discard'); if(d) d.onclick=function(){ changes={}; saveErrors=[]; render(); };
 		}
 
+		function scalarTd(r, c){ var v=r[c]; var rid=idOf(r); var fm=fmeta(rootType, c); var editable = rid && fm && fm.updateable && c.indexOf('.')===-1;
+			if(editable){ var dirty=changedVal(rid,c)!==undefined; var shown=dirty?changes[rid].fields[c]:v;
+				return '<td class="rt-edit'+(dirty?' rt-dirty':'')+'" title="Double-click to edit" data-rec="'+esc(rid)+'" data-type="'+esc(rootType)+'" data-field="'+esc(c)+'">'+valueDisplay(rootType,c,shown)+'</td>'; }
+			return '<td>'+valueDisplay(rootType,c,v)+'</td>'; }
+
 		function render(){ renderControls();
 			if(!records.length){ mount.innerHTML='<div style="padding:8px;opacity:.6">No rows.</div>'; return; }
 			var html='<div class="rt-scroll"><table class="rt"><thead><tr><th class="rt-num">#</th>'+columns.map(function(c){return '<th>'+esc(c)+'</th>';}).join('')+'</tr></thead><tbody>';
 			for(var i=0;i<records.length;i++){ var r=records[i];
-				html+='<tr><td class="rt-num">'+(i+1)+'</td>'+columns.map(function(c){ var sub=subRecords(r[c]); return '<td'+(sub?' class="rt-sub"':'')+'>'+cellHtml(r,c)+'</td>'; }).join('')+'</tr>'; }
+				html+='<tr><td class="rt-num">'+(i+1)+'</td>'+columns.map(function(c){ var v=r[c]; var sub=subRecords(v); if(sub) return '<td class="rt-sub">'+cellHtml(r,c)+'</td>'; if(isRelObj(v)) return '<td>'+cellHtml(r,c)+'</td>'; return scalarTd(r,c); }).join('')+'</tr>'; }
 			mount.innerHTML=html+'</tbody></table></div>';
-			mount.querySelectorAll('.rt-edit').forEach(function(el){ el.onclick=function(e){ e.stopPropagation(); beginEdit(el); }; });
+			mount.querySelectorAll('.rt-edit').forEach(function(el){ el.ondblclick=function(e){ e.stopPropagation(); beginEdit(el); }; });
+			requestNames();
 		}
 
 		function setChange(id, type, field, val){ if(!changes[id]) changes[id]={ type:type, fields:{} }; changes[id].fields[field]=val; }
@@ -133,9 +150,9 @@ export function resultsTableScript(): string {
 			function place(){ var r=input.getBoundingClientRect(); list.style.left=r.left+'px'; list.style.top=(r.bottom+2)+'px'; list.style.minWidth=Math.max(r.width,220)+'px'; }
 			function teardown(){ if(done) return; done=true; if(list.parentNode) list.parentNode.removeChild(list); render(); }
 			input.oninput=function(){ if(t) clearTimeout(t); var q=input.value.trim(); if(!q){ list.style.display='none'; return; } t=setTimeout(function(){ var rid=++lookupSeq; lookupCbs[rid]=function(hits){
-				list.innerHTML=hits.length ? hits.map(function(h){ return '<div class="rt-opt" data-id="'+esc(h.id)+'"><div class="rt-opt-id">'+esc(h.id)+'</div><div class="rt-opt-name">'+esc(h.name)+'</div></div>'; }).join('') : '<div class="rt-opt" style="opacity:.6">No matches</div>';
+				list.innerHTML=hits.length ? hits.map(function(h){ return '<div class="rt-opt" data-id="'+esc(h.id)+'" data-name="'+esc(h.name)+'"><div class="rt-opt-id">'+esc(h.id)+'</div><div class="rt-opt-name">'+esc(h.name)+'</div></div>'; }).join('') : '<div class="rt-opt" style="opacity:.6">No matches</div>';
 				place(); list.style.display='block';
-				list.querySelectorAll('div[data-id]').forEach(function(o){ o.onmousedown=function(ev){ ev.preventDefault(); done=true; if(list.parentNode) list.parentNode.removeChild(list); commit(o.getAttribute('data-id')); }; });
+				list.querySelectorAll('div[data-id]').forEach(function(o){ o.onmousedown=function(ev){ ev.preventDefault(); done=true; if(list.parentNode) list.parentNode.removeChild(list); var nid=o.getAttribute('data-id'); nameById[nid]=o.getAttribute('data-name'); commit(nid); }; });
 			}; post({ type:'rt:lookup', org:getOrg(), requestId:rid, refObject:refObject, query:q }); }, 250); };
 			input.onkeydown=function(e){ if(e.key==='Escape') teardown(); };
 			input.onblur=function(){ setTimeout(teardown, 200); };
@@ -149,6 +166,7 @@ export function resultsTableScript(): string {
 
 		function handleMessage(msg){ if(msg.type==='rt:colMeta'){ meta=msg.meta||{}; render(); }
 			else if(msg.type==='rt:lookupResult'){ var cb=lookupCbs[msg.requestId]; if(cb){ delete lookupCbs[msg.requestId]; cb(msg.hits||[]); } }
+			else if(msg.type==='rt:names'){ var nm=msg.names||{}; var got=false; for(var k in nm){ nameById[k]=nm[k]; got=true; } if(got) render(); }
 			else if(msg.type==='rt:saveDone'){ onSaveDone(msg.results); } }
 
 		return { setData:setData, handleMessage:handleMessage, hasChanges:function(){ return dirtyCount()>0; } };

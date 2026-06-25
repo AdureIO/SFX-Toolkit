@@ -60,6 +60,32 @@ export async function lookupSearch(org: string | null, refObject: string, query:
 	}
 }
 
+/** Resolve the Name (real name field) of lookup/MD records by Id, for display. */
+export async function resolveNames(org: string | null, refObject: string, ids: string[]): Promise<Record<string, string>> {
+	const out: Record<string, string> = {};
+	const unique = Array.from(new Set((ids || []).filter(Boolean)));
+	if (!unique.length) return out;
+	const version = getToolingApiVersion();
+	const raw = await DescribeStore.getRaw(org, refObject);
+	const nameField = nameFieldOf(raw);
+	for (let i = 0; i < unique.length; i += 200) {
+		const chunk = unique.slice(i, i + 200);
+		const inList = chunk.map((id) => `'${id.replace(/'/g, "\\'")}'`).join(",");
+		const soql = `SELECT Id, ${nameField} FROM ${refObject} WHERE Id IN (${inList})`;
+		try {
+			const { body } = await AuthInfo.get(org, (a) =>
+				`${a.instanceUrl.replace(/\/$/, "")}/services/data/${version}/query?q=${encodeURIComponent(soql)}`
+			);
+			for (const r of (JSON.parse(body).records ?? []) as any[]) {
+				if (r.Id) out[r.Id] = (r[nameField] as string) ?? r.Id;
+			}
+		} catch (e: any) {
+			outputChannel.appendLine(`soqlEdit: resolveNames ${refObject} failed: ${e?.message ?? e}`);
+		}
+	}
+	return out;
+}
+
 export interface RecordChange { id: string; sobjectType: string; fields: Record<string, unknown> }
 
 /** Apply field updates to records via the REST API. Returns per-record errors. */

@@ -3,7 +3,7 @@
  * (column metadata, lookup search, save) using the soqlEdit backend. Both SOQL
  * surfaces call this from their webview message handler.
  */
-import { fieldMetaFor, lookupSearch, saveRecords, type FieldMeta, type RecordChange } from "./soqlEdit";
+import { fieldMetaFor, lookupSearch, resolveNames, saveRecords, type FieldMeta, type RecordChange } from "./soqlEdit";
 
 type Post = (msg: Record<string, unknown>) => void;
 
@@ -20,6 +20,10 @@ export async function handleResultsTableMessage(msg: any, post: Post): Promise<b
 	}
 	if (msg.type === "rt:lookup") {
 		post({ type: "rt:lookupResult", requestId: msg.requestId, hits: await lookupSearch(org, msg.refObject, msg.query || "") });
+		return true;
+	}
+	if (msg.type === "rt:resolveNames") {
+		post({ type: "rt:names", refObject: msg.refObject, names: await resolveNames(org, msg.refObject, (msg.ids as string[]) ?? []) });
 		return true;
 	}
 	if (msg.type === "rt:save") {
