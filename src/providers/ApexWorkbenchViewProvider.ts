@@ -18,8 +18,12 @@ import { ApexBufferBridge } from './apexBufferBridge';
 const WORKBENCH_BUFFER = '.vscode/anon-workbench-buffer.apex';
 const SOQL_BUFFER = '.vscode/workbench-soql-buffer.soql';
 
-/** Flatten a query record to dotted columns (relationship objects recurse; subqueries → count). */
-function flattenRecord(rec: any, prefix = '', out: Record<string, string> = {}): Record<string, string> {
+/**
+ * Flatten a query record to dotted columns. Parent relationships recurse into
+ * dotted fields; child-relationship subqueries become a nested `{ __sub: rows }`
+ * so the panel can render them as an expandable nested table (like the workbench).
+ */
+function flattenRecord(rec: any, prefix = '', out: Record<string, any> = {}): Record<string, any> {
 	for (const key of Object.keys(rec || {})) {
 		if (key === 'attributes') continue;
 		const val = rec[key];
@@ -27,7 +31,8 @@ function flattenRecord(rec: any, prefix = '', out: Record<string, string> = {}):
 		if (val === null || val === undefined) out[col] = '';
 		else if (Array.isArray(val)) out[col] = `[${val.length}]`;
 		else if (typeof val === 'object') {
-			if (val.attributes) flattenRecord(val, col + '.', out);
+			if (Array.isArray(val.records)) out[col] = { __sub: val.records.map((r: any) => flattenRecord(r)) };
+			else if (val.attributes) flattenRecord(val, col + '.', out);
 			else out[col] = JSON.stringify(val);
 		} else out[col] = String(val);
 	}
@@ -356,6 +361,10 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	#soqlResults th, #soqlResults td { border:1px solid var(--vscode-panel-border, rgba(128,128,128,0.25)); padding:3px 8px; text-align:left; white-space:nowrap; vertical-align:top; max-width:360px; overflow:hidden; text-overflow:ellipsis; }
 	#soqlResults th { position:sticky; top:0; background:var(--vscode-editor-background); z-index:1; }
 	#soqlResults tr:nth-child(even) td { background:rgba(128,128,128,0.06); }
+	#soqlResults td:has(.nested) { white-space:normal; max-width:none; padding:2px; }
+	#soqlResults table.nested { border-collapse:collapse; width:100%; font-size:11px; margin:0; }
+	#soqlResults table.nested th, #soqlResults table.nested td { border:1px solid var(--vscode-panel-border, rgba(128,128,128,0.2)); padding:2px 6px; white-space:nowrap; }
+	#soqlResults table.nested th { position:static; background:rgba(128,128,128,0.12); }
 	#soqlResults .rownum { color:var(--vscode-descriptionForeground); text-align:right; }
 	/* execute */
 	#editor { flex:1 1 auto; min-width:120px; border:1px solid var(--vscode-input-border, transparent); border-radius:4px; overflow:hidden; }
@@ -617,8 +626,16 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 		status.textContent=(d.returned||rows.length)+' of '+(d.total||rows.length)+' rows'+(d.done===false?' · more available, open in workbench':'');
 		if(!rows.length){ out.innerHTML='<div class="muted" style="padding:8px;">No rows.</div>'; return; }
 		let html='<table><thead><tr><th class="rownum">#</th>'+cols.map(function(c){return '<th>'+esc(c)+'</th>';}).join('')+'</tr></thead><tbody>';
-		for(let i=0;i<rows.length;i++){ const r=rows[i]; html+='<tr><td class="rownum">'+(i+1)+'</td>'+cols.map(function(c){ const v=r[c]||''; return '<td title="'+esc(v)+'">'+esc(v)+'</td>'; }).join('')+'</tr>'; }
+		for(let i=0;i<rows.length;i++){ const r=rows[i]; html+='<tr><td class="rownum">'+(i+1)+'</td>'+cols.map(function(c){ return '<td>'+cellHtml(r[c]);}).join('')+'</tr>'; }
 		html+='</tbody></table>'; out.innerHTML=html; out.scrollTop=0; }
+	function cellHtml(v){
+		if(v && typeof v==='object' && v.__sub){ const sub=v.__sub;
+			if(!sub.length) return '<span class="muted">0 rows</span>';
+			const sc=[]; const seen={}; sub.forEach(function(rr){ Object.keys(rr).forEach(function(k){ if(!seen[k]){seen[k]=1;sc.push(k);} }); });
+			let h='<table class="nested"><thead><tr>'+sc.map(function(c){return '<th>'+esc(c)+'</th>';}).join('')+'</tr></thead><tbody>';
+			sub.forEach(function(rr){ h+='<tr>'+sc.map(function(c){ const cv=rr[c]; return '<td>'+(cv&&typeof cv==='object'?'…':esc(cv!=null?String(cv):''))+'</td>'; }).join('')+'</tr>'; });
+			return h+'</tbody></table>'; }
+		const s=v!=null?String(v):''; return '<span title="'+esc(s)+'">'+esc(s)+'</span>'; }
 	const historySel=document.getElementById('history');
 	function setHistory(items){ while(historySel.options.length>1) historySel.remove(1);
 		(items||[]).forEach(function(q){ const o=document.createElement('option'); o.value=q; o.textContent=(q.length>50?q.slice(0,47)+'…':q).replace(/\\s+/g,' '); o.title=q; historySel.appendChild(o); }); }
