@@ -12,7 +12,6 @@ import type { SObjectDescribe, FieldDescribe, ChildRelationship } from "./dataMi
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
 const CACHE_KEY_DEFAULT = "__default__";
 
 // ─── Internal types ────────────────────────────────────────────────────────────
@@ -43,14 +42,15 @@ class SchemaCacheImpl {
 
   /**
    * Get a rich SObject describe (fields with createable, externalId, unique, nillable, etc).
-   * Results are cached per org+sobject with a 15-minute TTL.
+   * Cached per org+sobject indefinitely — kept until an explicit Refresh Metadata / invalidate,
+   * never silently re-fetched.
    * Uses AuthInfo for authenticated REST calls with automatic 401 retry.
    */
   async getRichDescribe(org: string | null, sobject: string): Promise<SObjectDescribe | null> {
     if (!sobject) return null;
     const map = this.getOrgMap(org);
     const entry = map.get(sobject);
-    if (entry && Date.now() - entry.fetchedAt < CACHE_TTL_MS) {
+    if (entry) {
       return entry.describe;
     }
 

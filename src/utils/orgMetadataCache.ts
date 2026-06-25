@@ -25,8 +25,6 @@ interface OrgCache {
 	sobjectsFetchedAt: number;
 }
 
-/** TTL for sobject list: refresh if older than this (ms). Describe cache is indefinite until invalidate. */
-const SOBJECT_LIST_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 function cacheKey(org: string | null): string {
 	return org === null || org === "" ? CACHE_KEY_DEFAULT : org;
@@ -128,7 +126,8 @@ class OrgMetadataCacheImpl {
 		const key = cacheKey(org);
 		const entry = this.getOrCreateOrgCache(key);
 		const now = Date.now();
-		if (entry.sobjects !== null && now - entry.sobjectsFetchedAt < SOBJECT_LIST_TTL_MS) {
+		// Kept indefinitely once fetched — only Refresh Metadata / push-pull invalidation re-fetches.
+		if (entry.sobjects !== null) {
 			return entry.sobjects;
 		}
 		const existing = this.fetchLocks.get(key);

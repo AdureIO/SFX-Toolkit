@@ -17,7 +17,8 @@ import { getToolingApiVersion } from "./constants";
 import { outputChannel } from "./outputChannel";
 
 const CACHE_KEY_DEFAULT = "__default__";
-/** Default freshness window for a raw describe. */
+/** Retained for API compatibility; a successful describe is now cached indefinitely
+ *  (until an explicit invalidate), so this TTL no longer expires positive entries. */
 export const DESCRIBE_TTL_MS = 15 * 60 * 1000;
 /** Short window to cache a miss (object not found / fetch failed) so completion
  *  and validation don't re-hit the org on every keystroke while typing a partial
@@ -57,10 +58,13 @@ class DescribeStoreImpl {
 		const map = this.orgMap(org);
 		const hit = map.get(sobject);
 		if (hit) {
-			// Misses get a short TTL; hits the full one.
-			const effectiveTtl = hit.raw === null ? NEGATIVE_TTL_MS : ttlMs;
-			if (Date.now() - hit.fetchedAt < effectiveTtl) return hit.raw;
+			// A successful describe is kept indefinitely (until the user runs Refresh Metadata
+			// or a push/pull invalidates it) — we never silently re-fetch the same org's schema.
+			// Only misses expire, on a short TTL, so a genuinely new/correctly-typed name resolves.
+			if (hit.raw !== null) return hit.raw;
+			if (Date.now() - hit.fetchedAt < NEGATIVE_TTL_MS) return hit.raw;
 		}
+		void ttlMs;
 
 		const lockKey = `${orgKey(org)}|${sobject}`;
 		const inflight = this.locks.get(lockKey);
@@ -83,10 +87,11 @@ class DescribeStoreImpl {
 		return promise;
 	}
 
-	/** Whether a fresh raw describe is already cached (no network). */
+	/** Whether a successful raw describe is already cached (no network). */
 	hasFresh(org: string | null, sobject: string, ttlMs: number = DESCRIBE_TTL_MS): boolean {
+		void ttlMs;
 		const hit = this.orgMap(org).get(sobject);
-		return !!hit && Date.now() - hit.fetchedAt < ttlMs;
+		return !!hit && hit.raw !== null; // kept indefinitely until invalidate
 	}
 
 	private async fetch(org: string | null, sobject: string): Promise<any | null> {
