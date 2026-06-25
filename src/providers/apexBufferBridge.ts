@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { matchesNamespaceOptional } from '../utils/nameMatch';
+import { fuzzyScore } from '../utils/nameMatch';
 
 /**
  * Bridges a webview Apex editor to VS Code's real language features. It keeps a
@@ -93,13 +93,18 @@ export class ApexBufferBridge {
 			// capping, honoring the namespace-optional filterText.
 			const prefix = ApexBufferBridge.prefixAt(text, line, character);
 			if (prefix) {
-				// Keep items where the typed text matches at the start OR right after a
-				// namespace boundary (`__`) — namespace-optional matching — even when the
-				// server didn't attach a namespaceless filterText.
-				items = items.filter((it) => {
-					const label = typeof it.label === 'string' ? it.label : it.label.label;
-					return matchesNamespaceOptional(label, prefix) || matchesNamespaceOptional(it.filterText ?? '', prefix);
-				});
+				// Fuzzy match: namespace-optional prefix, then substring, then subsequence —
+				// so `OrgDi` or `Dim` both surface `adser__IsvaOrgDim__c`, not just `IsvaO`.
+				// Rank by score so the strongest matches survive the cap; Monaco then
+				// re-ranks/highlights against the typed text and the server's sortText.
+				const scored = items
+					.map((it) => {
+						const label = typeof it.label === 'string' ? it.label : it.label.label;
+						return { it, score: Math.max(fuzzyScore(label, prefix), fuzzyScore(it.filterText ?? '', prefix)) };
+					})
+					.filter((x) => x.score >= 0);
+				scored.sort((a, b) => b.score - a.score);
+				items = scored.map((x) => x.it);
 			}
 			return items.slice(0, 200).map((it) => {
 				const label = typeof it.label === 'string' ? it.label : it.label.label;
