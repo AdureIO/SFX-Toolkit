@@ -21,8 +21,8 @@ export function resultsTableCss(): string {
 	.rt-save { background:var(--vscode-button-background); color:var(--vscode-button-foreground); }
 	.rt-discard { background:var(--vscode-button-secondaryBackground); color:var(--vscode-button-secondaryForeground); }
 	.rt-err { color:var(--vscode-errorForeground); }
-	.rt-scroll { overflow:auto; }
-	table.rt { border-collapse:collapse; width:100%; font-size:12px; }
+	.rt-scroll { overflow:auto; max-width:100%; }
+	table.rt { border-collapse:collapse; width:max-content; min-width:100%; font-size:12px; }
 	table.rt th, table.rt td { border:1px solid var(--vscode-panel-border, rgba(128,128,128,0.25)); padding:3px 8px; text-align:left; white-space:nowrap; vertical-align:top; max-width:380px; overflow:hidden; text-overflow:ellipsis; }
 	table.rt th { position:sticky; top:0; background:var(--vscode-editor-background); z-index:1; }
 	table.rt tr:nth-child(even) > td { background:rgba(128,128,128,0.06); }
@@ -37,9 +37,12 @@ export function resultsTableCss(): string {
 	.rt-relfield { display:block; }
 	.rt-relfield .k { opacity:.65; }
 	.rt-lookup { position:relative; }
-	.rt-lookup-list { position:absolute; left:0; right:0; top:100%; z-index:50; max-height:180px; overflow:auto; background:var(--vscode-dropdown-background); border:1px solid var(--vscode-dropdown-border, rgba(128,128,128,0.4)); border-radius:4px; }
-	.rt-lookup-list div { padding:3px 8px; cursor:pointer; font-size:12px; }
-	.rt-lookup-list div:hover { background:var(--vscode-list-hoverBackground); }`;
+	.rt-lookup-list { position:fixed; z-index:9999; max-height:220px; overflow:auto; background:var(--vscode-dropdown-background); border:1px solid var(--vscode-dropdown-border, rgba(128,128,128,0.4)); border-radius:4px; box-shadow:0 2px 8px rgba(0,0,0,0.35); }
+	.rt-lookup-list div.rt-opt { padding:4px 8px; cursor:pointer; font-size:12px; border-bottom:1px solid var(--vscode-panel-border, rgba(128,128,128,0.15)); }
+	.rt-lookup-list div.rt-opt:last-child { border-bottom:none; }
+	.rt-lookup-list div.rt-opt:hover { background:var(--vscode-list-hoverBackground); }
+	.rt-lookup-list .rt-opt-id { font-family:var(--vscode-editor-font-family, monospace); opacity:.65; font-size:11px; }
+	.rt-lookup-list .rt-opt-name { font-weight:600; }`;
 }
 
 export function resultsTableScript(): string {
@@ -123,12 +126,19 @@ export function resultsTableScript(): string {
 		function replace(el, node){ el.innerHTML=''; el.appendChild(node); node.focus && node.focus(); }
 
 		function beginLookup(el, refObject, commit){ el.innerHTML='';
-			var wrap=document.createElement('div'); wrap.className='rt-lookup'; var input=document.createElement('input'); input.placeholder='Search '+refObject+'…'; wrap.appendChild(input);
-			var list=document.createElement('div'); list.className='rt-lookup-list'; list.style.display='none'; wrap.appendChild(list); el.appendChild(wrap); input.focus();
-			var t=null;
-			input.oninput=function(){ if(t) clearTimeout(t); var q=input.value.trim(); if(!q){ list.style.display='none'; return; } t=setTimeout(function(){ var rid=++lookupSeq; lookupCbs[rid]=function(hits){ list.innerHTML=hits.map(function(h){ return '<div data-id="'+esc(h.id)+'">'+esc(h.name)+' <span style="opacity:.6">'+esc(h.id)+'</span></div>'; }).join('')||'<div style="opacity:.6">No matches</div>'; list.style.display='block'; list.querySelectorAll('div[data-id]').forEach(function(o){ o.onmousedown=function(ev){ ev.preventDefault(); commit(o.getAttribute('data-id')); }; }); }; post({ type:'rt:lookup', org:getOrg(), requestId:rid, refObject:refObject, query:q }); }, 250); };
-			input.onkeydown=function(e){ if(e.key==='Escape') render(); };
-			input.onblur=function(){ setTimeout(function(){ if(el.querySelector('.rt-lookup')) render(); }, 200); };
+			var wrap=document.createElement('div'); wrap.className='rt-lookup'; var input=document.createElement('input'); input.placeholder='Search '+refObject+'…'; wrap.appendChild(input); el.appendChild(wrap); input.focus();
+			// The dropdown lives on <body> with fixed positioning so cell/scroll overflow can't clip it.
+			var list=document.createElement('div'); list.className='rt-lookup-list'; list.style.display='none'; document.body.appendChild(list);
+			var t=null, done=false;
+			function place(){ var r=input.getBoundingClientRect(); list.style.left=r.left+'px'; list.style.top=(r.bottom+2)+'px'; list.style.minWidth=Math.max(r.width,220)+'px'; }
+			function teardown(){ if(done) return; done=true; if(list.parentNode) list.parentNode.removeChild(list); render(); }
+			input.oninput=function(){ if(t) clearTimeout(t); var q=input.value.trim(); if(!q){ list.style.display='none'; return; } t=setTimeout(function(){ var rid=++lookupSeq; lookupCbs[rid]=function(hits){
+				list.innerHTML=hits.length ? hits.map(function(h){ return '<div class="rt-opt" data-id="'+esc(h.id)+'"><div class="rt-opt-id">'+esc(h.id)+'</div><div class="rt-opt-name">'+esc(h.name)+'</div></div>'; }).join('') : '<div class="rt-opt" style="opacity:.6">No matches</div>';
+				place(); list.style.display='block';
+				list.querySelectorAll('div[data-id]').forEach(function(o){ o.onmousedown=function(ev){ ev.preventDefault(); done=true; if(list.parentNode) list.parentNode.removeChild(list); commit(o.getAttribute('data-id')); }; });
+			}; post({ type:'rt:lookup', org:getOrg(), requestId:rid, refObject:refObject, query:q }); }, 250); };
+			input.onkeydown=function(e){ if(e.key==='Escape') teardown(); };
+			input.onblur=function(){ setTimeout(teardown, 200); };
 		}
 
 		function findRecDeep(id){ var found=null; (function walk(recs){ for(var i=0;i<recs.length;i++){ var r=recs[i]; if(idOf(r)===id){ found=r; return; } for(var k in r){ if(k==='attributes') continue; var v=r[k]; var sub=subRecords(v); if(sub) walk(sub); else if(isRelObj(v) && idOf(v)===id) { found=v; return; } } } })(records); return found; }
