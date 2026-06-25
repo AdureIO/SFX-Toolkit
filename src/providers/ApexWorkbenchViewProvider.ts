@@ -12,32 +12,14 @@ import { isSalesforceProject } from '../utils/projectUtils';
 import { setBufferOrgOverride } from '../utils/bufferOrgOverride';
 import { getSoqlMarkers } from '../utils/soqlMarkers';
 import { parseSoqlError } from '../utils/soqlError';
+import { handleResultsTableMessage } from '../utils/resultsTableHost';
+import { resultsTableCss, resultsTableScript } from '../webview/resultsTableComponent';
 import { refreshLanguageServerSchema, setEphemeralBuffers } from '../languageClient';
 import { ApexBufferBridge } from './apexBufferBridge';
 
 const WORKBENCH_BUFFER = '.vscode/anon-workbench-buffer.apex';
 const SOQL_BUFFER = '.vscode/workbench-soql-buffer.soql';
 
-/**
- * Flatten a query record to dotted columns. Parent relationships recurse into
- * dotted fields; child-relationship subqueries become a nested `{ __sub: rows }`
- * so the panel can render them as an expandable nested table (like the workbench).
- */
-function flattenRecord(rec: any, prefix = '', out: Record<string, any> = {}): Record<string, any> {
-	for (const key of Object.keys(rec || {})) {
-		if (key === 'attributes') continue;
-		const val = rec[key];
-		const col = prefix + key;
-		if (val === null || val === undefined) out[col] = '';
-		else if (Array.isArray(val)) out[col] = `[${val.length}]`;
-		else if (typeof val === 'object') {
-			if (Array.isArray(val.records)) out[col] = { __sub: val.records.map((r: any) => flattenRecord(r)) };
-			else if (val.attributes) flattenRecord(val, col + '.', out);
-			else out[col] = JSON.stringify(val);
-		} else out[col] = String(val);
-	}
-	return out;
-}
 const ASFX_DIR = '.sfdx/asfx';
 const HISTORY_FILE = 'workbench-apex-history.json';
 const HISTORY_MAX = 10;
@@ -113,6 +95,8 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 
 		this._listener?.dispose();
 		this._listener = view.webview.onDidReceiveMessage(async (data: any) => {
+			// Shared results-table component messages (column meta / lookup / save).
+			if (await handleResultsTableMessage(data, (m) => view.webview.postMessage(m))) return;
 			switch (data?.type) {
 				case 'getOrgs':
 					this._post('orgList', { orgs: await getAnonymousApexOrgList() });
@@ -259,7 +243,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 		}
 	}
 
-	/** Run a SOQL query against `org` and flatten the records into columns + rows. */
+	/** Run a SOQL query against `org` and return the raw records for the shared table. */
 	private async _runSoql(org: string | null, query: string): Promise<Record<string, unknown>> {
 		if (!query.trim()) return { error: 'Enter a query.' };
 		const version = getToolingApiVersion();
@@ -268,15 +252,8 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 				`${a.instanceUrl.replace(/\/$/, "")}/services/data/${version}/query?q=${encodeURIComponent(query)}`
 			);
 			const data = JSON.parse(body);
-			const records: any[] = data.records ?? [];
-			const columns: string[] = [];
-			const seen = new Set<string>();
-			const rows = records.slice(0, 2000).map((r) => {
-				const flat = flattenRecord(r);
-				for (const k of Object.keys(flat)) if (!seen.has(k)) { seen.add(k); columns.push(k); }
-				return flat;
-			});
-			return { columns, rows, total: data.totalSize ?? rows.length, returned: rows.length, done: data.done !== false };
+			const records: any[] = (data.records ?? []).slice(0, 2000);
+			return { records, total: data.totalSize ?? records.length, returned: records.length, done: data.done !== false };
 		} catch (e: any) {
 			const p = parseSoqlError(e?.message ?? String(e));
 			return { error: p.code ? `${p.code}: ${p.message}` : p.message, errorDetails: p.details, errorLine: p.line, errorColumn: p.column };
@@ -374,6 +351,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	#execPage { flex-direction:column; padding:6px; gap:6px; }
 	#execTop { flex:1; display:flex; min-height:0; }
 	#execActions { display:flex; gap:8px; flex-shrink:0; }
+	${resultsTableCss()}
 </style></head>
 <body>
 <script type="application/json" id="wb-data">${data}</script>
@@ -456,6 +434,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 </div>
 
 <script src="${monacoBase}/loader.js"></script>
+<script>${resultsTableScript()}</script>
 <script>
 	const vscode = acquireVsCodeApi();
 	let initial = { highlightPatterns: [], code: '' };
@@ -616,26 +595,16 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 		window.addEventListener('mouseup',function(){drag=false;document.body.style.cursor='';document.body.style.userSelect='';}); })();
 	function setSoqlErrMarker(line,col,text){ if(!soqlEd||!line) return; try{ const model=soqlEd.getModel(); let c=col||1,e=c+1; const w=model.getWordAtPosition({lineNumber:line,column:c}); if(w){c=w.startColumn;e=w.endColumn;} monaco.editor.setModelMarkers(model,'asfx-soql-error',[{severity:monaco.MarkerSeverity.Error,message:text,startLineNumber:line,startColumn:c,endLineNumber:line,endColumn:e}]); }catch(x){} }
 	function clearSoqlErrMarker(){ if(soqlEd) try{ monaco.editor.setModelMarkers(soqlEd.getModel(),'asfx-soql-error',[]); }catch(x){} }
-	function renderSoql(d){ const status=document.getElementById('soqlStatus'); const out=document.getElementById('soqlResults');
+	const soqlTable = ASFXResults({ mount: document.getElementById('soqlResults'), post: vscode.postMessage, getOrg: function(){ return orgVal(); } });
+	function renderSoql(d){ const status=document.getElementById('soqlStatus');
 		if(d.error){ status.className=''; status.style.color='var(--vscode-errorForeground)'; status.textContent=d.error;
-			out.innerHTML = d.errorDetails ? '<pre style="white-space:pre-wrap;word-break:break-word;margin:0;padding:8px;font-family:var(--vscode-editor-font-family,monospace);font-size:12px;opacity:0.85;">'+esc(d.errorDetails)+'</pre>' : '';
+			document.getElementById('soqlResults').innerHTML = d.errorDetails ? '<pre style="white-space:pre-wrap;word-break:break-word;margin:0;padding:8px;font-family:var(--vscode-editor-font-family,monospace);font-size:12px;opacity:0.85;">'+esc(d.errorDetails)+'</pre>' : '';
 			setSoqlErrMarker(d.errorLine,d.errorColumn,d.error); return; }
 		clearSoqlErrMarker();
 		status.style.color=''; status.className='muted';
-		const cols=d.columns||[]; const rows=d.rows||[];
-		status.textContent=(d.returned||rows.length)+' of '+(d.total||rows.length)+' rows'+(d.done===false?' · more available, open in workbench':'');
-		if(!rows.length){ out.innerHTML='<div class="muted" style="padding:8px;">No rows.</div>'; return; }
-		let html='<table><thead><tr><th class="rownum">#</th>'+cols.map(function(c){return '<th>'+esc(c)+'</th>';}).join('')+'</tr></thead><tbody>';
-		for(let i=0;i<rows.length;i++){ const r=rows[i]; html+='<tr><td class="rownum">'+(i+1)+'</td>'+cols.map(function(c){ return '<td>'+cellHtml(r[c]);}).join('')+'</tr>'; }
-		html+='</tbody></table>'; out.innerHTML=html; out.scrollTop=0; }
-	function cellHtml(v){
-		if(v && typeof v==='object' && v.__sub){ const sub=v.__sub;
-			if(!sub.length) return '<span class="muted">0 rows</span>';
-			const sc=[]; const seen={}; sub.forEach(function(rr){ Object.keys(rr).forEach(function(k){ if(!seen[k]){seen[k]=1;sc.push(k);} }); });
-			let h='<table class="nested"><thead><tr>'+sc.map(function(c){return '<th>'+esc(c)+'</th>';}).join('')+'</tr></thead><tbody>';
-			sub.forEach(function(rr){ h+='<tr>'+sc.map(function(c){ const cv=rr[c]; return '<td>'+(cv&&typeof cv==='object'?'…':esc(cv!=null?String(cv):''))+'</td>'; }).join('')+'</tr>'; });
-			return h+'</tbody></table>'; }
-		const s=v!=null?String(v):''; return '<span title="'+esc(s)+'">'+esc(s)+'</span>'; }
+		const recs=d.records||[];
+		status.textContent=(d.returned||recs.length)+' of '+(d.total||recs.length)+' rows'+(d.done===false?' · more available, open in workbench':'');
+		soqlTable.setData(recs); }
 	const historySel=document.getElementById('history');
 	function setHistory(items){ while(historySel.options.length>1) historySel.remove(1);
 		(items||[]).forEach(function(q){ const o=document.createElement('option'); o.value=q; o.textContent=(q.length>50?q.slice(0,47)+'…':q).replace(/\\s+/g,' '); o.title=q; historySel.appendChild(o); }); }
@@ -652,6 +621,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 
 	// ── messages ────────────────────────────────────────────────────────────────
 	window.addEventListener('message', function(e){ const d=e.data; if(!d) return;
+		if(d.type && d.type.indexOf('rt:')===0){ soqlTable.handleMessage(d); return; }
 		if(d.type==='completionResult'){ setBusy(-1); const cb=pending[d.requestId]; if(cb){ delete pending[d.requestId]; cb(d.items||[]); } return; }
 		if(d.type==='hoverResult'){ setBusy(-1); const cb=pending[d.requestId]; if(cb){ delete pending[d.requestId]; cb(d.hover||null); } return; }
 		if(d.type==='soqlMarkers'){ if(soqlEd){ try{ monaco.editor.setModelMarkers(soqlEd.getModel(),'asfx-soql',(d.markers||[]).map(function(m){ return {severity:monaco.MarkerSeverity.Error,message:m.message,startLineNumber:m.line+1,startColumn:m.startCol+1,endLineNumber:m.line+1,endColumn:m.endCol+1}; })); }catch(e){} } return; }

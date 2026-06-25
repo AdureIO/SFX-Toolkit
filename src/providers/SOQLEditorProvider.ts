@@ -11,6 +11,8 @@ import { setBufferOrgOverride } from "../utils/bufferOrgOverride";
 import { refreshLanguageServerSchema, setEphemeralBuffers } from "../languageClient";
 import { getSoqlMarkers } from "../utils/soqlMarkers";
 import { parseSoqlError } from "../utils/soqlError";
+import { handleResultsTableMessage } from "../utils/resultsTableHost";
+import { resultsTableCss, resultsTableScript } from "../webview/resultsTableComponent";
 
 const SOQL_WB_BUFFER = ".vscode/soql-wb-buffer.soql";
 const SOQL_HISTORY_MAX = 50;
@@ -109,6 +111,7 @@ export class SOQLEditorProvider {
 
     const messageListener = panel.webview.onDidReceiveMessage(
       async (message) => {
+        if (await handleResultsTableMessage(message, (m) => panel.webview.postMessage(m))) return;
         switch (message.command) {
           case "execute":
             await this.executeQuery(panel, message.query, message.targetOrg || null);
@@ -954,6 +957,7 @@ export class SOQLEditorProvider {
         #results-container a { color: var(--vscode-textLink-foreground); text-decoration: none; }
         #results-container a:hover { color: var(--vscode-textLink-activeForeground); text-decoration: underline; }
         td.readonly-cell { background: var(--asfx-card-bg); color: var(--vscode-descriptionForeground); cursor: not-allowed; border-left: 2px solid var(--asfx-border); }
+        ${resultsTableCss()}
     </style>
 </head>
 <body>
@@ -1088,6 +1092,7 @@ export class SOQLEditorProvider {
     </div>
 
     <script src="${monacoBase}/loader.js"></script>
+    <script>${resultsTableScript()}</script>
     <script>
         const vscode = acquireVsCodeApi();
         const MONACO_BASE = '${monacoBase}';
@@ -2055,6 +2060,7 @@ export class SOQLEditorProvider {
 
         window.addEventListener('message', event => {
             const message = event.data;
+            if (message.command && message.command.indexOf('rt:') === 0) { soqlTable.handleMessage(message); return; }
             if (message.command === 'wbCompletions') { setBusy(-1); const cb = _pending[message.requestId]; if (cb) { delete _pending[message.requestId]; cb(message.items || []); } return; }
             if (message.command === 'wbHover') { setBusy(-1); const cb = _pending[message.requestId]; if (cb) { delete _pending[message.requestId]; cb(message.hover || null); } return; }
             if (message.command === 'soqlMarkers') { if (soqlEditor) { try { monaco.editor.setModelMarkers(soqlEditor.getModel(), 'asfx-soql', (message.markers || []).map(function (m) { return { severity: monaco.MarkerSeverity.Error, message: m.message, startLineNumber: m.line + 1, startColumn: m.startCol + 1, endLineNumber: m.line + 1, endColumn: m.endCol + 1 }; })); } catch (e) {} } return; }
@@ -2405,73 +2411,13 @@ export class SOQLEditorProvider {
             return !!map[field];
         }
 
+        // Rendering + type-aware inline editing now go through the shared component
+        // (same one the ASFX Workbench SOQL tab uses). We keep currentRecords for
+        // pagination/export; the component owns the table, editors and Save bar.
+        const soqlTable = ASFXResults({ mount: resultsContainer, post: vscode.postMessage, getOrg: function () { return currentTargetOrg(); } });
         function renderTable(records) {
-            currentRecords = records;
-            resultsContainer.innerHTML = '';
-            if (!records || records.length === 0) {
-                resultsContainer.textContent = 'No records found.';
-                return;
-            }
-
-            const columns = new Set();
-            records.forEach(r => {
-                Object.keys(r).forEach(k => { if (k !== 'attributes') columns.add(k); });
-            });
-            const headers = Array.from(columns);
-
-            const table = document.createElement('table');
-            const thead = document.createElement('thead');
-            const trHead = document.createElement('tr');
-            headers.forEach(h => {
-                const th = document.createElement('th');
-                th.textContent = h;
-                trHead.appendChild(th);
-            });
-            thead.appendChild(trHead);
-            table.appendChild(thead);
-
-            const tbody = document.createElement('tbody');
-            records.forEach(r => {
-                const tr = document.createElement('tr');
-                const recId = recordIdOf(r);
-                const type = (r.attributes && r.attributes.type) ? r.attributes.type : null;
-
-                headers.forEach(h => {
-                    const td = document.createElement('td');
-                    const value = r[h];
-                    const isObject = typeof value === 'object' && value !== null;
-
-                    if (isObject) {
-                        td.appendChild(renderCellValue(value, recId, type, h, changes));
-                    } else {
-                        const link = currentInstanceUrl && (h === 'Id' || isSalesforceId(value)) ? makeRecordLink(String(value), currentInstanceUrl) : null;
-                        if (link) td.appendChild(link);
-                        else td.textContent = value === null ? '' : value;
-                    }
-
-                    const isEditable = recId && type && h !== 'Id' && !isObject && isFieldEditable(type, h);
-                    if (isEditable) {
-                        td.contentEditable = true;
-                        td.classList.add('editable-cell');
-                        td.dataset.recId = recId;
-                        td.title = 'Editable — click to change, then Save edits';
-                        td.addEventListener('input', () => {
-                            const newValue = td.textContent.trim();
-                            if (!changes[recId]) changes[recId] = { _type: type };
-                            changes[recId][h] = newValue;
-                            td.classList.add('changed');
-                            updateSaveButton();
-                        });
-                    } else if (recId && type && h !== 'Id' && !isObject) {
-                        td.classList.add('readonly-cell');
-                        td.title = 'Read-only (formula, system field, or no edit permission)';
-                    }
-                    tr.appendChild(td);
-                });
-                tbody.appendChild(tr);
-            });
-            table.appendChild(tbody);
-            resultsContainer.appendChild(table);
+            currentRecords = records || [];
+            soqlTable.setData(currentRecords);
         }
 
         function updateSaveButton() {
