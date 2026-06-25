@@ -43,6 +43,7 @@ import { ScratchOrgDefEditorProvider } from "./editors/ScratchOrgDefEditorProvid
 import { SOQLEditorProvider } from "./providers/SOQLEditorProvider";
 import { AnonymousApexViewProvider } from "./providers/AnonymousApexViewProvider";
 import { Logger, outputChannel } from "./utils/outputChannel";
+import { Telemetry, categorizeError } from "./utils/telemetry";
 import { metadataDiff } from "./commands/metadataDiff";
 import { OrgHealthProvider } from "./commands/orgHealth";
 import { quickSoqlFromSelection } from "./commands/quickSoql";
@@ -123,10 +124,15 @@ function register(command: string, callback: (...args: any[]) => any, thisArg?: 
       vscode.window.showInformationMessage(NOT_SFDX_PROJECT_MESSAGE);
       return;
     }
+    const start = Date.now();
     try {
-      return await callback.call(thisArg, ...args);
+      const result = await callback.call(thisArg, ...args);
+      Telemetry.event("command", { command }, { durationMs: Date.now() - start, success: 1 });
+      return result;
     } catch (error) {
       Logger.error(`Error executing command: ${command}`, error);
+      Telemetry.error("commandError", { command, reason: categorizeError(error) });
+      Telemetry.event("command", { command }, { durationMs: Date.now() - start, success: 0 });
       throw error;
     }
   });
@@ -141,6 +147,10 @@ export function activate(context: vscode.ExtensionContext) {
 
   try {
     Logger.info("Extension activation starting...");
+
+    // 0. Telemetry (anonymous usage; respects VS Code global + opt-out setting)
+    Telemetry.init(context);
+    Telemetry.event("activated", { extensionVersion: context.extension.packageJSON.version });
 
     // 0. Bootstrap persistent state stores
     initDeployHistory(context);

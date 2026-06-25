@@ -875,6 +875,14 @@
           "type": "boolean",
           "default": true,
           "description": "When true, strip trailing newlines automatically as part of the save lifecycle (onWillSaveTextDocument). Set to false to disable the save-time behaviour while keeping the feature configured."
+        },
+        "adure-sfx-toolkit.telemetry.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Send anonymous usage telemetry (which features are used, success/failure rates, durations) to help prioritize development. No code, queries, org details, or personal data are ever collected. This setting also respects VS Code's global `#telemetry.telemetryLevel#` — disabling either one turns telemetry off.",
+          "tags": [
+            "telemetry"
+          ]
         }
       }
     }
@@ -905,6 +913,7 @@
     "typescript": "^5.1.3"
   },
   "dependencies": {
+    "@vscode/extension-telemetry": "^1.5.2",
     "fast-xml-parser": "^5.5.7",
     "glob": "^8.1.0",
     "minimatch": "^10.2.5"

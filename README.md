@@ -227,6 +227,23 @@ Each applied strip emits a single `INFO` line to the **Adure SFX Toolkit** outpu
 - `Alt+L`: LWC navigate to sibling picker.
 - `Alt+1` / `Alt+2` / `Alt+3` / `Alt+4`: Jump directly to LWC JS / HTML / Meta / CSS file.
 
+## Telemetry
+
+The extension collects **anonymous** usage telemetry to understand how many people
+use it and which features are valuable, so development can be prioritized. We collect:
+
+- Extension activation and an anonymous, randomly generated install id
+- Which commands and panels are used, with execution duration and success/failure
+- Coarse error categories (e.g. `auth`, `network`, `cli`) — never raw messages
+- Deploy / test / SOQL outcomes as categorical flags and counts
+
+We **never** collect access tokens, usernames, org ids, record ids, file paths,
+SOQL/Apex text, query results, or any personal data.
+
+To opt out, set `adure-sfx-toolkit.telemetry.enabled` to `false`. Telemetry also
+honors VS Code's global `telemetry.telemetryLevel` setting — disabling either turns
+it off.
+
 ## Open Source
 
 This project is open source! Contributions, issues, and feature requests are welcome.
