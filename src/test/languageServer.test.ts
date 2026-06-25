@@ -167,6 +167,16 @@ describe("SOQL completion", () => {
     assert.ok(fields.includes("LastName"));
   });
 
+  it("forces child relationships (not objects) in a SELECT-list subquery FROM with a partial name", async () => {
+    // Mid-edit the parser may emit the SObjects placeholder here; we must still offer the
+    // outer object's child relationships, consistently, regardless of parse state.
+    const src = "SELECT Id, (SELECT Id FROM Cont) FROM Account WHERE Name != null";
+    const col = src.indexOf("Cont)") + "Cont".length;
+    const labels = labelsOf(await complete(src, 0, col));
+    assert.ok(labels.includes("Contacts"), `expected child relationship, got: ${labels.slice(0, 5)}`);
+    assert.ok(!labels.includes("Account"), `should not offer SObjects, got: ${labels.slice(0, 5)}`);
+  });
+
   it("completes objects (not relationships) in a WHERE semi-join subquery", async () => {
     const src = "SELECT Id FROM Account WHERE Id IN (SELECT AccountId FROM )";
     const col = src.indexOf("FROM )") + "FROM ".length;

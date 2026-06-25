@@ -376,11 +376,38 @@ async function sobjectsCompletion(docUri: string): Promise<CompletionItem[]> {
     );
 }
 
-async function expand(item: CompletionItem, relSegments: string[], docUri: string, forceObjects = false): Promise<CompletionItem[]> {
+/** Child-relationship completion for a parent object (the `(SELECT … FROM <rel>)` position). */
+async function childRelationshipsOf(docUri: string, parentName: string): Promise<CompletionItem[]> {
+    const d = await describe(docUri, parentName);
+    if (!d) return [];
+    return d.childRelationships.map((r) =>
+        withSchemaDoc(
+            {
+                label: r.name,
+                kind: CompletionItemKind.Reference,
+                labelDetails: { detail: ` → ${r.childSObject}`, description: parentName },
+                sortText: r.name,
+            },
+            [`\`${parentName}.${r.name}\` → **${r.childSObject}** (child relationship)`],
+        ),
+    );
+}
+
+async function expand(
+    item: CompletionItem,
+    relSegments: string[],
+    docUri: string,
+    forceObjects = false,
+    subqueryParent: string | null = null,
+): Promise<CompletionItem[]> {
     const label = item.label as string;
     const c = ctxOf(item);
 
     if (label === '__SOBJECTS_PLACEHOLDER') {
+        // In a SELECT-list subquery (`SELECT …, (SELECT Id FROM |) FROM Parent`) the parser
+        // sometimes emits SOBJECTS instead of RELATIONSHIPS depending on parse state. Force
+        // child relationships of the outer object so it's consistent regardless of edits.
+        if (subqueryParent) return childRelationshipsOf(docUri, subqueryParent);
         return sobjectsCompletion(docUri);
     }
 
@@ -398,19 +425,11 @@ async function expand(item: CompletionItem, relSegments: string[], docUri: strin
         // A WHERE/value-position subquery (`… IN (SELECT Id FROM |)`) is a semi-join
         // over an SObject, not a child-relationship subquery — offer objects.
         if (forceObjects) return sobjectsCompletion(docUri);
-        const d = c?.sobjectName ? await describe(docUri, c.sobjectName) : null;
-        if (!d) return [];
-        return d.childRelationships.map((r) =>
-            withSchemaDoc(
-                {
-                    label: r.name,
-                    kind: CompletionItemKind.Reference,
-                    labelDetails: { detail: ` → ${r.childSObject}`, description: c.sobjectName },
-                    sortText: r.name,
-                },
-                [`\`${c.sobjectName}.${r.name}\` → **${r.childSObject}** (child relationship)`],
-            ),
-        );
+        // Prefer the text-derived outer object (reliable across edits) over the parser's
+        // context, then fall back to it.
+        const parent = subqueryParent || c?.sobjectName || null;
+        if (!parent) return [];
+        return childRelationshipsOf(docUri, parent);
     }
 
     if (label === '__RELATIONSHIP_FIELDS_PLACEHOLDER') {
@@ -617,10 +636,13 @@ connection.onCompletion(async (params) => {
     }
 
     const forceObjects = inSemiJoinSubquery(text, line, column);
+    // A SELECT-list child subquery `(SELECT … FROM |)` → complete child relationships of
+    // the outer object, even when the parser's state would otherwise offer SObjects.
+    const subqueryParent = forceObjects ? null : childSubqueryParent(text, line, column);
     const out: CompletionItem[] = [];
     for (const item of raw) {
         if (isPlaceholder(item)) {
-            out.push(...(await expand(item, relSegments, docUri, forceObjects)));
+            out.push(...(await expand(item, relSegments, docUri, forceObjects, subqueryParent)));
         } else {
             out.push(item);
         }
@@ -648,6 +670,54 @@ function inSemiJoinSubquery(text: string, line: number, column: number): boolean
         }
     }
     return false;
+}
+
+/**
+ * When the cursor is inside a SELECT-list child subquery `(SELECT … FROM |)`, returns the
+ * OUTER object name (so the FROM completes that object's child relationships). Returns null
+ * when not in such a subquery or when it's a value-position semi-join (`… IN (SELECT …)`).
+ */
+function childSubqueryParent(text: string, line: number, column: number): string | null {
+    const lines = text.split('\n');
+    let offset = 0;
+    for (let i = 0; i < line - 1 && i < lines.length; i++) offset += lines[i].length + 1;
+    offset += column - 1;
+    let depth = 0;
+    for (let i = offset - 1; i >= 0; i--) {
+        const ch = text[i];
+        if (ch === ')') depth++;
+        else if (ch === '(') {
+            if (depth === 0) {
+                // Enclosing paren found. A semi-join (preceded by IN/NOT IN) is handled elsewhere.
+                if (/\b(?:not\s+in|in)\s*$/i.test(text.slice(0, i))) return null;
+                return outerFromObject(text);
+            }
+            depth--;
+        }
+    }
+    return null;
+}
+
+/**
+ * The outer/main query's FROM object: the FROM clause at the shallowest paren depth.
+ * Using the minimum depth (rather than strictly 0) keeps it working mid-edit when the
+ * subquery's closing paren isn't typed yet.
+ */
+function outerFromObject(text: string): string | null {
+    const re = /\(|\)|\bFROM\s+([A-Za-z_]\w*)/gi;
+    let depth = 0;
+    let best: string | null = null;
+    let bestDepth = Infinity;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text))) {
+        if (m[0] === '(') depth++;
+        else if (m[0] === ')') depth = Math.max(0, depth - 1);
+        else if (m[1] && depth < bestDepth) {
+            best = m[1];
+            bestDepth = depth;
+        }
+    }
+    return best;
 }
 
 /**
