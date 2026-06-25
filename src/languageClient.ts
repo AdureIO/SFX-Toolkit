@@ -199,8 +199,10 @@ export function refreshLanguageServerSchema(): void {
  * for them (their IntelliSense org may be non-default). Go-to-definition on an
  * SObject in these buffers won't generate stubs into the shared .sfdx folder.
  */
+const ephemeralBufferUris = new Set<string>();
 export function setEphemeralBuffers(uris: string[]): void {
-	void client?.sendNotification(NOTE_EPHEMERAL, { uris }).catch(() => {});
+	for (const u of uris) ephemeralBufferUris.add(u);
+	void client?.sendNotification(NOTE_EPHEMERAL, { uris: [...ephemeralBufferUris] }).catch(() => {});
 }
 
 /**

@@ -6,7 +6,11 @@ import { getToolingApiVersion } from "../utils/constants";
 import { OrgMetadataCache } from "../utils/orgMetadataCache";
 import { sfRequest } from "../utils/dataMigration";
 import { getCachedOrgList, refreshOrgListCache, warmOrgListCache } from "../utils/orgListCache";
+import { ApexBufferBridge } from "./apexBufferBridge";
+import { setBufferOrgOverride } from "../utils/bufferOrgOverride";
+import { refreshLanguageServerSchema, setEphemeralBuffers } from "../languageClient";
 
+const SOQL_WB_BUFFER = ".vscode/soql-wb-buffer.soql";
 const SOQL_HISTORY_MAX = 50;
 const SOQL_LAST_FILE = "soql-last.txt";
 const SOQL_HISTORY_FILE = "soql-history.json";
@@ -20,6 +24,9 @@ interface SavedQuery {
 
 export class SOQLEditorProvider {
   public static readonly viewType = "adure-sfx-toolkit.soqlEditor";
+
+  /** Backing buffer for the Monaco editor's language-server completion/hover. */
+  private static readonly _bridge = new ApexBufferBridge(SOQL_WB_BUFFER);
 
   private static async runSoqlQuery(query: string, targetOrg: string | null) {
     const apiVersion = getToolingApiVersion();
@@ -54,7 +61,10 @@ export class SOQLEditorProvider {
       {
         enableScripts: true,
         retainContextWhenHidden: true,
-        localResourceRoots: [vscode.Uri.joinPath(extensionUri, "resources")]
+        localResourceRoots: [
+        vscode.Uri.joinPath(extensionUri, "resources"),
+        vscode.Uri.joinPath(extensionUri, "node_modules", "monaco-editor", "min")
+      ]
       }
     );
 
@@ -69,7 +79,10 @@ export class SOQLEditorProvider {
   public static async revive(panel: vscode.WebviewPanel, extensionUri: vscode.Uri) {
     panel.webview.options = {
       enableScripts: true,
-      localResourceRoots: [vscode.Uri.joinPath(extensionUri, "resources")]
+      localResourceRoots: [
+        vscode.Uri.joinPath(extensionUri, "resources"),
+        vscode.Uri.joinPath(extensionUri, "node_modules", "monaco-editor", "min")
+      ]
     };
     await SOQLEditorProvider.attach(panel, extensionUri);
   }
@@ -84,12 +97,38 @@ export class SOQLEditorProvider {
     OrgMetadataCache.warmDefaultOrg();
     warmOrgListCache();
 
+    // Point the editor's IntelliSense buffer at the initial org and ensure no
+    // SObject stubs are ever written for it (its org may be non-default).
+    const wbUri = SOQLEditorProvider._bridge.getBufferUri();
+    if (wbUri) {
+      setBufferOrgOverride(wbUri.fsPath, initialOrg || null);
+      setEphemeralBuffers([wbUri.toString()]);
+    }
+
     const messageListener = panel.webview.onDidReceiveMessage(
       async (message) => {
         switch (message.command) {
           case "execute":
             await this.executeQuery(panel, message.query, message.targetOrg || null);
             break;
+          case "wbCompletions":
+            panel.webview.postMessage({
+              command: "wbCompletions", requestId: message.requestId,
+              items: await SOQLEditorProvider._bridge.completions(message.text || "", message.line || 0, message.character || 0)
+            });
+            break;
+          case "wbHover":
+            panel.webview.postMessage({
+              command: "wbHover", requestId: message.requestId,
+              hover: await SOQLEditorProvider._bridge.hover(message.text || "", message.line || 0, message.character || 0)
+            });
+            break;
+          case "wbSetOrg": {
+            const u = SOQLEditorProvider._bridge.getBufferUri();
+            if (u) setBufferOrgOverride(u.fsPath, (typeof message.org === "string" && message.org) ? message.org : null);
+            refreshLanguageServerSchema();
+            break;
+          }
           case "queryMore":
             await this.queryMore(panel, message.nextRecordsUrl, message.targetOrg || null);
             break;
@@ -736,10 +775,13 @@ export class SOQLEditorProvider {
       initialOrg: initialOrg || ""
     });
     const initialDataEscaped = initialData.replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
+    const monacoBase = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, "node_modules", "monaco-editor", "min", "vs"));
+    const cspSource = webview.cspSource;
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src ${cspSource} 'unsafe-eval' 'unsafe-inline'; style-src ${cspSource} 'unsafe-inline'; font-src ${cspSource}; img-src ${cspSource} data:; worker-src blob:; connect-src ${cspSource};">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SOQL Builder &amp; Editor</title>
     <style>
@@ -979,8 +1021,8 @@ export class SOQLEditorProvider {
             </div>
             <div class="card-body" style="gap:8px;">
                 <div class="query-wrap">
-                    <textarea id="query-input" placeholder="SELECT Id, Name FROM Account LIMIT 10">SELECT Id, Name FROM Account LIMIT 10</textarea>
-                    <ul id="completion-list"></ul>
+                    <div id="query-editor" style="height:170px; width:100%; border:1px solid var(--asfx-border); border-radius:var(--asfx-radius-sm); overflow:hidden;"></div>
+                    <ul id="completion-list" style="display:none;"></ul>
                 </div>
             </div>
         </div>
@@ -1025,9 +1067,46 @@ export class SOQLEditorProvider {
         </div>
     </div>
 
+    <script src="${monacoBase}/loader.js"></script>
     <script>
         const vscode = acquireVsCodeApi();
-        const queryInput = document.getElementById('query-input');
+        const MONACO_BASE = '${monacoBase}';
+        // ── Monaco-backed query editor with a textarea-compatible shim ──────────
+        // The rest of this view (builder, results, history) reads/writes
+        // queryInput.value; we back it with a Monaco 'soql' editor whose completion
+        // and hover come from the shared language server (single implementation).
+        let soqlEditor = null, _pendingValue = null, _onChangeCb = null;
+        const queryInput = {
+            get value() { return soqlEditor ? soqlEditor.getValue() : (_pendingValue || ''); },
+            set value(v) { if (soqlEditor) soqlEditor.setValue(v || ''); else _pendingValue = v || ''; },
+            focus() { if (soqlEditor) soqlEditor.focus(); },
+            get selectionStart() { try { return soqlEditor ? soqlEditor.getModel().getOffsetAt(soqlEditor.getPosition()) : 0; } catch (e) { return 0; } },
+            get selectionEnd() { return this.selectionStart; },
+            setSelectionRange(s) { try { if (soqlEditor) { const p = soqlEditor.getModel().getPositionAt(s); soqlEditor.setPosition(p); soqlEditor.revealPositionInCenterIfOutsideViewport(p); } } catch (e) {} },
+            addEventListener() { /* legacy textarea listeners are no-ops; Monaco handles input */ }
+        };
+        let _reqId = 0; const _pending = {};
+        require.config({ paths: { vs: MONACO_BASE } });
+        self.MonacoEnvironment = { getWorkerUrl: function () { return URL.createObjectURL(new Blob(["self.MonacoEnvironment={baseUrl:'" + MONACO_BASE + "/'};importScripts('" + MONACO_BASE + "/base/worker/workerMain.js');"], { type: 'text/javascript' })); } };
+        require(['vs/editor/editor.main'], function () {
+            function mapKind(k){ const M=monaco.languages.CompletionItemKind; const T={0:M.Text,1:M.Method,2:M.Function,3:M.Constructor,4:M.Field,5:M.Variable,6:M.Class,7:M.Interface,8:M.Module,9:M.Property,10:M.Unit,11:M.Value,12:M.Enum,13:M.Keyword,14:M.Snippet,17:M.Reference,19:M.EnumMember,20:M.Constant,21:M.Struct}; return T[k]!=null?T[k]:M.Text; }
+            monaco.languages.register({ id: 'soql' });
+            monaco.languages.setMonarchTokensProvider('soql', { ignoreCase: true,
+                keywords: ['select','from','where','limit','offset','order','by','group','having','asc','desc','nulls','first','last','and','or','not','like','in','includes','excludes','null','true','false','count','count_distinct','sum','avg','min','max','using','scope','with','data','category','for','view','reference','update','tracking','viewstat','typeof','when','then','else','end'],
+                tokenizer: { root: [ [/'(?:[^'\\\\]|\\\\.)*'/, 'string'], [/\\b\\d+(\\.\\d+)?\\b/, 'number'], [/[a-zA-Z_][\\w.]*/, { cases: { '@keywords': 'keyword', '@default': 'identifier' } }] ] } });
+            monaco.languages.registerCompletionItemProvider('soql', { triggerCharacters: ['.', ' ', ',', '('], provideCompletionItems: function (model, pos) {
+                return new Promise(function (resolve) { const id = ++_reqId; _pending[id] = function (items) { const w = model.getWordUntilPosition(pos); const range = { startLineNumber: pos.lineNumber, endLineNumber: pos.lineNumber, startColumn: w.startColumn, endColumn: w.endColumn }; resolve({ suggestions: items.map(function (it) { return { label: it.label, kind: mapKind(it.kind), insertText: it.insertText || it.label, insertTextRules: it.isSnippet ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet : undefined, detail: it.detail, documentation: it.documentation ? { value: it.documentation } : undefined, sortText: it.sortText, filterText: it.filterText, range: range }; }) }); }; vscode.postMessage({ command: 'wbCompletions', requestId: id, text: model.getValue(), line: pos.lineNumber - 1, character: pos.column - 1 }); });
+            } });
+            monaco.languages.registerHoverProvider('soql', { provideHover: function (model, pos) {
+                return new Promise(function (resolve) { const id = ++_reqId; _pending[id] = function (h) { if (!h || !h.contents || !h.contents.length) { resolve(null); return; } resolve({ contents: h.contents.map(function (v) { return { value: v }; }) }); }; vscode.postMessage({ command: 'wbHover', requestId: id, text: model.getValue(), line: pos.lineNumber - 1, character: pos.column - 1 }); });
+            } });
+            const dark = document.body.classList.contains('vscode-dark') || document.body.classList.contains('vscode-high-contrast');
+            soqlEditor = monaco.editor.create(document.getElementById('query-editor'), { value: _pendingValue || '', language: 'soql', theme: dark ? 'vs-dark' : 'vs', automaticLayout: true, minimap: { enabled: false }, scrollBeyondLastLine: false, fontSize: 13, quickSuggestions: true, fixedOverflowWidgets: true });
+            _pendingValue = null;
+            soqlEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, function () { runQuery(); });
+            soqlEditor.addCommand(monaco.KeyMod.WinCtrl | monaco.KeyCode.Enter, function () { runQuery(); });
+            if (_onChangeCb) soqlEditor.onDidChangeModelContent(_onChangeCb);
+        });
         const completionList = document.getElementById('completion-list');
         const executeBtn = document.getElementById('execute-btn');
         const saveBtn = document.getElementById('save-btn');
@@ -1204,6 +1283,8 @@ export class SOQLEditorProvider {
 
         orgSelect.addEventListener('change', () => {
             relationshipCache = {};
+            // Point editor completion/hover at the selected org (server-side override).
+            vscode.postMessage({ command: 'wbSetOrg', org: currentTargetOrg() });
             if (builderPanel.classList.contains('visible')) {
                 vscode.postMessage({ command: 'getBuilderObjectList', targetOrg: currentTargetOrg() });
             }
@@ -1933,6 +2014,8 @@ export class SOQLEditorProvider {
 
         window.addEventListener('message', event => {
             const message = event.data;
+            if (message.command === 'wbCompletions') { const cb = _pending[message.requestId]; if (cb) { delete _pending[message.requestId]; cb(message.items || []); } return; }
+            if (message.command === 'wbHover') { const cb = _pending[message.requestId]; if (cb) { delete _pending[message.requestId]; cb(message.hover || null); } return; }
             switch (message.command) {
                 case 'loading':
                     executeBtn.disabled = message.value;
