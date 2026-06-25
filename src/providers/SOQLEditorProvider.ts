@@ -1078,15 +1078,14 @@ export class SOQLEditorProvider {
                 <div class="card-actions results-toolbar" id="results-toolbar" style="display:none;">
                     <span id="results-count" class="results-count"></span>
                     <button type="button" id="load-more-btn" class="btn-mini" style="display:none;" title="Load the next page of records">⬇ Load more</button>
-                    <button id="save-btn" class="btn-mini" style="display:none;">💾 Save edits</button>
-                    <button id="discard-btn" class="btn-mini" style="display:none;">Discard</button>
+                    <span id="rt-controls" class="rt-ctl"></span>
                     <button type="button" class="btn-mini" onclick="exportResults('csv')" title="Download results as CSV">⬇ CSV</button>
                     <button type="button" class="btn-mini" onclick="exportResults('json')" title="Download results as JSON">⬇ JSON</button>
                 </div>
             </div>
             <div class="results-wrap">
                 <div id="results-container"></div>
-                <div class="status-bar" id="status-bar"><span id="status-text"></span><span id="rt-controls" class="rt-ctl"></span></div>
+                <div class="status-bar" id="status-bar"><span id="status-text"></span></div>
             </div>
         </div>
     </div>
@@ -1154,8 +1153,10 @@ export class SOQLEditorProvider {
         function clearSoqlErrorMarker() { if (soqlEditor) { try { monaco.editor.setModelMarkers(soqlEditor.getModel(), 'asfx-soql-error', []); } catch (e) {} } }
         const completionList = document.getElementById('completion-list');
         const executeBtn = document.getElementById('execute-btn');
-        const saveBtn = document.getElementById('save-btn');
-        const discardBtn = document.getElementById('discard-btn');
+        // Save/Discard now live in the shared results component (top-right toolbar).
+        // These detached fallbacks keep the dormant legacy edit code harmless.
+        const saveBtn = document.getElementById('save-btn') || document.createElement('button');
+        const discardBtn = document.getElementById('discard-btn') || document.createElement('button');
         const resultsContainer = document.getElementById('results-container');
         const errorMsg = document.getElementById('error-msg');
         const statusBar = document.getElementById('status-text');
