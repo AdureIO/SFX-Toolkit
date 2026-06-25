@@ -184,7 +184,10 @@ export function resultsTableScript(): string {
 
 		function save(){ saveErrors=[]; var payload=[]; for(var id in changes){ if(Object.keys(changes[id].fields).length) payload.push({ id:id, sobjectType:changes[id].type, fields:changes[id].fields }); } if(!payload.length) return; post({ type:'rt:save', org:getOrg(), changes:payload }); }
 		function onSaveDone(results){ saveErrors=[]; (results||[]).forEach(function(rr){ if(rr.error) saveErrors.push(rr.id+': '+rr.error); else delete changes[rr.id]; });
-			if(!saveErrors.length){ saveOk=true; setTimeout(function(){ saveOk=false; renderControls(); }, 4000); } render(); }
+			if(!saveErrors.length){ saveOk=true; setTimeout(function(){ saveOk=false; renderControls(); }, 4000);
+				// Reload from the org so cells show the persisted values (otherwise they'd revert to the stale originals).
+				if(onRefresh){ onRefresh(); return; } }
+			render(); }
 
 		function handleMessage(msg){ if(msg.type==='rt:colMeta'){ meta=msg.meta||{}; render(); }
 			else if(msg.type==='rt:lookupResult'){ var cb=lookupCbs[msg.requestId]; if(cb){ delete lookupCbs[msg.requestId]; cb(msg.hits||[]); } }
