@@ -59,7 +59,11 @@ export async function httpsRequestWithRetry(
         } catch (e: any) {
             lastError = e;
             const status = e.message?.match(/HTTP (\d+)/)?.[1];
-            if (status === '401' || status === '403' || status === '404') {
+            const code = status ? parseInt(status, 10) : 0;
+            // 4xx client errors (malformed query, bad field, auth, not found) will never
+            // succeed on retry — fail fast instead of burning ~3s of backoff. Only 429
+            // (rate limit) is worth retrying among 4xx; 5xx and network errors still retry.
+            if (code >= 400 && code < 500 && code !== 429) {
                 throw e;
             }
             if (attempt < maxRetries) {
