@@ -1,7 +1,7 @@
 # ASFX Toolkit
 
-![Visual Studio Marketplace Installs](https://img.shields.io/visual-studio-marketplace/i/adureio.sfx-toolkit?style=flat-square&label=VS%20Marketplace&color=blue)
-![Open VSX Installs](https://img.shields.io/open-vsx/dt/adureio/sfx-toolkit?style=flat-square&label=Open%20VSX&color=orange)
+[![Visual Studio Marketplace Installs](https://vsmarketplacebadges.dev/installs-short/AdureIO.sfx-toolkit.svg?style=flat-square&label=VS%20Marketplace&color=blue)](https://marketplace.visualstudio.com/items?itemName=AdureIO.sfx-toolkit)
+[![Open VSX Installs](https://img.shields.io/open-vsx/dt/adureio/sfx-toolkit?style=flat-square&label=Open%20VSX&color=orange)](https://open-vsx.org/extension/adureio/sfx-toolkit)
 
 ASFX Toolkit is an open-source VS Code / Cursor extension that supercharges your Salesforce development workflow. It bundles org-aware **Apex & SOQL IntelliSense**, log management & debugging, org management, source tracking & deployment, data operations, and API exploration — all without leaving the editor, and all driven by the Salesforce CLI you already have.
 
