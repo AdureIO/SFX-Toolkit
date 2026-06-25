@@ -4,6 +4,7 @@
  * surfaces call this from their webview message handler.
  */
 import { fieldMetaFor, lookupSearch, resolveNames, saveRecords, type FieldMeta, type RecordChange } from "./soqlEdit";
+import { Telemetry } from "./telemetry";
 
 type Post = (msg: Record<string, unknown>) => void;
 
@@ -27,7 +28,9 @@ export async function handleResultsTableMessage(msg: any, post: Post): Promise<b
 		return true;
 	}
 	if (msg.type === "rt:save") {
-		post({ type: "rt:saveDone", results: await saveRecords(org, (msg.changes as RecordChange[]) ?? []) });
+		const changes = (msg.changes as RecordChange[]) ?? [];
+		Telemetry.event("recordsSave", undefined, { count: changes.length });
+		post({ type: "rt:saveDone", results: await saveRecords(org, changes) });
 		return true;
 	}
 	return false;

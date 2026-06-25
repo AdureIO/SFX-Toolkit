@@ -130,6 +130,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 					this._post('traceInfo', { org: data.org || '', ...(await listActiveTraceFlags(data.org || null)) });
 					break;
 				case 'quickTrace': {
+					Telemetry.event('traceCreate', { surface: 'workbench', kind: 'quick' });
 					const ok = await createUserTrace(data.org || null);
 					vscode.window.showInformationMessage(ok ? 'Quick trace started for the selected org.' : 'Could not start the trace.');
 					this._post('traceInfo', { org: data.org || '', ...(await listActiveTraceFlags(data.org || null)) });
@@ -141,6 +142,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 						value: '60', validateInput: (v) => (/^\d+$/.test(v) && +v > 0 ? null : 'Enter a positive number of minutes'),
 					});
 					if (input === undefined) break;
+					Telemetry.event('traceCreate', { surface: 'workbench', kind: 'custom' });
 					const ok = await createUserTrace(data.org || null, parseInt(input, 10));
 					vscode.window.showInformationMessage(ok ? `Trace created (${input} min) for the selected org.` : 'Could not create the trace.');
 					this._post('traceInfo', { org: data.org || '', ...(await listActiveTraceFlags(data.org || null)) });
@@ -213,6 +215,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 					if (typeof data.query === 'string') await this._soqlBridge.update(data.query);
 					break;
 				case 'runSoql': {
+					Telemetry.event('soqlExecute', { surface: 'workbench' });
 					this._post('soqlStarted', {});
 					this._post('soqlResult', await this._runSoql(data.org || null, data.query || ''));
 					break;
