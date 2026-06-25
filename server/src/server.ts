@@ -205,14 +205,12 @@ async function fetchDescribe(docUri: string, sobject: string): Promise<HostDescr
     }
 }
 
-// Cached per document+sobject so a different sub-project (different org) doesn't
-// reuse another project's describe. Host also caches by org with a TTL.
-// Namespace-aware: in a namespaced project, `Widget__c` resolves to
-// `ns__Widget__c` when the bare name isn't found.
-const describeCache = new Map<string, HostDescribe | null>();
+// No server-side describe cache: a single webview buffer (the ASFX/SOQL workbench)
+// keeps ONE docUri but switches orgs over its lifetime, so caching by docUri here
+// would serve a previous org's fields after an org switch. The host owns the
+// authoritative per-org describe cache, so we always delegate to it (a host memory
+// hit, no network). Namespace-aware: `Widget__c` falls back to `ns__Widget__c`.
 async function describe(docUri: string, sobject: string): Promise<HostDescribe | null> {
-    const key = `${docUri}|${sobject}`;
-    if (describeCache.has(key)) return describeCache.get(key) ?? null;
     let res = await fetchDescribe(docUri, sobject);
     if (!res) {
         const ns = await projectNamespace(docUri);
@@ -220,7 +218,6 @@ async function describe(docUri: string, sobject: string): Promise<HostDescribe |
             res = await fetchDescribe(docUri, `${ns}__${sobject}`);
         }
     }
-    describeCache.set(key, res);
     return res;
 }
 
@@ -534,7 +531,6 @@ function soqlRegionAt(text: string, offset: number): SoqlRegion | null {
 }
 
 connection.onNotification(NOTE_REFRESH, () => {
-    describeCache.clear();
     namespaceCache.clear();
     objectDescriptionCache.clear();
     apexSymbolCache.clear();

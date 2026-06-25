@@ -191,6 +191,23 @@ Sample workspace config:
 - The **Salesforce CLI** (`sf`) installed and authenticated to your orgs — used for auth and several operations.
 - The official **Salesforce Apex extension** is recommended (ASFX Toolkit's Apex IntelliSense runs alongside it); SOQL features work without it.
 
+## Telemetry
+
+The extension collects **anonymous** usage telemetry to understand how many people
+use it and which features are valuable, so development can be prioritized. We collect:
+
+- Extension activation and an anonymous, randomly generated install id
+- Which commands and panels are used, with execution duration and success/failure
+- Coarse error categories (e.g. `auth`, `network`, `cli`) — never raw messages
+- Deploy / test / SOQL outcomes as categorical flags and counts
+
+We **never** collect access tokens, usernames, org ids, record ids, file paths,
+SOQL/Apex text, query results, or any personal data.
+
+To opt out, set `adure-sfx-toolkit.telemetry.enabled` to `false`. Telemetry also
+honors VS Code's global `telemetry.telemetryLevel` setting — disabling either turns
+it off.
+
 ## Open Source
 
 Contributions, issues, and feature requests are welcome — see the [GitHub repository](https://github.com/AdureIO/SFX-Toolkit).

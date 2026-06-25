@@ -66,3 +66,7 @@ export function getRemoveFinalNewlineRunOnSave(): boolean {
 export function getWarnOnProductionOrg(): boolean {
   return getConfig().get<boolean>("warnOnProductionOrg", true);
 }
+
+export function getTelemetryEnabled(): boolean {
+  return getConfig().get<boolean>("telemetry.enabled", true);
+}

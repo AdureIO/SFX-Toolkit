@@ -9,6 +9,7 @@ import { getAutoSaveBeforePush, getTestRunTimeout } from "../utils/constants";
 import { DEPLOY_TIMEOUT_MS } from "./deployMetadata";
 import { getDefaultOrg, getDefaultOrgSync } from "../utils/defaultOrg";
 import { confirmProductionOrgOperation } from "../utils/orgSafety";
+import { Telemetry } from "../utils/telemetry";
 
 // Helper to strip ANSI and progress lines
 export function cleanDeployOutput(output: string): string {
@@ -652,7 +653,9 @@ export async function runLocalTests() {
         channel.append(result);
         channel.show();
 
-        if (result.includes("Pass") && !result.includes("Fail")) {
+        const passed = result.includes("Pass") && !result.includes("Fail");
+        Telemetry.event("testRun", { outcome: passed ? "pass" : "fail" });
+        if (passed) {
           vscode.window.showInformationMessage("Tests Passed.");
         } else {
           vscode.window.showWarningMessage("Some tests failed. Check output.");
@@ -662,6 +665,7 @@ export async function runLocalTests() {
           Logger.info("Run Local Tests cancelled by user.");
           return;
         }
+        Telemetry.event("testRun", { outcome: "error" });
         vscode.window.showErrorMessage(`Tests execution failed.`);
         const channel = vscode.window.createOutputChannel("Salesforce Test Results");
         channel.append(e.stderr || e.message);

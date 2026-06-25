@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { Telemetry } from '../utils/telemetry';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -29,6 +30,19 @@ export function initDeployHistory(context: vscode.ExtensionContext): void {
 }
 
 export function addDeployHistoryEntry(entry: Omit<DeployHistoryEntry, 'id'>): void {
+  // Anonymous deploy outcome telemetry (categorical + numeric only; no org/paths).
+  Telemetry.event(
+    "deploy",
+    { status: entry.status, dryRun: String(entry.dryRun) },
+    {
+      durationMs: entry.durationMs,
+      components: entry.components,
+      componentErrors: entry.componentErrors,
+      testsPassed: entry.testsPassed,
+      testsFailed: entry.testsFailed
+    }
+  );
+
   if (!_ctx) return;
   const existing: DeployHistoryEntry[] = _ctx.globalState.get(HISTORY_KEY, []);
   const newEntry: DeployHistoryEntry = {

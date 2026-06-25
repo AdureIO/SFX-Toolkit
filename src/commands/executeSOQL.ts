@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { runCommandArgs } from "../utils/commandRunner";
 import { Logger, outputChannel } from "../utils/outputChannel";
+import { Telemetry } from "../utils/telemetry";
 
 export async function executeSOQL() {
   const editor = vscode.window.activeTextEditor;
@@ -41,6 +42,7 @@ export async function executeSOQL() {
         );
 
         Logger.info("SOQL query executed successfully.");
+        Telemetry.event("soqlExecute", { success: "1" });
 
         const doc = await vscode.workspace.openTextDocument({
           content: result,
@@ -51,6 +53,7 @@ export async function executeSOQL() {
         vscode.window.showInformationMessage("SOQL query executed. Results opened in a new document.");
       } catch (e: any) {
         if (e.cancelled) return;
+        Telemetry.event("soqlExecute", { success: "0" });
         Logger.error("SOQL query failed", e);
         outputChannel.show();
         vscode.window
