@@ -10,6 +10,7 @@ import { ApexBufferBridge } from "./apexBufferBridge";
 import { setBufferOrgOverride } from "../utils/bufferOrgOverride";
 import { refreshLanguageServerSchema, setEphemeralBuffers } from "../languageClient";
 import { getSoqlMarkers } from "../utils/soqlMarkers";
+import { parseSoqlError } from "../utils/soqlError";
 
 const SOQL_WB_BUFFER = ".vscode/soql-wb-buffer.soql";
 const SOQL_HISTORY_MAX = 50;
@@ -541,14 +542,20 @@ export class SOQLEditorProvider {
       } else {
         const err = result[0] || result;
         const message = err.message || err.errorDescription || JSON.stringify(result);
-        panel.webview.postMessage({ command: "error", text: message });
+        SOQLEditorProvider.postQueryError(panel, message);
       }
     } catch (e: any) {
-      const errorMsg = e.message || e.stderr || JSON.stringify(e);
-      panel.webview.postMessage({ command: "error", text: errorMsg });
+      SOQLEditorProvider.postQueryError(panel, e.message || e.stderr || JSON.stringify(e));
     } finally {
       panel.webview.postMessage({ command: "loading", value: false });
     }
+  }
+
+  /** Parse a SOQL error and surface it cleanly + inline (marker at Row:Column). */
+  private static postQueryError(panel: vscode.WebviewPanel, raw: string): void {
+    const parsed = parseSoqlError(raw);
+    const label = parsed.code ? `${parsed.code}: ${parsed.message}` : parsed.message;
+    panel.webview.postMessage({ command: "error", text: label, line: parsed.line, column: parsed.column });
   }
 
   /** Load the next page of records for the current result set (pagination). */
@@ -1121,9 +1128,22 @@ export class SOQLEditorProvider {
             let _valTimer = null;
             function scheduleValidate() { if (_valTimer) clearTimeout(_valTimer); _valTimer = setTimeout(function () { vscode.postMessage({ command: 'validateSoql', org: currentTargetOrg(), text: soqlEditor.getValue() }); }, 400); }
             soqlEditor.onDidChangeModelContent(scheduleValidate);
+            soqlEditor.onDidChangeModelContent(clearSoqlErrorMarker); // stale once edited
             scheduleValidate();
             window.__soqlScheduleValidate = scheduleValidate;
         });
+        // Inline marker for a run-time query error (from the API's Row:Column).
+        function setSoqlErrorMarker(line, column, text) {
+            if (!soqlEditor || !line) return;
+            try {
+                const model = soqlEditor.getModel();
+                let col = column || 1, endCol = col + 1;
+                const w = model.getWordAtPosition({ lineNumber: line, column: col });
+                if (w) { col = w.startColumn; endCol = w.endColumn; }
+                monaco.editor.setModelMarkers(model, 'asfx-soql-error', [{ severity: monaco.MarkerSeverity.Error, message: text, startLineNumber: line, startColumn: col, endLineNumber: line, endColumn: endCol }]);
+            } catch (e) {}
+        }
+        function clearSoqlErrorMarker() { if (soqlEditor) { try { monaco.editor.setModelMarkers(soqlEditor.getModel(), 'asfx-soql-error', []); } catch (e) {} } }
         const completionList = document.getElementById('completion-list');
         const executeBtn = document.getElementById('execute-btn');
         const saveBtn = document.getElementById('save-btn');
@@ -2047,6 +2067,7 @@ export class SOQLEditorProvider {
                     saveBtn.textContent = message.value ? 'Saving...' : 'Save';
                     break;
                 case 'results':
+                    clearSoqlErrorMarker();
                     if (message.instanceUrl) currentInstanceUrl = message.instanceUrl;
                     if (message.editableFields) editableFieldsByType = message.editableFields;
                     nextRecordsUrl = message.nextRecordsUrl || null;
@@ -2092,6 +2113,7 @@ export class SOQLEditorProvider {
                     errorMsg.textContent = message.text;
                     resultsContainer.innerHTML = '';
                     statusBar.textContent = '';
+                    setSoqlErrorMarker(message.line, message.column, message.text);
                     break;
                 case 'saveErrors':
                     errorMsg.textContent = 'Save errors:\\n' + (message.errors || []).join('\\n');
