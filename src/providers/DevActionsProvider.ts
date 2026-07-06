@@ -33,6 +33,7 @@ export class DevActionsProvider implements vscode.TreeDataProvider<vscode.TreeIt
 				this.createItem("Push Source", "adure-sfx-toolkit.pushSource", "cloud-upload", "Deploy all source to default org"),
 				this.createItem("Push Source (Force)", "adure-sfx-toolkit.pushSourceForce", "alert", "Force push source (overwrite conflicts)"),
 				this.createItem("Pull Source", "adure-sfx-toolkit.pullSource", "cloud-download", "Retrieve all source from default org"),
+					this.createItem("Pull Source (Force)", "adure-sfx-toolkit.pullSourceForce", "alert", "Force pull source (overwrite conflicts)"),
 				this.createItem("Reset Source Tracking", "adure-sfx-toolkit.resetSourceTracking", "history", "Reset source tracking for default org"),
 			]),
 			new DevGroupItem("Deploy & Retrieve", "package", [

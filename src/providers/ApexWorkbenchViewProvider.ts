@@ -341,6 +341,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	#traces { border-top:1px solid var(--vscode-panel-border, rgba(128,128,128,0.25)); padding:6px 8px; font-size:11px; display:flex; align-items:center; justify-content:space-between; }
 	.viewer { flex:1; display:flex; flex-direction:column; min-width:0; }
 	.vtools { display:flex; align-items:center; gap:6px; padding:5px 8px; border-bottom:1px solid var(--vscode-panel-border, rgba(128,128,128,0.2)); flex-shrink:0; }
+	.vtools-lbl { font-size:11px; opacity:0.7; }
 	.vtools input { flex:1; min-width:50px; height:26px; padding:2px 6px; font-size:11px; background:var(--vscode-input-background); color:var(--vscode-input-foreground); border:1px solid var(--vscode-input-border, transparent); border-radius:4px; }
 	.vtools input.invalid { border-color:var(--vscode-inputValidation-errorBorder, var(--vscode-errorForeground)); }
 	.qf { border-radius:11px; padding:3px 11px; }
@@ -401,8 +402,10 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 			</span>
 		</div>
 	</div>
+	<div id="logSplit" style="flex:0 0 8px; cursor:col-resize; display:flex; justify-content:center;"><span style="height:100%; width:3px; border-radius:2px; background:var(--vscode-panel-border, rgba(128,128,128,0.3));"></span></div>
 	<div class="viewer">
 		<div class="vtools">
+			<span class="vtools-lbl">Filter</span>
 			<button class="qf" data-pane="log" data-f="debug" title="Toggle USER_DEBUG, exceptions and errors">Debug</button>
 			<button class="qf" data-pane="log" data-f="soql" title="Toggle SOQL and DML">SOQL/DML</button>
 			<input data-pane="log" type="text" placeholder="Filter (regex)…" spellcheck="false" />
@@ -419,6 +422,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 		<div id="execResults">
 			<div class="vtools">
 				<span id="execTitle" style="font-size:11px; opacity:0.9; margin-right:auto;">Result</span>
+				<span class="vtools-lbl">Filter</span>
 				<button class="qf" data-pane="exec" data-f="debug" title="Toggle USER_DEBUG, exceptions and errors">Debug</button>
 				<button class="qf" data-pane="exec" data-f="soql" title="Toggle SOQL and DML">SOQL/DML</button>
 				<input data-pane="exec" type="text" placeholder="Filter (regex)…" spellcheck="false" style="display:none;" />
@@ -603,6 +607,10 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	document.getElementById('runSoql').onclick=doRunSoql;
 	document.getElementById('openSoqlWb').onclick=function(){ vscode.postMessage({type:'openSoqlWorkbench', query:soqlEd?soqlEd.getValue():'', org:orgVal()}); };
 	document.getElementById('clearSoql').onclick=function(){ if(soqlEd){soqlEd.setValue('');soqlEd.focus();} vscode.postMessage({type:'soqlChanged',query:''}); };
+	(function(){ const sp=document.getElementById('logSplit'); const list=document.getElementById('list'); let drag=false,sx=0,sw=0;
+		sp.addEventListener('mousedown',function(e){drag=true;sx=e.clientX;sw=list.getBoundingClientRect().width;document.body.style.cursor='col-resize';document.body.style.userSelect='none';e.preventDefault();});
+		window.addEventListener('mousemove',function(e){ if(!drag)return; const max=Math.max(160,window.innerWidth-200); list.style.flex='0 0 '+Math.min(max,Math.max(140,sw+(e.clientX-sx)))+'px'; });
+		window.addEventListener('mouseup',function(){drag=false;document.body.style.cursor='';document.body.style.userSelect='';}); })();
 	(function(){ const sp=document.getElementById('soqlSplit'); const ed=document.getElementById('soqlEditor'); let drag=false,sx=0,sw=0;
 		sp.addEventListener('mousedown',function(e){drag=true;sx=e.clientX;sw=ed.getBoundingClientRect().width;document.body.style.cursor='col-resize';document.body.style.userSelect='none';e.preventDefault();});
 		window.addEventListener('mousemove',function(e){ if(!drag)return; const max=Math.max(160,window.innerWidth-200); ed.style.flex='0 0 '+Math.min(max,Math.max(160,sw+(e.clientX-sx)))+'px'; });

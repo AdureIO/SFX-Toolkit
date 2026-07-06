@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import * as path from "path";
 import * as glob from "glob";
-import { Logger } from "./outputChannel";
+import { DeployLog } from "./outputChannel";
 import { getPackageDirectories } from "../commands/deployMetadata";
 
 const DEPLOY_DIAGNOSTIC_SOURCE = "Deploy";
@@ -16,6 +16,16 @@ export interface ApiComponentFailure {
   problem?: string;
 }
 
+/** A successfully-deployed component; `created`/`changed`/`deleted` give the native state. */
+export interface ApiComponentSuccess {
+  fileName?: string;
+  fullName?: string;
+  componentType?: string;
+  created?: boolean;
+  changed?: boolean;
+  deleted?: boolean;
+}
+
 export interface ApiDeployResult {
   status?: string;
   numberComponentsDeployed?: number;
@@ -25,8 +35,11 @@ export interface ApiDeployResult {
   numberTestsTotal?: number;
   numberTestErrors?: number;
   stateDetail?: string;
+  errorStatusCode?: string;
+  errorMessage?: string;
   details?: {
     componentFailures?: ApiComponentFailure | ApiComponentFailure[];
+    componentSuccesses?: ApiComponentSuccess | ApiComponentSuccess[];
   };
 }
 
@@ -36,6 +49,22 @@ function getComponentFailuresList(result: ApiDeployResult): ApiComponentFailure[
   if (Array.isArray(raw)) return raw;
   if (raw && typeof raw === "object") return [raw];
   return [];
+}
+
+/** Normalize API componentSuccesses to an array. */
+function getComponentSuccessesList(result: ApiDeployResult): ApiComponentSuccess[] {
+  const raw = result.details?.componentSuccesses;
+  if (Array.isArray(raw)) return raw;
+  if (raw && typeof raw === "object") return [raw];
+  return [];
+}
+
+/** Native deploy state for a successful component (mirrors the CLI's State column). */
+function componentState(c: ApiComponentSuccess): string {
+  if (c.deleted) return "Deleted";
+  if (c.created) return "Created";
+  if (c.changed) return "Changed";
+  return "Unchanged";
 }
 
 /**
@@ -72,22 +101,34 @@ export function formatApiDeployResultForLog(
         ((apiResult.numberTestErrors ?? 0) > 0 ? ` (${apiResult.numberTestErrors} failed)` : "")
     );
   }
+  // CLI-style component table: State | Type Name | Location [| problem]. Failures
+  // first (most important), then successes with their native state.
   const failures = getComponentFailuresList(apiResult);
-  if (failures.length > 0) {
-    lines.push("  Component failures:");
-    for (let i = 0; i < failures.length; i++) {
-      const f = failures[i];
-      const file = f.fileName?.trim() || [f.componentType, f.fullName].filter(Boolean).join(" ").trim() || "(no file)";
-      const lineCol =
-        f.lineNumber !== null && f.lineNumber !== undefined
-          ? f.columnNumber !== null && f.columnNumber !== undefined
-            ? ` ${f.lineNumber}:${f.columnNumber}`
-            : ` line ${f.lineNumber}`
-          : "";
-      const typeName = [f.componentType, f.fullName].filter(Boolean).join(" ") || "—";
-      const problem = (f.problem ?? "Deploy error").replace(/\s+/g, " ").slice(0, 300);
-      lines.push(`    [${i + 1}] ${file}${lineCol}  (${typeName})`);
-      lines.push(`        ${problem}`);
+  const successes = getComponentSuccessesList(apiResult);
+
+  interface Row { state: string; comp: string; loc: string; problem?: string }
+  const rows: Row[] = [];
+  const compLabel = (type?: string, name?: string) => [type, name].filter(Boolean).join(" ") || "—";
+
+  for (const f of failures) {
+    let loc = f.fileName?.trim() || "";
+    if (f.lineNumber !== null && f.lineNumber !== undefined) {
+      loc += `:${f.lineNumber}${f.columnNumber !== null && f.columnNumber !== undefined ? ":" + f.columnNumber : ""}`;
+    }
+    rows.push({ state: "Failed", comp: compLabel(f.componentType, f.fullName), loc, problem: (f.problem ?? "Deploy error").replace(/\s+/g, " ").slice(0, 300) });
+  }
+  for (const s of successes) {
+    rows.push({ state: componentState(s), comp: compLabel(s.componentType, s.fullName), loc: s.fileName?.trim() || "" });
+  }
+
+  if (rows.length > 0) {
+    const stateW = Math.max(...rows.map((r) => r.state.length));
+    const compW = Math.min(48, Math.max(...rows.map((r) => r.comp.length)));
+    lines.push(`  Components (${rows.length}):`);
+    for (const r of rows) {
+      let line = `    ${r.state.padEnd(stateW)}  ${r.comp.padEnd(compW)}  ${r.loc}`.replace(/\s+$/, "");
+      if (r.problem) line += `  — ${r.problem}`;
+      lines.push(line);
     }
   }
   return lines.join("\n");
@@ -109,6 +150,35 @@ export function getDeployDiagnosticCollection(): vscode.DiagnosticCollection {
 /** Clear all deploy diagnostics (e.g. when starting a new deploy or when deploy succeeds). */
 export function clearDeployDiagnostics(): void {
   getDeployDiagnosticCollection().clear();
+}
+
+/**
+ * Remove a deploy-failure diagnostic once the user edits its line — the error is
+ * being worked on, so keeping the stale red squiggle is noise. Registered once at
+ * activation.
+ */
+export function registerDeployDiagnosticAutoClear(context: vscode.ExtensionContext): void {
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeTextDocument((e) => {
+      if (e.contentChanges.length === 0) return;
+      const collection = getDeployDiagnosticCollection();
+      const existing = collection.get(e.document.uri);
+      if (!existing || existing.length === 0) return;
+
+      const editedLines = new Set<number>();
+      for (const c of e.contentChanges) {
+        for (let ln = c.range.start.line; ln <= c.range.end.line; ln++) editedLines.add(ln);
+      }
+
+      const kept = existing.filter((d) => {
+        for (let ln = d.range.start.line; ln <= d.range.end.line; ln++) {
+          if (editedLines.has(ln)) return false; // this diagnostic's line was edited → drop it
+        }
+        return true;
+      });
+      if (kept.length !== existing.length) collection.set(e.document.uri, kept);
+    })
+  );
 }
 
 /** Strip ANSI codes from CLI output. */
@@ -339,7 +409,7 @@ export function setDeployDiagnosticsFromApiResult(
   options?: { skipLog?: boolean }
 ): void {
   if (!options?.skipLog) {
-    Logger.info(formatApiDeployResultForLog(apiResult));
+    DeployLog.line(formatApiDeployResultForLog(apiResult));
   }
   const collection = getDeployDiagnosticCollection();
   collection.clear();
@@ -397,11 +467,11 @@ export async function setDeployDiagnosticsFromFailure(
   _targetOrg?: string | null
 ): Promise<void> {
   const trimres = cleanDeployOutput(errorOutput);
-  Logger.info("Deploy failed:\n" + (trimres || errorOutput || "(no output)"));
+  DeployLog.line("Deploy failed:\n" + (trimres || errorOutput || "(no output)"));
 
   const parsedResult = parseDeployResultFromCliOutput(trimres);
   if (parsedResult && getComponentFailuresList(parsedResult).length > 0) {
-    Logger.info(formatApiDeployResultForLog(parsedResult, "Deploy result (from CLI output):"));
+    DeployLog.line(formatApiDeployResultForLog(parsedResult, "Deploy result (from CLI output):"));
     setDeployDiagnosticsFromApiResult(workspaceRoot, parsedResult, { skipLog: true });
     return;
   }
@@ -416,7 +486,7 @@ export async function setDeployDiagnosticsFromFailure(
  */
 export function setDeployDiagnosticsFromOutput(workspaceRoot: string, errorOutput: string): void {
   const trimmed = trimToFailureSection(errorOutput);
-  Logger.info("Deploy failed (no API result). Failure output:\n" + (trimmed || errorOutput));
+  DeployLog.line("Deploy failed (no API result). Failure output:\n" + (trimmed || errorOutput));
   const collection = getDeployDiagnosticCollection();
   collection.clear();
   const diagnostic = new vscode.Diagnostic(

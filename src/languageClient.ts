@@ -64,6 +64,11 @@ export function startLanguageServer(context: vscode.ExtensionContext): void {
 	const apexCompletion = vscode.workspace
 		.getConfiguration("adure-sfx-toolkit")
 		.get<boolean>("apex.enableCompletion", true);
+	// Offline schema validation (Tier 1) — flags SObject member accesses that don't
+	// exist in org metadata. Gated by apexFeatures on the server too.
+	const apexValidateSchema = vscode.workspace
+		.getConfiguration("adure-sfx-toolkit")
+		.get<boolean>("apex.validateSemantics", true);
 
 	const clientOptions: LanguageClientOptions = {
 		documentSelector: [
@@ -79,7 +84,7 @@ export function startLanguageServer(context: vscode.ExtensionContext): void {
 			{ scheme: "file", pattern: "**/*.cls" },
 			{ scheme: "file", pattern: "**/*.trigger" },
 		],
-		initializationOptions: { apexFeatures, apexCompletion },
+		initializationOptions: { apexFeatures, apexCompletion, apexValidateSchema },
 		outputChannel,
 	};
 
@@ -165,12 +170,18 @@ export function startLanguageServer(context: vscode.ExtensionContext): void {
 
 	// When the org switches or metadata is refreshed, drop the host-side describe
 	// cache and tell the server to drop its own.
-	const unsubscribe = OrgMetadataCache.onChange(() => {
-		SoqlSchemaProvider.invalidateAll();
+	const unsubscribe = OrgMetadataCache.onChange((_org, change) => {
+		// Always tell the server to drop its cached schema doc (cheap).
 		void client?.sendNotification(NOTE_REFRESH).catch(() => {});
-		// Regenerate ALL SObject schema stubs after org switch / pull / refresh
-		// (force: the schema may have changed, so don't trust existing stubs).
-		scheduleStubSync({ force: true });
+		if (change && change.objects.length) {
+			// Targeted: a push/pull touched only these objects' schema. The affected
+			// describes were already dropped; regenerate just those stubs — not the org.
+			scheduleStubSync({ only: change.objects });
+		} else {
+			// Full invalidation (org switch / manual refresh): don't trust any stub.
+			SoqlSchemaProvider.invalidateAll();
+			scheduleStubSync({ force: true });
+		}
 	});
 
 	// Initial background stub generation: incremental — only create stubs that

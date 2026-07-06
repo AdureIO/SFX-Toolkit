@@ -48,6 +48,12 @@ class WorkspaceIndexImpl {
         return [...this.names.values()];
     }
 
+    /** Cheap check (filename scan only, no parse) whether a name is a workspace Apex type. */
+    hasType(name: string): boolean {
+        if (!this.scanned) this.scan();
+        return this.files.has(name.toLowerCase());
+    }
+
     /**
      * Members (methods/fields/properties) of a workspace type, for cross-file
      * member completion (`MyClass.` or `instanceOfMyClass.`). Parses only the one

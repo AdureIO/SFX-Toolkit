@@ -204,12 +204,22 @@
         "icon": "$(cloud-download)"
       },
       {
+        "command": "adure-sfx-toolkit.pullSourceForce",
+        "title": "ASFXT: Pull Source (Force/Override)",
+        "icon": "$(alert)"
+      },
+      {
         "command": "adure-sfx-toolkit.deployCurrentFile",
         "title": "ASFXT: Deploy Current File"
       },
       {
         "command": "adure-sfx-toolkit.retrieveCurrentFile",
         "title": "ASFXT: Retrieve Current File"
+      },
+      {
+        "command": "adure-sfx-toolkit.validateApexFile",
+        "title": "ASFXT: Validate Apex Against Org",
+        "icon": "$(check-all)"
       },
       {
         "command": "adure-sfx-toolkit.resetSourceTracking",
@@ -642,6 +652,11 @@
           "group": "navigation@1"
         },
         {
+          "command": "adure-sfx-toolkit.validateApexFile",
+          "when": "resourceExtname == .cls || resourceExtname == .trigger",
+          "group": "navigation@2"
+        },
+        {
           "command": "adure-sfx-toolkit.rerunLastApex",
           "when": "resourceScheme == sf-anon-log",
           "group": "navigation@1"
@@ -883,6 +898,21 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "Org-aware Apex code completion (SObject fields on `var.`, `new` constructors, and SObject type names). This is additive to the Salesforce Apex extension. Turn **off** if you see duplicate suggestions and prefer the Salesforce extension's completion."
+        },
+        "adure-sfx-toolkit.apex.validateSemantics": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Offline schema validation: flag `variable.Field` accesses whose field or relationship does not exist on the SObject, checked against cached org metadata (no org round-trip). Warnings appear as you open/save Apex files. Conservative — only flags members it can confidently resolve. Requires Apex semantic features (`apex.languageServer` not `off`)."
+        },
+        "adure-sfx-toolkit.deploy.liveStatus": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Deploy with live status by submitting the deploy asynchronously and polling the Metadata REST API for structured progress (stage, components X/Y, tests X/Y) and failures. Faster and more reliable than parsing CLI text, and errors go straight to the Problems view. Turn **off** to stream the classic `sf project deploy start` CLI output instead. If the async submit ever fails, the CLI path is used automatically."
+        },
+        "adure-sfx-toolkit.apex.validateOnSave": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "On save, validate the Apex file against the default org with a check-only (dry-run) deploy and show compiler errors in the Problems view. Authoritative (catches type/reference errors the offline check cannot) but performs an org round-trip on every save, so it is **off by default**. Also available on demand via **ASFXT: Validate Apex Against Org**."
         },
         "adure-sfx-toolkit.apex.autoRestartLanguageServer": {
           "type": "boolean",

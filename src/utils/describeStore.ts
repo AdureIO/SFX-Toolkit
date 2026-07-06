@@ -79,7 +79,13 @@ class DescribeStoreImpl {
 			.catch((e: any) => {
 				map.set(sobject, { raw: null, fetchedAt: Date.now() });
 				this.locks.delete(lockKey);
-				outputChannel.appendLine(`DescribeStore: describe ${sobject} failed: ${e?.message ?? e}`);
+				// A 404 just means "that name isn't an SObject" — an expected negative result
+				// (Apex class, generic, system type). Negative-cached; not worth logging. Only
+				// surface genuine failures (network / auth / 5xx).
+				const msg = String(e?.message ?? e);
+				if (!/HTTP 404\b/.test(msg)) {
+					outputChannel.appendLine(`DescribeStore: describe ${sobject} failed: ${msg}`);
+				}
 				return null;
 			});
 		this.locks.set(lockKey, promise);

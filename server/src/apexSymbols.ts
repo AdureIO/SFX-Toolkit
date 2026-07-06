@@ -38,10 +38,23 @@ export interface ApexIndex {
     methods: Map<string, string[]>;
 }
 
+/**
+ * A `receiver.member` field/property access (NOT a method call). The `chain` is
+ * the raw text of the base expression (e.g. `acc`, `acc.Contact__r`); `member`
+ * is the accessed name; `range` covers the member token. Used by the schema
+ * validator to flag members that don't exist on the resolved SObject.
+ */
+export interface FieldAccess {
+    chain: string;
+    member: string;
+    range: Range;
+}
+
 export interface ApexParseResult {
     symbols: DocumentSymbol[];
     diagnostics: Diagnostic[];
     index: ApexIndex;
+    fieldAccesses: FieldAccess[];
 }
 
 // antlr tokens: line is 1-based, column 0-based.
@@ -70,7 +83,7 @@ class DiagnosticCollector extends ApexErrorListener {
             severity: DiagnosticSeverity.Error,
             range: Range.create(pos, Position.create(pos.line, pos.character + 1)),
             message: msg,
-            source: 'sfx-apex',
+            source: 'asfx-apex',
         });
     }
 }
@@ -78,8 +91,23 @@ class DiagnosticCollector extends ApexErrorListener {
 class SymbolListener extends ApexParserBaseListener {
     roots: DocumentSymbol[] = [];
     index: ApexIndex = { types: new Map(), varTypes: new Map(), classRanges: [], decls: new Map(), methods: new Map() };
+    fieldAccesses: FieldAccess[] = [];
     private stack: DocumentSymbol[] = [];
     private typeNameStack: string[] = [];
+
+    // `receiver.member` where the RHS is an identifier (field/property/relationship),
+    // NOT a method call (`dotMethodCall` alternative). The grammar splits these, so
+    // method invocations like `acc.put('x', v)` are naturally excluded.
+    enterDotExpression = (ctx: any) => {
+        if (ctx.dotMethodCall?.()) return; // method call, not a field access
+        const idc = ctx.anyId?.();
+        const baseCtx = ctx.expression?.();
+        if (!idc || !baseCtx) return;
+        const chain = baseCtx.getText?.();
+        const member = idc.getText?.();
+        if (!chain || !member) return;
+        this.fieldAccesses.push({ chain, member, range: nameRange(idc, ctx) });
+    };
 
     private recordDecl(name: string | undefined, idCtx: any, fallback: any): void {
         if (name) this.index.decls.set(name, nameRange(idCtx, fallback));
@@ -221,6 +249,7 @@ export function parseApex(text: string): ApexParseResult {
     const diagnostics: Diagnostic[] = [];
     let symbols: DocumentSymbol[] = [];
     let index: ApexIndex = { types: new Map(), varTypes: new Map(), classRanges: [], decls: new Map(), methods: new Map() };
+    let fieldAccesses: FieldAccess[] = [];
     try {
         const parser = ApexParserFactory.createParser(text);
         parser.removeErrorListeners();
@@ -230,10 +259,11 @@ export function parseApex(text: string): ApexParseResult {
         ApexParseTreeWalker.DEFAULT.walk(listener, tree);
         symbols = listener.roots;
         index = listener.index;
+        fieldAccesses = listener.fieldAccesses;
     } catch {
         // Parsing failed hard; keep whatever diagnostics we collected.
     }
-    return { symbols, diagnostics, index };
+    return { symbols, diagnostics, index, fieldAccesses };
 }
 
 /** Innermost class name whose range contains the position, for `this` resolution. */

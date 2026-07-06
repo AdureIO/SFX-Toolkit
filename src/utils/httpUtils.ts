@@ -129,6 +129,50 @@ export function httpsDelete(url: string, token: string): Promise<string> {
 }
 
 /**
+ * PATCH with a request body and custom headers. Resolves with response text on
+ * 2xx; rejects with `HTTP <status>: <body>` otherwise. Used for the Metadata REST
+ * deploy-cancel call.
+ */
+export function httpsPatch(
+    url: string,
+    body: string,
+    headers: Record<string, string>,
+    timeoutMs?: number
+): Promise<string> {
+    const timeout = timeoutMs ?? getHttpTimeout();
+    return new Promise((resolve, reject) => {
+        const parsed = new URL(url);
+        const data = Buffer.from(body, 'utf8');
+        const options = {
+            hostname: parsed.hostname,
+            path: parsed.pathname + parsed.search,
+            method: 'PATCH',
+            headers: { ...headers, 'Content-Length': data.length },
+            timeout,
+        };
+        const req = https.request(options, (res) => {
+            const chunks: any[] = [];
+            res.on('data', (d) => chunks.push(d));
+            res.on('end', () => {
+                const text = Buffer.concat(chunks).toString();
+                if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+                    resolve(text);
+                } else {
+                    reject(new Error(`HTTP ${res.statusCode}: ${text.slice(0, 1000)}`));
+                }
+            });
+        });
+        req.on('timeout', () => {
+            req.destroy();
+            reject(new Error(`Request timed out after ${timeout}ms: PATCH ${url}`));
+        });
+        req.on('error', (e) => reject(e));
+        req.write(data);
+        req.end();
+    });
+}
+
+/**
  * GET only the first `maxBytes` of a resource via a Range request. Salesforce may
  * honor it (206 partial) or ignore it (200 full) — either is returned as-is.
  */

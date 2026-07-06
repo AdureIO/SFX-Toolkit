@@ -248,46 +248,69 @@ export interface ApexCompletionContext {
     objectName?: string;
     /** SObject name resolved from FROM clause for 'soqlField'. */
     sobjectName?: string;
+    /**
+     * Parent-relationship hops for 'soqlField' when the field token is a dotted
+     * traversal, e.g. `Account__r.Owner.<cursor>` → ['Account__r', 'Owner'].
+     * Empty/undefined for a direct field on the FROM object.
+     */
+    relPath?: string[];
 }
 
 /**
  * Parse the context at the cursor.
  * @param textUpToCursor  The text of the current line up to (not including) the cursor character.
- * @param surroundingText Optional multi-line text window around the cursor for SOQL FROM detection.
+ * @param surroundingText Optional multi-line text window around the cursor. Used to locate the
+ *                        FROM SObject, which sits *after* the field list being completed.
+ * @param beforeCursor    Optional multi-line text from the top of the window up to the cursor.
+ *                        Lets us detect a SELECT (and relationship paths) that began on an earlier
+ *                        line. Falls back to textUpToCursor when omitted.
  */
-export function parseContext(textUpToCursor: string, surroundingText?: string): ApexCompletionContext {
-    // 1. Dot-access: word.prefix
-    const dotMatch = textUpToCursor.match(/(\w+)\.(\w*)$/);
-    if (dotMatch) {
-        return { type: 'member', objectName: dotMatch[1], prefix: dotMatch[2] };
+export function parseContext(
+    textUpToCursor: string,
+    surroundingText?: string,
+    beforeCursor?: string
+): ApexCompletionContext {
+    const before = beforeCursor && beforeCursor.length ? beforeCursor : textUpToCursor;
+
+    // 1. SOQL SELECT field list (checked before Apex dot-access so relationship
+    //    traversals like `Account__r.Name` aren't mistaken for member access).
+    //    Find the nearest SELECT before the cursor that has not yet been closed
+    //    by its FROM, a subquery/statement end (']' / ';').
+    let lastSelect = -1;
+    const selRe = /\bSELECT\b/gi;
+    let sm: RegExpExecArray | null;
+    while ((sm = selRe.exec(before)) !== null) lastSelect = sm.index;
+
+    if (lastSelect >= 0) {
+        const seg = before.slice(lastSelect);
+        const inSelectList = !/\bFROM\b/i.test(seg) && !/[\];]/.test(seg);
+        if (inSelectList) {
+            const sobjFromMatch = (surroundingText || textUpToCursor).match(/\bFROM\s+(\w+)/i);
+            if (sobjFromMatch) {
+                const token = (textUpToCursor.match(/[\w.]*$/) || [''])[0];
+                const dot = token.lastIndexOf('.');
+                if (dot >= 0) {
+                    const relPath = token.slice(0, dot).split('.').filter(Boolean);
+                    return { type: 'soqlField', sobjectName: sobjFromMatch[1], prefix: token.slice(dot + 1), relPath };
+                }
+                return { type: 'soqlField', sobjectName: sobjFromMatch[1], prefix: token };
+            }
+        }
     }
 
-    // 2. SOQL FROM clause: cursor is after FROM
+    // 2. Apex dot-access, possibly a relationship drill on an SObject instance:
+    //    root.hop1.hop2.prefix  (e.g. `account.Contact.Na` → root=account, hops=[Contact]).
+    //    root carries the variable/type; hops are parent-relationship names to walk.
+    const chain = textUpToCursor.match(/([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\.(\w*)$/);
+    if (chain) {
+        const segs = chain[1].split('.');
+        return { type: 'member', objectName: segs[0], relPath: segs.slice(1), prefix: chain[2] };
+    }
+
+    // 3. SOQL FROM clause: cursor is after FROM
     const fromMatch = textUpToCursor.match(/\bFROM\s+(\w*)$/i);
     if (fromMatch) {
         return { type: 'soqlFrom', prefix: fromMatch[1] };
-    }
-
-    // 3. SOQL SELECT field list: cursor is after SELECT (and a comma / space),
-    //    and the surrounding text contains a FROM SObjectName.
-    const isInSelectList =
-        /\bSELECT\b/i.test(textUpToCursor) &&
-        !/\bFROM\b/i.test(textUpToCursor);
-
-    if (!isInSelectList && surroundingText) {
-        // Also catches: SELECT on previous lines, cursor on a field line
-        const upToNl = textUpToCursor.trimEnd();
-        if (upToNl === '' || /^[\w,\s]*$/.test(upToNl)) {
-            // Could be a continuation field line — look for SELECT above in window
-        }
-    }
-
-    if (isInSelectList && surroundingText) {
-        const sobjFromMatch = surroundingText.match(/\bFROM\s+(\w+)/i);
-        if (sobjFromMatch) {
-            const prefix = (textUpToCursor.split(/[\s,]+/).pop() || '').trim();
-            return { type: 'soqlField', sobjectName: sobjFromMatch[1], prefix };
-        }
     }
 
     // 4. Default: bare word
@@ -437,4 +460,39 @@ export function fieldItems(names: string[], prefix: string): RawCompletionItem[]
             kind: CompletionKind.Field,
             sortText: n,
         }));
+}
+
+/** One entry from OrgMetadataCache.getFieldsAndRelations. */
+export interface FieldOrRelation {
+    name: string;
+    type?: string;
+    /** True for a parent-relationship pseudo-field (e.g. `Account`, `MyLookup__r`). */
+    rel?: boolean;
+    /** Target SObject API name for a relationship entry. */
+    target?: string;
+}
+
+/**
+ * Wrap fields AND parent-relationship pseudo-fields into RawCompletionItems.
+ * Relationships (standard like `Owner`/`Account` and custom `__r`) are surfaced
+ * so inline SOQL in Apex offers the same traversals as the SOQL builder.
+ * Fields sort first, relationships after (both alphabetical within their group).
+ */
+export function fieldAndRelationItems(entries: FieldOrRelation[], prefix: string): RawCompletionItem[] {
+    const lp = prefix.toLowerCase();
+    return entries
+        .filter(e => e.name.toLowerCase().startsWith(lp))
+        .map(e => e.rel
+            ? {
+                label: e.name,
+                detail: e.target ? `Relationship → ${e.target}` : 'Relationship',
+                kind: CompletionKind.Class,
+                sortText: '1' + e.name,
+            }
+            : {
+                label: e.name,
+                detail: e.type ? `Field (${e.type})` : 'Field',
+                kind: CompletionKind.Field,
+                sortText: '0' + e.name,
+            });
 }

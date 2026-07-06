@@ -263,6 +263,7 @@ async function syncProject(
 	scope: "referenced" | "all",
 	force: boolean,
 	report?: (msg: string) => void,
+	only?: Set<string>,
 ): Promise<number> {
 	// Lazy-require vscode-dependent modules so the pure helpers stay testable.
 	const { OrgMetadataCache } = require("./orgMetadataCache");
@@ -302,8 +303,10 @@ async function syncProject(
 		// Incremental (non-forced) sync: a stub already on disk is assumed current,
 		// so we skip the describe + rebuild entirely. The 99%-already-exists case
 		// on activation/window-reload thus does almost no work. A forced sync
-		// (refresh / pull / org switch) regenerates everything to pick up changes.
-		if (!force && before) {
+		// (org switch / manual refresh) regenerates everything; a targeted `only`
+		// sync (push/pull) regenerates just the objects whose schema changed.
+		const regenerate = force || (only ? only.has(name) : false);
+		if (!regenerate && before) {
 			skipped++;
 			continue;
 		}
@@ -338,22 +341,31 @@ async function syncProject(
 
 let timer: NodeJS.Timeout | undefined;
 let pendingForce = false;
+let pendingOnly: Set<string> | undefined;
 
 /**
  * Debounced background sync for all SFDX projects in the workspace. Safe no-op
  * when disabled or outside an SFDX project. Never throws into the caller.
  *
- * `force` (refresh / pull / org switch) regenerates every stub; the default
- * incremental run only creates stubs that don't exist yet. If any call within
- * the debounce window asks to force, the coalesced run is forced.
+ * - `force` (org switch / manual refresh): regenerate every stub.
+ * - `only` (push/pull that changed specific objects): regenerate just those stubs,
+ *   leaving all others incremental — so a normal Apex push rebuilds nothing.
+ * - default (activation): incremental — only create stubs that don't exist yet.
+ * Calls within the debounce window coalesce; a `force` wins over `only`.
  */
-export function scheduleStubSync(opts?: { force?: boolean }): void {
+export function scheduleStubSync(opts?: { force?: boolean; only?: string[] }): void {
 	if (opts?.force) pendingForce = true;
+	if (opts?.only?.length) {
+		pendingOnly ??= new Set();
+		for (const n of opts.only) pendingOnly.add(n);
+	}
 	if (timer) clearTimeout(timer);
 	timer = setTimeout(() => {
 		const force = pendingForce;
+		const only = pendingForce ? undefined : pendingOnly;
 		pendingForce = false;
-		void runStubSync(force);
+		pendingOnly = undefined;
+		void runStubSync(force, only);
 	}, 1500);
 }
 
@@ -365,7 +377,7 @@ export function getInitialSyncState(): { done: boolean; wrote: boolean } {
 	return { done: firstSyncDone, wrote: firstSyncWrote };
 }
 
-async function runStubSync(force = false): Promise<void> {
+async function runStubSync(force = false, only?: Set<string>): Promise<void> {
 	try {
 		const vscode = require("vscode");
 		const enabled = vscode.workspace
@@ -385,7 +397,7 @@ async function runStubSync(force = false): Promise<void> {
 					// Sync the workspace root project and any nested sfdx-project.json dirs.
 					for (const projectDir of findSfdxProjectDirs(root)) {
 						const org = resolveDefaultTargetOrgUsernameSync(projectDir) ?? null;
-						changed += await syncProject(projectDir, org, scope, force, (msg) => progress.report({ message: msg }));
+						changed += await syncProject(projectDir, org, scope, force, (msg) => progress.report({ message: msg }), only);
 					}
 				}
 			},

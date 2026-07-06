@@ -69,6 +69,24 @@ const DESCRIBES: Record<string, Describe> = {
     ],
     childRelationships: [],
   },
+  acme__DynamicField__c: {
+    name: "acme__DynamicField__c",
+    label: "Dynamic Field",
+    fields: [
+      { name: "Id", type: "id" },
+      { name: "acme__Datasource__c", type: "reference", relationshipName: "acme__Datasource__r", referenceTo: ["acme__Datasource__c"] },
+    ],
+    childRelationships: [],
+  },
+  acme__Datasource__c: {
+    name: "acme__Datasource__c",
+    label: "Data Source",
+    fields: [
+      { name: "Id", type: "id" },
+      { name: "acme__Label__c", type: "string" },
+    ],
+    childRelationships: [],
+  },
 };
 
 // ─── Harness ────────────────────────────────────────────────────────────────────
@@ -83,6 +101,19 @@ function labelsOf(res: any): string[] {
 }
 function itemsOf(res: any): any[] {
   return Array.isArray(res) ? res : res.items;
+}
+
+const diagnosticsByUri = new Map<string, any[]>();
+const describeCalls: string[] = []; // every sobject name the server asked the host to describe
+/** Wait until a publishDiagnostics for `uri` satisfies `pred` (or time out). */
+async function waitForDiagnostics(uri: string, pred: (d: any[]) => boolean, timeoutMs = 4000): Promise<any[]> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const d = diagnosticsByUri.get(uri);
+    if (d && pred(d)) return d;
+    await new Promise((r) => setTimeout(r, 25));
+  }
+  return diagnosticsByUri.get(uri) ?? [];
 }
 
 async function openAndComplete(uri: string, languageId: string, text: string, line: number, character: number) {
@@ -106,6 +137,7 @@ before(async function () {
 
   conn.onRequest("sfx/objectList", () => OBJECTS);
   conn.onRequest("sfx/describe", ({ uri, sobject }: { uri?: string; sobject: string }) => {
+    describeCalls.push(sobject);
     const d = DESCRIBES[sobject];
     if (!d) return null;
     if (uri && uri.includes("billing") && sobject === "Account") {
@@ -117,6 +149,9 @@ before(async function () {
   conn.onRequest("sfx/objectInfo", ({ sobject }: { sobject: string }) =>
     sobject === "Account" ? { description: "Customer accounts and prospects." } : { description: null },
   );
+  conn.onNotification("textDocument/publishDiagnostics", (p: { uri: string; diagnostics: any[] }) => {
+    diagnosticsByUri.set(p.uri, p.diagnostics);
+  });
   conn.listen();
 
   const tmpRoot = path.join(os.tmpdir(), "sfx-test-" + process.pid);
@@ -264,6 +299,144 @@ describe("Apex language features", () => {
     const src = "public class C {\n  void m() {\n    Account a;\n    a.;\n  }\n}\n";
     const labels = labelsOf(await complete(src, 3, 6, "apex"));
     assert.ok(labels.includes("Id") && labels.includes("Industry"));
+  });
+
+  it("schema validation flags an unknown field on a typed SObject variable", async () => {
+    const uri = `file:///tmp/Sem${version++}.cls`;
+    const src = "public class C {\n  void m() {\n    Account a;\n    String bad = a.Nope__c;\n    String ok = a.Name;\n  }\n}\n";
+    await conn.sendNotification("textDocument/didOpen", { textDocument: { uri, languageId: "apex", version: 1, text: src } });
+    const diags = await waitForDiagnostics(uri, (d) => d.some((x) => x.source === "asfx-apex-schema"));
+    const schema = diags.filter((d) => d.source === "asfx-apex-schema");
+    assert.strictEqual(schema.length, 1, `expected one schema warning, got ${JSON.stringify(schema)}`);
+    assert.match(schema[0].message, /Nope__c/);
+    assert.strictEqual(schema[0].range.start.line, 3, "warning on the a.Nope__c line");
+  });
+
+  it("schema validation drills relationships and does not flag valid members", async () => {
+    const uri = `file:///tmp/Sem${version++}.cls`;
+    // Contact.Account (rel) → Account.Name is valid; Contact.Account.Bogus is not.
+    const src = "public class C {\n  void m() {\n    Contact c;\n    String a = c.Account.Name;\n    String b = c.Account.Bogus;\n  }\n}\n";
+    await conn.sendNotification("textDocument/didOpen", { textDocument: { uri, languageId: "apex", version: 1, text: src } });
+    const diags = await waitForDiagnostics(uri, (d) => d.some((x) => x.source === "asfx-apex-schema"));
+    const schema = diags.filter((d) => d.source === "asfx-apex-schema");
+    assert.strictEqual(schema.length, 1, `expected one schema warning, got ${JSON.stringify(schema)}`);
+    assert.match(schema[0].message, /Bogus/);
+  });
+
+  it("schema validation is namespace-optional (no false positive on unprefixed fields)", async () => {
+    const uri = `file:///tmp/Sem${version++}.cls`;
+    // Field is `acme__Amount__c` in the describe; code references it without the namespace.
+    const src = "public class C {\n  void m() {\n    acme__Widget__c w;\n    Object a = w.Amount__c;\n    Object b = w.Missing__c;\n  }\n}\n";
+    await conn.sendNotification("textDocument/didOpen", { textDocument: { uri, languageId: "apex", version: 1, text: src } });
+    const diags = await waitForDiagnostics(uri, (d) => d.some((x) => x.source === "asfx-apex-schema"));
+    const schema = diags.filter((d) => d.source === "asfx-apex-schema");
+    assert.strictEqual(schema.length, 1, `only Missing__c should flag, got ${JSON.stringify(schema.map((s) => s.message))}`);
+    assert.match(schema[0].message, /Missing__c/);
+  });
+
+  it("matches a namespaced field accessed WITHOUT the namespace (type also unprefixed)", async () => {
+    const uri = `file:///tmp/Sem${version++}.cls`;
+    // Object acme__DynamicField__c has field acme__DataSource__c; code omits the namespace on both.
+    const src = "public class C {\n  void m() {\n    DynamicField__c dyn = new DynamicField__c();\n    Object a = dyn.DataSource__c;\n    Object b = dyn.Bogus__c;\n  }\n}\n";
+    await conn.sendNotification("textDocument/didOpen", { textDocument: { uri, languageId: "apex", version: 1, text: src } });
+    const diags = await waitForDiagnostics(uri, (d) => d.some((x) => x.source === "asfx-apex-schema"));
+    const schema = diags.filter((d) => d.source === "asfx-apex-schema");
+    assert.strictEqual(schema.length, 1, `only Bogus__c should flag, got: ${JSON.stringify(schema.map((s) => s.message))}`);
+    assert.match(schema[0].message, /Bogus__c/);
+  });
+
+  it("traverses a relationship written WITHOUT its namespace (X__r resolves ns__X__r)", async () => {
+    const uri = `file:///tmp/Sem${version++}.cls`;
+    // dyn.DataSource__r → acme__Datasource__r → acme__Datasource__c; Label__c is valid there, Nope__c isn't.
+    const src = "public class C {\n  void m() {\n    DynamicField__c dyn = new DynamicField__c();\n    Object a = dyn.DataSource__r.Label__c;\n    Object b = dyn.DataSource__r.Nope__c;\n  }\n}\n";
+    await conn.sendNotification("textDocument/didOpen", { textDocument: { uri, languageId: "apex", version: 1, text: src } });
+    const diags = await waitForDiagnostics(uri, (d) => d.some((x) => x.source === "asfx-apex-schema"));
+    const schema = diags.filter((d) => d.source === "asfx-apex-schema");
+    assert.strictEqual(schema.length, 1, `only Nope__c should flag, got: ${JSON.stringify(schema.map((s) => s.message))}`);
+    assert.match(schema[0].message, /Nope__c/);
+  });
+
+  it("does NOT validate a variable whose type is a local class shadowing an SObject name", async () => {
+    describeCalls.length = 0;
+    const uri = `file:///tmp/Sem${version++}.cls`;
+    // `Contact` here is a local inner class, not the SObject — its members must not be flagged.
+    const src = "public class C {\n  class Contact { public Integer foo; }\n  void m() {\n    Contact c;\n    Object x = c.bar;\n  }\n}\n";
+    await conn.sendNotification("textDocument/didOpen", { textDocument: { uri, languageId: "apex", version: 1, text: src } });
+    await new Promise((r) => setTimeout(r, 600));
+    const schema = (diagnosticsByUri.get(uri) ?? []).filter((d) => d.source === "asfx-apex-schema");
+    assert.strictEqual(schema.length, 0, `local class must shadow the SObject: ${JSON.stringify(schema.map((s) => s.message))}`);
+    assert.ok(!describeCalls.includes("Contact"), "must not describe a locally-declared type");
+  });
+
+  it("describes SObjects by heuristic: custom suffix + standard name, not arbitrary types", async () => {
+    describeCalls.length = 0;
+    const uri = `file:///tmp/Sem${version++}.cls`;
+    // `Whatever__c` (custom suffix) and `Account` (standard) are SObjects; `Widget` is neither.
+    const src = "public class C {\n  void m() {\n    Whatever__c wc;\n    Object a = wc.foo;\n    Account acc;\n    Object b = acc.Name;\n    Widget w;\n    Object d = w.bar;\n  }\n}\n";
+    await conn.sendNotification("textDocument/didOpen", { textDocument: { uri, languageId: "apex", version: 1, text: src } });
+    await new Promise((r) => setTimeout(r, 600));
+    assert.ok(describeCalls.includes("Whatever__c"), `custom __c type should be described by suffix: ${describeCalls.join(",")}`);
+    assert.ok(describeCalls.includes("Account"), `standard object should be described: ${describeCalls.join(",")}`);
+    assert.ok(!describeCalls.includes("Widget"), `non-SObject type must not be described: ${describeCalls.join(",")}`);
+  });
+
+  it("skips describe for workspace classes, generics and system types (no 404 spam)", async () => {
+    describeCalls.length = 0;
+    const uri = `file:///tmp/Sem${version++}.cls`;
+    // Helper is a workspace class; List<String> is a generic; both must NOT be described.
+    const src = "public class C {\n  void m() {\n    Helper h;\n    Object a = h.greetField;\n    List<String> l;\n    Object b = l.something;\n  }\n}\n";
+    await conn.sendNotification("textDocument/didOpen", { textDocument: { uri, languageId: "apex", version: 1, text: src } });
+    await new Promise((r) => setTimeout(r, 600));
+    assert.ok(!describeCalls.includes("Helper"), `should not describe workspace class Helper: ${describeCalls.join(",")}`);
+    assert.ok(!describeCalls.some((s) => s.includes("<")), `should not describe generics: ${describeCalls.join(",")}`);
+  });
+
+  it("schema validation accepts child relationships (parent.ChildRel)", async () => {
+    const uri = `file:///tmp/Sem${version++}.cls`;
+    // Account has a `Contacts` child relationship — accessing it must not be flagged.
+    const src = "public class C {\n  void m() {\n    Account a;\n    Object k = a.Contacts;\n  }\n}\n";
+    await conn.sendNotification("textDocument/didOpen", { textDocument: { uri, languageId: "apex", version: 1, text: src } });
+    // Give the async pass time; then assert no schema warning was produced.
+    await new Promise((r) => setTimeout(r, 600));
+    const schema = (diagnosticsByUri.get(uri) ?? []).filter((d) => d.source === "asfx-apex-schema");
+    assert.strictEqual(schema.length, 0, `child relationship should be valid, got ${JSON.stringify(schema.map((s) => s.message))}`);
+  });
+
+  it("suggests `new List<String>()` right after a generic assignment", async () => {
+    const src = "public class C {\n  void m() {\n    List<String> a = \n  }\n}\n";
+    const labels = labelsOf(await complete(src, 2, 21, "apex"));
+    assert.ok(labels.includes("new List<String>()"), `got: ${labels.slice(0, 6).join(", ")}`);
+  });
+
+  it("preserves nested generics: `new Map<Id, Account>()`", async () => {
+    const src = "public class C {\n  void m() {\n    Map<Id, Account> mp = \n  }\n}\n";
+    const labels = labelsOf(await complete(src, 2, 25, "apex"));
+    assert.ok(labels.includes("new Map<Id, Account>()"), `got: ${labels.slice(0, 6).join(", ")}`);
+  });
+
+  it("suggests `new` for an SObject assignment", async () => {
+    const src = "public class C {\n  void m() {\n    Account a = \n  }\n}\n";
+    const labels = labelsOf(await complete(src, 2, 16, "apex"));
+    assert.ok(labels.includes("new Account()"), `got: ${labels.slice(0, 6).join(", ")}`);
+  });
+
+  it("does NOT suggest `new` for a primitive assignment", async () => {
+    const src = "public class C {\n  void m() {\n    Integer i = \n  }\n}\n";
+    const labels = labelsOf(await complete(src, 2, 16, "apex"));
+    assert.ok(!labels.includes("new Integer()"), `should not offer new Integer(): ${labels.slice(0, 6).join(", ")}`);
+  });
+
+  it("suggests `new` after `new ` matching the assigned type", async () => {
+    const src = "public class C {\n  void m() {\n    Account a = new \n  }\n}\n";
+    const labels = labelsOf(await complete(src, 2, 20, "apex"));
+    assert.ok(labels.includes("Account"), `got: ${labels.slice(0, 6).join(", ")}`);
+  });
+
+  it("member completion offers fields AND relationships for a namespaced object typed without its namespace", async () => {
+    const src = "public class C {\n  void m() {\n    DynamicField__c ds = new DynamicField__c();\n    ds.dataso\n  }\n}\n";
+    const labels = labelsOf(await complete(src, 3, 13, "apex"));
+    assert.ok(labels.some((l: string) => /datasource__c/i.test(l)), `field offered: ${labels.join(",")}`);
+    assert.ok(labels.some((l: string) => /datasource__r/i.test(l)), `relationship offered: ${labels.join(",")}`);
   });
 
   it("member completion resolves `this` and user types", async () => {

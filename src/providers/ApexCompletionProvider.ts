@@ -3,9 +3,11 @@ import {
     parseContext,
     getStaticItems,
     sobjectItems,
-    fieldItems,
+    fieldAndRelationItems,
+    APEX_KEYWORDS,
     CompletionKind,
     RawCompletionItem,
+    FieldOrRelation,
 } from '../utils/apexCompletions';
 import { OrgMetadataCache } from '../utils/orgMetadataCache';
 
@@ -44,9 +46,11 @@ export class ApexCompletionProvider implements vscode.CompletionItemProvider {
     static async getItems(
         textUpToCursor: string,
         surroundingText: string,
-        org: string | null
+        org: string | null,
+        beforeCursor?: string,
+        fullText?: string
     ): Promise<RawCompletionItem[]> {
-        const ctx = parseContext(textUpToCursor, surroundingText);
+        const ctx = parseContext(textUpToCursor, surroundingText, beforeCursor);
         const staticItems = getStaticItems(ctx);
 
         if (ctx.type === 'soqlFrom' || (ctx.type === 'bare' && ctx.prefix.length >= 2)) {
@@ -56,19 +60,77 @@ export class ApexCompletionProvider implements vscode.CompletionItemProvider {
         }
 
         if (ctx.type === 'soqlField' && ctx.sobjectName) {
-            const fields = await OrgMetadataCache.getFieldNames(org, ctx.sobjectName);
-            return [...staticItems, ...fieldItems(fields, ctx.prefix)];
+            // Walk any parent-relationship hops (Account__r.Owner.…) to the target
+            // SObject, then offer its fields AND relationships — same as the SOQL builder.
+            let target: string | null = ctx.sobjectName;
+            for (const rel of ctx.relPath ?? []) {
+                target = await OrgMetadataCache.getRelationshipTarget(org, target, rel);
+                if (!target) return staticItems; // relationship not in schema → suggest nothing
+            }
+            const entries = await OrgMetadataCache.getFieldsAndRelations(org, target);
+            return [...staticItems, ...fieldAndRelationItems(entries, ctx.prefix)];
         }
 
         if (ctx.type === 'member' && ctx.objectName) {
-            // If the stdlib didn't match, try it as an SObject type name for field completion
-            if (staticItems.length === 0) {
-                const fields = await OrgMetadataCache.getFieldNames(org, ctx.objectName);
-                return fieldItems(fields, ctx.prefix);
+            // stdlib / Trigger matched — return those.
+            if (staticItems.length > 0) return staticItems;
+
+            // Otherwise treat the root as an SObject instance (a declared variable)
+            // or an SObject type name, then drill through any parent-relationship
+            // hops (account.Contact.<field>) — same schema-driven walk as SOQL.
+            const root = await ApexCompletionProvider.resolveRootSObject(ctx.objectName, org, fullText);
+            if (!root) return [];
+
+            const hops = ctx.relPath ?? [];
+            if (hops.length === 0) {
+                return fieldAndRelationItems(root.entries, ctx.prefix);
             }
+            let target: string | null = root.sobject;
+            for (const rel of hops) {
+                target = await OrgMetadataCache.getRelationshipTarget(org, target, rel);
+                if (!target) return []; // relationship not in schema → suggest nothing
+            }
+            const entries = await OrgMetadataCache.getFieldsAndRelations(org, target);
+            return fieldAndRelationItems(entries, ctx.prefix);
         }
 
         return staticItems;
+    }
+
+    /**
+     * Resolve the SObject a member-access root refers to.
+     * Tries, in order: the declared type of a local variable named `root`
+     * (scanned from the file text), then `root` itself as an SObject API name.
+     * Returns the resolved name plus its fields+relations, or null if neither describes.
+     */
+    private static async resolveRootSObject(
+        root: string,
+        org: string | null,
+        fullText?: string
+    ): Promise<{ sobject: string; entries: FieldOrRelation[] } | null> {
+        const candidates: string[] = [];
+        if (fullText) {
+            // Match `SomeType root` declarations: `Account acc`, `Contact c =`,
+            // `for (Lead ld :`, `(Opportunity o)`. The type must be a bare identifier
+            // (optionally __c), not a member expression, and not an Apex keyword.
+            const esc = root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const declRe = new RegExp(`(?:^|[^\\w.])([A-Za-z_]\\w*(?:__[cCrR])?)\\s+${esc}\\b`, 'g');
+            const keywords = new Set(APEX_KEYWORDS);
+            let m: RegExpExecArray | null;
+            while ((m = declRe.exec(fullText)) !== null) {
+                const t = m[1];
+                if (!keywords.has(t.toLowerCase()) && t.toLowerCase() !== root.toLowerCase()) {
+                    candidates.push(t);
+                }
+            }
+        }
+        candidates.push(root); // the token itself may be an SObject type name
+
+        for (const c of candidates) {
+            const entries = await OrgMetadataCache.getFieldsAndRelations(org, c);
+            if (entries.length > 0) return { sobject: c, entries };
+        }
+        return null;
     }
 
     async provideCompletionItems(
@@ -84,13 +146,21 @@ export class ApexCompletionProvider implements vscode.CompletionItemProvider {
         const startLine = Math.max(0, position.line - 5);
         const endLine = Math.min(document.lineCount - 1, position.line + 5);
         const windowLines: string[] = [];
+        const beforeLines: string[] = [];
         for (let i = startLine; i <= endLine; i++) {
             windowLines.push(document.lineAt(i).text);
         }
+        // Text from the top of the window up to the cursor — lets a SELECT (and
+        // relationship path) that began on an earlier line be detected.
+        for (let i = startLine; i < position.line; i++) {
+            beforeLines.push(document.lineAt(i).text);
+        }
+        beforeLines.push(textUpToCursor);
         const surroundingText = windowLines.join('\n');
+        const beforeCursor = beforeLines.join('\n');
 
         try {
-            const raw = await ApexCompletionProvider.getItems(textUpToCursor, surroundingText, null);
+            const raw = await ApexCompletionProvider.getItems(textUpToCursor, surroundingText, null, beforeCursor, document.getText());
             return raw.map(toVsCodeItem);
         } catch {
             return [];

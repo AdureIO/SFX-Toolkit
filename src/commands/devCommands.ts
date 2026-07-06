@@ -2,11 +2,14 @@ import * as vscode from "vscode";
 import { escapeShellArg, runCommand } from "../utils/commandRunner";
 import * as fs from "fs";
 import * as path from "path";
-import { Logger, outputChannel } from "../utils/outputChannel";
+import { Logger, outputChannel, DeployLog } from "../utils/outputChannel";
 import { AuthInfo } from "../utils/authInfo";
 import { OrgMetadataCache } from "../utils/orgMetadataCache";
 import { getAutoSaveBeforePush, getTestRunTimeout } from "../utils/constants";
 import { DEPLOY_TIMEOUT_MS } from "./deployMetadata";
+import { runRestDeploy, DeploySubmitError } from "../utils/deployEngine";
+import { toApiDeployResult, formatStatus, formatElapsed, affectedSchemaObjects, componentSuccessList, parseRetrievedComponents, schemaObjectFromPath, type DeployedComponent } from "../utils/deployStatusMap";
+import { clearDeployDiagnostics, setDeployDiagnosticsFromApiResult, setDeployDiagnosticsFromFailure, formatApiDeployResultForLog } from "../utils/deployDiagnostics";
 import { getDefaultOrg, getDefaultOrgSync } from "../utils/defaultOrg";
 import { confirmProductionOrgOperation } from "../utils/orgSafety";
 import { Telemetry } from "../utils/telemetry";
@@ -214,6 +217,7 @@ async function pushSourceHelper(force: boolean) {
   outputChannel.clear();
   // outputChannel.show(); // Only show on error or explicit request
   Logger.info(`Starting Push Operation: ${titleWithOrg}`);
+  const pushStartTime = Date.now();
 
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, -100);
   statusBar.command = "adure-sfx-toolkit.showOutput";
@@ -262,95 +266,67 @@ async function pushSourceHelper(force: boolean) {
             }
           }
 
-          // State for status updates
-          let lastPrefix = "";
-          let currentPhase = "";
-          let currentDetails = "";
+          // Live deploy via the Metadata REST engine (async submit + poll). Replaces
+          // the old CLI-text scraping: structured status, correct cancel, and failures
+          // routed to the Problems view.
+          const liveStatus = vscode.workspace
+            .getConfiguration("adure-sfx-toolkit")
+            .get<boolean>("deploy.liveStatus", true);
+          clearDeployDiagnostics();
+          // Mutated inside runOne (a closure); a state object keeps TS narrowing honest
+          // (property narrowing resets after each await, unlike captured `let`s).
+          const state: {
+            totalCount: number; // numberComponentsDeployed, aggregated across package dirs
+            numTotal: number; // numberComponentsTotal
+            numErrors: number; // numberComponentErrors
+            cancelled: boolean;
+            failure: { apiResult?: import("../utils/deployDiagnostics").ApiDeployResult; errorText?: string } | null;
+            components: DeployedComponent[]; // deployed components, for smart schema refresh
+            fallbackUsed: boolean; // a non-live CLI deploy ran → no structured component list
+          } = { totalCount: 0, numTotal: 0, numErrors: 0, cancelled: false, failure: null, components: [], fallbackUsed: false };
 
-          // Common callback to stream output to log and update progress
-          const handleOutput = (data: string, prefix?: string) => {
-            // Reset state if prefix changes (new package)
-            if (prefix && prefix !== lastPrefix) {
-              lastPrefix = prefix;
-              currentPhase = "";
-              currentDetails = "";
-            }
-
-            // Strip ANSI codes but keep non-ASCII (spinners, checkmarks)
-            // We need to see spinners to know what's active.
-            const cleanData = data.replace(
-              /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g,
-              ""
-            );
-
-            const lines = cleanData.split(/[\r\n]+/);
-
-            // 1. Determine Status Message for Notification
-            for (const line of lines) {
-              const l = line.trim();
-              if (!l) continue;
-
-              // Check for spinner/activity indicators
-              // \u2800-\u28FF are Braille patterns often used for spinners
-              // \u2026 is ellipsis ...
-              // \u22EE is vertical ellipsis
-              const isSpinner = /[\u2800-\u28FF\u2026\u22EE]/.test(l);
-              const isCheckmark = /[✓\u2713\u2714]/.test(l);
-              const isSquare = /[▪■]/.test(l); // Often used for pending steps
-
-              // If line has a spinner, it is the active phase!
-              if (isSpinner) {
-                // Extract the text part of the line (remove spinner) to preserve time info if present
-                const cleanLine = l.replace(/^[^\w\s]+/, "").trim();
-
-                if (l.includes("Deploying Metadata")) {
-                  currentPhase = cleanLine;
-                } else if (l.includes("Running Tests")) {
-                  currentPhase = cleanLine;
-                  currentDetails = "";
-                } else if (l.includes("Preparing")) {
-                  currentPhase = cleanLine;
-                } else if (l.includes("Waiting for the org to respond")) {
-                  currentPhase = cleanLine;
-                }
-              }
-              // If line has a checkmark, it is done. Don't set as current phase if we have a spinner.
-              else if (isCheckmark) {
-                // Do nothing, or maybe set as "Last Completed: ..." if we wanted more detail.
-              }
-              // If line has a square, it is likely pending.
-              else if (isSquare) {
-                // Do nothing, wait for it to spin.
-              }
-              // Fallback logic for lines without clear indicators or standard status lines
-              else {
-                if (l.includes("Components:")) {
-                  currentDetails = l.replace(/^[^\w\s]+/, "").trim();
-                } else if (l.startsWith("Status:")) {
-                  if (!l.includes("In Progress") && !l.includes("Pending")) {
-                    const s = l.replace("Status:", "").trim();
-                    if (s.length > 0) {
-                      // Prevent "Running Tests" from being overwritten by stale status lines
-                      if (currentPhase === "Running Tests" && !l.includes("Running Tests")) {
-                        // Ignore status updates if we are already in Running Tests phase,
-                        // unless the new status is "Done" or "Failed"
-                        if (s === "Done" || s === "Failed" || s === "Succeeded") {
-                          currentPhase = `Status: ${s}`;
-                        }
-                      } else {
-                        currentPhase = `Status: ${s}`;
-                      }
-                    }
-                  }
-                }
+          /** Run one deploy invocation; returns false to stop a multi-package loop (cancel/failure). */
+          const runOne = async (submitBase: string, label?: string): Promise<boolean> => {
+            const report = (m: string) => {
+              const full = label ? `${label}: ${m}` : m;
+              progress.report({ message: full });
+              statusBar.text = `$(sync~spin) ${full}`;
+            };
+            if (liveStatus) {
+              try {
+                const res = await runRestDeploy({
+                  submitCommand: `${submitBase} --async --json`.replace(/\s+/g, " ").trim(),
+                  cwd: rootPath,
+                  org: null,
+                  token,
+                  timeoutMs: DEPLOY_TIMEOUT_MS,
+                  onStatus: (s) => report(formatStatus(s))
+                });
+                if (res.kind === "cancelled") { state.cancelled = true; return false; }
+                if (res.kind === "failed") { state.failure = { apiResult: toApiDeployResult(res.result) }; return false; }
+                state.totalCount += res.result.numberComponentsDeployed ?? 0;
+                state.numTotal += res.result.numberComponentsTotal ?? 0;
+                state.numErrors += res.result.numberComponentErrors ?? 0;
+                state.components.push(...componentSuccessList(res.result));
+                return true;
+              } catch (e: any) {
+                if (e?.cancelled) { state.cancelled = true; return false; }
+                if (!(e instanceof DeploySubmitError)) { state.failure = { errorText: e?.message ?? String(e) }; return false; }
+                Logger.warn(`Live push submit failed, using CLI deploy: ${e.message}`);
+                // fall through to the blocking CLI path
               }
             }
-
-            const statusMsg = [currentPhase, currentDetails].filter(Boolean).join(" | ");
-            if (statusMsg) {
-              const msg = prefix ? `${prefix}: ${statusMsg}` : statusMsg;
-              progress.report({ message: msg });
-              statusBar.text = `$(sync~spin) ${msg}`;
+            // Setting off, or submit failed before anything ran → plain blocking deploy.
+            try {
+              const out = await runCommand(submitBase, rootPath, undefined, false, token, DEPLOY_TIMEOUT_MS);
+              Logger.info(cleanDeployOutput(out));
+              state.totalCount += getDeployedCount(out);
+              state.fallbackUsed = true; // no structured component list from CLI text
+              return true;
+            } catch (e2: any) {
+              if (e2?.cancelled) { state.cancelled = true; return false; }
+              state.failure = { errorText: e2?.message ?? String(e2) };
+              return false;
             }
           };
 
@@ -370,83 +346,77 @@ async function pushSourceHelper(force: boolean) {
             Logger.warn("Failed to check source tracking status. Assuming no tracking.");
           }
 
+          const flag = force ? "--ignore-conflicts" : "";
           if (hasSourceTracking) {
-            // Use Source Tracking (Deploy changes only)
-            progress.report({ message: "Deploying project (Source Tracking)..." });
-            const flag = force ? "--ignore-conflicts" : "";
-            Logger.info(`Running: sf project deploy start ${flag}`);
-
-            const result = await runCommand(
-              `sf project deploy start ${flag}`,
-              undefined,
-              (data) => handleOutput(data),
-              false,
-              token,
-              DEPLOY_TIMEOUT_MS
-            );
-            Logger.info(cleanDeployOutput(result));
-
-            const count = getDeployedCount(result);
-            vscode.window.showInformationMessage(
-              count > 0 ? `Deployed ${count} components.` : "Source pushed successfully."
-            );
+            // Source tracking active → one deploy of the tracked changes.
+            progress.report({ message: "Deploying (source tracking)…" });
+            await runOne(`sf project deploy start ${flag}`);
+          } else if (packageDirs.length > 0) {
+            // No tracking → deploy each package directory in turn.
+            progress.report({ message: `Found ${packageDirs.length} package directories.` });
+            for (const pkgDir of packageDirs) {
+              const fullPkgPath = path.join(rootPath, pkgDir);
+              if (!fs.existsSync(fullPkgPath)) continue;
+              const cont = await runOne(`sf project deploy start -d ${escapeShellArg(fullPkgPath)} ${flag}`, pkgDir);
+              if (!cont) break; // cancelled or failed — stop the sequence
+            }
           } else {
-            // No Source Tracking -> Full Sequential Deploy
-            if (packageDirs.length > 0) {
-              progress.report({ message: `Found ${packageDirs.length} package directories.` });
+            progress.report({ message: "Deploying project…" });
+            await runOne(`sf project deploy start ${flag}`);
+          }
 
-              let totalCount = 0;
+          if (state.cancelled) {
+            Logger.info("Push cancelled by user.");
+            return;
+          }
+          if (state.failure) {
+            DeployLog.line("Push failed.");
+            DeployLog.show();
+            if (state.failure.apiResult) {
+              // Structured Metadata API failures → Problems view (inline).
+              setDeployDiagnosticsFromApiResult(rootPath, state.failure.apiResult);
+            } else if (state.failure.errorText) {
+              await setDeployDiagnosticsFromFailure(rootPath, state.failure.errorText, null);
+            }
+            vscode.window.showErrorMessage("Push failed. See Problems / deploy log.", "View Log").then((sel) => {
+              if (sel === "View Log") DeployLog.show();
+            });
+            return;
+          }
 
-              for (const pkgDir of packageDirs) {
-                const fullPkgPath = path.join(rootPath, pkgDir);
-                if (!fs.existsSync(fullPkgPath)) continue;
-
-                progress.report({ message: `Starting ${pkgDir}...` });
-                const flag = force ? "--ignore-conflicts" : "";
-                Logger.info(`Deploying Package: ${pkgDir}`);
-
-                const result = await runCommand(
-                  `sf project deploy start -d ${escapeShellArg(fullPkgPath)} ${flag}`,
-                  undefined,
-                  (data) => handleOutput(data, pkgDir),
-                  false,
-                  token,
-                  DEPLOY_TIMEOUT_MS
-                );
-                Logger.info(cleanDeployOutput(result));
-                totalCount += getDeployedCount(result);
-              }
-              OrgMetadataCache.invalidate(null);
-              OrgMetadataCache.warmDefaultOrg();
-              vscode.window.showInformationMessage(
-                totalCount > 0
-                  ? `Successfully pushed source for ${packageDirs.length} packages. Deployed ${totalCount} components.`
-                  : `Successfully pushed source for ${packageDirs.length} packages.`
-              );
-            } else {
-              // Fallback if no packages found
-              progress.report({ message: "Deploying project..." });
-              const flag = force ? "--ignore-conflicts" : "";
-              Logger.info(`Running: sf project deploy start ${flag}`);
-
-              const result = await runCommand(
-                `sf project deploy start ${flag}`,
-                undefined,
-                (data) => handleOutput(data),
-                true,
-                token,
-                DEPLOY_TIMEOUT_MS
-              );
-              Logger.info(cleanDeployOutput(result));
-
-              const count = getDeployedCount(result);
-              OrgMetadataCache.invalidate(null);
-              OrgMetadataCache.warmDefaultOrg();
-              vscode.window.showInformationMessage(
-                count > 0 ? `Source pushed successfully. Deployed ${count} components.` : "Source pushed successfully."
-              );
+          // Smart schema refresh: only invalidate/regenerate stubs when the push
+          // actually changed objects/fields — a plain Apex push refreshes nothing.
+          if (state.fallbackUsed) {
+            // No structured component list from the CLI text path → refresh fully to be safe.
+            OrgMetadataCache.invalidate(null);
+            OrgMetadataCache.warmDefaultOrg();
+          } else {
+            const { objects, structural } = affectedSchemaObjects(state.components);
+            if (objects.length) {
+              Logger.info(`Push changed schema for: ${objects.join(", ")}${structural ? " (structural)" : ""}. Refreshing those stubs.`);
+              OrgMetadataCache.invalidateSObjects(null, objects, structural);
+              if (structural) OrgMetadataCache.warmDefaultOrg();
             }
           }
+
+          const pushElapsed = formatElapsed(Date.now() - pushStartTime);
+          DeployLog.line(
+            formatApiDeployResultForLog(
+              {
+                status: "Succeeded",
+                numberComponentsDeployed: state.totalCount,
+                numberComponentsTotal: state.numTotal || state.totalCount,
+                numberComponentErrors: state.numErrors,
+                details: { componentSuccesses: state.components },
+              },
+              `Push succeeded (${pushElapsed}):`
+            )
+          );
+          vscode.window.showInformationMessage(
+            state.totalCount > 0
+              ? `Source pushed successfully in ${pushElapsed}. Deployed ${state.totalCount} components.`
+              : `Source pushed successfully in ${pushElapsed}.`
+          );
         } catch (e: any) {
           if (e.cancelled) {
             Logger.info("Push cancelled by user.");
@@ -456,17 +426,12 @@ async function pushSourceHelper(force: boolean) {
           const raw = e.message || e.stderr || "Unknown Error";
           const cleanError = cleanDeployOutput(raw);
 
-          // First log the high-level failure.
-          Logger.error("Push failed:", cleanError);
+          DeployLog.line("Push failed:\n" + cleanError);
+          DeployLog.show(); // Auto-open the deploy log on error
 
-          // Also log a structured summary so it mirrors the deploy panel behavior.
-          Logger.info(`Deploy result (from CLI output):\n${cleanError}`);
-
-          outputChannel.show(); // Auto-open log on error
-
-          vscode.window.showErrorMessage(`Push failed. Check output log for details.`, "View Log").then((selection) => {
+          vscode.window.showErrorMessage(`Push failed. Check the deploy log for details.`, "View Log").then((selection) => {
             if (selection === "View Log") {
-              outputChannel.show();
+              DeployLog.show();
             }
           });
         }
@@ -485,20 +450,38 @@ export async function pushSourceForce() {
   await pushSourceHelper(true);
 }
 
-export async function pullSource() {
+async function pullSourceHelper(force: boolean) {
+  const title = force ? "Force Pulling Source from Default Org..." : "Pulling Source from Default Org...";
   await vscode.window.withProgress(
     {
       location: vscode.ProgressLocation.Notification,
-      title: "Pulling Source from Default Org...",
+      title,
       cancellable: true
     },
     async (_progress, token) => {
       try {
-        const result = await runCommand("sf project retrieve start", undefined, undefined, true, token);
+        const flag = force ? "--ignore-conflicts" : "";
+        // --json so we can see exactly which components were retrieved and refresh smartly.
+        const command = `sf project retrieve start ${flag} --json`.replace(/\s+/g, " ").trim();
+        Logger.info(`Running: ${command}`);
+        const result = await runCommand(command, undefined, undefined, false, token);
         Logger.info("Pull completed successfully.");
-        Logger.info(cleanDeployOutput(result));
-        OrgMetadataCache.invalidate(null);
-        OrgMetadataCache.warmDefaultOrg();
+
+        // Smart schema refresh: only when the pull brought down object/field changes.
+        const components = parseRetrievedComponents(result);
+        if (!components) {
+          // Couldn't read the retrieve result → refresh fully to be safe.
+          OrgMetadataCache.invalidate(null);
+          OrgMetadataCache.warmDefaultOrg();
+        } else {
+          const { objects, structural } = affectedSchemaObjects(components);
+          if (objects.length) {
+            Logger.info(`Pull changed schema for: ${objects.join(", ")}${structural ? " (structural)" : ""}. Refreshing those stubs.`);
+            OrgMetadataCache.invalidateSObjects(null, objects, structural);
+            if (structural) OrgMetadataCache.warmDefaultOrg();
+          }
+          // else: no schema changes retrieved → no stub/describe refresh
+        }
         vscode.window.showInformationMessage("Source pulled successfully.");
       } catch (e: any) {
         if (e.cancelled) {
@@ -518,6 +501,14 @@ export async function pullSource() {
       }
     }
   );
+}
+
+export async function pullSource() {
+  await pullSourceHelper(false);
+}
+
+export async function pullSourceForce() {
+  await pullSourceHelper(true);
 }
 
 export async function deployCurrentFile() {
@@ -558,6 +549,12 @@ export async function deployCurrentFile() {
             : `File deploy succeeded for ${filePath}.`
         );
         Logger.info(cleanDeployOutput(result));
+        // Only refresh stubs if the deployed file is object/field schema.
+        const schema = schemaObjectFromPath(filePath);
+        if (schema) {
+          OrgMetadataCache.invalidateSObjects(null, [schema.object], schema.structural);
+          if (schema.structural) OrgMetadataCache.warmDefaultOrg();
+        }
         vscode.window.showInformationMessage(
           count > 0 ? `File deployed successfully. Deployed ${count} components.` : "File deployed successfully."
         );
@@ -607,8 +604,12 @@ export async function retrieveCurrentFile() {
         );
         Logger.info(`Retrieve current file succeeded for ${filePath}.`);
         Logger.info(cleanDeployOutput(result));
-        OrgMetadataCache.invalidate(null);
-        OrgMetadataCache.warmDefaultOrg();
+        // Only refresh stubs if the retrieved file is object/field schema.
+        const schema = schemaObjectFromPath(filePath);
+        if (schema) {
+          OrgMetadataCache.invalidateSObjects(null, [schema.object], schema.structural);
+          if (schema.structural) OrgMetadataCache.warmDefaultOrg();
+        }
         vscode.window.showInformationMessage("File retrieved successfully.");
       } catch (e: any) {
         if (e.cancelled) {

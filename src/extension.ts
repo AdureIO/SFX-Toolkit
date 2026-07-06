@@ -33,10 +33,12 @@ import {
   pushSource,
   pushSourceForce,
   pullSource,
+  pullSourceForce,
   deployCurrentFile,
   retrieveCurrentFile,
   resetSourceTracking
 } from "./commands/devCommands";
+import { validateApexFile, registerValidateOnSave } from "./commands/validateApex";
 import { PermissionSetEditorProvider } from "./editors/PermissionSetEditorProvider";
 import { ScratchOrgDefEditorProvider } from "./editors/ScratchOrgDefEditorProvider";
 import { SOQLEditorProvider } from "./providers/SOQLEditorProvider";
@@ -72,7 +74,7 @@ import { startLanguageServer, stopLanguageServer } from "./languageClient";
 import { isSalesforceProject, updateSalesforceProjectContext, NOT_SFDX_PROJECT_MESSAGE } from "./utils/projectUtils";
 import { OrgMetadataCache } from "./utils/orgMetadataCache";
 import { AuthInfo } from "./utils/authInfo";
-import { getDeployDiagnosticCollection } from "./utils/deployDiagnostics";
+import { getDeployDiagnosticCollection, registerDeployDiagnosticAutoClear } from "./utils/deployDiagnostics";
 import { warmOrgListCache, invalidateOrgListCache, refreshOrgListCache } from "./utils/orgListCache";
 import { initDefaultOrgWatcher } from "./utils/defaultOrgEvents";
 
@@ -219,6 +221,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     // 4. Deploy Metadata (panel with tree, presets, org, test level)
     context.subscriptions.push(getDeployDiagnosticCollection());
+    registerDeployDiagnosticAutoClear(context);
     const deployMetadataCmd = register("adure-sfx-toolkit.deployMetadata", () => DeployMetadataPanelProvider.show());
     context.subscriptions.push(
       vscode.window.registerWebviewPanelSerializer(DeployMetadataPanelProvider.viewType, {
@@ -386,9 +389,12 @@ export function activate(context: vscode.ExtensionContext) {
     const pushCmd = register("adure-sfx-toolkit.pushSource", pushSource);
     const pushForceCmd = register("adure-sfx-toolkit.pushSourceForce", pushSourceForce);
     const pullCmd = register("adure-sfx-toolkit.pullSource", pullSource);
+    const pullForceCmd = register("adure-sfx-toolkit.pullSourceForce", pullSourceForce);
     const deployFileCmd = register("adure-sfx-toolkit.deployCurrentFile", deployCurrentFile);
     const retrieveFileCmd = register("adure-sfx-toolkit.retrieveCurrentFile", retrieveCurrentFile);
     const resetTrackingCmd = register("adure-sfx-toolkit.resetSourceTracking", resetSourceTracking);
+    const validateApexCmd = register("adure-sfx-toolkit.validateApexFile", () => validateApexFile());
+    registerValidateOnSave(context);
     const refreshMetadataCmd = register("adure-sfx-toolkit.refreshMetadata", async () => {
       await vscode.window.withProgress(
         {
@@ -595,9 +601,11 @@ export function activate(context: vscode.ExtensionContext) {
       pushCmd,
       pushForceCmd,
       pullCmd,
+      pullForceCmd,
       deployFileCmd,
       retrieveFileCmd,
       resetTrackingCmd,
+      validateApexCmd,
       refreshMetadataCmd,
       openSOQLEditorCmd,
       showOutputCmd,

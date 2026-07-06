@@ -34,17 +34,27 @@ function cacheKey(org: string | null): string {
  * builder, and any feature that needs object/field lists. Refresh when user pulls
  * or runs "Refresh Metadata"; optionally warm in background when opening SOQL etc.
  */
+/**
+ * Detail attached to a change event. Absent ⇒ full invalidation (org switch /
+ * manual refresh). Present ⇒ only these SObjects changed, so consumers can do a
+ * targeted refresh (e.g. regenerate just those stubs) instead of everything.
+ */
+export interface SchemaChangeInfo {
+	objects: string[];
+	structural: boolean;
+}
+
 class OrgMetadataCacheImpl {
 	private cache = new Map<string, OrgCache>();
 	private fetchLocks = new Map<string, Promise<string[]>>();
-	private changeListeners: ((org: string | null) => void)[] = [];
+	private changeListeners: ((org: string | null, change?: SchemaChangeInfo) => void)[] = [];
 
 	/**
 	 * Subscribe to cache invalidation/refresh events (org switch, pull, refresh
 	 * metadata). Used by the SOQL language server to drop its describe cache.
-	 * Returns a disposer.
+	 * `change` is set for targeted (per-object) invalidations. Returns a disposer.
 	 */
-	onChange(listener: (org: string | null) => void): () => void {
+	onChange(listener: (org: string | null, change?: SchemaChangeInfo) => void): () => void {
 		this.changeListeners.push(listener);
 		return () => {
 			const i = this.changeListeners.indexOf(listener);
@@ -52,14 +62,34 @@ class OrgMetadataCacheImpl {
 		};
 	}
 
-	private emitChange(org: string | null): void {
+	private emitChange(org: string | null, change?: SchemaChangeInfo): void {
 		for (const l of this.changeListeners) {
 			try {
-				l(org);
+				l(org, change);
 			} catch {
 				/* listener errors must not break cache ops */
 			}
 		}
+	}
+
+	/**
+	 * Targeted invalidation after a push/pull that changed only specific SObjects.
+	 * Drops just those describes (and, if `structural`, the object list so a new or
+	 * removed object is picked up), then emits a change carrying the object names so
+	 * consumers refresh only what's needed instead of everything.
+	 */
+	invalidateSObjects(org: string | null, objects: string[], structural = false): void {
+		if (!objects.length && !structural) return;
+		for (const name of objects) DescribeStore.invalidateSObject(org, name);
+		if (structural) {
+			const entry = this.cache.get(cacheKey(org));
+			if (entry) {
+				entry.sobjects = null;
+				entry.sobjectsFetchedAt = 0;
+			}
+			this.fetchLocks.delete(cacheKey(org));
+		}
+		this.emitChange(org, { objects, structural });
 	}
 
 	private getOrCreateOrgCache(key: string): OrgCache {

@@ -28,6 +28,7 @@ import { fileURLToPath } from 'url';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { completionsFor } from '@salesforce/soql-language-server/lib/completion';
 import { parseApex, enclosingClass, ApexParseResult, ApexMember } from './apexSymbols';
+import { validateFieldAccesses } from './apexSemantics';
 import { WorkspaceIndex } from './workspaceIndex';
 import { getStub, setStubRoot, clearStubs } from './sobjectStub';
 import { STD_TYPES, stdTypeName, stdMembersFor, StdMember } from './apexStdlib';
@@ -88,6 +89,9 @@ let apexFeatures = false;
 // Apex *completion* (org-aware member fields, `new` constructors, type names) —
 // additive and on by default; users can turn it off to avoid duplicate items.
 let apexCompletion = true;
+// Offline schema validation (Tier 1): flag `receiver.member` accesses whose member
+// isn't a field/relationship of the resolved SObject. Gated with apexFeatures.
+let apexValidateSchema = true;
 
 // Cached per document version so we parse at most once per edit, on demand
 // (completion/hover/definition/diagnostics all share the same parse).
@@ -104,6 +108,7 @@ connection.onInitialize((params): InitializeResult => {
     const opts = params.initializationOptions || {};
     apexFeatures = !!opts.apexFeatures;
     apexCompletion = opts.apexCompletion !== false;
+    apexValidateSchema = opts.apexValidateSchema !== false;
 
     // Workspace roots for the cross-file type index (go-to-definition).
     const roots: string[] = [];
@@ -124,7 +129,13 @@ connection.onInitialize((params): InitializeResult => {
 
     return {
         capabilities: {
-            textDocumentSync: TextDocumentSyncKind.Incremental,
+            // Object form (not the number shorthand) so the client also sends
+            // didSave — the schema/diagnostics pass refreshes on save.
+            textDocumentSync: {
+                openClose: true,
+                change: TextDocumentSyncKind.Incremental,
+                save: { includeText: false },
+            },
             completionProvider: {
                 // Trigger on the characters that begin a new SOQL token position.
                 triggerCharacters: ['.', ' ', ',', '(', '\n'],
@@ -343,15 +354,35 @@ function fieldsAndRels(owner: string, d: HostDescribe, c: any): CompletionItem[]
     return out;
 }
 
+/** Strip a leading managed-package namespace: `ns__Name__r` → `name__r` (lower-cased). */
+function stripLeadingNamespace(name: string): string {
+    const p = name.toLowerCase().split('__');
+    return p.length >= 3 ? p.slice(1).join('__') : name.toLowerCase();
+}
+
+/** Namespace-optional, case-insensitive match (e.g. `DataSource__r` ≈ `sfy24__DataSource__r`). */
+function nameMatchesNsOptional(apiName: string, typed: string): boolean {
+    const a = apiName.toLowerCase();
+    const b = typed.toLowerCase();
+    return a === b || stripLeadingNamespace(a) === stripLeadingNamespace(b);
+}
+
+/** Namespace-optional prefix match for member completion: `datasource__c` matches `sfy24__Datasource__c`. */
+function matchesMemberPrefix(label: string, partial: string): boolean {
+    const l = label.toLowerCase();
+    return l.startsWith(partial) || stripLeadingNamespace(l).startsWith(partial);
+}
+
 // Walk a parent-relationship path (e.g. ['Account','Owner']) from a base sobject
 // to the final referenced sobject. Returns null if any hop can't be resolved.
+// Relationship names match namespace-optionally so `X__r` resolves `ns__X__r`.
 async function resolveRelationshipTarget(docUri: string, base: string, segments: string[]): Promise<string | null> {
     let current = base;
     for (const seg of segments) {
         const d = await describe(docUri, current);
         if (!d) return null;
         const f = d.fields.find(
-            (x) => x.relationshipName && x.relationshipName.toLowerCase() === seg.toLowerCase() && x.referenceTo && x.referenceTo.length,
+            (x) => x.relationshipName && nameMatchesNsOptional(x.relationshipName, seg) && x.referenceTo && x.referenceTo.length,
         );
         if (!f || !f.referenceTo) return null;
         current = f.referenceTo[0];
@@ -801,31 +832,68 @@ function newTypeItem(typeName: string, tier: string): CompletionItem {
     );
 }
 
+/** Apex primitives / value types that have no meaningful `new X()` constructor. */
+const NON_CONSTRUCTABLE = new Set(
+    ['string', 'integer', 'long', 'decimal', 'double', 'boolean', 'id', 'blob', 'date', 'datetime', 'time', 'object', 'void', 'sobject'],
+);
+
+/** A full `new Type()` expression item — includes the `new ` keyword (for the pre-`new` assignment position). */
+function newExprItem(typeName: string, tier: string): CompletionItem {
+    return withSchemaDoc(
+        {
+            label: `new ${typeName}()`,
+            kind: CompletionItemKind.Constructor,
+            insertText: `new ${typeName}($0)`,
+            insertTextFormat: InsertTextFormat.Snippet,
+            filterText: `new ${typeName}`,
+            labelDetails: { detail: '', description: 'construct' },
+            sortText: tier + '_' + typeName,
+        },
+        ['`new ' + typeName + '()`'],
+    );
+}
+
+/** Capture the declared/known type on an assignment LHS. `requireNew` matches after `new ` is typed. */
+function expectedAssignType(doc: TextDocument, lineUpToCursor: string, requireNew: boolean): string | undefined {
+    const tail = requireNew ? 'new\\s+[\\w.<>]*' : '(?:new\\s+[\\w.<>]*)?';
+    // `Type name = [new …]` — Type may carry (possibly nested) generics: List<String>, Map<Id, List<X>>.
+    const declared = new RegExp(`(?:^|[\\s({;,])([A-Za-z_][\\w.]*(?:\\s*<.*>)?)\\s+[A-Za-z_]\\w*\\s*=\\s*${tail}$`).exec(lineUpToCursor);
+    if (declared) return declared[1].trim();
+    // `existingVar = [new …]` — resolve the variable's type from the index.
+    const reassign = new RegExp(`(?:^|[\\s({;,])([A-Za-z_]\\w*)\\s*=\\s*${tail}$`).exec(lineUpToCursor);
+    if (reassign) return getApexParse(doc).index.varTypes.get(reassign[1]);
+    return undefined;
+}
+
 /**
- * Complete after `new ` in Apex. Prioritizes the type being assigned — e.g.
- * `acme__Widget__c po = new |` → `acme__Widget__c()` first —
- * then offers constructable SObjects. Returns [] when not in a `new` context.
+ * Suggest constructor expressions in Apex. Two positions:
+ *  1. Right after an assignment `Type a = |` (before `new` is typed) → offers `new Type()`
+ *     first, with declared generics preserved (`List<String> a = ` → `new List<String>()`).
+ *  2. After `new ` → the assigned type first, then constructable SObjects.
+ * Returns [] when not in either position.
  */
 async function apexNewCompletion(doc: TextDocument, offset: number): Promise<CompletionItem[]> {
     const full = doc.getText();
     const lineStart = full.lastIndexOf('\n', offset - 1) + 1;
     const lineUpToCursor = full.slice(lineStart, offset);
-    if (!/(?:^|[\s({,=])new\s+[A-Za-z_0-9.<>]*$/.test(lineUpToCursor)) return [];
 
-    // Expected type from the assignment LHS (declared inline, or via the index).
-    let expected: string | undefined;
-    const declared = /([A-Za-z_][\w.]*(?:<[^>]*>)?)\s+[A-Za-z_]\w*\s*=\s*new\s+[\w.<>]*$/.exec(lineUpToCursor);
-    if (declared) {
-        expected = declared[1];
-    } else {
-        const reassign = /([A-Za-z_]\w*)\s*=\s*new\s+[\w.<>]*$/.exec(lineUpToCursor);
-        if (reassign) expected = getApexParse(doc).index.varTypes.get(reassign[1]);
+    const afterNew = /(?:^|[\s({,=])new\s+[A-Za-z_0-9.<>]*$/.test(lineUpToCursor);
+    // Assignment RHS just opened (`… = |`), but not a comparison/compound op (`==`, `<=`, `+=`, …).
+    const assignOpen = /(?:^|[^=!<>+\-*/%&|^])=\s*$/.test(lineUpToCursor);
+
+    if (!afterNew && assignOpen) {
+        const expected = expectedAssignType(doc, lineUpToCursor, false);
+        if (!expected || NON_CONSTRUCTABLE.has(baseTypeName(expected).toLowerCase())) return [];
+        return sfxTag(applyNamespace([newExprItem(expected, '0')], await projectNamespace(doc.uri)));
     }
 
+    if (!afterNew) return [];
+
+    // After `new `: the assigned type first, then constructable SObjects.
+    const expected = expectedAssignType(doc, lineUpToCursor, true);
     const items: CompletionItem[] = [];
     if (expected) items.push(newTypeItem(expected, '0'));
 
-    // Constructable SObjects (deprioritized below the expected type).
     const expectedBase = expected ? baseTypeName(expected) : '';
     for (const name of await objectList(doc.uri)) {
         if (name === expectedBase) continue;
@@ -883,11 +951,20 @@ async function apexMemberCompletion(
         // Static members of a Salesforce built-in namespace/type (System.debug…).
         items = stdMembers.map((m) => stdMemberItem(stdTypeName(base) ?? base, m));
     } else {
+        // An SObject instance (namespace resolved inside describe): offer its fields
+        // AND its parent relationships (`X__r`), same as the SOQL builder.
         const d = await describe(doc.uri, base);
-        if (d) items = d.fields.map((f) => fieldItem(base, f));
+        if (d) {
+            for (const f of d.fields) {
+                items.push(fieldItem(base, f));
+                if (f.relationshipName) items.push(relItem(base, f));
+            }
+        }
     }
 
-    const filtered = partial ? items.filter((i) => String(i.label).toLowerCase().startsWith(partial)) : items;
+    // Namespace-optional prefix filter: a member typed `datasource__c` matches
+    // `sfy24__Datasource__c`, and typing the namespaced form matches too.
+    const filtered = partial ? items.filter((i) => matchesMemberPrefix(String(i.label), partial)) : items;
     return sfxTag(applyNamespace(filtered, await projectNamespace(doc.uri)));
 }
 
@@ -1002,18 +1079,97 @@ function isApex(uri: string): boolean {
     return /\.(cls|trigger)$/i.test(uri) || /\.apex$/i.test(uri);
 }
 
-// Diagnostics are intentionally NOT recomputed on every edit (to avoid per-keystroke
-// parsing). We publish them when a document opens and refresh them on push/pull/org
-// change (via NOTE_REFRESH). Completion/hover/definition still parse on demand
-// (version-cached) only when actually invoked.
+// Diagnostics are intentionally NOT recomputed on every keystroke (to avoid
+// per-edit parsing). We publish them when a document opens or is saved, and refresh
+// on push/pull/org change (via NOTE_REFRESH). Syntax diagnostics go out immediately;
+// the org-aware schema pass (async describe calls) runs debounced and re-publishes
+// the merged set. Completion/hover/definition still parse on demand (version-cached).
 function publishApexDiagnostics(doc: TextDocument): void {
     if (!apexFeatures || doc.languageId === 'soql' || !isApex(doc.uri)) return;
-    connection.sendDiagnostics({ uri: doc.uri, diagnostics: getApexParse(doc).diagnostics });
+    const parse = getApexParse(doc);
+    connection.sendDiagnostics({ uri: doc.uri, diagnostics: parse.diagnostics });
+    if (apexValidateSchema) scheduleSchemaValidation(doc.uri);
+}
+
+// Debounced, per-document schema validation. Coalesces bursts (open+save) and
+// drops stale runs when the document changes underneath us.
+const schemaTimers = new Map<string, ReturnType<typeof setTimeout>>();
+function scheduleSchemaValidation(uri: string): void {
+    const prev = schemaTimers.get(uri);
+    if (prev) clearTimeout(prev);
+    schemaTimers.set(uri, setTimeout(() => { schemaTimers.delete(uri); void runSchemaValidation(uri); }, 300));
+}
+
+/** Suffixes that make a name a custom SObject: object, big object, platform event, custom metadata, external object. */
+const CUSTOM_SOBJECT_SUFFIX = /__(c|b|e|mdt|x)$/i;
+
+/**
+ * Common standard objects declared as Apex variable types. Not exhaustive — custom
+ * SObjects are recognized by their suffix, and a standard object missing here simply
+ * isn't validated (conservative, no false positive). Local/workspace types shadow these.
+ */
+const STANDARD_SOBJECTS = new Set([
+    'account', 'accountcontactrelation', 'asset', 'attachment', 'businesshours', 'campaign', 'campaignmember',
+    'case', 'casecomment', 'contact', 'contentdocument', 'contentdocumentlink', 'contentnote', 'contentversion',
+    'contract', 'dashboard', 'document', 'emailmessage', 'entitlement', 'event', 'eventrelation', 'feedcomment',
+    'feeditem', 'group', 'groupmember', 'holiday', 'idea', 'individual', 'lead', 'note', 'opportunity',
+    'opportunitycontactrole', 'opportunitylineitem', 'opportunityteammember', 'order', 'orderitem', 'organization',
+    'period', 'permissionset', 'permissionsetassignment', 'pricebook2', 'pricebookentry', 'processinstance',
+    'product2', 'profile', 'quote', 'quotelineitem', 'recordtype', 'report', 'serviceappointment', 'servicecontract',
+    'site', 'solution', 'task', 'territory2', 'topic', 'user', 'userrole', 'workorder', 'workorderlineitem',
+]);
+
+/**
+ * A name that is obviously NOT an org SObject and must never be resolved via the
+ * describe API: generics/arrays/qualified names, the abstract `SObject`, Apex system
+ * types, and any class/trigger defined in the workspace.
+ */
+function isNonSObjectName(name: string): boolean {
+    if (!name || /[<>[\]\s.,()]/.test(name)) return true; // generics, arrays, qualified, calls
+    if (name.toLowerCase() === 'sobject') return true;    // the abstract base type
+    if (stdTypeName(name)) return true;                   // System/Database/… and value types
+    if (WorkspaceIndex.hasType(name)) return true;        // a class/trigger defined in this project
+    return false;
+}
+
+async function runSchemaValidation(uri: string): Promise<void> {
+    const doc = documents.get(uri);
+    if (!doc || !apexFeatures || !apexValidateSchema || ephemeralDocs.has(uri) || doc.languageId === 'soql' || !isApex(uri)) return;
+    const atStart = doc.version;
+    const parse = getApexParse(doc);
+    try {
+        // Decide if a receiver type is an SObject with no API probing — easy logic:
+        //   • a type declared in this file (class/enum/inner class), a workspace class,
+        //     a generic/system type → NOT an SObject (a local `Event` beats the SObject).
+        //   • a custom suffix (__c/__b/__e/__mdt/__x) → a custom SObject.
+        //   • otherwise, a known standard object.
+        const localTypes = new Set([...parse.index.types.keys()].map((t) => t.toLowerCase()));
+        const shouldDescribe = (s: string): boolean => {
+            if (isNonSObjectName(s) || localTypes.has(s.toLowerCase())) return false;
+            return CUSTOM_SOBJECT_SUFFIX.test(s) || STANDARD_SOBJECTS.has(s.toLowerCase());
+        };
+
+        const schema = await validateFieldAccesses(parse.fieldAccesses, {
+            varTypes: parse.index.varTypes,
+            describe: (s) => (shouldDescribe(s) ? describe(uri, s) : Promise.resolve(null)),
+            resolveRelTarget: (base, hops) => resolveRelationshipTarget(uri, base, hops),
+        });
+        // Drop the result if the document changed while we were awaiting describes;
+        // a newer edit will have scheduled its own run.
+        const live = documents.get(uri);
+        if (!live || live.version !== atStart) return;
+        connection.sendDiagnostics({ uri, diagnostics: [...getApexParse(live).diagnostics, ...schema] });
+    } catch {
+        // Keep the already-published syntax diagnostics; schema pass is best-effort.
+    }
 }
 
 documents.onDidOpen((e) => publishApexDiagnostics(e.document));
+documents.onDidSave((e) => publishApexDiagnostics(e.document));
 documents.onDidClose((e) => {
     apexSymbolCache.delete(e.document.uri);
+    const t = schemaTimers.get(e.document.uri);
+    if (t) { clearTimeout(t); schemaTimers.delete(e.document.uri); }
     connection.sendDiagnostics({ uri: e.document.uri, diagnostics: [] });
 });
 
