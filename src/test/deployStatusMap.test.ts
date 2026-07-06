@@ -194,14 +194,14 @@ describe("deployStatusMap.schemaObjectFromPath", () => {
 });
 
 describe("deployStatusMap.formatElapsed", () => {
-  it("formats under a minute as m:ss.cc (hundredths)", () => {
-    assert.strictEqual(formatElapsed(0), "0:00.00");
-    assert.strictEqual(formatElapsed(5000), "0:05.00");
-    assert.strictEqual(formatElapsed(65000), "1:05.00");
-    assert.strictEqual(formatElapsed(23450), "0:23.45");
+  it("formats under a minute as m:ss.d (tenths)", () => {
+    assert.strictEqual(formatElapsed(0), "0:00.0");
+    assert.strictEqual(formatElapsed(5000), "0:05.0");
+    assert.strictEqual(formatElapsed(65000), "1:05.0");
+    assert.strictEqual(formatElapsed(23450), "0:23.4");
   });
-  it("formats past an hour as h:mm:ss.cc", () => {
-    assert.strictEqual(formatElapsed(3600_000 + 125_000), "1:02:05.00");
+  it("formats past an hour as h:mm:ss.d", () => {
+    assert.strictEqual(formatElapsed(3600_000 + 125_000), "1:02:05.0");
   });
 });
 

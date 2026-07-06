@@ -125,17 +125,18 @@ export interface DeployLiveStatus {
 }
 
 /**
- * Format a duration as `m:ss.cc` (hundredths) — or `h:mm:ss.cc` past an hour — so the
- * running timer shows sub-second precision, like the CLI, instead of ticking whole seconds.
+ * Format a duration as `m:ss.d` (tenths) — or `h:mm:ss.d` past an hour. Tenths (not
+ * hundredths/millis) so the running timer *counts* smoothly at the ~100 ms display
+ * tick: one tenth per tick. Finer digits can't count at that refresh rate — they jump.
  */
 export function formatElapsed(ms: number): string {
 	const totalMs = Math.max(0, Math.floor(ms));
 	const totalS = Math.floor(totalMs / 1000);
-	const cc = String(Math.floor((totalMs % 1000) / 10)).padStart(2, "0"); // hundredths
+	const d = Math.floor((totalMs % 1000) / 100); // tenths
 	const s = String(totalS % 60).padStart(2, "0");
 	const m = Math.floor(totalS / 60) % 60;
 	const h = Math.floor(totalS / 3600);
-	return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${s}.${cc}` : `${m}:${s}.${cc}`;
+	return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${s}.${d}` : `${m}:${s}.${d}`;
 }
 
 export interface DeployStats {
