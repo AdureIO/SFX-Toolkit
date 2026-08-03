@@ -243,6 +243,11 @@
         "icon": "$(type-hierarchy)"
       },
       {
+        "command": "adure-sfx-toolkit.processMap",
+        "title": "ASFXT: Process Map (Automation)",
+        "icon": "$(circuit-board)"
+      },
+      {
         "command": "adure-sfx-toolkit.metadataDiff",
         "title": "ASFXT: Compare with Org"
       },

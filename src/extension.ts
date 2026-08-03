@@ -42,6 +42,7 @@ import { PermissionSetEditorProvider } from "./editors/PermissionSetEditorProvid
 import { ScratchOrgDefEditorProvider } from "./editors/ScratchOrgDefEditorProvider";
 import { SOQLEditorProvider } from "./providers/SOQLEditorProvider";
 import { ObjectVisualizerPanelProvider } from "./providers/ObjectVisualizerPanelProvider";
+import { ProcessMapPanelProvider } from "./providers/ProcessMapPanelProvider";
 import { AnonymousApexViewProvider } from "./providers/AnonymousApexViewProvider";
 import { Logger, outputChannel } from "./utils/outputChannel";
 import { metadataDiff } from "./commands/metadataDiff";
@@ -447,6 +448,9 @@ export function activate(context: vscode.ExtensionContext) {
     const objectVisualizerCmd = register("adure-sfx-toolkit.objectVisualizer", () => {
       ObjectVisualizerPanelProvider.show(context.extensionUri);
     });
+    const processMapCmd = register("adure-sfx-toolkit.processMap", () => {
+      ProcessMapPanelProvider.show(context.extensionUri);
+    });
     context.subscriptions.push(
       vscode.window.registerWebviewPanelSerializer(ObjectVisualizerPanelProvider.viewType, {
         async deserializeWebviewPanel(panel: vscode.WebviewPanel): Promise<void> {
@@ -608,6 +612,7 @@ export function activate(context: vscode.ExtensionContext) {
       refreshMetadataCmd,
       openSOQLEditorCmd,
       objectVisualizerCmd,
+      processMapCmd,
       showOutputCmd,
       metadataDiffCmd,
       orgHealthCmd,
