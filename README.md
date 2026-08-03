@@ -80,11 +80,22 @@ A unified bottom panel (sidebar **Tools → ASFX Workbench**) that brings Apex e
 - **Quick Actions**: open in browser, set as default org / Dev Hub, copy username, rename alias, generate scratch-org password, delete/logout.
 - **Scratch Org Wizard**: interactive **Create Scratch Org**, or **Quick Scratch** with sensible defaults in one click.
 
+### 📦 Package Explorer (Dev Hub)
+
+`ASFXT: Package Explorer` — a second-generation (2GP) package control panel for your Dev Hub (also opens from the inline **package** action on a Dev Hub in the Org Explorer).
+
+- **Browse** every 2GP package → its versions, newest first: version number, subscriber (`04t`) and package (`0Ho`) ids as click-to-copy chips, released/beta status, created date, and package aliases from `sfdx-project.json`. A **searchable package combobox**, a version filter, and *Released-only* / *Latest-per-package* toggles keep large packages manageable; results are cached so switching or reopening is instant.
+- **Install links & commands** — per version, copy the **Prod** or **Sandbox** install URL, the `sf package install` command, or a paste-ready `sfdx-project.json` **dependency snippet**. Password-protected packages prompt for an installation key.
+- **Dependencies view** — a package's declared dependencies (from `sfdx-project.json`) resolved to their concrete ids.
+- **Actions** (native confirm + progress): **Install** into any org, **Promote** to released, **Update** or **Delete** a version, **Rename** a package. Optional per-version **code-coverage** column (opt-in, since it's a heavier query).
+- **Installed in org** tab — list packages installed in any org (`ASFXT: List Installed Packages`, also on org context menus) with **upgrade** badges when your Dev Hub has a newer released version, plus one-click **Upgrade** / **Uninstall**.
+- **Version report** — dependencies + ancestry on demand; **export** a package's versions to Markdown or CSV.
+
 ### 🛠️ Development Tools
 
 - **Source Operations**: smart **Push** (diff deploy for source-tracked orgs, sequential package deploy otherwise), **Push (Force)**, **Pull**, contextual **Deploy/Retrieve** for the open file, and **Reset Source Tracking**.
 - **Flexible Metadata Deploy Flow** (`ASFXT: Deploy Metadata`):
-  - Select paths/files, pick a test level, target any org.
+  - Select paths/files, pick a test level, target any org — the panel always deploys exactly the components you picked (source-tracking conflicts are overridden).
   - **Deployment History**: every deploy persisted with status, duration, test results and timestamp — browse, search and re-run in one click.
   - **Named Test Suites**: save groups of test classes with a preset and reload them instantly.
   - **Pre-Deploy Quality Gate**: scans Apex before deploy for leftover `System.debug()` (warning), hardcoded record IDs (error), SOQL/DML in loops (error), and `TODO`/`FIXME` (info) — review, then abort or deploy anyway.
@@ -93,8 +104,17 @@ A unified bottom panel (sidebar **Tools → ASFX Workbench**) that brings Apex e
 - **Test Runner**: run local tests easily.
 - **Ignore Helpers**: add files/folders to `.gitignore` or `.forceignore` from explorer context actions.
 - **Custom Editors**: friendly UIs for **Permission Sets** (`.permissionset-meta.xml`) and **Scratch Org Definitions** (`project-scratch-def.json`).
+- **Explorer tidy**: `ASFXT: Toggle Hide Apex -meta.xml Files` hides/shows the `*.cls-meta.xml` / `*.trigger-meta.xml` sidecar files via `files.exclude` (workspace-scoped, persisted).
 
 ![Deploy metadata flow](docs/screenshots/deploy-metadata.png)
+
+### ✅ Apex Test Coverage
+
+Org-wide Apex coverage surfaced three ways, all sharing one **auto-refreshing** store — it updates after a coverage test run (this extension's *Run Apex Tests with Coverage* profile **or** the Salesforce extension's, detected via a watcher on `.sfdx/tools/testresults/`), on panel refresh, and on focus.
+
+- **Explorer badges** — each `.cls`/`.trigger` shows its coverage % (toggle with `ASFXT: Toggle Apex Coverage % Badge`); the exact covered/total lines are always on hover.
+- **Coverage panel** (`ASFXT: Apex Coverage`) — overall org %, a classes-below-75% count, and a **worst-first**, searchable table with a below-threshold filter; click a row to open the class. Includes **Refresh** and **Clear results** (deletes local `.sfdx/tools/testresults` and resets the display).
+- **Line highlights** (`ASFXT: Toggle Apex Coverage Line Highlights`) — opt-in, persisted covered/uncovered line decorations in the open class that stay live while enabled.
 
 ### 🔄 Data Migration Wizard
 
