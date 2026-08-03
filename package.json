@@ -1071,7 +1071,7 @@
     "@apexdevtools/apex-parser": "5.0.0",
     "@salesforce/soql-language-server": "1.1.0",
     "@vscode/extension-telemetry": "^1.5.2",
-    "fast-xml-parser": "^5.9.3",
+    "fast-xml-parser": "^5.10.1",
     "glob": "^8.1.0",
     "minimatch": "^10.2.5",
     "monaco-editor": "^0.52.2",
