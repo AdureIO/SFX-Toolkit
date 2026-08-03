@@ -241,19 +241,19 @@ function nodeData(n: GraphNode) {
 // Tap a node → spotlight its direct relationships; tap empty space → reset.
 function clearFocus() {
   cy.batch(() => {
-    cy.nodes().forEach((x) => {
+    cy.nodes().forEach((x: cytoscape.NodeSingular) => {
       x.data("dim", 0);
       x.data("focus", 0);
     });
   });
   cy.elements().removeClass("faded hl");
 }
-cy.on("tap", "node", (evt) => {
+cy.on("tap", "node", (evt: cytoscape.EventObject) => {
   const n = evt.target;
   const hood = n.outgoers().union(n.incomers()).union(n);
   const keep = new Set(hood.nodes().map((x: cytoscape.NodeSingular) => x.id()));
   cy.batch(() => {
-    cy.nodes().forEach((x) => {
+    cy.nodes().forEach((x: cytoscape.NodeSingular) => {
       x.data("dim", keep.has(x.id()) ? 0 : 1);
       x.data("focus", x.id() === n.id() ? 1 : 0);
     });
@@ -262,7 +262,7 @@ cy.on("tap", "node", (evt) => {
   hood.removeClass("faded");
   hood.edges().addClass("hl");
 });
-cy.on("tap", (evt) => {
+cy.on("tap", (evt: cytoscape.EventObject) => {
   if (evt.target === cy) clearFocus();
 });
 
