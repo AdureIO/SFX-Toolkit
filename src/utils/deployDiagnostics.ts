@@ -467,8 +467,6 @@ export async function setDeployDiagnosticsFromFailure(
   _targetOrg?: string | null
 ): Promise<void> {
   const trimres = cleanDeployOutput(errorOutput);
-  DeployLog.line("Deploy failed:\n" + (trimres || errorOutput || "(no output)"));
-
   const parsedResult = parseDeployResultFromCliOutput(trimres);
   if (parsedResult && getComponentFailuresList(parsedResult).length > 0) {
     DeployLog.line(formatApiDeployResultForLog(parsedResult, "Deploy result (from CLI output):"));

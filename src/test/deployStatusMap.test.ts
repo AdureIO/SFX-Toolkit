@@ -1,6 +1,7 @@
 import * as assert from "assert";
 import {
   extractDeployResult,
+  parseCliDeployJson,
   mapLiveStatus,
   isTerminalStatus,
   toApiDeployResult,
@@ -28,6 +29,25 @@ describe("deployStatusMap.extractDeployResult", () => {
   it("returns null for non-objects", () => {
     assert.strictEqual(extractDeployResult(null), null);
     assert.strictEqual(extractDeployResult("x"), null);
+  });
+});
+
+describe("deployStatusMap.parseCliDeployJson", () => {
+  it("reads the `result` wrapper from sf --json output", () => {
+    const out = JSON.stringify({ status: 0, result: { numberComponentsDeployed: 2, details: { componentSuccesses: [{ fullName: "A" }] } } });
+    const dr = parseCliDeployJson(out);
+    assert.strictEqual(dr?.numberComponentsDeployed, 2);
+  });
+  it("unwraps a nested result.deployResult", () => {
+    const out = JSON.stringify({ result: { deployResult: { status: "Succeeded", numberComponentsTotal: 5 } } });
+    assert.strictEqual(parseCliDeployJson(out)?.status, "Succeeded");
+  });
+  it("finds JSON amid surrounding log lines", () => {
+    const out = `warning: something\n{"result":{"numberComponentsDeployed":3}}\nDone`;
+    assert.strictEqual(parseCliDeployJson(out)?.numberComponentsDeployed, 3);
+  });
+  it("returns null when there is no JSON", () => {
+    assert.strictEqual(parseCliDeployJson("no json here"), null);
   });
 });
 

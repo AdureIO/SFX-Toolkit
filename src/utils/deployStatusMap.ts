@@ -160,6 +160,24 @@ export function isTerminalStatus(status: string | undefined): boolean {
 	return !!status && TERMINAL.has(status);
 }
 
+/**
+ * Parse the deploy result out of `sf project deploy start --json` output (success or
+ * failure). The CLI may wrap it under `result` (and sometimes `result.deployResult`),
+ * and may print extra lines around the JSON. Returns null if no result JSON is found.
+ */
+export function parseCliDeployJson(text: string): RawDeployResult | null {
+	const start = text.indexOf("{");
+	const end = text.lastIndexOf("}");
+	if (start < 0 || end <= start) return null;
+	try {
+		const parsed = JSON.parse(text.slice(start, end + 1)) as Record<string, unknown>;
+		const result = (parsed.result ?? parsed) as Record<string, unknown>;
+		return ((result.deployResult ?? result) as RawDeployResult) ?? null;
+	} catch {
+		return null;
+	}
+}
+
 /** The REST endpoint wraps the result under `deployResult`; some shapes expose it flat. */
 export function extractDeployResult(json: unknown): RawDeployResult | null {
 	if (!json || typeof json !== "object") return null;

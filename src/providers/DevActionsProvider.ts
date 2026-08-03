@@ -44,6 +44,10 @@ export class DevActionsProvider implements vscode.TreeDataProvider<vscode.TreeIt
 			]),
 			new DevGroupItem("Test", "beaker", [
 				this.createItem("Apex Tests (Test Explorer)", "adure-sfx-toolkit.openApexTests", "beaker", "Open the native Testing view — run Apex tests with results & code coverage"),
+				this.createItem("Apex Coverage", "adure-sfx-toolkit.openApexCoverage", "shield", "Org-wide Apex coverage — worst-first table, with % badges in the Explorer"),
+				this.createItem("Toggle Coverage Line Highlights", "adure-sfx-toolkit.toggleApexCoverageLines", "list-selection", "Show/hide covered & uncovered line highlights in Apex files (stays live while on)"),
+				this.createItem("Toggle Coverage % Badge", "adure-sfx-toolkit.toggleApexCoverageBadge", "eye", "Show/hide the coverage % badge on files in the Explorer (coverage stays on hover)"),
+				this.createItem("Clear Test Results", "adure-sfx-toolkit.clearApexTestResults", "clear-all", "Delete local .sfdx/tools/testresults and clear coverage"),
 			]),
 			new DevGroupItem("Query & API", "database", [
 				this.createItem("SOQL Builder & Editor", "adure-sfx-toolkit.openSOQLEditor", "database", "Build and run SOQL queries"),
@@ -55,6 +59,7 @@ export class DevActionsProvider implements vscode.TreeDataProvider<vscode.TreeIt
 				this.createItem("Apex Snippets", "adure-sfx-toolkit.showSnippets", "play", "Run, add, edit or delete Apex snippets"),
 				this.createItem("Apex Snippets Overview", "adure-sfx-toolkit.openSnippetsPanel", "list-unordered", "Open panel with all snippets"),
 				this.createItem("Org Health", "adure-sfx-toolkit.orgHealth", "dashboard", "View org limits and health metrics"),
+				this.createItem("Hide/Show -meta.xml Files", "adure-sfx-toolkit.toggleHideMetaXml", "eye-closed", "Toggle hiding Apex .cls-meta.xml / .trigger-meta.xml files in the Explorer"),
 			]),
 		];
 	}

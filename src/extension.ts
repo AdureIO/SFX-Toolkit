@@ -63,6 +63,12 @@ import {
   type ApexSnippet
 } from "./commands/apexSnippets";
 import { ApexSnippetsPanelProvider } from "./providers/ApexSnippetsPanelProvider";
+import { PackageExplorerPanelProvider } from "./providers/PackageExplorerPanelProvider";
+import { CoveragePanelProvider } from "./providers/CoveragePanelProvider";
+import { ApexCoverageDecorationProvider } from "./providers/ApexCoverageDecorationProvider";
+import { CoverageLineDecorator } from "./providers/CoverageLineDecorator";
+import { toggleHideMetaXml } from "./commands/toggleHideMeta";
+import { apexCoverage, registerCoverageWatchers, clearApexTestResults } from "./utils/apexCoverageService";
 import { SnippetTreeProvider } from "./providers/SnippetTreeProvider";
 import { addToGitignore, addToForceignore, addToIgnore } from "./commands/addToIgnore";
 import { DataToolsPanelProvider } from "./providers/DataToolsPanelProvider";
@@ -558,6 +564,44 @@ export function activate(context: vscode.ExtensionContext) {
 
     // 21. Data Migration Wizard
     const dataMigrationCmd = register("adure-sfx-toolkit.dataMigration", () => DataMigrationPanelProvider.show());
+
+    // 22. Package Explorer (Dev Hub 2GP)
+    const packageExplorerCmd = register("adure-sfx-toolkit.openPackageExplorer", (arg?: { orgData?: { username?: string } }) =>
+      PackageExplorerPanelProvider.show(arg?.orgData?.username)
+    );
+    const listInstalledPackagesCmd = register(
+      "adure-sfx-toolkit.listInstalledPackages",
+      (arg?: { orgData?: { username?: string } }) => {
+        const username = arg?.orgData?.username;
+        if (!username) {
+          vscode.window.showInformationMessage("Select an org from the Orgs panel to list its installed packages.");
+          return;
+        }
+        return PackageExplorerPanelProvider.showInstalled(username);
+      }
+    );
+
+    // 23. Apex coverage — Explorer badges + structured panel (shared store)
+    const covDecorator = new ApexCoverageDecorationProvider(context);
+    context.subscriptions.push(vscode.window.registerFileDecorationProvider(covDecorator));
+    registerCoverageWatchers(context); // auto-refresh when SF extensions write test results
+    const openCoverageCmd = register("adure-sfx-toolkit.openApexCoverage", () => CoveragePanelProvider.show());
+    const refreshCoverageCmd = register("adure-sfx-toolkit.refreshApexCoverage", () => CoveragePanelProvider.refreshData());
+    const lineDecorator = new CoverageLineDecorator(context);
+    context.subscriptions.push(lineDecorator);
+    const toggleCoverageLinesCmd = register("adure-sfx-toolkit.toggleApexCoverageLines", () => lineDecorator.toggle());
+    const toggleCoverageBadgeCmd = register("adure-sfx-toolkit.toggleApexCoverageBadge", () => covDecorator.toggleBadge());
+    const toggleHideMetaCmd = register("adure-sfx-toolkit.toggleHideMetaXml", () => toggleHideMetaXml());
+    const clearTestResultsCmd = register("adure-sfx-toolkit.clearApexTestResults", async () => {
+      const ok = await vscode.window.showWarningMessage(
+        "Delete all local Apex test results (.sfdx/tools/testresults) and clear coverage?",
+        { modal: true },
+        "Clear"
+      );
+      if (ok !== "Clear") return;
+      const removed = await clearApexTestResults();
+      vscode.window.showInformationMessage(`Cleared Apex test results (${removed} item${removed === 1 ? "" : "s"}) and coverage.`);
+    });
     const addToForceignoreCmd = register("adure-sfx-toolkit.addToForceignore", (uri?: vscode.Uri) =>
       addToForceignore(uri)
     );
@@ -632,12 +676,21 @@ export function activate(context: vscode.ExtensionContext) {
       lwcCssCmd,
       dataToolsCmd,
       restExplorerCmd,
-      dataMigrationCmd
+      dataMigrationCmd,
+      packageExplorerCmd,
+      listInstalledPackagesCmd,
+      openCoverageCmd,
+      refreshCoverageCmd,
+      toggleCoverageLinesCmd,
+      toggleCoverageBadgeCmd,
+      toggleHideMetaCmd,
+      clearTestResultsCmd
     );
 
     if (isSalesforceProject()) {
       warmOrgListCache();
       OrgMetadataCache.warmDefaultOrg();   // pre-load sobject list for SOQL completion
+      void apexCoverage.refresh().catch(() => undefined); // populate Explorer coverage badges
       // (auth token already warmed at the top of activate)
     }
     context.subscriptions.push(

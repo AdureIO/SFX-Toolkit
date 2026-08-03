@@ -73,6 +73,9 @@ export function buildDeployCommand(
     `-l ${testLevel}`,
     testFlags,
     targetOrg ? `-o ${escapeShellArg(targetOrg)}` : "",
+    // The panel is an explicit "deploy exactly this selection" action, so it must always
+    // deploy what was asked — never let source-tracking conflict detection block it.
+    "--ignore-conflicts",
     dryRun ? "--dry-run" : "",
     asyncJson ? "--async --json" : ""
   ];

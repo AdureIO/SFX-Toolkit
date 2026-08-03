@@ -10,6 +10,7 @@ import {
     FieldOrRelation,
 } from '../utils/apexCompletions';
 import { OrgMetadataCache } from '../utils/orgMetadataCache';
+import { Telemetry } from '../utils/telemetry';
 
 const KIND_MAP: Record<number, vscode.CompletionItemKind> = {
     [CompletionKind.Keyword]:  vscode.CompletionItemKind.Keyword,
@@ -161,6 +162,8 @@ export class ApexCompletionProvider implements vscode.CompletionItemProvider {
 
         try {
             const raw = await ApexCompletionProvider.getItems(textUpToCursor, surroundingText, null, beforeCursor, document.getText());
+            // Fires on every keystroke → throttle to a coarse "completion is used" signal.
+            if (raw.length) Telemetry.throttledEvent("completion", 5 * 60 * 1000, { surface: "apex" });
             return raw.map(toVsCodeItem);
         } catch {
             return [];

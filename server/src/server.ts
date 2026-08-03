@@ -27,10 +27,10 @@ import {
 import { fileURLToPath } from 'url';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { completionsFor } from '@salesforce/soql-language-server/lib/completion';
-import { parseApex, enclosingClass, ApexParseResult, ApexMember } from './apexSymbols';
+import { parseApex, enclosingClass, resolveVarType, ApexParseResult, ApexMember } from './apexSymbols';
 import { validateFieldAccesses } from './apexSemantics';
 import { WorkspaceIndex } from './workspaceIndex';
-import { getStub, setStubRoot, clearStubs } from './sobjectStub';
+import { getStub, setStubRoot, clearStubs, stubbedObjectNames, invalidateStubbedNames } from './sobjectStub';
 import { STD_TYPES, stdTypeName, stdMembersFor, StdMember } from './apexStdlib';
 
 // ─── Custom request contract with the host (see src/languageClient.ts) ──────────
@@ -585,6 +585,7 @@ connection.onNotification(NOTE_REFRESH, () => {
     objectDescriptionCache.clear();
     apexSymbolCache.clear();
     clearStubs();
+    invalidateStubbedNames(); // stubs may have been (re)generated → rescan for validation
     // Re-publish Apex diagnostics for open documents after a push/pull/refresh.
     for (const doc of documents.all()) publishApexDiagnostics(doc);
 });
@@ -925,10 +926,11 @@ async function apexMemberCompletion(
     // Resolve the receiver to a type name. Fall back to a text scan when the parse
     // index doesn't have it (common while mid-typing the member access).
     let typeName: string | undefined;
+    const scopedType = resolveVarType(index, receiver, pos.line, pos.character);
     if (receiver === 'this') {
         typeName = enclosingClass(index, pos.line, pos.character);
-    } else if (index.varTypes.has(receiver)) {
-        typeName = index.varTypes.get(receiver);
+    } else if (scopedType) {
+        typeName = scopedType; // scope-aware: the declaration in *this* method wins
     } else if (index.types.has(receiver)) {
         typeName = receiver; // static-ish access on a known type
     } else {
@@ -1142,15 +1144,19 @@ async function runSchemaValidation(uri: string): Promise<void> {
         //   • a type declared in this file (class/enum/inner class), a workspace class,
         //     a generic/system type → NOT an SObject (a local `Event` beats the SObject).
         //   • a custom suffix (__c/__b/__e/__mdt/__x) → a custom SObject.
-        //   • otherwise, a known standard object.
+        //   • a name we've generated an org stub for → a real SObject (covers standard
+        //     objects the org actually uses, beyond the built-in list).
+        //   • otherwise, a known standard object from the built-in list.
         const localTypes = new Set([...parse.index.types.keys()].map((t) => t.toLowerCase()));
+        const stubbed = stubbedObjectNames();
         const shouldDescribe = (s: string): boolean => {
-            if (isNonSObjectName(s) || localTypes.has(s.toLowerCase())) return false;
-            return CUSTOM_SOBJECT_SUFFIX.test(s) || STANDARD_SOBJECTS.has(s.toLowerCase());
+            const l = s.toLowerCase();
+            if (isNonSObjectName(s) || localTypes.has(l)) return false;
+            return CUSTOM_SOBJECT_SUFFIX.test(s) || stubbed.has(l) || STANDARD_SOBJECTS.has(l);
         };
 
         const schema = await validateFieldAccesses(parse.fieldAccesses, {
-            varTypes: parse.index.varTypes,
+            varTypeAt: (name, line, character) => resolveVarType(parse.index, name, line, character),
             describe: (s) => (shouldDescribe(s) ? describe(uri, s) : Promise.resolve(null)),
             resolveRelTarget: (base, hops) => resolveRelationshipTarget(uri, base, hops),
         });

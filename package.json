@@ -350,6 +350,46 @@
         "icon": "$(arrow-swap)"
       },
       {
+        "command": "adure-sfx-toolkit.openPackageExplorer",
+        "title": "ASFXT: Package Explorer (Dev Hub)",
+        "icon": "$(package)"
+      },
+      {
+        "command": "adure-sfx-toolkit.listInstalledPackages",
+        "title": "ASFXT: List Installed Packages",
+        "icon": "$(package)"
+      },
+      {
+        "command": "adure-sfx-toolkit.openApexCoverage",
+        "title": "ASFXT: Apex Coverage",
+        "icon": "$(shield)"
+      },
+      {
+        "command": "adure-sfx-toolkit.refreshApexCoverage",
+        "title": "ASFXT: Refresh Apex Coverage",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "adure-sfx-toolkit.toggleApexCoverageLines",
+        "title": "ASFXT: Toggle Apex Coverage Line Highlights",
+        "icon": "$(list-selection)"
+      },
+      {
+        "command": "adure-sfx-toolkit.toggleApexCoverageBadge",
+        "title": "ASFXT: Toggle Apex Coverage % Badge (Explorer)",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "adure-sfx-toolkit.clearApexTestResults",
+        "title": "ASFXT: Clear Apex Test Results",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "adure-sfx-toolkit.toggleHideMetaXml",
+        "title": "ASFXT: Toggle Hide Apex -meta.xml Files",
+        "icon": "$(eye-closed)"
+      },
+      {
         "command": "adure-sfx-toolkit.openApexTests",
         "title": "ASFXT: Open Apex Tests (Test Explorer)",
         "category": "Adure SFX Toolkit"
@@ -618,6 +658,21 @@
           "command": "adure-sfx-toolkit.setAsDefaultDevHub",
           "when": "view == adure-sfx-toolkit.orgs && viewItem == org-devhub",
           "group": "inline"
+        },
+        {
+          "command": "adure-sfx-toolkit.openPackageExplorer",
+          "when": "view == adure-sfx-toolkit.orgs && viewItem == org-devhub",
+          "group": "inline"
+        },
+        {
+          "command": "adure-sfx-toolkit.openPackageExplorer",
+          "when": "view == adure-sfx-toolkit.orgs && viewItem == org-devhub",
+          "group": "2_copy"
+        },
+        {
+          "command": "adure-sfx-toolkit.listInstalledPackages",
+          "when": "view == adure-sfx-toolkit.orgs && viewItem =~ /^org-/",
+          "group": "2_copy"
         },
         {
           "command": "adure-sfx-toolkit.renameAlias",
@@ -907,7 +962,7 @@
         "adure-sfx-toolkit.deploy.liveStatus": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "Deploy with live status by submitting the deploy asynchronously and polling the Metadata REST API for structured progress (stage, components X/Y, tests X/Y) and failures. Faster and more reliable than parsing CLI text, and errors go straight to the Problems view. Turn **off** to stream the classic `sf project deploy start` CLI output instead. If the async submit ever fails, the CLI path is used automatically."
+          "markdownDescription": "In the **Deploy Metadata** panel, show live status by polling the Metadata REST API for structured progress (stage, components X/Y, tests X/Y) and routing failures to the Problems view. Turn **off** to stream the classic `sf project deploy start` CLI output instead. (Push/Pull always run a synchronous deploy so source tracking stays correct — this setting does not affect them.)"
         },
         "adure-sfx-toolkit.apex.validateOnSave": {
           "type": "boolean",
@@ -991,7 +1046,7 @@
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src --ext ts",
-    "test": "node ./out/test/runTest.js",
+    "test": "npm run compile && node ./out/test/runTest.js",
     "package": "vsce package",
     "test:unit": "npm run compile && mocha --reporter spec --timeout 15000 \"out/test/**/*.test.js\"",
     "test:server": "npm run compile && mocha --reporter spec --timeout 15000 out/test/languageServer.test.js out/test/sobjectStubSync.test.js out/test/soqlValidate.test.js out/test/nameMatch.test.js out/test/apexLogParse.test.js out/test/soqlError.test.js out/test/soqlEdit.test.js",

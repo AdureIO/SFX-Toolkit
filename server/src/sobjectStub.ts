@@ -37,9 +37,38 @@ export interface StubInfo {
 
 let rootDir: string | null = null;
 const cache = new Map<string, StubInfo>();
+let stubbedNames: Set<string> | null = null;
+
+/**
+ * Lower-cased names of every SObject we've generated a stub for (from the stub
+ * directory's filenames). A reliable, cache-only signal of "this name is a real org
+ * SObject" for schema validation — no describe/API call. Cached; call
+ * invalidateStubbedNames() after a sync. Empty when stub generation is disabled.
+ */
+export function stubbedObjectNames(): Set<string> {
+    if (stubbedNames) return stubbedNames;
+    const set = new Set<string>();
+    const base = path.join(rootDir ?? os.tmpdir(), '.sfdx', 'tools', 'sobjects');
+    for (const sub of ['standardObjects', 'customObjects']) {
+        try {
+            for (const f of fs.readdirSync(path.join(base, sub))) {
+                if (f.endsWith('.cls')) set.add(f.slice(0, -4).toLowerCase());
+            }
+        } catch {
+            /* directory may not exist yet */
+        }
+    }
+    stubbedNames = set;
+    return set;
+}
+
+export function invalidateStubbedNames(): void {
+    stubbedNames = null;
+}
 
 export function setStubRoot(dir: string | null): void {
     rootDir = dir;
+    stubbedNames = null;
     // Remove the legacy custom stub dir from earlier versions (now unified into
     // .sfdx/tools/sobjects so the Salesforce LS and AI read the same files).
     if (dir) {

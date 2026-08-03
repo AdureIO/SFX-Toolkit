@@ -24,8 +24,8 @@ export interface DescribeLite {
 }
 
 export interface SemanticDeps {
-    /** Variable/field/param name → declared type text (as written in source). */
-    varTypes: Map<string, string>;
+    /** Resolve a variable's declared type at a position (scope-aware). */
+    varTypeAt: (name: string, line: number, character: number) => string | undefined;
     /** Resolve an SObject describe, or null if unknown / not an SObject / not loaded. */
     describe: (sobject: string) => Promise<DescribeLite | null>;
     /** Walk parent-relationship hops from a base SObject; null if any hop is unresolved. */
@@ -90,9 +90,10 @@ export async function validateFieldAccesses(
         const root = segs[0];
         const hops = segs.slice(1);
 
-        // Root must be a declared variable. We deliberately do NOT treat a bare
-        // SObject *type* name as a receiver here (that'd flag static access).
-        const rootType = deps.varTypes.get(root);
+        // Root must be a declared variable, resolved at THIS access's position (so a
+        // same-name variable in another method doesn't leak in). We deliberately do NOT
+        // treat a bare SObject *type* name as a receiver here (that'd flag static access).
+        const rootType = deps.varTypeAt(root, a.range.start.line, a.range.start.character);
         if (!rootType) continue;
 
         // The root's type must itself describe to a real SObject; otherwise it's a

@@ -14,6 +14,7 @@ import { findSfdxProjectDir, isSalesforceProject } from "../utils/projectUtils";
 import { clearDeployDiagnostics, setDeployDiagnosticsFromFailure } from "../utils/deployDiagnostics";
 import { getDefaultOrg, getDefaultOrgSync } from "../utils/defaultOrg";
 import { Logger, outputChannel } from "../utils/outputChannel";
+import { Telemetry } from "../utils/telemetry";
 
 const VALIDATE_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -58,12 +59,14 @@ export async function validateApexFile(doc?: vscode.TextDocument, silent = false
 				await runCommand(command, projectDir, undefined, false, token, VALIDATE_TIMEOUT_MS);
 				// Success — clear any prior validation diagnostics for a clean slate.
 				clearDeployDiagnostics();
+					Telemetry.event("validateApex", { status: "passed", trigger: silent ? "onSave" : "command" });
 				if (!silent) vscode.window.showInformationMessage("Apex validation passed — no compile errors.");
 			} catch (e: any) {
 				if (e?.cancelled) {
 					Logger.info("Apex validation cancelled.");
 					return;
 				}
+				Telemetry.event("validateApex", { status: "failed", trigger: silent ? "onSave" : "command" });
 				const raw = e?.message || e?.stderr || "Unknown error";
 				await setDeployDiagnosticsFromFailure(projectDir ?? "", raw, org.username ?? null);
 				if (!silent) {

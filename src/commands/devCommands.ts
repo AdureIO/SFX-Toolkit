@@ -7,8 +7,8 @@ import { AuthInfo } from "../utils/authInfo";
 import { OrgMetadataCache } from "../utils/orgMetadataCache";
 import { getAutoSaveBeforePush, getTestRunTimeout } from "../utils/constants";
 import { DEPLOY_TIMEOUT_MS } from "./deployMetadata";
-import { runRestDeploy, DeploySubmitError } from "../utils/deployEngine";
-import { toApiDeployResult, formatStatus, formatElapsed, affectedSchemaObjects, componentSuccessList, parseRetrievedComponents, schemaObjectFromPath, type DeployedComponent } from "../utils/deployStatusMap";
+import { runJsonDeploy } from "../utils/deployEngine";
+import { formatStatus, formatElapsed, affectedSchemaObjects, componentSuccessList, parseRetrievedComponents, schemaObjectFromPath, toApiDeployResult, type DeployedComponent } from "../utils/deployStatusMap";
 import { clearDeployDiagnostics, setDeployDiagnosticsFromApiResult, setDeployDiagnosticsFromFailure, formatApiDeployResultForLog } from "../utils/deployDiagnostics";
 import { getDefaultOrg, getDefaultOrgSync } from "../utils/defaultOrg";
 import { confirmProductionOrgOperation } from "../utils/orgSafety";
@@ -266,12 +266,6 @@ async function pushSourceHelper(force: boolean) {
             }
           }
 
-          // Live deploy via the Metadata REST engine (async submit + poll). Replaces
-          // the old CLI-text scraping: structured status, correct cancel, and failures
-          // routed to the Problems view.
-          const liveStatus = vscode.workspace
-            .getConfiguration("adure-sfx-toolkit")
-            .get<boolean>("deploy.liveStatus", true);
           clearDeployDiagnostics();
           // Mutated inside runOne (a closure); a state object keeps TS narrowing honest
           // (property narrowing resets after each await, unlike captured `let`s).
@@ -285,49 +279,47 @@ async function pushSourceHelper(force: boolean) {
             fallbackUsed: boolean; // a non-live CLI deploy ran → no structured component list
           } = { totalCount: 0, numTotal: 0, numErrors: 0, cancelled: false, failure: null, components: [], fallbackUsed: false };
 
-          /** Run one deploy invocation; returns false to stop a multi-package loop (cancel/failure). */
+          /**
+           * Run one deploy invocation; returns false to stop a multi-package loop (cancel/failure).
+           *
+           * Push runs a SYNCHRONOUS streaming deploy (no `--async`) so it WAITS for the org and
+           * advances local source tracking (→ incremental push; an async submit doesn't, and
+           * `deploy resume` can't retro-fix it). To still show live status, we grab the deploy id
+           * from the CLI's own output ("Deploy ID: 0Af…") and REST-poll THAT id in parallel — the
+           * poll drives the live status + timer and returns the final structured result for the
+           * smart schema refresh and the log table.
+           */
           const runOne = async (submitBase: string, label?: string): Promise<boolean> => {
             const report = (m: string) => {
               const full = label ? `${label}: ${m}` : m;
               progress.report({ message: full });
               statusBar.text = `$(sync~spin) ${full}`;
             };
-            if (liveStatus) {
-              try {
-                const res = await runRestDeploy({
-                  submitCommand: `${submitBase} --async --json`.replace(/\s+/g, " ").trim(),
-                  cwd: rootPath,
-                  org: null,
-                  token,
-                  timeoutMs: DEPLOY_TIMEOUT_MS,
-                  onStatus: (s) => report(formatStatus(s))
-                });
-                if (res.kind === "cancelled") { state.cancelled = true; return false; }
-                if (res.kind === "failed") { state.failure = { apiResult: toApiDeployResult(res.result) }; return false; }
-                state.totalCount += res.result.numberComponentsDeployed ?? 0;
-                state.numTotal += res.result.numberComponentsTotal ?? 0;
-                state.numErrors += res.result.numberComponentErrors ?? 0;
-                state.components.push(...componentSuccessList(res.result));
-                return true;
-              } catch (e: any) {
-                if (e?.cancelled) { state.cancelled = true; return false; }
-                if (!(e instanceof DeploySubmitError)) { state.failure = { errorText: e?.message ?? String(e) }; return false; }
-                Logger.warn(`Live push submit failed, using CLI deploy: ${e.message}`);
-                // fall through to the blocking CLI path
-              }
-            }
-            // Setting off, or submit failed before anything ran → plain blocking deploy.
-            try {
-              const out = await runCommand(submitBase, rootPath, undefined, false, token, DEPLOY_TIMEOUT_MS);
-              Logger.info(cleanDeployOutput(out));
-              state.totalCount += getDeployedCount(out);
-              state.fallbackUsed = true; // no structured component list from CLI text
-              return true;
-            } catch (e2: any) {
-              if (e2?.cancelled) { state.cancelled = true; return false; }
-              state.failure = { errorText: e2?.message ?? String(e2) };
+            report("Deploying (source tracking)…");
+            const outcome = await runJsonDeploy({
+              submitCommand: submitBase,
+              cwd: rootPath,
+              org: null,
+              token,
+              timeoutMs: DEPLOY_TIMEOUT_MS,
+              onStatus: (s) => report(formatStatus(s))
+            });
+            if (outcome.kind === "cancelled") { state.cancelled = true; return false; }
+            if (outcome.kind === "nothing") return true; // no local changes
+            if (outcome.kind === "failed") {
+              state.failure = outcome.result ? { apiResult: toApiDeployResult(outcome.result) } : { errorText: outcome.errorText };
               return false;
             }
+            const dr = outcome.result;
+            if (dr.numberComponentsDeployed !== undefined || dr.details) {
+              state.totalCount += dr.numberComponentsDeployed ?? 0;
+              state.numTotal += dr.numberComponentsTotal ?? 0;
+              state.numErrors += dr.numberComponentErrors ?? 0;
+              state.components.push(...componentSuccessList(dr));
+            } else {
+              state.fallbackUsed = true; // couldn't read the structured result → refresh fully
+            }
+            return true;
           };
 
           // Check if source tracking is active locally
@@ -367,9 +359,11 @@ async function pushSourceHelper(force: boolean) {
 
           if (state.cancelled) {
             Logger.info("Push cancelled by user.");
+            Telemetry.event("push", { force: String(force), status: "cancelled" }, { durationMs: Date.now() - pushStartTime });
             return;
           }
           if (state.failure) {
+            Telemetry.event("push", { force: String(force), status: "failed" }, { durationMs: Date.now() - pushStartTime });
             DeployLog.line("Push failed.");
             DeployLog.show();
             if (state.failure.apiResult) {
@@ -412,10 +406,15 @@ async function pushSourceHelper(force: boolean) {
               `Push succeeded (${pushElapsed}):`
             )
           );
+          Telemetry.event(
+            "push",
+            { force: String(force), status: state.totalCount > 0 ? "succeeded" : "nothing" },
+            { durationMs: Date.now() - pushStartTime }
+          );
           vscode.window.showInformationMessage(
             state.totalCount > 0
               ? `Source pushed successfully in ${pushElapsed}. Deployed ${state.totalCount} components.`
-              : `Source pushed successfully in ${pushElapsed}.`
+              : `Nothing to push — no local changes to deploy.`
           );
         } catch (e: any) {
           if (e.cancelled) {
@@ -459,6 +458,7 @@ async function pullSourceHelper(force: boolean) {
       cancellable: true
     },
     async (_progress, token) => {
+      const pullStartTime = Date.now();
       try {
         const flag = force ? "--ignore-conflicts" : "";
         // --json so we can see exactly which components were retrieved and refresh smartly.
@@ -482,12 +482,19 @@ async function pullSourceHelper(force: boolean) {
           }
           // else: no schema changes retrieved → no stub/describe refresh
         }
+        Telemetry.event(
+          "pull",
+          { force: String(force), status: (components?.length ?? 0) > 0 ? "succeeded" : "nothing" },
+          { durationMs: Date.now() - pullStartTime }
+        );
         vscode.window.showInformationMessage("Source pulled successfully.");
       } catch (e: any) {
         if (e.cancelled) {
           Logger.info("Pull cancelled by user.");
+          Telemetry.event("pull", { force: String(force), status: "cancelled" }, { durationMs: Date.now() - pullStartTime });
           return;
         }
+        Telemetry.event("pull", { force: String(force), status: "failed" }, { durationMs: Date.now() - pullStartTime });
         const msg = e?.message || e?.stderr || String(e);
         Logger.error("Pull failed", msg);
         outputChannel.show();
@@ -555,14 +562,17 @@ export async function deployCurrentFile() {
           OrgMetadataCache.invalidateSObjects(null, [schema.object], schema.structural);
           if (schema.structural) OrgMetadataCache.warmDefaultOrg();
         }
+        Telemetry.event("deployFile", { status: "succeeded" });
         vscode.window.showInformationMessage(
           count > 0 ? `File deployed successfully. Deployed ${count} components.` : "File deployed successfully."
         );
       } catch (e: any) {
         if (e.cancelled) {
           Logger.info("Deploy cancelled by user.");
+          Telemetry.event("deployFile", { status: "cancelled" });
           return;
         }
+        Telemetry.event("deployFile", { status: "failed" });
         const msg = e?.message || e?.stderr || String(e);
         Logger.error("Deploy current file failed", msg);
         outputChannel.show();
@@ -610,12 +620,15 @@ export async function retrieveCurrentFile() {
           OrgMetadataCache.invalidateSObjects(null, [schema.object], schema.structural);
           if (schema.structural) OrgMetadataCache.warmDefaultOrg();
         }
+        Telemetry.event("retrieveFile", { status: "succeeded" });
         vscode.window.showInformationMessage("File retrieved successfully.");
       } catch (e: any) {
         if (e.cancelled) {
           Logger.info("Retrieve cancelled by user.");
+          Telemetry.event("retrieveFile", { status: "cancelled" });
           return;
         }
+        Telemetry.event("retrieveFile", { status: "failed" });
         const msg = e?.message || e?.stderr || String(e);
         Logger.error("Retrieve current file failed", msg);
         outputChannel.show();

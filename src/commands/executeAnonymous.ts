@@ -10,6 +10,7 @@ export type { OrgOption };
 import { openLogById } from "./listLogs";
 import { logTreeProvider } from "../providers/LogTreeProvider";
 import { AuthInfo } from "../utils/authInfo";
+import { Telemetry } from "../utils/telemetry";
 import { getToolingApiVersion } from "../utils/constants";
 import { httpsPost } from "../utils/httpUtils";
 
@@ -264,6 +265,8 @@ export async function executeAnonymousApex(
 }
 
 async function executeContent(text: string, _fromPanel?: boolean, targetOrg?: string) {
+  // Panel/workbench paths emit their own apexExecute; only track the command surface here.
+  if (!_fromPanel) Telemetry.event("apexExecute", { surface: "command" });
   const tmpDir = os.tmpdir();
   const tmpFile = path.join(tmpDir, `anon-${Date.now()}.apex`);
   fs.writeFileSync(tmpFile, text);

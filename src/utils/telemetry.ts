@@ -53,6 +53,25 @@ export class Telemetry {
     return optedIn && vscode.env.isTelemetryEnabled;
   }
 
+  private static lastThrottled = new Map<string, number>();
+
+  /**
+   * Send a usage event at most once per `minIntervalMs` (per name). For high-frequency
+   * signals like code completion, so we see the feature is used without flooding. The
+   * underlying reporter still batches/queues and flushes on reconnect.
+   */
+  static throttledEvent(
+    name: string,
+    minIntervalMs: number,
+    properties?: Record<string, string>
+  ): void {
+    if (!this.isEnabled()) return;
+    const now = Date.now();
+    if (now - (this.lastThrottled.get(name) ?? 0) < minIntervalMs) return;
+    this.lastThrottled.set(name, now);
+    this.event(name, properties);
+  }
+
   /** Send a usage event. No-ops when disabled. */
   static event(
     name: string,

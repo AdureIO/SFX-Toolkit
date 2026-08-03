@@ -432,6 +432,15 @@ describe("Apex language features", () => {
     assert.ok(labels.includes("Account"), `got: ${labels.slice(0, 6).join(", ")}`);
   });
 
+  it("resolves same-named variables per method scope (not document-flat last-wins)", async () => {
+    // `x` is Account in m1 and acme__Widget__c in m2 — each method's completion uses its own.
+    const src = "public class C {\n  void m1() {\n    Account x;\n    x.\n  }\n  void m2() {\n    acme__Widget__c x;\n    x.\n  }\n}\n";
+    const inM1 = labelsOf(await complete(src, 3, 6, "apex"));
+    assert.ok(inM1.includes("Industry"), `m1 x should resolve to Account: ${inM1.slice(0, 5).join(",")}`);
+    const inM2 = labelsOf(await complete(src, 7, 6, "apex"));
+    assert.ok(inM2.some((l: string) => /amount__c/i.test(l)), `m2 x should resolve to acme__Widget__c: ${inM2.slice(0, 5).join(",")}`);
+  });
+
   it("member completion offers fields AND relationships for a namespaced object typed without its namespace", async () => {
     const src = "public class C {\n  void m() {\n    DynamicField__c ds = new DynamicField__c();\n    ds.dataso\n  }\n}\n";
     const labels = labelsOf(await complete(src, 3, 13, "apex"));

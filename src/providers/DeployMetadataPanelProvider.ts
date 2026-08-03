@@ -22,7 +22,7 @@ import { Logger, DeployLog } from "../utils/outputChannel";
 import { cleanDeployOutput, parseDeployStats, parseCoverageData } from "../commands/devCommands";
 import { addDeployHistoryEntry } from "../commands/deployHistory";
 import { clearDeployDiagnostics, setDeployDiagnosticsFromFailure, setDeployDiagnosticsFromApiResult, formatApiDeployResultForLog } from "../utils/deployDiagnostics";
-import { runRestDeploy, DeploySubmitError } from "../utils/deployEngine";
+import { runJsonDeploy } from "../utils/deployEngine";
 import { statsFromResult, coverageFromResult, toApiDeployResult, formatStatus, formatElapsed, formatResultSummary, type DeployStats, type CoverageRow } from "../utils/deployStatusMap";
 import { AuthInfo } from "../utils/authInfo";
 import { upsertTestSuite, deleteTestSuite as deleteTestSuiteEntry, loadTestSuites, type TestSuite } from "../utils/testSuites";
@@ -385,10 +385,10 @@ export class DeployMetadataPanelProvider {
 
             if (!liveStatus) return runCliStreaming();
 
-            // ── Live REST deploy: async submit + poll (fast, structured status) ──
-            const submitCmd = buildDeployCommand(absPaths, testLevel, testFlags, dryRun, workspaceRoot, msg.targetOrg || undefined, true);
+            // ── Synchronous --json deploy (updates source tracking) + live REST status ──
+            const submitCmd = buildDeployCommand(absPaths, testLevel, testFlags, dryRun, workspaceRoot, msg.targetOrg || undefined);
             try {
-              const res = await runRestDeploy({
+              const res = await runJsonDeploy({
                 submitCommand: submitCmd,
                 cwd: workspaceRoot,
                 org: targetOrg,
@@ -400,19 +400,21 @@ export class DeployMetadataPanelProvider {
                 }
               });
               if (res.kind === "cancelled") return { kind: "cancelled" };
-              const dr = res.result;
-              const stats = statsFromResult(dr);
-              const coverage = coverageFromResult(dr);
-              if (res.kind === "success") return { kind: "success", stats, coverage, apiResult: toApiDeployResult(dr) };
-              return { kind: "failed", stats, coverage, apiResult: toApiDeployResult(dr) };
-            } catch (e: unknown) {
-              if (e instanceof DeploySubmitError) {
-                Logger.info(`Live deploy could not be submitted; falling back to CLI streaming: ${e.message}`);
-                return runCliStreaming();
+              if (res.kind === "nothing") {
+                return { kind: "success", stats: { components: 0, componentErrors: 0, testsPassed: 0, testsFailed: 0 }, coverage: [] };
               }
-              const errorText = (e as { message?: string })?.message ?? String(e);
-              DeployLog.line(`Deploy failed:\n${errorText}`);
-              return { kind: "failed", stats: { components: 0, componentErrors: 0, testsPassed: 0, testsFailed: 0 }, coverage: [], errorText };
+              if (res.kind === "failed") {
+                const dr = res.result;
+                return dr
+                  ? { kind: "failed", stats: statsFromResult(dr), coverage: coverageFromResult(dr), apiResult: toApiDeployResult(dr) }
+                  : { kind: "failed", stats: { components: 0, componentErrors: 0, testsPassed: 0, testsFailed: 0 }, coverage: [], errorText: res.errorText };
+              }
+              const dr = res.result;
+              return { kind: "success", stats: statsFromResult(dr), coverage: coverageFromResult(dr), apiResult: toApiDeployResult(dr) };
+            } catch (e: unknown) {
+              // Unexpected engine error → fall back to the classic CLI streaming path.
+              Logger.info(`Live deploy failed unexpectedly; falling back to CLI streaming: ${(e as { message?: string })?.message ?? String(e)}`);
+              return runCliStreaming();
             }
           }
         );

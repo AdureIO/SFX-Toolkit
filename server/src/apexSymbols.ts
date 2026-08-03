@@ -25,11 +25,23 @@ export interface ApexMember {
     detail?: string;
 }
 
+/** A variable/param/field declaration with the scope it's visible in (for scope-aware resolution). */
+export interface VarDecl {
+    name: string;
+    type: string;
+    /** Line the declaration sits on (0-based). */
+    line: number;
+    /** The range this declaration is visible in — its enclosing method/constructor (locals/params) or class (fields). */
+    scope: Range;
+}
+
 export interface ApexIndex {
     /** User-defined type name (class/interface/enum) → its members. */
     types: Map<string, ApexMember[]>;
-    /** Variable/param/field name → declared type (flat, document-wide). */
+    /** Variable/param/field name → declared type (flat, document-wide; last-wins fallback). */
     varTypes: Map<string, string>;
+    /** All declarations, scoped — resolve a variable's type at a position (handles same-name vars in different methods). */
+    varDecls: VarDecl[];
     /** Class declarations with their full ranges, for `this` resolution. */
     classRanges: { name: string; range: Range }[];
     /** Symbol name → its declaration's name range (flat; for go-to-definition). */
@@ -90,10 +102,24 @@ class DiagnosticCollector extends ApexErrorListener {
 
 class SymbolListener extends ApexParserBaseListener {
     roots: DocumentSymbol[] = [];
-    index: ApexIndex = { types: new Map(), varTypes: new Map(), classRanges: [], decls: new Map(), methods: new Map() };
+    index: ApexIndex = { types: new Map(), varTypes: new Map(), varDecls: [], classRanges: [], decls: new Map(), methods: new Map() };
     fieldAccesses: FieldAccess[] = [];
     private stack: DocumentSymbol[] = [];
     private typeNameStack: string[] = [];
+    private methodScope: Range[] = []; // enclosing method/constructor ranges (for local/param scope)
+    private classScope: Range[] = [];  // enclosing class/interface/enum ranges (for field/property scope)
+
+    /** Scope a declaration is visible in: its method (locals/params) or class (members). */
+    private scopeFor(kind: 'local' | 'member'): Range {
+        if (kind === 'local' && this.methodScope.length) return this.methodScope[this.methodScope.length - 1];
+        if (this.classScope.length) return this.classScope[this.classScope.length - 1];
+        return Range.create(0, 0, 1_000_000, 0); // whole document fallback
+    }
+    private addVar(name: string | undefined, type: string, idCtx: any, kind: 'local' | 'member'): void {
+        if (!name || !type) return;
+        this.index.varTypes.set(name, type); // flat, last-wins fallback
+        this.index.varDecls.push({ name, type, line: (idCtx?.start?.line ?? 1) - 1, scope: this.scopeFor(kind) });
+    }
 
     // `receiver.member` where the RHS is an identifier (field/property/relationship),
     // NOT a method call (`dotMethodCall` alternative). The grammar splits these, so
@@ -132,11 +158,13 @@ class SymbolListener extends ApexParserBaseListener {
         this.typeNameStack.push(name);
         if (!this.index.types.has(name)) this.index.types.set(name, []);
         if (kind === SymbolKind.Class) this.index.classRanges.push({ name, range });
+        this.classScope.push(range);
         this.recordDecl(name, ctx.id?.(), ctx);
     }
     private popType(): void {
         this.stack.pop();
         this.typeNameStack.pop();
+        this.classScope.pop();
     }
 
     enterClassDeclaration = (ctx: any) => this.pushType(ctx, SymbolKind.Class);
@@ -161,11 +189,15 @@ class SymbolListener extends ApexParserBaseListener {
         const sigs = this.index.methods.get(name) ?? [];
         sigs.push(sig);
         this.index.methods.set(name, sigs);
+        this.methodScope.push(ctxRange(ctx));
     };
+    exitMethodDeclaration = () => { this.methodScope.pop(); };
     enterConstructorDeclaration = (ctx: any) => {
         const name = ctx.qualifiedName?.()?.getText?.() ?? ctx.id?.()?.getText?.() ?? '<ctor>';
         this.container().push(makeSymbol(name, SymbolKind.Constructor, ctxRange(ctx), nameRange(ctx.qualifiedName?.() ?? ctx.id?.(), ctx)));
+        this.methodScope.push(ctxRange(ctx));
     };
+    exitConstructorDeclaration = () => { this.methodScope.pop(); };
     enterFieldDeclaration = (ctx: any) => {
         const type = ctx.typeRef?.()?.getText?.() ?? '';
         const vds = ctx.variableDeclarators?.();
@@ -179,7 +211,7 @@ class SymbolListener extends ApexParserBaseListener {
             sym.detail = type;
             this.container().push(sym);
             this.currentMembers()?.push({ name, kind: 'field', detail: type });
-            if (type) this.index.varTypes.set(name, type);
+            this.addVar(name, type, id, 'member');
             this.recordDecl(name, id, d);
         }
     };
@@ -190,7 +222,7 @@ class SymbolListener extends ApexParserBaseListener {
         sym.detail = type;
         this.container().push(sym);
         this.currentMembers()?.push({ name, kind: 'property', detail: type });
-        if (type) this.index.varTypes.set(name, type);
+        this.addVar(name, type, ctx.id?.(), 'member');
         this.recordDecl(name, ctx.id?.(), ctx);
     };
 
@@ -204,7 +236,7 @@ class SymbolListener extends ApexParserBaseListener {
             const id = d?.id?.();
             const name = id?.getText?.();
             if (name) {
-                this.index.varTypes.set(name, type);
+                this.addVar(name, type, id, 'local');
                 this.recordDecl(name, id, d);
             }
         }
@@ -214,7 +246,7 @@ class SymbolListener extends ApexParserBaseListener {
         const id = ctx.id?.();
         const name = id?.getText?.();
         if (type && name) {
-            this.index.varTypes.set(name, type);
+            this.addVar(name, type, id, 'local');
             this.recordDecl(name, id, ctx);
         }
     };
@@ -248,7 +280,7 @@ function isContained(outer: Range, inner: Range): boolean {
 export function parseApex(text: string): ApexParseResult {
     const diagnostics: Diagnostic[] = [];
     let symbols: DocumentSymbol[] = [];
-    let index: ApexIndex = { types: new Map(), varTypes: new Map(), classRanges: [], decls: new Map(), methods: new Map() };
+    let index: ApexIndex = { types: new Map(), varTypes: new Map(), varDecls: [], classRanges: [], decls: new Map(), methods: new Map() };
     let fieldAccesses: FieldAccess[] = [];
     try {
         const parser = ApexParserFactory.createParser(text);
@@ -279,4 +311,34 @@ export function enclosingClass(index: ApexIndex, line: number, character: number
         if (!best || size < best.size) best = { name: c.name, size };
     }
     return best?.name;
+}
+
+function rangeContains(r: Range, line: number, character: number): boolean {
+    const afterStart = line > r.start.line || (line === r.start.line && character >= r.start.character);
+    const beforeEnd = line < r.end.line || (line === r.end.line && character <= r.end.character);
+    return afterStart && beforeEnd;
+}
+function rangeSize(r: Range): number {
+    return (r.end.line - r.start.line) * 100_000 + (r.end.character - r.start.character);
+}
+
+/**
+ * Resolve a variable's declared type at a position: the nearest in-scope declaration
+ * that precedes it (innermost scope wins, then latest declaration). Fixes same-name
+ * variables declared with different types in different methods, which the flat
+ * `varTypes` map (last-wins) gets wrong. Falls back to the flat map when unscoped.
+ */
+export function resolveVarType(index: ApexIndex, name: string, line: number, character: number): string | undefined {
+    const lc = name.toLowerCase();
+    let best: VarDecl | undefined;
+    for (const d of index.varDecls) {
+        if (d.name.toLowerCase() !== lc) continue;
+        if (d.line > line) continue; // declared after the cursor
+        if (!rangeContains(d.scope, line, character)) continue;
+        if (!best) { best = d; continue; }
+        const dSize = rangeSize(d.scope);
+        const bSize = rangeSize(best.scope);
+        if (dSize < bSize || (dSize === bSize && d.line >= best.line)) best = d;
+    }
+    return best?.type ?? index.varTypes.get(name);
 }
