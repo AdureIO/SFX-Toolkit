@@ -70,7 +70,7 @@ const JOB_INTERFACES: [RegExp, "Batchable" | "Queueable" | "Schedulable"][] = [
 
 /** Fetch and normalize the org's automation metadata. */
 export async function fetchProcessMetadata(org?: string): Promise<ProcessMetadata> {
-    const [triggerRecs, flowRecs, vrRecs, wrRecs, cronRecs, classRecs] = await Promise.all([
+    const [triggerRecs, flowRecs, vrRecs, wrRecs, cronRecs, classRecs, wfuRecs] = await Promise.all([
         query(
             org,
             "SELECT Name, Status, NamespacePrefix, EntityDefinition.QualifiedApiName, " +
@@ -87,7 +87,8 @@ export async function fetchProcessMetadata(org?: string): Promise<ProcessMetadat
         query(org, "SELECT ValidationName, Active, NamespacePrefix, EntityDefinition.QualifiedApiName FROM ValidationRule", true),
         query(org, "SELECT Name, TableEnumOrId FROM WorkflowRule", true),
         query(org, "SELECT CronJobDetail.Name, CronExpression, NextFireTime, State FROM CronTrigger WHERE State != 'DELETED'", false),
-        query(org, "SELECT Name, NamespacePrefix, SymbolTable FROM ApexClass", true)
+        query(org, "SELECT Name, NamespacePrefix, SymbolTable FROM ApexClass", true),
+        query(org, "SELECT Name, Field, NamespacePrefix FROM WorkflowFieldUpdate", true)
     ]);
 
     // Normalize object refs (flows/workflows can reference an Id/DurableId).
@@ -150,5 +151,60 @@ export async function fetchProcessMetadata(org?: string): Promise<ProcessMetadat
         }
     }
 
-    return { triggers, flows, validationRules, workflowRules, scheduledJobs, apexJobClasses };
+    // ── Phase 2/3: field lineage + apex invocations (best-effort) ──────────────
+    const fieldUpdates: NonNullable<ProcessMetadata["fieldUpdates"]> = [];
+    for (const r of wfuRecs) {
+        const f = str(r.Field); // "Object.FieldApiName"
+        if (!f || !f.includes(".")) continue;
+        const [object, ...rest] = f.split(".");
+        fieldUpdates.push({
+            source: str(r.Name) ?? f,
+            sourceKind: "fieldUpdate",
+            object,
+            field: rest.join("."),
+            namespace: str(r.NamespacePrefix)
+        });
+    }
+
+    const invocations: NonNullable<ProcessMetadata["invocations"]> = [];
+    // Flow.Metadata (Tooling) carries element details: `actionCalls` (apex) + record
+    // writes (`recordUpdates`/`recordCreates` → field lineage). Shape varies by version.
+    try {
+        const flowMeta = await query(org, "SELECT DeveloperName, Metadata FROM Flow WHERE Status = 'Active'", true);
+        for (const fr of flowMeta) {
+            const dev = str(fr.DeveloperName);
+            if (!dev) continue;
+            const raw = fr.Metadata;
+            const md = (typeof raw === "string" ? safeParse(raw) : raw) as
+                | { actionCalls?: unknown[]; recordUpdates?: unknown[]; recordCreates?: unknown[] }
+                | undefined;
+            if (!md) continue;
+            for (const acU of md.actionCalls ?? []) {
+                const ac = acU as { actionType?: string; actionName?: string };
+                if (String(ac.actionType).toLowerCase() === "apex" && ac.actionName) {
+                    invocations.push({ flow: dev, apexClass: String(ac.actionName) });
+                }
+            }
+            for (const ruU of [...(md.recordUpdates ?? []), ...(md.recordCreates ?? [])]) {
+                const ru = ruU as { object?: string; inputAssignments?: { field?: string }[] };
+                const obj = str(ru.object);
+                if (!obj) continue;
+                for (const ia of ru.inputAssignments ?? []) {
+                    if (ia.field) fieldUpdates.push({ source: dev, sourceKind: "flow", object: obj, field: ia.field });
+                }
+            }
+        }
+    } catch {
+        /* Flow.Metadata not queryable on this org/version — field lineage stays partial. */
+    }
+
+    return { triggers, flows, validationRules, workflowRules, scheduledJobs, apexJobClasses, fieldUpdates, invocations };
+}
+
+function safeParse(s: string): unknown {
+    try {
+        return JSON.parse(s);
+    } catch {
+        return undefined;
+    }
 }

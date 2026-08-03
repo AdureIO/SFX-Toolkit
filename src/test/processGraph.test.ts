@@ -42,6 +42,22 @@ describe("processGraph.buildProcessGraph", () => {
     assert.ok(!onlyTriggers.nodes.some((n) => n.kind === "validationRule"), "VR filtered out");
   });
 
+  it("builds field lineage, invocations and execution order (phase 2/3)", () => {
+    const g = buildProcessGraph({
+      flows: [{ apiName: "SetOwner", triggerType: "RecordBeforeSave", object: "Account" }],
+      fieldUpdates: [
+        { source: "SetOwner", sourceKind: "flow", object: "Account", field: "OwnerId" },
+        { source: "WFU", sourceKind: "fieldUpdate", object: "Account", field: "Status__c" }
+      ],
+      invocations: [{ flow: "SetOwner", apexClass: "OwnerService" }]
+    });
+    assert.ok(g.nodes.some((n) => n.kind === "field" && n.label === "OwnerId"), "field node created");
+    assert.ok(g.nodes.some((n) => n.kind === "fieldUpdate"), "workflow field update node created");
+    assert.strictEqual(g.edges.filter((e) => e.kind === "updates").length, 2, "two updates edges");
+    assert.ok(g.edges.some((e) => e.kind === "invokes" && e.target === "apexClass:OwnerService"));
+    assert.strictEqual(g.nodes.find((n) => n.kind === "flow")?.meta?.order, "1", "before-save flow is phase 1");
+  });
+
   it("focus subgraph returns a node and its neighbours", () => {
     const g = buildProcessGraph({
       triggers: [{ name: "AccountTrigger", object: "Account" }],

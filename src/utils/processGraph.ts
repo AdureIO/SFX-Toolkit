@@ -12,11 +12,13 @@
 
 export type ProcessNodeKind =
     | "object"
+    | "field"
     | "trigger"
     | "flow" // record-triggered / autolaunched / screen
     | "scheduledFlow"
     | "validationRule"
     | "workflowRule"
+    | "fieldUpdate" // workflow field update
     | "apexClass" // implements Batchable / Queueable / Schedulable
     | "scheduledJob"; // CronTrigger
 
@@ -34,7 +36,7 @@ export interface ProcessNode {
     meta?: Record<string, string | string[] | boolean>;
 }
 
-export type ProcessEdgeKind = "runsOn" | "validates" | "schedules" | "invokes";
+export type ProcessEdgeKind = "runsOn" | "validates" | "schedules" | "invokes" | "updates" | "fieldOf";
 
 export interface ProcessEdge {
     id: string;
@@ -65,6 +67,36 @@ export interface ProcessMetadata {
     workflowRules?: { name: string; object: string; active?: boolean; namespace?: string }[];
     apexJobClasses?: { name: string; interfaces: ("Batchable" | "Queueable" | "Schedulable")[]; namespace?: string }[];
     scheduledJobs?: { name: string; className?: string; cron?: string; nextFire?: string }[];
+    /** Phase 2 — field lineage: automations that write a field. */
+    fieldUpdates?: {
+        source: string; // the flow apiName or the workflow-field-update name
+        sourceKind: "flow" | "fieldUpdate";
+        sourceLabel?: string;
+        object: string;
+        field: string;
+        namespace?: string;
+    }[];
+    /** Phase 3 — a flow invoking an Apex class (invocable action). */
+    invocations?: { flow: string; apexClass: string }[];
+}
+
+/** Salesforce order-of-execution phase (1 = earliest) for a node, or 0 if not in the sync path. */
+export function executionOrder(kind: ProcessNodeKind, triggerType?: string): number {
+    switch (kind) {
+        case "flow":
+            if (/before/i.test(triggerType ?? "")) return 1;
+            if (/after/i.test(triggerType ?? "")) return 6;
+            return 0;
+        case "trigger":
+            return 2; // runs before + after; placed at the "before" rank
+        case "validationRule":
+            return 3;
+        case "workflowRule":
+        case "fieldUpdate":
+            return 5;
+        default:
+            return 0;
+    }
 }
 
 function nsLabel(name: string, namespace?: string): string {
@@ -184,6 +216,45 @@ export function buildProcessGraph(input: ProcessMetadata): ProcessGraph {
             put({ id: clsId, kind: "apexClass", label: j.className, meta: { interfaces: ["Schedulable"] } });
             link(id, clsId, "schedules");
         }
+    }
+
+    // Phase 3 — flow invokes Apex.
+    for (const i of input.invocations ?? []) {
+        const flowId = `flow:${i.flow}`;
+        const clsId = `apexClass:${i.apexClass}`;
+        put({ id: clsId, kind: "apexClass", label: i.apexClass, meta: {} });
+        if (nodes.has(flowId)) link(flowId, clsId, "invokes");
+    }
+
+    // Phase 2 — field lineage.
+    for (const u of input.fieldUpdates ?? []) {
+        const obj = ensureObject(u.object);
+        const fieldId = `field:${u.object}.${u.field}`;
+        put({ id: fieldId, kind: "field", label: u.field, object: u.object });
+        if (obj) link(fieldId, obj, "fieldOf");
+        let sourceId: string;
+        if (u.sourceKind === "flow") {
+            sourceId = `flow:${u.source}`;
+            if (!nodes.has(sourceId)) continue; // flow not in scope
+        } else {
+            sourceId = `fieldUpdate:${u.source}`;
+            put({
+                id: sourceId,
+                kind: "fieldUpdate",
+                label: nsLabel(u.sourceLabel || u.source, u.namespace),
+                object: u.object,
+                namespace: u.namespace
+            });
+            if (obj) link(sourceId, obj, "runsOn");
+        }
+        link(sourceId, fieldId, "updates");
+    }
+
+    // Attach the order-of-execution phase to sync-path nodes.
+    for (const n of nodes.values()) {
+        const tt = typeof n.meta?.triggerType === "string" ? (n.meta.triggerType as string) : undefined;
+        const ord = executionOrder(n.kind, tt);
+        if (ord) n.meta = { ...(n.meta ?? {}), order: String(ord) };
     }
 
     return { nodes: [...nodes.values()], edges: [...edges.values()] };
