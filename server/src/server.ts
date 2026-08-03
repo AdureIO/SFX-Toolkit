@@ -332,15 +332,19 @@ function passesFlags(f: HostField, c: any): boolean {
 
 // A relationship-traversal item, e.g. `Account` / `Owner` that you can dot into.
 function relItem(owner: string, f: HostField): CompletionItem {
-    const target = (f.referenceTo && f.referenceTo[0]) || '';
+    // Lookups can be polymorphic (WhatId → Account | Opportunity | …); show every target,
+    // and type it like a field so the details panel isn't blank for relationships.
+    const targets = f.referenceTo && f.referenceTo.length ? f.referenceTo : [];
+    const typeStr = targets.length ? targets.join(' | ') : '(relationship)';
     const item: CompletionItem = {
         label: f.relationshipName as string,
         kind: CompletionItemKind.Class,
-        labelDetails: { detail: target ? ` → ${target}` : ' → (relationship)', description: owner },
+        detail: `${typeStr} ${owner}.${f.relationshipName}`,
+        labelDetails: { detail: ` : ${typeStr}`, description: owner },
         // Sort relationships just after their owning fields.
         sortText: '1_' + f.relationshipName,
     };
-    return withSchemaDoc(item, [`\`${owner}.${f.relationshipName}\` → **${target || 'relationship'}**`]);
+    return withSchemaDoc(item, [`\`${owner}.${f.relationshipName}\` → **${typeStr}**`]);
 }
 
 // Scalar fields (flag-filtered) plus, unless suppressed, relationship names to traverse.
@@ -1401,7 +1405,7 @@ async function apexHover(doc: TextDocument, offset: number, pos: { line: number;
             const f = d.fields.find((x) => x.name.toLowerCase() === word.toLowerCase());
             if (f) return fieldHover(base, f);
             const r = d.fields.find((x) => x.relationshipName && x.relationshipName.toLowerCase() === word.toLowerCase());
-            if (r) return codeHover(`${base}.${r.relationshipName} → ${r.referenceTo?.[0] ?? '?'}`);
+            if (r) return codeHover(`${base}.${r.relationshipName} → ${r.referenceTo?.join(' | ') || '?'}`);
         }
         return null;
     }
@@ -1434,7 +1438,7 @@ async function soqlHover(docUri: string, soqlText: string, line: number, column:
     const f = d.fields.find((x) => x.name.toLowerCase() === word.toLowerCase());
     if (f) return fieldHover(target as string, f);
     const r = d.fields.find((x) => x.relationshipName && x.relationshipName.toLowerCase() === word.toLowerCase());
-    if (r) return codeHover(`${target}.${r.relationshipName} → ${r.referenceTo?.[0] ?? '?'}`);
+    if (r) return codeHover(`${target}.${r.relationshipName} → ${r.referenceTo?.join(' | ') || '?'}`);
     return null;
 }
 
