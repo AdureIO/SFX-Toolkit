@@ -239,11 +239,19 @@ export type CompletionContextType =
     | 'member'      // word.<cursor> — stdlib method or SObject field
     | 'soqlField'   // SELECT <cursor> FROM SObject
     | 'soqlFrom'    // FROM <cursor>
+    | 'annotation'  // @<cursor> in declaration position — Apex annotations
+    | 'apexPicklist'// obj.PicklistField = '<cursor>  — picklist values in Apex
     | 'bare';       // plain word — keywords, types, SObject names
+
+export type AnnotationTarget = 'class' | 'method' | 'any';
 
 export interface ApexCompletionContext {
     type: CompletionContextType;
     prefix: string;
+    /** For 'annotation': what the annotation is attached to, inferred from the following code. */
+    annotationTarget?: AnnotationTarget;
+    /** For 'apexPicklist': the field whose picklist values we want (last segment of the LHS). */
+    pickField?: string;
     /** Resolved for 'member' (the object before the dot). */
     objectName?: string;
     /** SObject name resolved from FROM clause for 'soqlField'. */
@@ -265,12 +273,32 @@ export interface ApexCompletionContext {
  *                        Lets us detect a SELECT (and relationship paths) that began on an earlier
  *                        line. Falls back to textUpToCursor when omitted.
  */
+/** Infer whether an annotation being typed applies to a class or a method, from the code after it. */
+export function annotationTargetFrom(afterText?: string): AnnotationTarget {
+    if (!afterText) return 'any';
+    const clsIdx = afterText.search(/\b(class|interface|enum)\b/i);
+    const parenIdx = afterText.indexOf('(');
+    // A class/interface/enum keyword before any '(' → class declaration.
+    if (clsIdx >= 0 && (parenIdx < 0 || clsIdx < parenIdx)) return 'class';
+    // A '(' → a method signature; a bare `Type name;`/`Type name =` → a property/field.
+    if (parenIdx >= 0) return 'method';
+    if (/\b[A-Za-z_][\w<>,.\][ ]*\s+[A-Za-z_]\w*\s*[;=]/.test(afterText)) return 'method';
+    return 'any';
+}
+
 export function parseContext(
     textUpToCursor: string,
     surroundingText?: string,
-    beforeCursor?: string
+    beforeCursor?: string,
+    afterText?: string
 ): ApexCompletionContext {
     const before = beforeCursor && beforeCursor.length ? beforeCursor : textUpToCursor;
+
+    // 0. Annotation position: the current line is only whitespace + `@word` (not an email/expression).
+    if (/^\s*@\w*$/.test(textUpToCursor)) {
+        const prefix = (textUpToCursor.match(/@(\w*)$/) || ['', ''])[1];
+        return { type: 'annotation', prefix, annotationTarget: annotationTargetFrom(afterText) };
+    }
 
     // 1. SOQL SELECT field list (checked before Apex dot-access so relationship
     //    traversals like `Account__r.Name` aren't mistaken for member access).
@@ -296,6 +324,15 @@ export function parseContext(
                 return { type: 'soqlField', sobjectName: sobjFromMatch[1], prefix: token };
             }
         }
+    }
+
+    // 1b. Apex picklist value: `obj.Field = '<cursor>` (or ==, !=). The LHS must be dotted so we
+    //     can resolve the object; a bare `Field = '…'` (no receiver) is left to SOQL handling.
+    const pick = textUpToCursor.match(/([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)\s*[=!<>]=?\s*'([^']*)$/);
+    if (pick) {
+        const segs = pick[1].split('.');
+        const pickField = segs[segs.length - 1];
+        return { type: 'apexPicklist', objectName: segs[0], relPath: segs.slice(1, -1), pickField, prefix: pick[2] };
     }
 
     // 2. Apex dot-access, possibly a relationship drill on an SObject instance:
@@ -328,6 +365,8 @@ export const CompletionKind = {
     Field:       4,
     Variable:    5,
     Text:        0,
+    Snippet:    14,
+    Value:      11,
 } as const;
 
 export type CompletionKindValue = typeof CompletionKind[keyof typeof CompletionKind];
@@ -336,10 +375,52 @@ export interface RawCompletionItem {
     label: string;
     detail?: string;
     documentation?: string;
+    /** When true, `documentation` is Markdown (e.g. carries the ASFX provenance footer). */
+    docIsMarkdown?: boolean;
     kind: CompletionKindValue;
     insertText?: string;
+    /** When true, `insertText` is a snippet (may contain ${1:…} tab stops). */
+    isSnippet?: boolean;
     sortText?: string;
 }
+
+/** Provenance footer so users can see a suggestion comes from this extension (matches the LS). */
+export const ASFX_FOOTER = '_— ASFX Toolkit_';
+
+// ─── Apex annotations ─────────────────────────────────────────────────────────
+
+interface AnnotationDef {
+    name: string;            // without the leading @
+    targets: AnnotationTarget[]; // 'class' | 'method' | 'any'
+    snippet?: string;        // insert text (without @); may contain ${1:…}
+    doc: string;
+}
+
+/** Common Apex annotations, tagged with where they belong. */
+export const APEX_ANNOTATIONS: AnnotationDef[] = [
+    { name: 'IsTest', targets: ['class', 'method'], doc: 'Marks a class or method as an Apex test (excluded from org code size).' },
+    { name: 'IsTest(SeeAllData=true)', targets: ['class', 'method'], doc: 'Test that can access existing org data.' },
+    { name: 'TestSetup', targets: ['method'], doc: 'Creates common test records once for every test method in the class.' },
+    { name: 'TestVisible', targets: ['method'], doc: 'Lets test methods see otherwise private/protected members.' },
+    { name: 'AuraEnabled', targets: ['method'], doc: 'Exposes a method or property to Aura/LWC.' },
+    { name: 'AuraEnabled(cacheable=true)', targets: ['method'], doc: 'Client-cacheable Aura/LWC method (read-only).' },
+    { name: 'InvocableMethod', targets: ['method'], snippet: "InvocableMethod(label='${1:Label}' description='${2:Description}')", doc: 'Exposes a static method to Flow / REST as an invocable action.' },
+    { name: 'InvocableVariable', targets: ['method'], snippet: "InvocableVariable(label='${1:Label}' required=${2:true})", doc: 'Marks a class member as an invocable action input/output.' },
+    { name: 'Future', targets: ['method'], doc: 'Runs the static method asynchronously.' },
+    { name: 'Future(callout=true)', targets: ['method'], doc: 'Async method that may make callouts.' },
+    { name: 'HttpGet', targets: ['method'], doc: 'REST resource: handle GET.' },
+    { name: 'HttpPost', targets: ['method'], doc: 'REST resource: handle POST.' },
+    { name: 'HttpPut', targets: ['method'], doc: 'REST resource: handle PUT.' },
+    { name: 'HttpPatch', targets: ['method'], doc: 'REST resource: handle PATCH.' },
+    { name: 'HttpDelete', targets: ['method'], doc: 'REST resource: handle DELETE.' },
+    { name: 'RemoteAction', targets: ['method'], doc: 'Visualforce JavaScript remoting endpoint.' },
+    { name: 'ReadOnly', targets: ['method'], doc: 'Relaxes query row limits for a read-only request.' },
+    { name: 'RestResource', targets: ['class'], snippet: "RestResource(urlMapping='/${1:path}')", doc: 'Exposes the class as a REST resource at a URL.' },
+    { name: 'SuppressWarnings', targets: ['class', 'method'], snippet: "SuppressWarnings('${1:PMD}')", doc: 'Suppresses analysis warnings for the annotated code.' },
+    { name: 'Deprecated', targets: ['class', 'method'], doc: 'Marks the item as deprecated (managed packages).' },
+    { name: 'NamespaceAccessible', targets: ['class', 'method'], doc: 'Managed package: makes the item accessible from other namespaces.' },
+    { name: 'JsonAccess', targets: ['class'], snippet: "JsonAccess(serializable='${1:allowed}' deserializable='${2:allowed}')", doc: 'Controls JSON (de)serialization across namespaces.' },
+];
 
 // ─── Static completion generation ────────────────────────────────────────────
 
@@ -387,6 +468,32 @@ export function getStaticItems(ctx: ApexCompletionContext): RawCompletionItem[] 
         }
 
         // Unknown object — no static completions (caller adds fields from describe)
+        return [];
+    }
+
+    if (type === 'annotation') {
+        // `@` already typed → insert the name only (no leading @). Filter by prefix, and rank
+        // annotations valid for the detected target (class vs method) first.
+        const target = ctx.annotationTarget ?? 'any';
+        return APEX_ANNOTATIONS
+            .filter(a => a.name.toLowerCase().startsWith(lp))
+            .map(a => {
+                const applies = target === 'any' || a.targets.includes(target);
+                return {
+                    label: '@' + a.name,
+                    detail: a.targets.join('/') + ' annotation',
+                    documentation: `${a.doc}\n\n${ASFX_FOOTER}`,
+                    docIsMarkdown: true,
+                    kind: CompletionKind.Snippet,
+                    insertText: a.snippet ?? a.name,
+                    isSnippet: !!a.snippet,
+                    sortText: (applies ? '0' : '1') + a.name.toLowerCase(),
+                } as RawCompletionItem;
+            });
+    }
+
+    if (type === 'apexPicklist') {
+        // Picklist values are resolved from the org schema by the caller — nothing static.
         return [];
     }
 

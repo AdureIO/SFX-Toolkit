@@ -39,6 +39,15 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "configurationDefaults": {
+      "[apex]": {
+        "editor.quickSuggestions": {
+          "other": "on",
+          "comments": "off",
+          "strings": "on"
+        }
+      }
+    },
     "commands": [
       {
         "command": "adure-sfx-toolkit.filterLogDebug",

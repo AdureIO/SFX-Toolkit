@@ -137,8 +137,9 @@ connection.onInitialize((params): InitializeResult => {
                 save: { includeText: false },
             },
             completionProvider: {
-                // Trigger on the characters that begin a new SOQL token position.
-                triggerCharacters: ['.', ' ', ',', '(', '\n'],
+                // Trigger on the characters that begin a new SOQL token position, plus the quote
+                // that opens a value literal so picklist values pop up in `WHERE Field = '|'`.
+                triggerCharacters: ['.', ' ', ',', '(', '\n', "'"],
                 resolveProvider: false,
             },
             documentSymbolProvider: apexFeatures ? true : undefined,

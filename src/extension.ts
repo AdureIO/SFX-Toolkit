@@ -269,7 +269,9 @@ export function activate(context: vscode.ExtensionContext) {
           { pattern: "**/*.trigger", scheme: "file" }
         ],
         new ApexCompletionProvider(),
-        "." // also fires on dot for member completion
+        ".", // member completion
+        "@", // Apex annotations (@IsTest, @AuraEnabled, …)
+        "'" // picklist values in obj.Field = '…'
       )
     );
 
