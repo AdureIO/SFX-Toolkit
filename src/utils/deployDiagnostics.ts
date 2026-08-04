@@ -51,6 +51,11 @@ function getComponentFailuresList(result: ApiDeployResult): ApiComponentFailure[
   return [];
 }
 
+/** Public accessor for the normalized component-failure list (used by the interpreted error panel). */
+export function componentFailuresOf(result: ApiDeployResult): ApiComponentFailure[] {
+  return getComponentFailuresList(result);
+}
+
 /** Normalize API componentSuccesses to an array. */
 function getComponentSuccessesList(result: ApiDeployResult): ApiComponentSuccess[] {
   const raw = result.details?.componentSuccesses;
