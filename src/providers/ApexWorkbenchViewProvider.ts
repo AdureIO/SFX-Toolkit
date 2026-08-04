@@ -580,6 +580,10 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 		// addAction (not addCommand) scopes the keybinding to THIS editor instance; with two
 		// editors, addCommand's shared registry let the SOQL editor clobber Cmd+Enter here.
 		editor.addAction({ id:'asfx.execApex', label:'Execute Anonymous Apex', keybindings:[monaco.KeyMod.CtrlCmd|monaco.KeyCode.Enter, monaco.KeyMod.WinCtrl|monaco.KeyCode.Enter], run:function(){ doRun(); } });
+		// Cmd/Ctrl+/ line comment: bind editor-scoped so the webview doesn't swallow the default
+		// keybinding (same reason Cmd+Enter is bound explicitly above). Routes to Monaco's built-in
+		// comment action, with a manual toggle fallback if the build lacks it.
+		editor.addAction({ id:'asfx.toggleComment', label:'Toggle Line Comment', keybindings:[monaco.KeyMod.CtrlCmd|monaco.KeyCode.Slash], run:function(ed){ const a=ed.getAction&&ed.getAction('editor.action.commentLine'); if(a){ a.run(); return; } toggleLineComment(ed); } });
 
 		// ── SOQL editor ───────────────────────────────────────────────────────
 		monaco.languages.register({ id:'soql' });
@@ -597,6 +601,8 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	function flush(){ if(!editor) return; if(saveTimer){clearTimeout(saveTimer);saveTimer=null;} vscode.postMessage({type:'contentChanged',code:editor.getValue()}); }
 	window.addEventListener('blur', flush);
 	function doRun(){ vscode.postMessage({type:'execute', code:editor?editor.getValue():'', org:orgVal()||undefined}); }
+	// Manual line-comment toggle (fallback for Cmd/Ctrl+/ if Monaco's built-in action is unavailable).
+	function toggleLineComment(ed){ const model=ed.getModel(); const sel=ed.getSelection(); if(!model||!sel) return; const start=sel.startLineNumber,end=sel.endLineNumber; let allCommented=true; for(let ln=start;ln<=end;ln++){ const t=model.getLineContent(ln); if(t.trim()==='') continue; if(!/^\\s*\\/\\//.test(t)){ allCommented=false; break; } } const edits=[]; for(let ln=start;ln<=end;ln++){ const t=model.getLineContent(ln); if(t.trim()==='') continue; if(allCommented){ const m=t.match(/^(\\s*)\\/\\/ ?/); if(m) edits.push({ range:new monaco.Range(ln,1,ln,m[0].length+1), text:m[1] }); } else { const indent=(t.match(/^\\s*/)||[''])[0]; edits.push({ range:new monaco.Range(ln,indent.length+1,ln,indent.length+1), text:'// ' }); } } if(edits.length) ed.executeEdits('toggle-comment',edits); }
 	document.getElementById('run').onclick=doRun;
 	document.getElementById('clear').onclick=function(){ if(editor){editor.setValue('');editor.focus();} vscode.postMessage({type:'contentChanged',code:''}); };
 
