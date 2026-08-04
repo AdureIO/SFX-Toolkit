@@ -20,7 +20,9 @@ export type ProcessNodeKind =
     | "workflowRule"
     | "fieldUpdate" // workflow field update
     | "apexClass" // implements Batchable / Queueable / Schedulable
-    | "scheduledJob"; // CronTrigger
+    | "scheduledJob" // CronTrigger
+    | "phaseHub" // synthetic compound box grouping several same-phase automations that run in parallel
+    | "phasePort"; // invisible connection point inside a phase box (spine lines attach here, one per box)
 
 export interface ProcessNode {
     /** Stable id, `${kind}:${name}` (object-qualified for rules). Also the Cytoscape node id. */
@@ -29,6 +31,8 @@ export interface ProcessNode {
     label: string;
     /** The SObject this automation acts on, when applicable. */
     object?: string;
+    /** Compound-parent id — set when this node belongs inside a phase box. */
+    parent?: string;
     /** Managed-package namespace, when the element belongs to one. */
     namespace?: string;
     active?: boolean;
@@ -36,7 +40,17 @@ export interface ProcessNode {
     meta?: Record<string, string | string[] | boolean>;
 }
 
-export type ProcessEdgeKind = "runsOn" | "validates" | "schedules" | "invokes" | "updates" | "fieldOf";
+export type ProcessEdgeKind =
+    | "runsOn"
+    | "validates"
+    | "schedules"
+    | "invokes"
+    | "updates"
+    | "fieldOf"
+    | "then" // execution-order spine: one automation, then the next, on the same object
+    | "triggers" // cross-object hop: an automation writes/creates another object, continuing the process
+    | "operatesOn" // scheduled / autolaunched flow reads or writes this object (not in the record-save order)
+    | "member"; // a phase hub to one of its parallel same-phase automations
 
 export interface ProcessEdge {
     id: string;
@@ -53,7 +67,7 @@ export interface ProcessGraph {
 
 /** Raw metadata the retrieval layer produces (org queries), consumed by {@link buildProcessGraph}. */
 export interface ProcessMetadata {
-    triggers?: { name: string; object: string; events?: string[]; active?: boolean; namespace?: string }[];
+    triggers?: { name: string; object: string; events?: string[]; active?: boolean; namespace?: string; recordId?: string }[];
     flows?: {
         apiName: string;
         label?: string;
@@ -62,10 +76,12 @@ export interface ProcessMetadata {
         object?: string;
         active?: boolean;
         namespace?: string;
+        recordId?: string;
+        versionId?: string;
     }[];
-    validationRules?: { name: string; object: string; active?: boolean; namespace?: string }[];
-    workflowRules?: { name: string; object: string; active?: boolean; namespace?: string }[];
-    apexJobClasses?: { name: string; interfaces: ("Batchable" | "Queueable" | "Schedulable")[]; namespace?: string }[];
+    validationRules?: { name: string; object: string; active?: boolean; namespace?: string; recordId?: string }[];
+    workflowRules?: { name: string; object: string; active?: boolean; namespace?: string; recordId?: string }[];
+    apexJobClasses?: { name: string; interfaces: ("Batchable" | "Queueable" | "Schedulable")[]; namespace?: string; recordId?: string }[];
     scheduledJobs?: { name: string; className?: string; cron?: string; nextFire?: string }[];
     /** Phase 2 — field lineage: automations that write a field. */
     fieldUpdates?: {
@@ -78,6 +94,8 @@ export interface ProcessMetadata {
     }[];
     /** Phase 3 — a flow invoking an Apex class (invocable action). */
     invocations?: { flow: string; apexClass: string }[];
+    /** Objects a flow reads/writes (from Flow metadata record ops) — used to tie scheduled/autolaunched flows to their objects. */
+    flowObjects?: { flow: string; object: string }[];
 }
 
 /** Salesforce order-of-execution phase (1 = earliest) for a node, or 0 if not in the sync path. */
@@ -101,6 +119,24 @@ export function executionOrder(kind: ProcessNodeKind, triggerType?: string): num
 
 function nsLabel(name: string, namespace?: string): string {
     return namespace ? `${namespace}__${name}` : name;
+}
+
+/** Human-readable Salesforce order-of-execution phase name for a numeric order. */
+export function phaseLabel(order: number): string {
+    switch (order) {
+        case 1:
+            return "Before-save flow";
+        case 2:
+            return "Apex before trigger";
+        case 3:
+            return "Validation";
+        case 5:
+            return "Workflow / field update";
+        case 6:
+            return "After-save flow";
+        default:
+            return "Other";
+    }
 }
 
 /** A scheduled flow is one whose start is time-based (not object DML). */
@@ -140,7 +176,7 @@ export function buildProcessGraph(input: ProcessMetadata): ProcessGraph {
             object: t.object,
             namespace: t.namespace,
             active: t.active,
-            meta: { events: t.events ?? [] }
+            meta: { events: t.events ?? [], recordId: t.recordId ?? "" }
         });
         const obj = ensureObject(t.object);
         if (obj) link(id, obj, "runsOn", (t.events ?? []).join(", "));
@@ -159,7 +195,9 @@ export function buildProcessGraph(input: ProcessMetadata): ProcessGraph {
             meta: {
                 processType: f.processType ?? "",
                 triggerType: f.triggerType ?? "",
-                kind: scheduled ? "scheduled" : record ? "record-triggered" : "autolaunched"
+                kind: scheduled ? "scheduled" : record ? "record-triggered" : "autolaunched",
+                recordId: f.recordId ?? "",
+                versionId: f.versionId ?? ""
             }
         });
         if (record) {
@@ -175,7 +213,8 @@ export function buildProcessGraph(input: ProcessMetadata): ProcessGraph {
             label: nsLabel(v.name, v.namespace),
             object: v.object,
             namespace: v.namespace,
-            active: v.active
+            active: v.active,
+            meta: { recordId: v.recordId ?? "" }
         });
         const obj = ensureObject(v.object);
         if (obj) link(id, obj, "validates");
@@ -188,7 +227,8 @@ export function buildProcessGraph(input: ProcessMetadata): ProcessGraph {
             label: nsLabel(w.name, w.namespace),
             object: w.object,
             namespace: w.namespace,
-            active: w.active
+            active: w.active,
+            meta: { recordId: w.recordId ?? "" }
         });
         const obj = ensureObject(w.object);
         if (obj) link(id, obj, "runsOn");
@@ -200,7 +240,7 @@ export function buildProcessGraph(input: ProcessMetadata): ProcessGraph {
             kind: "apexClass",
             label: nsLabel(c.name, c.namespace),
             namespace: c.namespace,
-            meta: { interfaces: c.interfaces }
+            meta: { interfaces: c.interfaces, recordId: c.recordId ?? "" }
         });
     }
 
@@ -250,11 +290,85 @@ export function buildProcessGraph(input: ProcessMetadata): ProcessGraph {
         link(sourceId, fieldId, "updates");
     }
 
+    // Scheduled / autolaunched flows aren't in the record-save order, but they read/write objects.
+    // Tie them to those objects with a dotted "operatesOn" link so they aren't floating.
+    for (const fo of input.flowObjects ?? []) {
+        const flowId = `flow:${fo.flow}`;
+        const flow = nodes.get(flowId);
+        if (!flow) continue;
+        if (flow.kind !== "scheduledFlow" && !(flow.kind === "flow" && !flow.object)) continue; // only non-record flows
+        const obj = ensureObject(fo.object);
+        if (obj) link(flowId, obj, "operatesOn");
+    }
+
     // Attach the order-of-execution phase to sync-path nodes.
     for (const n of nodes.values()) {
         const tt = typeof n.meta?.triggerType === "string" ? (n.meta.triggerType as string) : undefined;
         const ord = executionOrder(n.kind, tt);
         if (ord) n.meta = { ...(n.meta ?? {}), order: String(ord) };
+    }
+
+    // ── Execution-order spine: chain each object's sync automations in the order they run ──
+    // This is what turns the "star of things attached to an object" into a readable *process*:
+    // object (record change) → phase-1 automation → phase-2 → … Left-to-right = execution order.
+    const SYNC_KINDS = new Set<ProcessNodeKind>(["trigger", "flow", "validationRule", "workflowRule", "fieldUpdate"]);
+    const kindRank: Record<string, number> = { flow: 0, trigger: 1, validationRule: 2, workflowRule: 3, fieldUpdate: 4 };
+    const phaseOf = (n: ProcessNode): number => {
+        const o = n.meta && typeof n.meta.order === "string" ? Number(n.meta.order) : 0;
+        return o || 99; // unknown phase sorts last within the object
+    };
+    const byObject = new Map<string, ProcessNode[]>();
+    for (const n of nodes.values()) {
+        if (n.object && SYNC_KINDS.has(n.kind)) {
+            (byObject.get(n.object) ?? byObject.set(n.object, []).get(n.object)!).push(n);
+        }
+    }
+    for (const [obj, autos] of byObject) {
+        const entry = `object:${obj}`;
+        if (!nodes.has(entry)) continue;
+        // Group by execution phase. Automations in the SAME phase run in parallel (e.g. several
+        // triggers, several validation rules), so they must be siblings — fed from the previous
+        // phase and feeding the next — not chained to each other.
+        const phases = new Map<number, ProcessNode[]>();
+        for (const a of autos) {
+            const p = phaseOf(a);
+            (phases.get(p) ?? phases.set(p, []).get(p)!).push(a);
+        }
+        let prev = entry; // tail of the spine so far (object entry, a single automation, or a phase-box port)
+        for (const p of [...phases.keys()].sort((x, y) => x - y)) {
+            const group = phases.get(p)!.sort((a, b) => (kindRank[a.kind] ?? 9) - (kindRank[b.kind] ?? 9) || a.label.localeCompare(b.label));
+            const label = p < 99 ? phaseLabel(p) : "Other";
+            if (group.length === 1) {
+                // Single automation in this phase → keep the spine a clean straight line.
+                link(prev, group[0].id, "then", label);
+                prev = group[0].id;
+            } else {
+                // Several automations run in parallel → wrap them in ONE labelled phase box (a compound
+                // parent). The step-to-step spine attaches to an invisible port inside the box, so there
+                // is exactly ONE line into the group instead of an M×N wave. Items sit inside the box.
+                const boxId = `phase:${obj}:${p}`;
+                const portId = `port:${obj}:${p}`;
+                put({ id: boxId, kind: "phaseHub", label, object: obj, meta: { order: String(p) } });
+                put({ id: portId, kind: "phasePort", label: "", object: obj, parent: boxId });
+                for (const a of group) {
+                    const node = nodes.get(a.id);
+                    if (node) node.parent = boxId;
+                }
+                link(prev, portId, "then");
+                prev = portId;
+            }
+        }
+    }
+
+    // ── Cross-object hops: an automation that writes/creates a *different* object continues the
+    //    process there. This is "how it flows through" — e.g. an after-save flow on A updates B,
+    //    which fires B's own automation chain. ──
+    for (const e of [...edges.values()]) {
+        if (e.kind !== "updates") continue;
+        const src = nodes.get(e.source);
+        const field = nodes.get(e.target);
+        if (!src || !field || !field.object || !src.object) continue;
+        if (src.object !== field.object) link(src.id, `object:${field.object}`, "triggers");
     }
 
     return { nodes: [...nodes.values()], edges: [...edges.values()] };

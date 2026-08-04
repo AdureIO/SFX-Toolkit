@@ -3,7 +3,8 @@ import * as fs from "fs";
 import * as path from "path";
 import { getCachedOrgList, refreshOrgListCache, OrgOption } from "../utils/orgListCache";
 import { fetchProcessMetadata } from "../utils/processMetadata";
-import { buildProcessGraph, ProcessGraph } from "../utils/processGraph";
+import { buildProcessGraph, ProcessGraph, ProcessNode } from "../utils/processGraph";
+import { runCommandArgs } from "../utils/commandRunner";
 
 function getNonce(): string {
     let text = "";
@@ -12,36 +13,12 @@ function getNonce(): string {
     return text;
 }
 
-/** Render the graph as a compact, LLM-friendly text description. */
-function graphToLlmText(graph: ProcessGraph): string {
-    const byObject = new Map<string, string[]>();
-    const standalone: string[] = [];
-    const objectOf = new Map(graph.nodes.map((n) => [n.id, n.object]));
-    for (const n of graph.nodes) {
-        if (n.kind === "object") continue;
-        const extras = n.meta?.events ? ` [${(n.meta.events as string[]).join(", ")}]` : n.meta?.kind ? ` [${n.meta.kind}]` : "";
-        const line = `- ${n.kind}: ${n.label}${n.active === false ? " (inactive)" : ""}${extras}`;
-        if (n.object) (byObject.get(n.object) ?? byObject.set(n.object, []).get(n.object)!).push(line);
-        else standalone.push(line);
-    }
-    const out: string[] = ["# Org automation map", ""];
-    for (const [obj, lines] of [...byObject.entries()].sort()) {
-        out.push(`## ${obj}`, ...lines, "");
-    }
-    if (standalone.length) out.push("## Not object-scoped (scheduled / async / autolaunched)", ...standalone, "");
-    // Cross-links (e.g. scheduled job → apex class).
-    const links = graph.edges.filter((e) => e.kind === "schedules" || e.kind === "invokes");
-    if (links.length) {
-        out.push("## Links");
-        for (const e of links) out.push(`- ${e.source} ${e.kind} ${objectOf.get(e.target) ?? e.target}`);
-    }
-    return out.join("\n");
-}
 
 export class ProcessMapPanelProvider {
     public static readonly viewType = "adure-sfx-toolkit.processMap";
     private static _panel: vscode.WebviewPanel | undefined;
     private static _graph: ProcessGraph | undefined;
+    private static _org: string | undefined;
 
     public static async show(extensionUri: vscode.Uri): Promise<void> {
         const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
@@ -68,15 +45,20 @@ export class ProcessMapPanelProvider {
                 case "build":
                     await this.build(panel, s("org"));
                     break;
-                case "copyLlm":
-                    if (ProcessMapPanelProvider._graph) {
-                        await vscode.env.clipboard.writeText(graphToLlmText(ProcessMapPanelProvider._graph));
-                        vscode.window.setStatusBarMessage("Process map copied as text for an LLM", 2500);
-                    }
-                    break;
                 case "export":
                     await this.export(s("filename"), s("content"), msg.base64 === true);
                     break;
+                case "openOrg":
+                    await this.openInOrg(s("nodeId"));
+                    break;
+                case "copyText": {
+                    const text = s("text");
+                    if (text) {
+                        await vscode.env.clipboard.writeText(text);
+                        vscode.window.setStatusBarMessage(`Copied “${text}”`, 2000);
+                    }
+                    break;
+                }
             }
         });
 
@@ -87,9 +69,13 @@ export class ProcessMapPanelProvider {
     }
 
     private static async build(panel: vscode.WebviewPanel, org?: string): Promise<void> {
+        ProcessMapPanelProvider._org = org;
         panel.webview.postMessage({ command: "loading", value: true });
         try {
-            const metadata = await fetchProcessMetadata(org);
+            const metadata = await fetchProcessMetadata(org, (p) =>
+                panel.webview.postMessage({ command: "progress", label: p.label, completed: p.completed, total: p.total })
+            );
+            panel.webview.postMessage({ command: "progress", label: "Building graph", completed: 1, total: 1, phase: "build" });
             const graph = buildProcessGraph(metadata);
             ProcessMapPanelProvider._graph = graph;
             panel.webview.postMessage({ command: "graph", graph });
@@ -98,6 +84,52 @@ export class ProcessMapPanelProvider {
             panel.webview.postMessage({ command: "error", text: `Couldn't build the process map: ${reason}` });
         } finally {
             panel.webview.postMessage({ command: "loading", value: false });
+        }
+    }
+
+    /** Setup/relative path for a node, used to open the component in the org via `sf org open`. */
+    private static orgPath(node: ProcessNode): string {
+        const id = typeof node.meta?.recordId === "string" ? node.meta.recordId : "";
+        const versionId = typeof node.meta?.versionId === "string" ? node.meta.versionId : "";
+        switch (node.kind) {
+            case "flow":
+            case "scheduledFlow":
+                return versionId ? `/builder_platform_interaction/flowBuilder.app?flowId=${versionId}` : "/lightning/setup/Flows/home";
+            case "apexClass":
+                return id ? `/lightning/setup/ApexClasses/page?address=%2F${id}` : "/lightning/setup/ApexClasses/home";
+            case "trigger":
+                return id ? `/${id}` : "/lightning/setup/ApexTriggers/home";
+            case "validationRule":
+            case "workflowRule":
+                return id ? `/${id}` : "/lightning/setup/WorkflowRules/home";
+            case "fieldUpdate":
+                return "/lightning/setup/WorkflowFieldUpdates/home";
+            case "scheduledJob":
+                return "/lightning/setup/ScheduledJobs/home";
+            case "object": {
+                const obj = node.object ?? node.label;
+                return obj ? `/lightning/setup/ObjectManager/${obj}/Details/view` : "/lightning/setup/ObjectManager/home";
+            }
+            case "field":
+                return node.object ? `/lightning/setup/ObjectManager/${node.object}/FieldsAndRelationships/view` : "/lightning/setup/ObjectManager/home";
+            default:
+                return "/lightning/setup/SetupOneHome/home";
+        }
+    }
+
+    /** Open the component behind a node in the org's browser via the Salesforce CLI. */
+    private static async openInOrg(nodeId?: string): Promise<void> {
+        if (!nodeId || !ProcessMapPanelProvider._graph) return;
+        const node = ProcessMapPanelProvider._graph.nodes.find((n) => n.id === nodeId);
+        if (!node) return;
+        const path = this.orgPath(node);
+        const args = ["org", "open", "--path", path];
+        if (ProcessMapPanelProvider._org) args.push("--target-org", ProcessMapPanelProvider._org);
+        try {
+            await runCommandArgs("sf", args, undefined, undefined, false);
+            vscode.window.setStatusBarMessage(`Opening ${node.label} in the org…`, 2500);
+        } catch (e) {
+            vscode.window.showErrorMessage(`Couldn't open in org: ${e instanceof Error ? e.message : String(e)}`);
         }
     }
 
@@ -161,8 +193,18 @@ export class ProcessMapPanelProvider {
     color: var(--vscode-input-foreground); border: 1px solid var(--pm-border); border-radius: var(--pm-radius-sm); font-size: 12px; outline: none; }
   select:focus, input:focus { border-color: var(--pm-accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--pm-accent) 22%, transparent); }
   .search { position: relative; }
-  .search input { padding-left: 28px; width: 200px; }
-  .search::before { content: "⌕"; position: absolute; left: 9px; top: 50%; transform: translateY(-50%); opacity: .6; font-size: 15px; }
+  .search input { padding-left: 28px; width: 220px; }
+  .search::before { content: "⌕"; position: absolute; left: 9px; top: 50%; transform: translateY(-50%); opacity: .6; font-size: 15px; z-index: 1; }
+  /* Search results dropdown */
+  .results { position: absolute; top: 36px; left: 0; width: 300px; max-height: 340px; overflow-y: auto; z-index: 30;
+    background: var(--pm-surface); border: 1px solid var(--pm-border-strong); border-radius: var(--pm-radius); box-shadow: var(--pm-shadow); display: none; padding: 4px; }
+  .results.open { display: block; }
+  .result-head { padding: 5px 8px 3px; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--vscode-descriptionForeground); }
+  .result-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 7px; cursor: pointer; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .result-item:hover, .result-item.active { background: var(--pm-surface-2); }
+  .result-item .sw { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
+  .result-item .rk { margin-left: auto; font-size: 10px; color: var(--vscode-descriptionForeground); flex-shrink: 0; }
+  .result-more { padding: 6px 8px; font-size: 11px; color: var(--vscode-descriptionForeground); }
   button { height: 30px; display: inline-flex; align-items: center; gap: 6px; background: var(--vscode-button-background);
     color: var(--vscode-button-foreground); border: 1px solid transparent; padding: 0 14px; cursor: pointer;
     border-radius: var(--pm-radius-sm); font-size: 12px; font-family: inherit; font-weight: 500; transition: filter .12s, transform .06s; }
@@ -189,6 +231,15 @@ export class ProcessMapPanelProvider {
   .empty .big { font-size: 15px; color: var(--vscode-foreground); font-weight: 600; }
   .empty .ring { width: 46px; height: 46px; border-radius: 50%; border: 2px solid var(--pm-border); border-top-color: var(--pm-accent); }
   .empty.spin .ring { animation: spin 1s linear infinite; } @keyframes spin { to { transform: rotate(360deg); } }
+  /* Loading / progress */
+  .empty .load { display: none; flex-direction: column; align-items: center; gap: 10px; width: min(340px, 70vw); }
+  .empty.loading .load { display: flex; } .empty.loading .idle { display: none; }
+  .empty .idle { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+  .loadstep { font-size: 12px; color: var(--vscode-descriptionForeground); min-height: 16px; }
+  .pbar { width: 100%; height: 6px; border-radius: 999px; overflow: hidden; background: var(--pm-surface-2); border: 1px solid var(--pm-border); }
+  .pfill { height: 100%; width: 0; border-radius: 999px; background: linear-gradient(90deg, var(--pm-accent), color-mix(in srgb, var(--pm-accent) 55%, #10b981));
+    transition: width .3s cubic-bezier(.2,.7,.2,1); }
+  .pcount { font-size: 11px; color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
 
   /* Legend (floating) */
   .legend { position: absolute; left: 14px; bottom: 14px; display: flex; flex-wrap: wrap; gap: 6px; max-width: 62%;
@@ -199,11 +250,13 @@ export class ProcessMapPanelProvider {
   .chip:hover { filter: brightness(1.15); } .chip.off { opacity: .38; }
   .chip .sw { width: 10px; height: 10px; border-radius: 3px; } .chip .n { opacity: .65; font-variant-numeric: tabular-nums; }
 
-  /* Inspector */
-  .inspector { width: 0; flex-shrink: 0; overflow: hidden; border-left: 1px solid var(--pm-border);
-    background: var(--pm-surface); transition: width .22s cubic-bezier(.2,.7,.2,1); }
-  .inspector.open { width: 340px; }
-  .insp-inner { width: 340px; height: 100%; display: flex; flex-direction: column; }
+  /* Inspector — absolute overlay pinned to the stage's right edge (never widens the layout,
+     so it can't get pushed off-screen when #cy won't shrink). */
+  .inspector { position: absolute; top: 0; right: 0; bottom: 0; width: 340px; max-width: 92vw; overflow: hidden;
+    border-left: 1px solid var(--pm-border); background: var(--pm-surface); box-shadow: var(--pm-shadow);
+    transform: translateX(100%); transition: transform .22s cubic-bezier(.2,.7,.2,1); z-index: 25; }
+  .inspector.open { transform: translateX(0); }
+  .insp-inner { width: 100%; height: 100%; display: flex; flex-direction: column; }
   .insp-head { padding: 14px 16px; border-bottom: 1px solid var(--pm-border); display: flex; align-items: flex-start; gap: 10px; }
   .insp-ico { width: 34px; height: 34px; border-radius: 9px; display: flex; align-items: center; justify-content: center;
     font-size: 17px; color: #fff; flex-shrink: 0; }
@@ -217,7 +270,32 @@ export class ProcessMapPanelProvider {
   .insp-sec { margin-top: 14px; } .insp-sec h4 { margin: 0 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--vscode-descriptionForeground); }
   .conn { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 7px; cursor: pointer; font-size: 12px; }
   .conn:hover { background: var(--pm-surface-2); } .conn .sw { width: 9px; height: 9px; border-radius: 3px; flex-shrink: 0; }
+  .conn .label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .conn .open, .execorder .open { margin-left: auto; opacity: 0; font-size: 13px; padding: 0 4px; border-radius: 5px; flex-shrink: 0; }
+  .conn:hover .open, .execorder li:hover .open { opacity: .75; } .conn .open:hover, .execorder .open:hover { opacity: 1; background: var(--pm-surface-2); }
   .badge { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 10px; font-weight: 600; }
+  .insp-open { height: 26px; font-size: 11px; padding: 0 10px; }
+  /* Execution-order timeline */
+  .execorder { list-style: none; margin: 0; padding: 0; }
+  .execorder li { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 7px; cursor: pointer; position: relative; }
+  .execorder li:hover { background: var(--pm-surface-2); }
+  .execorder li::before { content: ""; position: absolute; left: 15px; top: 24px; bottom: -6px; width: 1.5px; background: var(--pm-border); }
+  .execorder li:last-child::before { display: none; }
+  .execorder .step { width: 20px; height: 20px; border-radius: 50%; flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+    font-size: 10px; font-weight: 700; color: #fff; z-index: 1; }
+  .execorder .et { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+  .execorder .et .nm { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .execorder .et .ph { font-size: 10px; color: var(--vscode-descriptionForeground); }
+
+  /* Right-click context menu */
+  .ctxmenu { position: fixed; z-index: 60; min-width: 180px; display: none; padding: 5px;
+    background: var(--pm-surface); border: 1px solid var(--pm-border-strong); border-radius: var(--pm-radius); box-shadow: var(--pm-shadow); }
+  .ctxmenu.open { display: block; }
+  .ctx-title { display: flex; align-items: center; gap: 7px; padding: 4px 8px 6px; font-size: 12px; font-weight: 600;
+    border-bottom: 1px solid var(--pm-border); margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .ctx-title .sw { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
+  .ctx-item { padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 12px; white-space: nowrap; }
+  .ctx-item:hover { background: var(--pm-surface-2); }
 
   .status { padding: 6px 14px; font-size: 11px; color: var(--vscode-descriptionForeground);
     border-top: 1px solid var(--pm-border); flex-shrink: 0; display: flex; align-items: center; gap: 8px;
@@ -234,24 +312,32 @@ export class ProcessMapPanelProvider {
     <span class="sep"></span>
     <span class="lbl">Layout</span>
     <span class="seg" id="layout">
-      <button data-l="dagre" class="on">Flow</button>
+      <button data-l="dagre" class="on">Process</button>
       <button data-l="cose">Organic</button>
-      <button data-l="order">Order</button>
     </span>
-    <span class="search"><input type="search" id="search" placeholder="Search object / name…" /></span>
+    <span class="search"><input type="search" id="search" placeholder="Search object / name…" autocomplete="off" /><div class="results" id="results"></div></span>
     <label class="chk"><input type="checkbox" id="activeOnly" /> Active only</label>
     <span class="spacer"></span>
     <button class="ghost icon" id="fit" title="Fit to view">⤢</button>
-    <button class="ghost" id="copyLlm" title="Copy a text description for an LLM">Copy for LLM</button>
     <button class="ghost icon" id="exportPng" title="Export PNG">PNG</button>
     <button class="ghost icon" id="exportJson" title="Export JSON">JSON</button>
   </div>
   <div class="stage">
     <div id="cy"></div>
     <div class="legend" id="legend"></div>
-    <div class="empty" id="empty"><div class="ring"></div><div class="big">Map your org's automation</div><div>Pick an org and press <b>Build map</b>.</div></div>
+    <div class="empty" id="empty">
+      <div class="ring"></div>
+      <div class="idle"><div class="big">Map your org's process</div><div>Pick an org and press <b>Build map</b>.<br>Follow the blue arrows to read execution order · right-click a node to open it in the org.</div></div>
+      <div class="load">
+        <div class="big">Mapping your org…</div>
+        <div class="loadstep" id="loadStep">Starting…</div>
+        <div class="pbar"><div class="pfill" id="pfill"></div></div>
+        <div class="pcount" id="pcount"></div>
+      </div>
+    </div>
     <aside class="inspector" id="inspector"><div class="insp-inner" id="inspInner"></div></aside>
   </div>
+  <div class="ctxmenu" id="ctxmenu"></div>
   <div class="status" id="status">Ready.</div>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>

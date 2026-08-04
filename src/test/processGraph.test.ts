@@ -58,6 +58,61 @@ describe("processGraph.buildProcessGraph", () => {
     assert.strictEqual(g.nodes.find((n) => n.kind === "flow")?.meta?.order, "1", "before-save flow is phase 1");
   });
 
+  it("chains an object's automations into an execution-order process spine", () => {
+    const g = buildProcessGraph({
+      triggers: [{ name: "AccountTrigger", object: "Account", events: ["before insert"] }],
+      flows: [
+        { apiName: "BeforeF", triggerType: "RecordBeforeSave", object: "Account" },
+        { apiName: "AfterF", triggerType: "RecordAfterSave", object: "Account" }
+      ],
+      validationRules: [{ name: "VR1", object: "Account" }]
+    });
+    const then = g.edges.filter((e) => e.kind === "then");
+    // entry → before-save flow → trigger → validation → after-save flow == 4 sequence edges
+    assert.strictEqual(then.length, 4, "one spine edge between each consecutive step");
+    assert.ok(then.some((e) => e.source === "object:Account"), "spine starts at the object entry");
+    const targets = then.map((e) => e.target);
+    assert.ok(targets.indexOf("flow:BeforeF") < targets.indexOf("flow:AfterF"), "before-save precedes after-save in the spine");
+  });
+
+  it("wraps same-phase automations in a labelled phase box with a single line to the next group", () => {
+    const g = buildProcessGraph({
+      triggers: [
+        { name: "T1", object: "Account", events: ["before insert"] },
+        { name: "T2", object: "Account", events: ["before insert"] }
+      ],
+      validationRules: [
+        { name: "V1", object: "Account" },
+        { name: "V2", object: "Account" }
+      ]
+    });
+    const boxes = g.nodes.filter((n) => n.kind === "phaseHub");
+    assert.strictEqual(boxes.length, 2, "one box for the before-trigger phase and one for the validation phase");
+    // Items are members of their phase box (compound children), not chained to each other.
+    assert.strictEqual(g.nodes.find((n) => n.id === "trigger:T1")?.parent, "phase:Account:2");
+    assert.strictEqual(g.nodes.find((n) => n.id === "validationRule:Account.V1")?.parent, "phase:Account:3");
+    // Each box has an invisible port; the spine runs port → port — a single line between the groups.
+    assert.ok(g.nodes.some((n) => n.kind === "phasePort" && n.id === "port:Account:2"));
+    const then = g.edges.filter((e) => e.kind === "then");
+    assert.strictEqual(
+      then.filter((e) => e.source.startsWith("port:") && e.target.startsWith("port:")).length,
+      1,
+      "a single line connects the two phase boxes"
+    );
+    assert.ok(!then.some((e) => e.source.startsWith("trigger:")), "triggers are not individually chained onward");
+  });
+
+  it("adds a cross-object hop when an automation writes another object", () => {
+    const g = buildProcessGraph({
+      flows: [{ apiName: "AccToContact", triggerType: "RecordAfterSave", object: "Account" }],
+      fieldUpdates: [{ source: "AccToContact", sourceKind: "flow", object: "Contact", field: "Foo__c" }]
+    });
+    assert.ok(
+      g.edges.some((e) => e.kind === "triggers" && e.source === "flow:AccToContact" && e.target === "object:Contact"),
+      "cross-object hop links the writing flow to the target object"
+    );
+  });
+
   it("focus subgraph returns a node and its neighbours", () => {
     const g = buildProcessGraph({
       triggers: [{ name: "AccountTrigger", object: "Account" }],

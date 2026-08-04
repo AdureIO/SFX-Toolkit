@@ -68,28 +68,47 @@ const JOB_INTERFACES: [RegExp, "Batchable" | "Queueable" | "Schedulable"][] = [
     [/Schedulable/i, "Schedulable"]
 ];
 
-/** Fetch and normalize the org's automation metadata. */
-export async function fetchProcessMetadata(org?: string): Promise<ProcessMetadata> {
-    const [triggerRecs, flowRecs, vrRecs, wrRecs, cronRecs, classRecs, wfuRecs] = await Promise.all([
-        query(
-            org,
-            "SELECT Name, Status, NamespacePrefix, EntityDefinition.QualifiedApiName, " +
+/** A single progress update emitted while fetching. */
+export interface FetchProgress {
+    label: string;
+    completed: number;
+    total: number;
+}
+
+/** Fetch and normalize the org's automation metadata. `onProgress` reports query completion for a loading UI. */
+export async function fetchProcessMetadata(org?: string, onProgress?: (p: FetchProgress) => void): Promise<ProcessMetadata> {
+    // Named parallel queries — each reports progress as it resolves so the UI shows a real bar.
+    const steps: { label: string; soql: string; tooling: boolean }[] = [
+        {
+            label: "Apex triggers",
+            soql:
+                "SELECT Id, Name, Status, NamespacePrefix, EntityDefinition.QualifiedApiName, " +
                 "UsageBeforeInsert, UsageAfterInsert, UsageBeforeUpdate, UsageAfterUpdate, " +
                 "UsageBeforeDelete, UsageAfterDelete, UsageAfterUndelete FROM ApexTrigger",
-            true
-        ),
-        query(
-            org,
-            "SELECT ApiName, Label, ProcessType, TriggerType, TriggerObjectOrEventId, " +
-                "TriggerObjectOrEventLabel, IsActive, NamespacePrefix FROM FlowDefinitionView",
-            true
-        ),
-        query(org, "SELECT ValidationName, Active, NamespacePrefix, EntityDefinition.QualifiedApiName FROM ValidationRule", true),
-        query(org, "SELECT Name, TableEnumOrId FROM WorkflowRule", true),
-        query(org, "SELECT CronJobDetail.Name, CronExpression, NextFireTime, State FROM CronTrigger WHERE State != 'DELETED'", false),
-        query(org, "SELECT Name, NamespacePrefix, SymbolTable FROM ApexClass", true),
-        query(org, "SELECT Name, Field, NamespacePrefix FROM WorkflowFieldUpdate", true)
-    ]);
+            tooling: true
+        },
+        {
+            // NOTE: FlowDefinitionView is NOT supported on the Tooling API — it must be queried on the standard API.
+            label: "Flows",
+            soql:
+                "SELECT ApiName, Label, ProcessType, TriggerType, TriggerObjectOrEventId, " +
+                "TriggerObjectOrEventLabel, IsActive, NamespacePrefix, DurableId, ActiveVersionId FROM FlowDefinitionView",
+            tooling: false
+        },
+        { label: "Validation rules", soql: "SELECT Id, ValidationName, Active, NamespacePrefix, EntityDefinition.QualifiedApiName FROM ValidationRule", tooling: true },
+        { label: "Workflow rules", soql: "SELECT Id, Name, TableEnumOrId FROM WorkflowRule", tooling: true },
+        { label: "Scheduled jobs", soql: "SELECT CronJobDetail.Name, CronExpression, NextFireTime, State FROM CronTrigger WHERE State != 'DELETED'", tooling: false },
+        { label: "Apex classes", soql: "SELECT Id, Name, NamespacePrefix, SymbolTable FROM ApexClass", tooling: true },
+        { label: "Field updates", soql: "SELECT Name, Field, NamespacePrefix FROM WorkflowFieldUpdate", tooling: true }
+    ];
+    // +2 downstream phases (object refs, flow metadata) so the bar reaches 100% at the end.
+    const total = steps.length + 2;
+    let completed = 0;
+    const tick = (label: string) => onProgress?.({ label, completed: ++completed, total });
+
+    const [triggerRecs, flowRecs, vrRecs, wrRecs, cronRecs, classRecs, wfuRecs] = await Promise.all(
+        steps.map((st) => query(org, st.soql, st.tooling).then((recs) => (tick(st.label), recs)))
+    );
 
     // Normalize object refs (flows/workflows can reference an Id/DurableId).
     const rawRefs = new Set<string>();
@@ -102,6 +121,7 @@ export async function fetchProcessMetadata(org?: string): Promise<ProcessMetadat
         if (t) rawRefs.add(t);
     }
     const refMap = await resolveObjectRefs(org, rawRefs);
+    tick("Object references");
     const resolve = (ref: string | undefined, fallback?: string): string | undefined =>
         ref ? refMap.get(ref) ?? (isIdLike(ref) ? fallback ?? ref : ref) : undefined;
 
@@ -110,7 +130,8 @@ export async function fetchProcessMetadata(org?: string): Promise<ProcessMetadat
         object: rel(r, "EntityDefinition.QualifiedApiName") ?? "Unknown",
         events: triggerEvents(r),
         active: str(r.Status) === "Active",
-        namespace: str(r.NamespacePrefix)
+        namespace: str(r.NamespacePrefix),
+        recordId: str(r.Id)
     }));
 
     const flows = flowRecs.map((r) => ({
@@ -120,19 +141,23 @@ export async function fetchProcessMetadata(org?: string): Promise<ProcessMetadat
         triggerType: str(r.TriggerType),
         object: resolve(str(r.TriggerObjectOrEventId), str(r.TriggerObjectOrEventLabel)),
         active: r.IsActive === true,
-        namespace: str(r.NamespacePrefix)
+        namespace: str(r.NamespacePrefix),
+        recordId: str(r.DurableId),
+        versionId: str(r.ActiveVersionId)
     }));
 
     const validationRules = vrRecs.map((r) => ({
         name: str(r.ValidationName) ?? "(rule)",
         object: rel(r, "EntityDefinition.QualifiedApiName") ?? "Unknown",
         active: r.Active === true,
-        namespace: str(r.NamespacePrefix)
+        namespace: str(r.NamespacePrefix),
+        recordId: str(r.Id)
     }));
 
     const workflowRules = wrRecs.map((r) => ({
         name: str(r.Name) ?? "(rule)",
-        object: resolve(str(r.TableEnumOrId)) ?? "Unknown"
+        object: resolve(str(r.TableEnumOrId)) ?? "Unknown",
+        recordId: str(r.Id)
     }));
 
     const scheduledJobs = cronRecs.map((r) => ({
@@ -147,7 +172,7 @@ export async function fetchProcessMetadata(org?: string): Promise<ProcessMetadat
         const ifaces = symbol?.interfaces ?? [];
         const matched = JOB_INTERFACES.filter(([re]) => ifaces.some((i) => re.test(i))).map(([, name]) => name);
         if (matched.length) {
-            apexJobClasses.push({ name: str(r.Name) ?? "(class)", interfaces: matched, namespace: str(r.NamespacePrefix) });
+            apexJobClasses.push({ name: str(r.Name) ?? "(class)", interfaces: matched, namespace: str(r.NamespacePrefix), recordId: str(r.Id) });
         }
     }
 
@@ -167,6 +192,7 @@ export async function fetchProcessMetadata(org?: string): Promise<ProcessMetadat
     }
 
     const invocations: NonNullable<ProcessMetadata["invocations"]> = [];
+    const flowObjects: NonNullable<ProcessMetadata["flowObjects"]> = [];
     // Flow.Metadata (Tooling) carries element details: `actionCalls` (apex) + record
     // writes (`recordUpdates`/`recordCreates` → field lineage). Shape varies by version.
     try {
@@ -176,7 +202,13 @@ export async function fetchProcessMetadata(org?: string): Promise<ProcessMetadat
             if (!dev) continue;
             const raw = fr.Metadata;
             const md = (typeof raw === "string" ? safeParse(raw) : raw) as
-                | { actionCalls?: unknown[]; recordUpdates?: unknown[]; recordCreates?: unknown[] }
+                | {
+                      actionCalls?: unknown[];
+                      recordUpdates?: unknown[];
+                      recordCreates?: unknown[];
+                      recordLookups?: unknown[];
+                      recordDeletes?: unknown[];
+                  }
                 | undefined;
             if (!md) continue;
             for (const acU of md.actionCalls ?? []) {
@@ -193,12 +225,23 @@ export async function fetchProcessMetadata(org?: string): Promise<ProcessMetadat
                     if (ia.field) fieldUpdates.push({ source: dev, sourceKind: "flow", object: obj, field: ia.field });
                 }
             }
+            // Every object the flow reads or writes → ties scheduled/autolaunched flows to their objects.
+            for (const elU of [
+                ...(md.recordLookups ?? []),
+                ...(md.recordUpdates ?? []),
+                ...(md.recordCreates ?? []),
+                ...(md.recordDeletes ?? [])
+            ]) {
+                const obj = str((elU as { object?: string }).object);
+                if (obj) flowObjects.push({ flow: dev, object: obj });
+            }
         }
     } catch {
         /* Flow.Metadata not queryable on this org/version — field lineage stays partial. */
     }
+    tick("Flow metadata");
 
-    return { triggers, flows, validationRules, workflowRules, scheduledJobs, apexJobClasses, fieldUpdates, invocations };
+    return { triggers, flows, validationRules, workflowRules, scheduledJobs, apexJobClasses, fieldUpdates, invocations, flowObjects };
 }
 
 function safeParse(s: string): unknown {
