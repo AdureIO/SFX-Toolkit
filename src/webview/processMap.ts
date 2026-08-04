@@ -167,7 +167,8 @@ function render(graph: ProcessGraph): void {
           object: n.object ?? "",
           color: isHub ? "#94a3b8" : k.color,
           active: n.active === false ? 0 : 1,
-          ...(n.parent ? { parent: n.parent } : {})
+          ...(n.parent ? { parent: n.parent } : {}),
+          ...(n.kind === "phasePort" ? { w: Number(n.meta?.w) || 6, h: Number(n.meta?.h) || 6 } : {})
         }
       };
     }),
@@ -233,8 +234,8 @@ function render(graph: ProcessGraph): void {
           padding: "16px"
         } as cytoscape.Css.Node
       },
-      // Invisible connection port living inside a phase box; the spine attaches here.
-      { selector: 'node[kind="phasePort"]', style: { width: 6, height: 6, "background-opacity": 0, "border-width": 0, label: "", events: "no" } as unknown as cytoscape.Css.Node },
+      // Invisible port that reserves the phase box's slot in the layout; the spine attaches here.
+      { selector: 'node[kind="phasePort"]', style: { width: "data(w)", height: "data(h)", "background-opacity": 0, "border-width": 0, label: "", events: "no" } as unknown as cytoscape.Css.Node },
       { selector: "node[active=0]", style: { opacity: 0.5, "border-style": "dashed" } as cytoscape.Css.Node },
       { selector: "node.sel", style: { "border-width": 3, "border-color": themeFg } as cytoscape.Css.Node },
       { selector: "node.match", style: { "border-width": 3, "border-color": "#facc15" } as cytoscape.Css.Node },
@@ -309,11 +310,39 @@ function runLayout(): void {
   const l = cy.layout(opts);
   // Guarantee no overlapping nodes regardless of layout, then re-fit.
   l.one("layoutstop", () => {
+    assignPhaseBoxes();
     resolveCollisions();
     packDisconnected();
     cy?.fit(undefined, 40);
   });
   l.run();
+}
+
+/** After the ports are laid out, drop each phase box's items into the box and grid them around the
+ *  port. Items are kept OUT of dagre (only the pre-sized port participates), so the box never stretches
+ *  to enclose scattered nodes — it ends up exactly around its own gridded members. */
+function assignPhaseBoxes(): void {
+  if (!cy) return;
+  const byBox = new Map<string, string[]>();
+  for (const n of currentGraph.nodes) {
+    const boxId = n.meta && typeof n.meta.box === "string" ? n.meta.box : "";
+    if (boxId) (byBox.get(boxId) ?? byBox.set(boxId, []).get(boxId)!).push(n.id);
+  }
+  byBox.forEach((ids, boxId) => {
+    const port = cy!.getElementById(boxId.replace("phase:", "port:"));
+    const center = port.nonempty() ? port.position() : cy!.getElementById(boxId).position();
+    const items = ids.map((id) => cy!.getElementById(id)).filter((el) => el.nonempty());
+    const n = items.length;
+    const cols = Math.max(1, Math.round(Math.sqrt(n)));
+    const rows = Math.ceil(n / cols);
+    const colW = 215, rowH = 44;
+    const totalW = (cols - 1) * colW, totalH = (rows - 1) * rowH;
+    items.forEach((el, i) => {
+      el.move({ parent: boxId });
+      const col = i % cols, row = Math.floor(i / cols);
+      el.position({ x: center.x - totalW / 2 + col * colW, y: center.y - totalH / 2 + row * rowH });
+    });
+  });
 }
 
 /** Dagre puts every edgeless node at rank 0, so disconnected items (e.g. autolaunched flows with no
@@ -322,7 +351,7 @@ function runLayout(): void {
 function packDisconnected(): void {
   if (!cy) return;
   const loose = cy.nodes(":visible").filter(
-    (n: cytoscape.NodeSingular) => !n.isParent() && n.data("kind") !== "phasePort" && n.degree(false) === 0
+    (n: cytoscape.NodeSingular) => !n.isParent() && !n.isChild() && n.data("kind") !== "phasePort" && n.degree(false) === 0
   );
   if (loose.length < 2) return;
   const connected = cy.nodes(":visible").difference(loose).filter((n: cytoscape.NodeSingular) => n.data("kind") !== "phasePort");
@@ -600,7 +629,7 @@ function openInspector(id: string): void {
   const { incoming, outgoing } = neighborsOf(id);
   const sections: string[] = [];
   if (n.kind === "phaseHub") {
-    const members = currentGraph.nodes.filter((x) => x.parent === id).map((x) => x.id);
+    const members = currentGraph.nodes.filter((x) => x.meta?.box === id).map((x) => x.id);
     sections.push(`<div class="insp-sec"><h4>Runs in parallel (${members.length})</h4>${members.map(connRow).join("")}</div>`);
   } else if (n.kind === "object") {
     const seq = execOrderSection(id);

@@ -88,11 +88,12 @@ describe("processGraph.buildProcessGraph", () => {
     });
     const boxes = g.nodes.filter((n) => n.kind === "phaseHub");
     assert.strictEqual(boxes.length, 2, "one box for the before-trigger phase and one for the validation phase");
-    // Items are members of their phase box (compound children), not chained to each other.
-    assert.strictEqual(g.nodes.find((n) => n.id === "trigger:T1")?.parent, "phase:Account:2");
-    assert.strictEqual(g.nodes.find((n) => n.id === "validationRule:Account.V1")?.parent, "phase:Account:3");
-    // Each box has an invisible port; the spine runs port → port — a single line between the groups.
-    assert.ok(g.nodes.some((n) => n.kind === "phasePort" && n.id === "port:Account:2"));
+    // Items record their phase box (gridded into it after layout), not chained to each other.
+    assert.strictEqual(g.nodes.find((n) => n.id === "trigger:T1")?.meta?.box, "phase:Account:2");
+    assert.strictEqual(g.nodes.find((n) => n.id === "validationRule:Account.V1")?.meta?.box, "phase:Account:3");
+    // Each box has an invisible port (parented into the box) that reserves its slot in the layout.
+    const port = g.nodes.find((n) => n.kind === "phasePort" && n.id === "port:Account:2");
+    assert.ok(port && port.parent === "phase:Account:2", "port lives inside its box");
     const then = g.edges.filter((e) => e.kind === "then");
     assert.strictEqual(
       then.filter((e) => e.source.startsWith("port:") && e.target.startsWith("port:")).length,

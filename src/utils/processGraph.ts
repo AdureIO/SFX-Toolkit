@@ -344,15 +344,21 @@ export function buildProcessGraph(input: ProcessMetadata): ProcessGraph {
                 prev = group[0].id;
             } else {
                 // Several automations run in parallel → wrap them in ONE labelled phase box (a compound
-                // parent). The step-to-step spine attaches to an invisible port inside the box, so there
-                // is exactly ONE line into the group instead of an M×N wave. Items sit inside the box.
+                // parent). Only an invisible, pre-sized *port* takes part in the dagre layout (so the box's
+                // slot is reserved and the spine has exactly ONE line into the group); the items themselves
+                // are parented into the box and gridded afterwards. Keeping the items OUT of dagre avoids the
+                // box stretching to enclose scattered, edgeless nodes.
                 const boxId = `phase:${obj}:${p}`;
                 const portId = `port:${obj}:${p}`;
+                const cols = Math.max(1, Math.round(Math.sqrt(group.length)));
+                const rows = Math.ceil(group.length / cols);
+                const boxW = (cols - 1) * 215 + 210;
+                const boxH = (rows - 1) * 44 + 74;
                 put({ id: boxId, kind: "phaseHub", label, object: obj, meta: { order: String(p) } });
-                put({ id: portId, kind: "phasePort", label: "", object: obj, parent: boxId });
+                put({ id: portId, kind: "phasePort", label: "", object: obj, parent: boxId, meta: { w: String(boxW), h: String(boxH) } });
                 for (const a of group) {
                     const node = nodes.get(a.id);
-                    if (node) node.parent = boxId;
+                    if (node) node.meta = { ...(node.meta ?? {}), box: boxId };
                 }
                 link(prev, portId, "then");
                 prev = portId;
