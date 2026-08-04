@@ -1,5 +1,6 @@
 .vscode/**
 .vscode-test/**
+.claude/**
 src/**
 out/test/**
 .gitignore
@@ -12,3 +13,9 @@ settings.md
 features.md
 functions.md
 *.vsix
+server/**
+node_modules/.bin/**
+node_modules/monaco-editor/esm/**
+node_modules/monaco-editor/dev/**
+node_modules/monaco-editor/dev-package.json
+node_modules/monaco-editor/min-maps/**

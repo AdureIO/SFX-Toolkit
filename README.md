@@ -1,237 +1,242 @@
-# Adure SFX Toolkit
+# ASFX Toolkit
 
-![Visual Studio Marketplace Installs](https://img.shields.io/visual-studio-marketplace/i/adureio.sfx-toolkit?style=flat-square&label=VS%20Marketplace&color=blue)
-![Open VSX Installs](https://img.shields.io/open-vsx/dt/adureio/sfx-toolkit?style=flat-square&label=Open%20VSX&color=orange)
+[![Visual Studio Marketplace Installs](https://vsmarketplacebadges.dev/installs-short/AdureIO.sfx-toolkit.svg?style=flat-square&label=VS%20Marketplace&color=blue)](https://marketplace.visualstudio.com/items?itemName=AdureIO.sfx-toolkit)
+[![Open VSX Installs](https://img.shields.io/open-vsx/dt/adureio/sfx-toolkit?style=flat-square&label=Open%20VSX&color=orange)](https://open-vsx.org/extension/adureio/sfx-toolkit)
 
-Adure SFX Toolkit is an open-source VSCode extension designed to supercharge your Salesforce development workflow. It provides a comprehensive set of utilities for log management, debugging, org management, source tracking, deployment, data operations, and API exploration.
+ASFX Toolkit is an open-source VS Code / Cursor extension that supercharges your Salesforce development workflow. It bundles org-aware **Apex & SOQL IntelliSense**, log management & debugging, org management, source tracking & deployment, data operations, and API exploration — all without leaving the editor, and all driven by the Salesforce CLI you already have.
+
+> Works on VS Code 1.80+ and Cursor. Activates automatically in any folder containing an `sfdx-project.json`; outside SFDX projects it stays completely inert.
+
+![ASFX Toolkit sidebar — orgs, source, deploy, tests, query/API and tools](docs/screenshots/sidebar.png)
 
 ## Features
 
+### 🧠 Apex & SOQL IntelliSense
+
+A built-in, **JVM-free** language server (pure Node, shipped inside the extension) that adds **org-aware** IntelliSense for Apex and SOQL. It runs alongside the official Salesforce Apex extension and only adds what that engine can't: live schema from your connected org.
+
+**SOQL** — in `.soql` files, inline `[SELECT … ]` queries in Apex, and `Database.query('…')` strings:
+
+- Object completion after `FROM`; field completion in `SELECT` / `WHERE` / `ORDER BY`, with type badges.
+- **Relationship traversal** — `Account.Owner.Name` resolves through `__r` lookups.
+- **Child-relationship subqueries** — `(SELECT … FROM Contacts)`.
+- **Type-aware `WHERE`** operators and **picklist value** completion.
+- **Rich hover** — fields show type, label, length, help text and picklist values; objects show label, key prefix, custom flag, CRUD flags, field/relationship counts and the admin **Description** (via the Tooling API).
+
+**Apex** — additive to the Salesforce Apex extension:
+
+- **Member completion via declared types** — `acc.` → `Account` fields, `myService.` → your class's members.
+- **`new` constructor completion** — suggests the type being assigned first (`Account a = new |`).
+- **SObject type-name completion** in declarations, casts, generics and `instanceof`.
+- **Outline** and **syntax diagnostics**, **go-to-definition** (in-file and cross-file), and **signature help**.
+
+**Org-aware extras:**
+
+- **Namespace-optional matching** — when your `sfdx-project.json` defines a namespace, typing `Widget__c` matches `ns__Widget__c` (the namespace stays in the inserted code; matching is what's optional).
+- **Per-document org resolution** — nested / multi-package projects each resolve their own default org, so `billing/force-app/...` uses billing's org.
+- **Result weighting** — auxiliary objects (`*History`, `*Share`, `*Feed`, `*ChangeEvent`) and standard audit fields sink below the business objects/fields you actually use.
+- **Schema stubs** generated in the background for go-to-definition and to ground AI tooling; refreshed on org switch, pull, and Refresh Metadata.
+- **Self-healing** — if the Salesforce Apex Language Server gets stuck, it's restarted (bounded), with a clear notification if it keeps failing.
+
+Schema is read from your **default org** via the REST describe API (auth resolved from `sf org display`); the language server itself stays credential-free. Everything is gated to SFDX projects and individually toggleable — see [Settings](#settings).
+
+### 🧰 ASFX Workbench
+
+A unified bottom panel (sidebar **Tools → ASFX Workbench**) that brings Apex execution, ad-hoc SOQL, and debug logs together, each on its own tab, with a shared org selector and trace indicator.
+
+- **Execute** — run **anonymous Apex** with org-aware completion; the live **debug log** and **governor limits** render side-by-side as it runs. Execute with `Cmd/Ctrl+Enter`, open the result in an editor, or replay from history.
+- **SOQL** — fire a quick query against the selected org and browse results in a table; export, or jump to the full **SOQL Builder & Editor**.
+- **Logs** — browse the org's debug logs in a syntax-highlighted viewer that colour-codes `USER_DEBUG`, execution markers, and limit usage.
+
+![ASFX Workbench — execute anonymous Apex with live debug log and governor limits](docs/screenshots/ASFX-Workbench-apex.png)
+![ASFX Workbench — SOQL tab with results table](docs/screenshots/ASFX-Workbench-soql.png)
+![ASFX Workbench — debug log viewer](docs/screenshots/ASFX-Workbench-logs.png)
+
 ### 🔍 Log Management & Filtering
 
-- **Log Viewer**: Easily list, download, and open Salesforce debug logs directly from the sidebar. Works with the Salesforce default extensions' log locations.
-- **Delete All Logs**: Remove logs from both the org (Tooling API with CLI fallback when needed) and clear the local log cache in one action.
-- **Smart Filtering**: Toggle filters to focus on what matters.
-  - **Debug Filter** (`Cmd+D` / `Ctrl+D`): Instantly show only `USER_DEBUG` statements, errors, and exceptions.
-  - **SOQL & DML Filter**: Filter logs to show only database queries (`SOQL_EXECUTE`) and DML operations.
-- **Visual Feedback**:
-  - **Active State Icons**: Filter icons in the editor title bar light up (blue) when active, so you always know what you're seeing.
-  - **Loading Indicators**: Visual progress indication when applying filters to large log files.
-- **Live Polling**: Automatically poll for new debug logs in the background (every 5 seconds).
-- **Trace Flags**:
-  - **Quick Trace**: One-click setup of a debug trace for the current user.
-  - View, manage, and delete existing trace flags.
+- **Log Viewer**: List, download, and open Salesforce debug logs from the sidebar. Works with the Salesforce default extensions' log locations.
+- **Delete All Logs**: Remove logs from the org (Tooling API with CLI fallback) and clear the local cache in one action.
+- **Smart Filtering**:
+  - **Debug Filter** (`Cmd+D` / `Ctrl+D`): show only `USER_DEBUG` statements, errors, and exceptions.
+  - **SOQL & DML Filter**: show only queries (`SOQL_EXECUTE`) and DML operations.
+- **Visual Feedback**: active-state filter icons in the editor title bar; loading indicators for large logs.
+- **Live Polling**: automatically poll for new debug logs in the background.
+- **Trace Flags**: one-click **Quick Trace** for the current user; view, manage and delete existing trace flags.
 
-![Sidebar with logs, traces, orgs and tools](docs/screenshots/sidebar.png)
-![Log filtering for debug and SOQL/DML](docs/screenshots/filter-logs.png)
-![Create debug trace flow](docs/screenshots/create-trace.png)
+### ⚡ Apex & SOQL Tools
 
-### ⚡ Apex & SOQL
+- **Execute Anonymous**: Run Apex from the editor (`.apex` files or selections) or the **ASFX Workbench** Execute tab, with live debug log, governor limits, and history.
+- **Rerun Last**: Re-run the last executed Apex without re-selecting code.
+- **SOQL Builder & Editor** (`ASFXT: Open SOQL Builder & Editor`): build and run SOQL with object/field completion and an optional visual builder, view results in an interactive table, **edit records inline**, **save** changes back to Salesforce, or **discard** edits. Export results to **CSV / JSON**; query history and saved queries are kept per workspace.
+- **Apex CodeLens**: Run a specific test method or an entire test class straight from the code.
+- **Apex Snippets**: Save, organize, run, edit, and delete reusable Apex snippets from the sidebar and overview panel.
 
-- **Execute Anonymous**: Run Apex code directly from the editor (`.apex` files or selections). Output runs in the **Execute Apex** bottom panel for fast feedback and history.
-- **Rerun Last**: Quickly rerun the last executed Apex snippet without re-selecting code.
-- **SOQL Editor** (`ASFXT: Open SOQL Builder & Editor`): A powerful SOQL builder and editor with completion.
-  - **Builder & Completion**: Object and field completion to write SOQL faster.
-  - **Interactive Table**: View query results in a responsive table.
-  - **Inline Editing**: Directly edit record fields in the table.
-  - **Smart Save**: Commit changes back to Salesforce (`sf data update record`) with automatic quote escaping and error handling.
-  - **Discard Changes**: Easily revert unsaved edits.
-- **Apex CodeLens**: Run specific test methods or entire test classes directly from your Apex code.
-- **Apex Snippets**: Save, organize, run, edit, and delete reusable Apex snippets from the dedicated sidebar view and overview panel.
-
-![SOQL builder and results table](docs/screenshots/soql-builder.png)
-![Apex snippets panel](docs/screenshots/apex-snippets.png)
+![SOQL Builder & Editor with results table and CSV/JSON export](docs/screenshots/SOQL-workbench.png)
+![Apex snippets quick-pick](docs/screenshots/apex-snippets.png)
 
 ### ☁️ Org Management
 
-- **Org Explorer**: A dedicated view to manage all your connected orgs, scratch orgs, and Dev Hubs.
-- **Quick Actions**:
-  - 🌐 Open Org in Browser
-  - ✅ Set as Default Org / Default Dev Hub
-  - 📋 Copy Username
-  - ✏️ Rename Alias
-  - 🔑 Generate Password for Scratch Orgs
-  - 🗑️ Delete/Logout from Org
-- **Scratch Org Wizard**:
-  - **Create Scratch Org**: Interactive wizard to create scratch orgs.
-  - **Quick Scratch**: Create a scratch org with default settings in one click.
+- **Org Explorer**: Manage all connected orgs, scratch orgs, and Dev Hubs from a dedicated view.
+- **Quick Actions**: open in browser, set as default org / Dev Hub, copy username, rename alias, generate scratch-org password, delete/logout.
+- **Scratch Org Wizard**: interactive **Create Scratch Org**, or **Quick Scratch** with sensible defaults in one click.
+
+### 📦 Package Explorer (Dev Hub)
+
+`ASFXT: Package Explorer` — a second-generation (2GP) package control panel for your Dev Hub (also opens from the inline **package** action on a Dev Hub in the Org Explorer).
+
+- **Browse** every 2GP package → its versions, newest first: version number, subscriber (`04t`) and package (`0Ho`) ids as click-to-copy chips, released/beta status, created date, and package aliases from `sfdx-project.json`. A **searchable package combobox**, a version filter, and *Released-only* / *Latest-per-package* toggles keep large packages manageable; results are cached so switching or reopening is instant.
+- **Install links & commands** — per version, copy the **Prod** or **Sandbox** install URL, the `sf package install` command, or a paste-ready `sfdx-project.json` **dependency snippet**. Password-protected packages prompt for an installation key.
+- **Dependencies view** — a package's declared dependencies (from `sfdx-project.json`) resolved to their concrete ids.
+- **Actions** (native confirm + progress): **Install** into any org, **Promote** to released, **Update** or **Delete** a version, **Rename** a package. Optional per-version **code-coverage** column (opt-in, since it's a heavier query).
+- **Installed in org** tab — list packages installed in any org (`ASFXT: List Installed Packages`, also on org context menus) with **upgrade** badges when your Dev Hub has a newer released version, plus one-click **Upgrade** / **Uninstall**.
+- **Version report** — dependencies + ancestry on demand; **export** a package's versions to Markdown or CSV.
 
 ### 🛠️ Development Tools
 
-- **Source Operations**:
-  - **Push Source**: Intelligent push that automatically detects if source tracking is available. Uses `sf project deploy start` (diff) for tracked orgs and falls back to sequential package deployment for others.
-  - **Push Source (Force)**: Override conflicts and force push changes.
-  - **Pull Source**: Retrieve changes from the org.
-  - **Deploy/Retrieve**: Contextual commands to deploy or retrieve the currently open file.
-  - **Reset Source Tracking**: Quickly reset tracking for the default org (`sf project reset tracking`).
-- **Flexible Metadata Deploy Flow** (`ASFXT: Deploy Metadata`): Production-style deployment with full control:
-  - Select metadata paths / files, pick a test level, target any org.
-  - **Deployment History**: Every deployment is persisted with status, duration, test results, and timestamp. Browse, search, and re-run past deployments in one click.
-  - **Named Test Suites**: Save named groups of test classes alongside a deployment preset. Load them back in one click for repeat validations.
-  - **Pre-Deploy Quality Gate**: Automatically scan your Apex files before deploying and catch:
-    - `System.debug()` statements left in code (warning)
-    - Hardcoded Salesforce record IDs (error)
-    - SOQL or DML inside `for`/`while` loops (error)
-    - `TODO` / `FIXME` comments (info)
-
-    You can review violations, then choose to abort or deploy anyway. Errors and warnings are clearly colour-coded.
-  - **Test Coverage Display**: After a deployment with tests, a collapsible coverage panel shows per-class coverage percentages — green (≥ 75 %), amber (≥ 50 %), or red (< 50 %) — with the overall average.
-  - **Auto-git detection**: The panel automatically detects file changes in your workspace via a `FileSystemWatcher` (debounced 600 ms) so the source tree is always fresh without polling.
-  - **Deployment Presets**: Save and load frequently used deployment configurations (paths, test level, target org).
-- **Test Runner**: Run local tests with ease.
-- **Ignore Helpers**: Add files/folders to `.gitignore` or `.forceignore` directly from explorer context actions.
-- **Custom Editors**:
-  - **Permission Set Editor**: A dedicated, user-friendly UI for editing Permission Sets (`.permissionset-meta.xml`).
-  - **Scratch Org Definition Editor**: specialized UI for editing `project-scratch-def.json` files.
+- **Source Operations**: smart **Push** (diff deploy for source-tracked orgs, sequential package deploy otherwise), **Push (Force)**, **Pull**, contextual **Deploy/Retrieve** for the open file, and **Reset Source Tracking**.
+- **Flexible Metadata Deploy Flow** (`ASFXT: Deploy Metadata`):
+  - Select paths/files, pick a test level, target any org — the panel always deploys exactly the components you picked (source-tracking conflicts are overridden).
+  - **Deployment History**: every deploy persisted with status, duration, test results and timestamp — browse, search and re-run in one click.
+  - **Named Test Suites**: save groups of test classes with a preset and reload them instantly.
+  - **Pre-Deploy Quality Gate**: scans Apex before deploy for leftover `System.debug()` (warning), hardcoded record IDs (error), SOQL/DML in loops (error), and `TODO`/`FIXME` (info) — review, then abort or deploy anyway.
+  - **Test Coverage Display**: post-deploy per-class coverage, colour-coded (≥75% green / ≥50% amber / <50% red) with overall average.
+  - **Auto file detection** via a debounced `FileSystemWatcher`; **Deployment Presets** for reusable configs.
+- **Test Runner**: run local tests easily.
+- **Ignore Helpers**: add files/folders to `.gitignore` or `.forceignore` from explorer context actions.
+- **Custom Editors**: friendly UIs for **Permission Sets** (`.permissionset-meta.xml`) and **Scratch Org Definitions** (`project-scratch-def.json`).
+- **Explorer tidy**: `ASFXT: Toggle Hide Apex -meta.xml Files` hides/shows the `*.cls-meta.xml` / `*.trigger-meta.xml` sidecar files via `files.exclude` (workspace-scoped, persisted).
 
 ![Deploy metadata flow](docs/screenshots/deploy-metadata.png)
 
+### ✅ Apex Test Coverage
+
+Org-wide Apex coverage surfaced three ways, all sharing one **auto-refreshing** store — it updates after a coverage test run (this extension's *Run Apex Tests with Coverage* profile **or** the Salesforce extension's, detected via a watcher on `.sfdx/tools/testresults/`), on panel refresh, and on focus.
+
+- **Explorer badges** — each `.cls`/`.trigger` shows its coverage % (toggle with `ASFXT: Toggle Apex Coverage % Badge`); the exact covered/total lines are always on hover.
+- **Coverage panel** (`ASFXT: Apex Coverage`) — overall org %, a classes-below-75% count, and a **worst-first**, searchable table with a below-threshold filter; click a row to open the class. Includes **Refresh** and **Clear results** (deletes local `.sfdx/tools/testresults` and resets the display).
+- **Line highlights** (`ASFXT: Toggle Apex Coverage Line Highlights`) — opt-in, persisted covered/uncovered line decorations in the open class that stay live while enabled.
+
 ### 🔄 Data Migration Wizard
 
-`ASFXT: Data Migration Wizard` — move entire Salesforce object trees from one connected org to another — no CSV, no manual ID management.
+`ASFXT: Data Migration Wizard` — move entire Salesforce object trees from one connected org to another, with no CSV and no manual ID management.
 
-#### How it works
+1. **Source & Target** — pick orgs, write a root SOQL query, name the migration (or load a saved `.migration.json` profile).
+2. **Object Tree** — child relationships are described lazily into a checkable tree (unbounded depth); per object, choose fields and an **external ID / upsert key**.
+3. **Run** — root records are inserted/upserted, a `sourceId → targetId` map is built per object, child lookups are remapped, and each depth level runs in topological order with live progress and per-object error details.
 
-**Step 1 — Source & Target**
-
-Pick source and target org, write a SOQL query for the root object, and give the migration a name. Or load a previously saved migration profile to re-run an existing setup in seconds.
-
-**Step 2 — Object Tree**
-
-The root SObject is described via the Salesforce REST API. Its full list of child relationships is displayed in a tree. You check which children to include — Contacts under Account, Opportunities, Tasks under Contact, etc. Each checked object is described lazily, so you can drill as deep as the data model goes.
-
-For each included object:
-- **Fields** — all createable fields are pre-selected. Untick anything you don't need. Bulk "All / None" toggles per object.
-- **External ID / Upsert key** — choose a field (any external ID or unique field) to use upsert semantics on the target org. This prevents duplicate records on re-runs and is essential for sandbox refreshes.
-
-Click **Save Profile** to write a `.migration.json` file to your workspace (`.sfdx/asfx/`). Load it back any time to skip the tree-building step.
-
-**Step 3 — Run**
-
-Click **Start Migration**. The wizard:
-1. Queries root records from source org (paginated, no record limits).
-2. Inserts / upserts root records in target org.
-3. Queries target org to map source IDs → target IDs.
-4. Fetches child records (`WHERE lookupField IN (parent IDs)`, chunked for > 500 parents).
-5. Replaces every lookup field value with the correct target ID before sending.
-6. Repeats for each depth level in topological order.
-
-Live per-object progress bars, phase labels, and counts (inserted / updated / failed) update in real time. Errors are expandable per object with row number and Salesforce error message.
-
-#### Key design decisions
-
-| Concern | Solution |
-|---|---|
-| Referential integrity | After each object, a `sourceId → targetId` map is built by querying the target org. Child lookup fields are remapped before every batch. |
-| Large datasets | REST API pagination via `nextRecordsUrl` — no CLI row limits. WHERE IN clauses are chunked at 500 IDs. |
-| Re-runability | External ID / upsert mode per object prevents duplicates. Profiles are saved as JSON for exact re-runs. |
-| Deep trees | Lazy describe — only objects you check are described. Tree depth is unbounded. |
-| Batch efficiency | SObject Collections REST API, 200 records per batch, `allOrNone: false` for partial success. |
+Referential integrity is preserved via per-object ID remapping; large datasets use REST pagination (no CLI row limits) with `WHERE IN` chunked at 500; profiles make re-runs exact; SObject Collections batches of 200 with partial success.
 
 ### 📂 Data Export / Import
 
-`ASFXT: Data Export / Import` — a full-featured data migration panel for Salesforce orgs.
+`ASFXT: Data Export / Import` — a full data panel:
 
-#### Export
+- **Export** any SOQL query to CSV or JSON in your workspace, openable in one click.
+- **Import** a CSV with preview and auto-guessed SObject: **Insert**, **Update** (needs `Id`), **Upsert** (single external-ID field *or* a 2–3 column composite key resolved client-side), or **Delete** by `Id`. Live progress, per-record errors, and a results summary.
 
-- Write any SOQL query and export results to CSV or JSON, saved directly to your workspace root.
-- Click the result bar to open the exported file immediately in the editor.
-
-#### Import
-
-- Select a CSV file from your workspace, preview the first rows, see total record count.
-- Choose the SObject API name (auto-guessed from the file name).
-- Pick the **operation**:
-  - **Insert** — create new records via SObject Collections API in batches of 200.
-  - **Update** — update records (requires `Id` column).
-  - **Upsert** — match on an external ID field:
-    - **Single field**: standard `sf composite/sobjects/{SObject}/{ExternalIdField}` upsert.
-    - **Composite key (2–3 fields)**: no dedicated external ID field in Salesforce? Select any 2–3 CSV columns as a composite lookup key. The panel queries the org for existing matches, splits your CSV into insert and update batches client-side, and runs both in one operation.
-  - **Delete** — bulk delete records by `Id` column.
-- Live progress, per-record error details (row number + SF error message), and a results summary (inserted / updated / failed) are shown after the operation.
-
-Auth is resolved automatically from `sf org display` — no manual token management.
+Auth is resolved automatically from `sf org display`.
 
 ### 🔌 REST API Explorer
 
-`ASFXT: REST API Explorer` — a built-in Salesforce REST API client with zero authentication setup.
+`ASFXT: REST API Explorer` — a built-in Salesforce REST client with zero auth setup.
 
-#### Left pane — Request builder
+- **Request builder**: org selector with auto `Authorization: Bearer` injection; GET/POST/PATCH/PUT/DELETE; relative or full URLs with `{version}` substitution; headers and JSON body editors; 10 quick templates (List/Describe SObjects, SOQL, CRUD, Composite, Limits, SOSL); request history.
+- **Response viewer**: colour-coded status badge with timing, resolved URL, pretty syntax-highlighted JSON, response headers table, copy-body.
 
-- **Org selector** + auto-inject of `Authorization: Bearer <token>` from `sf org display`.
-- **Method pills**: GET, POST, PATCH, PUT, DELETE.
-- **URL input**: accepts relative paths (e.g. `/services/data/v{version}/sobjects`) or full URLs. `{version}` is automatically substituted from your configured API version.
-- **Headers tab**: free-text `Key: Value` headers.
-- **Body tab**: JSON body editor for POST / PATCH / PUT.
-- **Quick templates**: 10 pre-built templates covering the most common Salesforce REST endpoints:
-  - List SObjects, Describe SObject, SOQL Query, Get/Create/Update/Delete Record, Composite API, Limits, SOSL Search.
-- **Request history**: last 10 requests with method, URL, and HTTP status. Click any entry to reload it.
+All calls are made server-side (Node `https`) — no CORS issues.
 
-#### Right pane — Response viewer
+![REST API Explorer — request builder, templates and JSON response](docs/screenshots/REST-explorer.png)
 
-- **Status badge** colour-coded by HTTP status class (2xx green, 4xx amber, 5xx red) with timing in ms.
-- **Resolved URL** shown below the toolbar for transparency.
-- **Body tab**: pretty-printed, syntax-highlighted JSON (keys, strings, numbers, booleans, nulls each in distinct VS Code theme colours). Falls back to raw text for non-JSON.
-- **Response Headers tab**: key/value table of all response headers.
-- **Copy body** button.
+### 🩺 Org Health Dashboard
 
-All HTTP calls are made server-side (TypeScript / Node.js `https` module) — no CORS issues.
+`ASFXT: Org Health` — a sortable, filterable dashboard of your org's **limits** (API requests, storage, async Apex, streaming events, and more), each with used/max, remaining, and a colour-coded usage bar so you can spot what's running hot at a glance.
+
+![Org Health Dashboard — org limits with usage bars](docs/screenshots/ORG-limits.png)
 
 ### ⚙️ System & Setup
 
-- **Project Validation**: Automatically checks for `sfdx-project.json` to ensure you are working in a valid Salesforce project.
-- **Output Logging**: detailed logs are available in the "Adure SFX Toolkit" output channel. Logs are suppressed by default during deployments to keep the view clean, opening only on errors.
-- **Configurable Settings**:
-  - Polling interval, maximum fetched logs, quick trace defaults, API version, parallel delete count, test timeout, auto-save before push, and HTTP timeout.
-
-### 🧹 Remove Final Newline on Save
-
-Prettier always writes a final end-of-file newline for JS/CSS/HTML, and there is no Prettier core option to opt out. This setting lets you strip that trailing newline for specific files without touching the rest of the document. It runs as a post-format/save step (via `onWillSaveTextDocument`), so it executes after Prettier's `editor.formatOnSave` and just before VS Code writes to disk.
-
-The feature is **opt-in** and entirely workspace-driven. A document is only modified when:
-
-- `adure-sfx-toolkit.removeFinalNewline.enabled` is `true`, **and**
-- the document's language id is in `adure-sfx-toolkit.removeFinalNewline.languages`, **and**
-- its workspace-relative path matches at least one glob in `adure-sfx-toolkit.removeFinalNewline.patterns`.
-
-Only the trailing `\n` / `\r\n` characters at the very end of the file are removed; interior content (including blank lines) is left untouched. The operation is idempotent.
-
-#### Settings
-
-| Setting | Default | Description |
-| --- | --- | --- |
-| `adure-sfx-toolkit.removeFinalNewline.enabled` | `false` | Master switch for the feature. |
-| `adure-sfx-toolkit.removeFinalNewline.patterns` | `[]` | Workspace-relative globs (forward-slash). At least one must match for the strip to run. |
-| `adure-sfx-toolkit.removeFinalNewline.languages` | `["javascript", "javascriptreact", "html", "css"]` | Language ids eligible for stripping. |
-| `adure-sfx-toolkit.removeFinalNewline.runOnSave` | `true` | Run automatically as part of the save lifecycle. |
-
-#### Sample workspace configuration
-
-```json
-{
-  "adure-sfx-toolkit.removeFinalNewline.enabled": true,
-  "adure-sfx-toolkit.removeFinalNewline.patterns": [
-    "force-app/**/*.js",
-    "force-app/**/*.html",
-    "force-app/**/*.css"
-  ]
-}
-```
-
-Each applied strip emits a single `INFO` line to the **Adure SFX Toolkit** output channel for traceability.
+- **Project Validation**: checks for `sfdx-project.json`; features and views hide outside SFDX projects.
+- **Output Logging**: detailed logs in the **ASFX Toolkit** output channel (suppressed during deploys, opened on errors).
+- **Configurable**: see [Settings](#settings).
 
 ## Keyboard Shortcuts
 
-- `Cmd+Enter` / `Ctrl+Enter`: Execute anonymous Apex (when editing `.apex`).
-- `Cmd+D` / `Ctrl+D`: Toggle debug-focused log filter (when viewing logs).
-- `Alt+L`: LWC navigate to sibling picker.
-- `Alt+1` / `Alt+2` / `Alt+3` / `Alt+4`: Jump directly to LWC JS / HTML / Meta / CSS file.
+| Shortcut | Action |
+| --- | --- |
+| `Cmd+Enter` / `Ctrl+Enter` | Execute anonymous Apex (in `.apex`) |
+| `Cmd+D` / `Ctrl+D` | Toggle debug-focused log filter (when viewing logs) |
+| `Alt+L` | LWC: navigate to sibling picker |
+| `Alt+1` / `Alt+2` / `Alt+3` / `Alt+4` | Jump to LWC JS / HTML / Meta / CSS |
+
+## Settings
+
+All settings live under the `adure-sfx-toolkit.*` namespace.
+
+### Apex & SOQL IntelliSense
+
+| Setting | Default | Description |
+| --- | --- | --- |
+| `soql.enableCompletion` | `true` | Org-aware SOQL completion in `.soql` files (and inline SOQL in Apex). |
+| `apex.enableCompletion` | `true` | Org-aware Apex completion (SObject fields on `var.`, `new` constructors, type names). Turn off to defer entirely to the Salesforce extension. |
+| `apex.languageServer` | `on` | Apex *semantic* features (outline, syntax diagnostics, go-to-definition for your classes, signature help). `on` (default) always enables them; `auto` enables them only when the Salesforce Apex extension is **not** installed; `off` disables. |
+| `apex.generateSObjectStubs` | `true` | Generate SObject schema stubs in the background (go-to-definition + AI grounding), refreshed on org switch / pull / Refresh Metadata. |
+| `apex.stubScope` | `referenced` | `referenced` (lean) generates stubs only for objects used in your code; `all` also writes type-only stubs for every org object (heavier). |
+| `apex.restartAfterInitialLoad` | `true` | Once, after the Salesforce Apex LS finishes loading, do a single clean restart so newly generated stub types are indexed (never restarts mid-index). |
+| `apex.monitorLanguageServer` | `true` | Watch the Salesforce Apex LS and recover it if it crashes and stays down (bounded; shows an error if it keeps failing). |
+| `apex.autoRestartLanguageServer` | `false` | Restart the Salesforce Apex LS after every stub change. Off by default — the Salesforce LS already picks up changes incrementally. |
+
+### Logs, traces, deploy & API
+
+| Setting | Default | Description |
+| --- | --- | --- |
+| `pollingIntervalSeconds` | `5` | Background poll interval for new debug logs. |
+| `maxLogFiles` | — | Maximum number of logs to fetch. |
+| `quickTraceDurationMinutes` | — | Quick Trace duration. |
+| `quickTraceDebugLevel` | — | Debug level used by Quick Trace. |
+| `toolingApiVersion` | `v67.0` | Salesforce API version for REST/Tooling calls and `{version}` substitution. |
+| `parallelDeletes` | `8` | Parallel API calls when deleting logs. |
+| `testRunTimeoutMinutes` | — | Timeout for test runs. |
+| `autoSaveBeforePush` | — | Save dirty editors before a push. |
+
+## Requirements
+
+- A Salesforce **DX project** (`sfdx-project.json` in the workspace).
+- The **Salesforce CLI** (`sf`) installed and authenticated to your orgs — used for auth and several operations.
+- The official **Salesforce Apex extension** is recommended (ASFX Toolkit's Apex IntelliSense runs alongside it); SOQL features work without it.
+
+## Telemetry
+
+The extension collects **anonymous** usage telemetry to understand how many people
+use it and which features are valuable, so development can be prioritized. We collect:
+
+- Extension activation and an anonymous, randomly generated install id
+- Which commands and panels are used, with execution duration and success/failure
+- Coarse error categories (e.g. `auth`, `network`, `cli`) — never raw messages
+- Key feature actions: running a SOQL query, sending a REST request, exporting/
+  importing data, running a migration, executing anonymous Apex
+- Deploy / test outcomes as categorical flags and counts
+
+We **never** collect access tokens, usernames, org ids, record ids, file paths,
+SOQL/Apex text, query results, or any personal data.
+
+To opt out, set `adure-sfx-toolkit.telemetry.enabled` to `false`. Telemetry also
+honors VS Code's global `telemetry.telemetryLevel` setting — disabling either turns
+it off.
+
+## 💜 Support / Sponsor
+
+Adure SFX Toolkit is free and open source, built and maintained in our spare time.
+If it saves you time, please consider [**sponsoring its development**](https://github.com/sponsors/AdureIO).
+Sponsorships fund ongoing maintenance, new features, and faster bug fixes — and are
+hugely appreciated. ⭐ Starring the [repository](https://github.com/AdureIO/SFX-Toolkit)
+and leaving a [Marketplace review](https://marketplace.visualstudio.com/items?itemName=AdureIO.sfx-toolkit&ssr=false#review-details)
+helps too.
 
 ## Open Source
 
-This project is open source! Contributions, issues, and feature requests are welcome.
-Check out the [GitHub Repository](https://github.com/AdureIO/SFX-Toolkit).
+Contributions, issues, and feature requests are welcome — see the [GitHub repository](https://github.com/AdureIO/SFX-Toolkit).
+
+Bundled open-source components are listed in [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md).
 
 ## Feedback
 
-If you encounter any issues or have suggestions, please file an issue on our GitHub repository.
+Found a bug or have a suggestion? Please file an issue on the GitHub repository.

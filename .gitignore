@@ -10,5 +10,11 @@ functions.md
 settings.md
 
 *.vsix
-# Object Visualizer webview bundle (built by esbuild)
+# Webview bundles (built by esbuild)
 resources/webview/
+
+# Project uses npm (package-lock.json)
+yarn.lock
+
+# Claude Code (local only)
+.claude/

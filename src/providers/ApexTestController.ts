@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { runCommandArgs } from "../utils/commandRunner";
 import { Logger } from "../utils/outputChannel";
 import { isSalesforceProject } from "../utils/projectUtils";
+import { apexCoverage } from "../utils/apexCoverageService";
 
 /**
  * Integrates Apex tests with VS Code's native Testing view ("Test Explorer").
@@ -220,6 +221,10 @@ async function runTests(
       (withCoverage && summary.testRunCoverage ? ` · coverage ${summary.testRunCoverage}` : "") + "\r\n"
     );
     Logger.info(`Apex test run: ${summary.passing ?? "?"} pass / ${summary.failing ?? "?"} fail`);
+    if (withCoverage) {
+      // A coverage run updates ApexCodeCoverageAggregate — refresh Explorer badges + panel.
+      void apexCoverage.refresh().catch(() => undefined);
+    }
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     const tm = new vscode.TestMessage(`Could not run Apex tests: ${message}`);

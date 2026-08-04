@@ -1,6 +1,6 @@
 import { runCommandArgs } from "./commandRunner";
-import { httpsGet, httpsDelete } from "./httpUtils";
-import { Logger, outputChannel } from "./outputChannel";
+import { httpsGet, httpsDelete, httpsPost, httpsPatch, httpsGetRange } from "./httpUtils";
+import { outputChannel } from "./outputChannel";
 import { isSalesforceProject } from "./projectUtils";
 
 /** Default: consider token expired after 55 minutes so we refresh before typical 2h OAuth expiry. */
@@ -111,30 +111,19 @@ export class AuthInfo {
 		if (!isSalesforceProject()) return null;
 
 		const key = this.cacheKey(targetOrg);
-		Logger.info(`Deploy: getAuthInfoForOrg(org=${targetOrg ?? "default"})`);
 
 		const valid = this.getValidFromCache(key);
-		if (valid) {
-			Logger.info(`Deploy: auth from cache (${valid.username})`);
-			return valid;
-		}
+		if (valid) return valid;
 
 		const existing = this.fetchLocks.get(key);
-		if (existing) {
-			Logger.info(`Deploy: auth fetch already in progress, awaiting`);
-			return existing;
-		}
+		if (existing) return existing;
 
 		const doFetch = async (): Promise<OrgAuth | null> => {
 			try {
-				Logger.info(`Deploy: sending auth request (sf org display${targetOrg ? ` -o ${targetOrg}` : ""})`);
 				const auth = await this.fetchOrgAuth(targetOrg);
 				if (auth) {
 					this.cache.set(key, auth);
-					Logger.info(`Deploy: auth answer received, cached (${auth.username})`);
 					outputChannel.appendLine(`AuthInfo: Cached ${auth.instanceUrl} (${auth.username})`);
-				} else {
-					Logger.info(`Deploy: auth answer failed (sf org display returned error)`);
 				}
 				return auth;
 			} finally {
@@ -257,6 +246,50 @@ export class AuthInfo {
 			httpsGet(buildUrl(a), a.accessToken)
 		);
 		return { body, auth };
+	}
+
+	/** Authenticated ranged GET (first `maxBytes`). On 401, refreshes and retries once. */
+	public static async getRange(
+		org: string | null,
+		buildUrl: (auth: OrgAuth) => string,
+		maxBytes: number
+	): Promise<string> {
+		const { result } = await this.withRetry(org, (a) => httpsGetRange(buildUrl(a), a.accessToken, maxBytes));
+		return result;
+	}
+
+	/**
+	 * Authenticated POST with a JSON body. On 401, forces CLI token refresh and
+	 * retries once. Returns the response text.
+	 */
+	public static async post(
+		org: string | null,
+		buildUrl: (auth: OrgAuth) => string,
+		body: unknown,
+		contentType = "application/json"
+	): Promise<string> {
+		const payload = typeof body === "string" ? body : JSON.stringify(body);
+		const { result } = await this.withRetry(org, (a) =>
+			httpsPost(buildUrl(a), payload, { Authorization: `Bearer ${a.accessToken}`, "Content-Type": contentType })
+		);
+		return result;
+	}
+
+	/**
+	 * Authenticated PATCH with a JSON body. On 401, forces CLI token refresh and
+	 * retries once. Returns the response text. Used for the Metadata REST deploy-cancel.
+	 */
+	public static async patch(
+		org: string | null,
+		buildUrl: (auth: OrgAuth) => string,
+		body: unknown,
+		contentType = "application/json"
+	): Promise<string> {
+		const payload = typeof body === "string" ? body : JSON.stringify(body);
+		const { result } = await this.withRetry(org, (a) =>
+			httpsPatch(buildUrl(a), payload, { Authorization: `Bearer ${a.accessToken}`, "Content-Type": contentType })
+		);
+		return result;
 	}
 
 	/**

@@ -33,18 +33,21 @@ import {
   pushSource,
   pushSourceForce,
   pullSource,
+  pullSourceForce,
   deployCurrentFile,
   retrieveCurrentFile,
-  runLocalTests,
   resetSourceTracking
 } from "./commands/devCommands";
+import { validateApexFile, registerValidateOnSave } from "./commands/validateApex";
 import { PermissionSetEditorProvider } from "./editors/PermissionSetEditorProvider";
 import { ScratchOrgDefEditorProvider } from "./editors/ScratchOrgDefEditorProvider";
 import { SOQLEditorProvider } from "./providers/SOQLEditorProvider";
 import { ObjectVisualizerPanelProvider } from "./providers/ObjectVisualizerPanelProvider";
 import { ProcessMapPanelProvider } from "./providers/ProcessMapPanelProvider";
-import { AnonymousApexViewProvider } from "./providers/AnonymousApexViewProvider";
+import { registerApexLogDecorator } from "./providers/ApexLogDecorator";
+import { ApexWorkbenchViewProvider } from "./providers/ApexWorkbenchViewProvider";
 import { Logger, outputChannel } from "./utils/outputChannel";
+import { Telemetry, categorizeError } from "./utils/telemetry";
 import { metadataDiff } from "./commands/metadataDiff";
 import { OrgHealthProvider } from "./commands/orgHealth";
 import { quickSoqlFromSelection } from "./commands/quickSoql";
@@ -62,6 +65,12 @@ import {
   type ApexSnippet
 } from "./commands/apexSnippets";
 import { ApexSnippetsPanelProvider } from "./providers/ApexSnippetsPanelProvider";
+import { PackageExplorerPanelProvider } from "./providers/PackageExplorerPanelProvider";
+import { CoveragePanelProvider } from "./providers/CoveragePanelProvider";
+import { ApexCoverageDecorationProvider } from "./providers/ApexCoverageDecorationProvider";
+import { CoverageLineDecorator } from "./providers/CoverageLineDecorator";
+import { toggleHideMetaXml } from "./commands/toggleHideMeta";
+import { apexCoverage, registerCoverageWatchers, clearApexTestResults } from "./utils/apexCoverageService";
 import { SnippetTreeProvider } from "./providers/SnippetTreeProvider";
 import { addToGitignore, addToForceignore, addToIgnore } from "./commands/addToIgnore";
 import { DataToolsPanelProvider } from "./providers/DataToolsPanelProvider";
@@ -69,13 +78,13 @@ import { RestExplorerPanelProvider } from "./providers/RestExplorerPanelProvider
 import { DataMigrationPanelProvider } from "./providers/DataMigrationPanelProvider";
 import * as path from "path";
 import * as fs from "fs";
-import { getPollingInterval } from "./utils/constants";
+import { startLanguageServer, stopLanguageServer } from "./languageClient";
 import { isSalesforceProject, updateSalesforceProjectContext, NOT_SFDX_PROJECT_MESSAGE } from "./utils/projectUtils";
 import { OrgMetadataCache } from "./utils/orgMetadataCache";
 import { AuthInfo } from "./utils/authInfo";
-import { getDeployDiagnosticCollection } from "./utils/deployDiagnostics";
+import { getDeployDiagnosticCollection, registerDeployDiagnosticAutoClear } from "./utils/deployDiagnostics";
 import { warmOrgListCache, invalidateOrgListCache, refreshOrgListCache } from "./utils/orgListCache";
-import { registerRemoveFinalNewlineHook } from "./utils/removeFinalNewlineHook";
+import { initDefaultOrgWatcher } from "./utils/defaultOrgEvents";
 
 function updateLwcContext(editor: vscode.TextEditor | undefined): void {
   if (!editor) {
@@ -125,10 +134,15 @@ function register(command: string, callback: (...args: any[]) => any, thisArg?: 
       vscode.window.showInformationMessage(NOT_SFDX_PROJECT_MESSAGE);
       return;
     }
+    const start = Date.now();
     try {
-      return await callback.call(thisArg, ...args);
+      const result = await callback.call(thisArg, ...args);
+      Telemetry.event("command", { command }, { durationMs: Date.now() - start, success: 1 });
+      return result;
     } catch (error) {
       Logger.error(`Error executing command: ${command}`, error);
+      Telemetry.error("commandError", { command, reason: categorizeError(error) });
+      Telemetry.event("command", { command }, { durationMs: Date.now() - start, success: 0 });
       throw error;
     }
   });
@@ -137,15 +151,43 @@ function register(command: string, callback: (...args: any[]) => any, thisArg?: 
 export function activate(context: vscode.ExtensionContext) {
   Logger.info('Extension "adure-sfx-toolkit" is starting activation...');
 
+  // Warm the default-org auth token as the very first thing (the initial fetch
+  // shells out to the CLI). Kicking it off here means it runs concurrently with
+  // the rest of activation, so every AuthInfo-based feature finds it cached.
+  if (isSalesforceProject()) AuthInfo.warmAuthForOrg(null);
+
+  // Watch for default (target) org changes — extension command or external `sf config set` —
+  // so the workbenches can realign their selected org and we drop stale default-org caches.
+  initDefaultOrgWatcher(context);
+
   // Set context so panels can show placeholder when not in SFDX project; update when workspace changes
   updateSalesforceProjectContext();
-  context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => updateSalesforceProjectContext()));
+  context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => {
+    updateSalesforceProjectContext();
+    // Start the language server if an SFDX project was just added (idempotent).
+    try {
+      startLanguageServer(context);
+    } catch {
+      /* ignore */
+    }
+  }));
 
   try {
     Logger.info("Extension activation starting...");
 
+    // 0. Telemetry (anonymous usage; respects VS Code global + opt-out setting)
+    Telemetry.init(context);
+    Telemetry.event("activated", { extensionVersion: context.extension.packageJSON.version });
+
     // 0. Bootstrap persistent state stores
     initDeployHistory(context);
+
+    // Org-aware SOQL language server (JVM-free). Safe no-op outside SFDX projects.
+    try {
+      startLanguageServer(context);
+    } catch (e) {
+      Logger.error(`Failed to start SFX language server: ${e instanceof Error ? e.message : String(e)}`);
+    }
     setOpenDeployPanelCallback((entry) => {
       const preset = {
         name: entry.presetName || "Re-deploy",
@@ -156,9 +198,6 @@ export function activate(context: vscode.ExtensionContext) {
       };
       void DeployMetadataPanelProvider.show(preset);
     });
-
-    // Remove-final-newline save hook (config-gated; safe to register before SFDX checks)
-    registerRemoveFinalNewlineHook(context);
 
     // 1. Filter Logs Commands
     // 1. Filter Logs Commands (Normal and Active versions point to same handler)
@@ -190,6 +229,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     // 4. Deploy Metadata (panel with tree, presets, org, test level)
     context.subscriptions.push(getDeployDiagnosticCollection());
+    registerDeployDiagnosticAutoClear(context);
     const deployMetadataCmd = register("adure-sfx-toolkit.deployMetadata", () => DeployMetadataPanelProvider.show());
     context.subscriptions.push(
       vscode.window.registerWebviewPanelSerializer(DeployMetadataPanelProvider.viewType, {
@@ -236,23 +276,31 @@ export function activate(context: vscode.ExtensionContext) {
     // 6. Execute SOQL
     const executeSOQLCmd = register("adure-sfx-toolkit.executeSOQL", executeSOQL);
 
-    // 7. Side Bar Log Provider (shows logs from .sfdx/tools/debug/logs, no own download)
-    vscode.window.registerTreeDataProvider("adure-sfx-toolkit.logs", logTreeProvider);
+    // 7. Side Bar Log Provider (lists the org's Apex logs over REST via apexLogApi —
+    //    same path as the ASFX Workbench; no local files or CLI download).
+    //    Discovery is event-driven (no fixed-interval polling): the list re-fetches
+    //    the moment the view becomes visible, when the window regains focus, and right
+    //    after Apex runs — so new logs surface immediately instead of up to N seconds later.
+    const logsView = vscode.window.createTreeView("adure-sfx-toolkit.logs", { treeDataProvider: logTreeProvider });
+    context.subscriptions.push(logsView);
+    // Only discover (and live-poll while a trace is active) while the view is shown.
+    logTreeProvider.setActive(logsView.visible);
 
-    const refreshLogsCmd = register("adure-sfx-toolkit.refreshLogs", async () => {
-      await logTreeProvider.fetchNewLogsFromOrg();
-      logTreeProvider.refresh();
-    });
+    const refreshLogsCmd = register("adure-sfx-toolkit.refreshLogs", () => logTreeProvider.refresh());
 
-    // Watch .sfdx/tools/debug/logs so the tree updates when Salesforce extensions add/change/remove logs
+    context.subscriptions.push(
+      logsView.onDidChangeVisibility((e) => logTreeProvider.setActive(e.visible)),
+      vscode.window.onDidChangeWindowState((s) => { if (s.focused && logsView.visible) logTreeProvider.refresh(); })
+    );
+
+    // A new log file written by the Salesforce extensions is a cheap extra signal that
+    // the org has fresh logs — trigger a re-list (the tree itself reads from REST).
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
     if (workspaceFolder) {
       const logWatcher = vscode.workspace.createFileSystemWatcher(
         new vscode.RelativePattern(workspaceFolder, ".sfdx/tools/debug/logs/*.log")
       );
-      logWatcher.onDidCreate(() => logTreeProvider.refresh());
-      logWatcher.onDidChange(() => logTreeProvider.refresh());
-      logWatcher.onDidDelete(() => logTreeProvider.refresh());
+      logWatcher.onDidCreate(() => { if (logsView.visible) logTreeProvider.refresh(); });
       context.subscriptions.push(logWatcher);
     }
 
@@ -330,10 +378,16 @@ export function activate(context: vscode.ExtensionContext) {
     const createScratchCmd = register("adure-sfx-toolkit.createScratch", createScratch);
     const quickScratchCmd = register("adure-sfx-toolkit.quickScratch", quickScratch);
 
-    // 8. Execute Apex panel (bottom panel only; content persisted in .vscode/anon-apex-buffer.apex)
-    const anonymousApexProvider = new AnonymousApexViewProvider(context.extensionUri);
+    // 8. Highlight Salesforce debug logs (.log + opened logs) per the configured rules.
+    registerApexLogDecorator(context);
+
+    // 8b. Apex Workbench panel (org-switchable logs, traces & execute).
     context.subscriptions.push(
-      vscode.window.registerWebviewViewProvider("adure-sfx-toolkit.anonymousApexPanel", anonymousApexProvider)
+      vscode.window.registerWebviewViewProvider(
+        "adure-sfx-toolkit.apexWorkbench",
+        new ApexWorkbenchViewProvider(context.extensionUri),
+        { webviewOptions: { retainContextWhenHidden: true } }
+      )
     );
 
     // 9. Development Actions
@@ -343,10 +397,12 @@ export function activate(context: vscode.ExtensionContext) {
     const pushCmd = register("adure-sfx-toolkit.pushSource", pushSource);
     const pushForceCmd = register("adure-sfx-toolkit.pushSourceForce", pushSourceForce);
     const pullCmd = register("adure-sfx-toolkit.pullSource", pullSource);
+    const pullForceCmd = register("adure-sfx-toolkit.pullSourceForce", pullSourceForce);
     const deployFileCmd = register("adure-sfx-toolkit.deployCurrentFile", deployCurrentFile);
     const retrieveFileCmd = register("adure-sfx-toolkit.retrieveCurrentFile", retrieveCurrentFile);
-    const runTestsCmd = register("adure-sfx-toolkit.runLocalTests", runLocalTests);
     const resetTrackingCmd = register("adure-sfx-toolkit.resetSourceTracking", resetSourceTracking);
+    const validateApexCmd = register("adure-sfx-toolkit.validateApexFile", () => validateApexFile());
+    registerValidateOnSave(context);
     const refreshMetadataCmd = register("adure-sfx-toolkit.refreshMetadata", async () => {
       await vscode.window.withProgress(
         {
@@ -389,51 +445,16 @@ export function activate(context: vscode.ExtensionContext) {
       })
     );
 
-    // 12. Polling Logic (clear interval on deactivate to avoid leak)
-    const pollingIntervalRef = { current: undefined as NodeJS.Timeout | undefined };
-
-    const startPollingCmd = register("adure-sfx-toolkit.startPolling", async () => {
-      logTreeProvider.isPolling = true;
-      await vscode.commands.executeCommand("setContext", "adure-sfx-toolkit:polling", true);
-
-      if (!pollingIntervalRef.current) {
-        // Immediate fetch from org, then every N seconds
-        logTreeProvider.fetchNewLogsFromOrg().then(() => logTreeProvider.refresh());
-        pollingIntervalRef.current = setInterval(() => {
-          if (logTreeProvider.isPolling) {
-            logTreeProvider.fetchNewLogsFromOrg();
-          }
-        }, getPollingInterval() * 1000);
-      }
-      vscode.window.showInformationMessage(`Log polling started: retrieving logs every ${getPollingInterval()}s`);
-    });
-
-    const stopPollingCmd = register("adure-sfx-toolkit.stopPolling", async () => {
-      logTreeProvider.isPolling = false;
-      await vscode.commands.executeCommand("setContext", "adure-sfx-toolkit:polling", false);
-
-      if (pollingIntervalRef.current) {
-        clearInterval(pollingIntervalRef.current);
-        pollingIntervalRef.current = undefined;
-      }
-      vscode.window.showInformationMessage("Log Polling Stopped");
-    });
-
-    context.subscriptions.push(
-      new vscode.Disposable(() => {
-        if (pollingIntervalRef.current) {
-          clearInterval(pollingIntervalRef.current);
-          pollingIntervalRef.current = undefined;
-        }
-      })
-    );
-
-    // Initialize context
-    vscode.commands.executeCommand("setContext", "adure-sfx-toolkit:polling", false);
+    // (Log discovery is now event-driven — see the Logs view registration above.
+    //  The old fixed-interval polling has been retired.)
 
     // 13. SOQL Editor
-    const openSOQLEditorCmd = register("adure-sfx-toolkit.openSOQLEditor", () => {
-      SOQLEditorProvider.show(context.extensionUri);
+    const openSOQLEditorCmd = register("adure-sfx-toolkit.openSOQLEditor", (query?: unknown, org?: unknown) => {
+      SOQLEditorProvider.show(
+        context.extensionUri,
+        typeof query === "string" ? query : undefined,
+        typeof org === "string" && org ? org : undefined
+      );
     });
     // Restore the SOQL panel after a window reload (so its tab doesn't vanish).
     context.subscriptions.push(
@@ -560,6 +581,44 @@ export function activate(context: vscode.ExtensionContext) {
 
     // 21. Data Migration Wizard
     const dataMigrationCmd = register("adure-sfx-toolkit.dataMigration", () => DataMigrationPanelProvider.show());
+
+    // 22. Package Explorer (Dev Hub 2GP)
+    const packageExplorerCmd = register("adure-sfx-toolkit.openPackageExplorer", (arg?: { orgData?: { username?: string } }) =>
+      PackageExplorerPanelProvider.show(arg?.orgData?.username)
+    );
+    const listInstalledPackagesCmd = register(
+      "adure-sfx-toolkit.listInstalledPackages",
+      (arg?: { orgData?: { username?: string } }) => {
+        const username = arg?.orgData?.username;
+        if (!username) {
+          vscode.window.showInformationMessage("Select an org from the Orgs panel to list its installed packages.");
+          return;
+        }
+        return PackageExplorerPanelProvider.showInstalled(username);
+      }
+    );
+
+    // 23. Apex coverage — Explorer badges + structured panel (shared store)
+    const covDecorator = new ApexCoverageDecorationProvider(context);
+    context.subscriptions.push(vscode.window.registerFileDecorationProvider(covDecorator));
+    registerCoverageWatchers(context); // auto-refresh when SF extensions write test results
+    const openCoverageCmd = register("adure-sfx-toolkit.openApexCoverage", () => CoveragePanelProvider.show());
+    const refreshCoverageCmd = register("adure-sfx-toolkit.refreshApexCoverage", () => CoveragePanelProvider.refreshData());
+    const lineDecorator = new CoverageLineDecorator(context);
+    context.subscriptions.push(lineDecorator);
+    const toggleCoverageLinesCmd = register("adure-sfx-toolkit.toggleApexCoverageLines", () => lineDecorator.toggle());
+    const toggleCoverageBadgeCmd = register("adure-sfx-toolkit.toggleApexCoverageBadge", () => covDecorator.toggleBadge());
+    const toggleHideMetaCmd = register("adure-sfx-toolkit.toggleHideMetaXml", () => toggleHideMetaXml());
+    const clearTestResultsCmd = register("adure-sfx-toolkit.clearApexTestResults", async () => {
+      const ok = await vscode.window.showWarningMessage(
+        "Delete all local Apex test results (.sfdx/tools/testresults) and clear coverage?",
+        { modal: true },
+        "Clear"
+      );
+      if (ok !== "Clear") return;
+      const removed = await clearApexTestResults();
+      vscode.window.showInformationMessage(`Cleared Apex test results (${removed} item${removed === 1 ? "" : "s"}) and coverage.`);
+    });
     const addToForceignoreCmd = register("adure-sfx-toolkit.addToForceignore", (uri?: vscode.Uri) =>
       addToForceignore(uri)
     );
@@ -589,8 +648,6 @@ export function activate(context: vscode.ExtensionContext) {
       refreshTracesCmd,
       quickTraceCmd,
       deleteTraceCmd,
-      startPollingCmd,
-      stopPollingCmd,
       refreshOrgsCmd,
       openOrgCmd,
       setAsDefaultCmd,
@@ -605,10 +662,11 @@ export function activate(context: vscode.ExtensionContext) {
       pushCmd,
       pushForceCmd,
       pullCmd,
+      pullForceCmd,
       deployFileCmd,
       retrieveFileCmd,
-      runTestsCmd,
       resetTrackingCmd,
+      validateApexCmd,
       refreshMetadataCmd,
       openSOQLEditorCmd,
       objectVisualizerCmd,
@@ -637,13 +695,22 @@ export function activate(context: vscode.ExtensionContext) {
       lwcCssCmd,
       dataToolsCmd,
       restExplorerCmd,
-      dataMigrationCmd
+      dataMigrationCmd,
+      packageExplorerCmd,
+      listInstalledPackagesCmd,
+      openCoverageCmd,
+      refreshCoverageCmd,
+      toggleCoverageLinesCmd,
+      toggleCoverageBadgeCmd,
+      toggleHideMetaCmd,
+      clearTestResultsCmd
     );
 
     if (isSalesforceProject()) {
       warmOrgListCache();
-      AuthInfo.warmAuthForOrg(null);       // pre-fetch token so first API call doesn't start cold
       OrgMetadataCache.warmDefaultOrg();   // pre-load sobject list for SOQL completion
+      void apexCoverage.refresh().catch(() => undefined); // populate Explorer coverage badges
+      // (auth token already warmed at the top of activate)
     }
     context.subscriptions.push(
       vscode.workspace.onDidChangeWorkspaceFolders(() => {
@@ -661,6 +728,7 @@ export function activate(context: vscode.ExtensionContext) {
   }
 }
 
-export function deactivate() {
+export function deactivate(): Thenable<void> | undefined {
   Logger.info('Extension "adure-sfx-toolkit" is deactivating...');
+  return stopLanguageServer();
 }

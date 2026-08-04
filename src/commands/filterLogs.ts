@@ -42,7 +42,7 @@ async function toggleFilter(type: FilterType, uri?: vscode.Uri) {
             cancellable: false
         }, async () => {
             // Toggle the filter
-            logContentProvider.toggleFilter(targetUri!, type);
+            await logContentProvider.toggleFilter(targetUri!, type);
             
             // Update context if the modified log is the active one
             if (editor && editor.document.uri.toString() === targetUri!.toString()) {

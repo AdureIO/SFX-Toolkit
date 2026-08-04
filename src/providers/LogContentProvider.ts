@@ -1,8 +1,6 @@
 import * as vscode from 'vscode';
-import * as fs from 'fs';
-import * as path from 'path';
 import { Logger } from '../utils/outputChannel';
-import { getSalesforceLogDirectory } from '../utils/logPaths';
+import { fetchApexLogBody } from '../utils/apexLogApi';
 
 // Filter Modes
 export type FilterType = 'DEBUG' | 'SOQL';
@@ -11,7 +9,7 @@ export class LogContentProvider implements vscode.TextDocumentContentProvider {
     // Map uri string -> { original: string, activeFilters: Set<FilterType> }
     private logData = new Map<string, { original: string, activeFilters: Set<FilterType> }>();
     private readonly maxCachedLogs = 10;
-    
+
     // Emitter for content changes
     private _onDidChange = new vscode.EventEmitter<vscode.Uri>();
     readonly onDidChange = this._onDidChange.event;
@@ -21,57 +19,52 @@ export class LogContentProvider implements vscode.TextDocumentContentProvider {
     }
 
     private parseLogId(uri: vscode.Uri): string | undefined {
-        // Expected shape: sf-log://log/<logId>
+        // Expected shape: sf-log://log/<logId>.log
         if (uri.scheme !== 'sf-log') return undefined;
         const authority = (uri.authority || '').toLowerCase();
-        const logId = uri.path.replace(/^\/+/, '');
+        const logId = uri.path.replace(/^\/+/, '').replace(/\.log$/i, '');
         if (authority !== 'log' || !logId) return undefined;
         return logId;
     }
 
-    private tryRehydrateContent(uri: vscode.Uri): boolean {
+    /** Re-fetch a log body over REST when the in-memory copy is gone (e.g. after a window reload). */
+    private async rehydrate(uri: vscode.Uri): Promise<boolean> {
         const key = this.getKey(uri);
         const logId = this.parseLogId(uri);
         if (!logId) return false;
-
-        const logDir = getSalesforceLogDirectory();
-        if (!logDir) return false;
-
-        const logPath = path.join(logDir, `${logId}.log`);
-        if (!fs.existsSync(logPath)) return false;
-
         try {
-            const content = fs.readFileSync(logPath, 'utf-8');
+            const content = await fetchApexLogBody(null, logId);
+            if (!content) return false;
             this.logData.set(key, { original: content, activeFilters: new Set() });
             this.evictIfNeeded();
-            Logger.info(`LogContentProvider: Rehydrated content for ${key} from ${logPath}`);
+            Logger.info(`LogContentProvider: Rehydrated ${key} over REST`);
             return true;
         } catch (error) {
-            Logger.warn(`LogContentProvider: Failed to rehydrate content for ${key}: ${error}`);
+            Logger.warn(`LogContentProvider: Failed to rehydrate ${key}: ${error}`);
             return false;
         }
     }
 
-    provideTextDocumentContent(uri: vscode.Uri): string {
+    async provideTextDocumentContent(uri: vscode.Uri): Promise<string> {
         const key = this.getKey(uri);
         let data = this.logData.get(key);
-        if (!data && this.tryRehydrateContent(uri)) {
+        if (!data && (await this.rehydrate(uri))) {
             data = this.logData.get(key);
         }
         if (!data) {
             Logger.warn(`LogContentProvider: No content found for ${key}`);
             return "Log content not found or cleared.";
         }
-        
+
         // If no filters are active, return original (Show All)
         if (data.activeFilters.size === 0) {
             return data.original;
         }
-        
+
         // Otherwise, union of active filters
         return this.getFilteredContent(data.original, data.activeFilters);
     }
-    
+
     public setContent(uri: vscode.Uri, content: string) {
         const key = this.getKey(uri);
         Logger.info(`LogContentProvider: Setting content for ${key}`);
@@ -103,19 +96,19 @@ export class LogContentProvider implements vscode.TextDocumentContentProvider {
             this.logData.delete(oldestKey);
         }
     }
-    
-    public toggleFilter(uri: vscode.Uri, type: FilterType) {
+
+    public async toggleFilter(uri: vscode.Uri, type: FilterType) {
         const key = this.getKey(uri);
         let data = this.logData.get(key);
-        if (!data && this.tryRehydrateContent(uri)) {
+        if (!data && (await this.rehydrate(uri))) {
             data = this.logData.get(key);
         }
-        
+
         if (!data) {
             Logger.error(`LogContentProvider: Failed to toggle filter ${type} for ${key} - Content not found`);
             return;
         }
-        
+
         if (data.activeFilters.has(type)) {
             Logger.info(`LogContentProvider: Removing filter ${type} for ${key}`);
             data.activeFilters.delete(type);
@@ -123,11 +116,11 @@ export class LogContentProvider implements vscode.TextDocumentContentProvider {
             Logger.info(`LogContentProvider: Adding filter ${type} for ${key}`);
             data.activeFilters.add(type);
         }
-        
+
         this.logData.set(key, data);
-        this._onDidChange.fire(uri); 
+        this._onDidChange.fire(uri);
     }
-    
+
     // Check if a specific filter is active
     public isFilterActive(uri: vscode.Uri, type: FilterType): boolean {
         const key = this.getKey(uri);
@@ -136,7 +129,7 @@ export class LogContentProvider implements vscode.TextDocumentContentProvider {
 
     private getFilteredContent(original: string, filters: Set<FilterType>): string {
         const lines = original.split('\n');
-        
+
         let keepNext = false;
         // Simplified regex: Matches Line starting with Timestamp HH:MM:SS
         const eventStartRegex = /^\d{2}:\d{2}:\d{2}\./;
@@ -147,7 +140,7 @@ export class LogContentProvider implements vscode.TextDocumentContentProvider {
             if (isEventStart) {
                 // Determine if this new event matches any filter
                 let matches = false;
-                
+
                 if (filters.has('DEBUG')) {
                     if (line.includes('|USER_DEBUG|') || line.includes('FATAL_ERROR') || line.includes('EXCEPTION_THROWN') || line.includes('|ERROR|')) matches = true;
                 }
@@ -155,7 +148,7 @@ export class LogContentProvider implements vscode.TextDocumentContentProvider {
                     // Combine SOQL and DML
                     if (line.includes('|SOQL_EXECUTE') || line.includes('|DML_')) matches = true;
                 }
-                
+
                 keepNext = matches;
                 return matches;
             } else {

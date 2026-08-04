@@ -4,7 +4,7 @@
   "publisher": "AdureIO",
   "description": "Utilities for Salesforce development: Log filtering, Debug Traces, Deployment, and more.",
   "icon": "resources/icon.png",
-  "version": "0.13.2",
+  "version": "1.2.0",
   "license": "BSD-3-Clause",
   "engines": {
     "vscode": "^1.80.0"
@@ -12,6 +12,9 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/AdureIO/SFX-Toolkit.git"
+  },
+  "sponsor": {
+    "url": "https://github.com/sponsors/AdureIO"
   },
   "categories": [
     "Programming Languages",
@@ -96,16 +99,6 @@
         "command": "adure-sfx-toolkit.deleteAllLogs",
         "title": "ASFXT: Delete All Logs",
         "icon": "$(trash)"
-      },
-      {
-        "command": "adure-sfx-toolkit.startPolling",
-        "title": "ASFXT: Start Polling",
-        "icon": "$(play)"
-      },
-      {
-        "command": "adure-sfx-toolkit.stopPolling",
-        "title": "ASFXT: Stop Polling",
-        "icon": "$(debug-stop)"
       },
       {
         "command": "adure-sfx-toolkit.deleteTrace",
@@ -211,6 +204,11 @@
         "icon": "$(cloud-download)"
       },
       {
+        "command": "adure-sfx-toolkit.pullSourceForce",
+        "title": "ASFXT: Pull Source (Force/Override)",
+        "icon": "$(alert)"
+      },
+      {
         "command": "adure-sfx-toolkit.deployCurrentFile",
         "title": "ASFXT: Deploy Current File"
       },
@@ -219,8 +217,9 @@
         "title": "ASFXT: Retrieve Current File"
       },
       {
-        "command": "adure-sfx-toolkit.runLocalTests",
-        "title": "ASFXT: Run Local Tests"
+        "command": "adure-sfx-toolkit.validateApexFile",
+        "title": "ASFXT: Validate Apex Against Org",
+        "icon": "$(check-all)"
       },
       {
         "command": "adure-sfx-toolkit.resetSourceTracking",
@@ -361,6 +360,46 @@
         "icon": "$(arrow-swap)"
       },
       {
+        "command": "adure-sfx-toolkit.openPackageExplorer",
+        "title": "ASFXT: Package Explorer (Dev Hub)",
+        "icon": "$(package)"
+      },
+      {
+        "command": "adure-sfx-toolkit.listInstalledPackages",
+        "title": "ASFXT: List Installed Packages",
+        "icon": "$(package)"
+      },
+      {
+        "command": "adure-sfx-toolkit.openApexCoverage",
+        "title": "ASFXT: Apex Coverage",
+        "icon": "$(shield)"
+      },
+      {
+        "command": "adure-sfx-toolkit.refreshApexCoverage",
+        "title": "ASFXT: Refresh Apex Coverage",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "adure-sfx-toolkit.toggleApexCoverageLines",
+        "title": "ASFXT: Toggle Apex Coverage Line Highlights",
+        "icon": "$(list-selection)"
+      },
+      {
+        "command": "adure-sfx-toolkit.toggleApexCoverageBadge",
+        "title": "ASFXT: Toggle Apex Coverage % Badge (Explorer)",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "adure-sfx-toolkit.clearApexTestResults",
+        "title": "ASFXT: Clear Apex Test Results",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "adure-sfx-toolkit.toggleHideMetaXml",
+        "title": "ASFXT: Toggle Hide Apex -meta.xml Files",
+        "icon": "$(eye-closed)"
+      },
+      {
         "command": "adure-sfx-toolkit.openApexTests",
         "title": "ASFXT: Open Apex Tests (Test Explorer)",
         "category": "Adure SFX Toolkit"
@@ -377,6 +416,15 @@
           ".log"
         ],
         "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "soql",
+        "aliases": [
+          "SOQL"
+        ],
+        "extensions": [
+          ".soql"
+        ]
       }
     ],
     "grammars": [
@@ -396,9 +444,9 @@
       ],
       "panel": [
         {
-          "id": "adure-sfx-toolkit-panel",
-          "title": "Execute Apex",
-          "icon": "$(play)"
+          "id": "adure-sfx-toolkit-workbench",
+          "title": "ASFX Workbench",
+          "icon": "$(beaker)"
         }
       ]
     },
@@ -407,7 +455,8 @@
         {
           "id": "adure-sfx-toolkit.logs",
           "name": "Logs",
-          "when": "adure-sfx-toolkit:isSalesforceProject"
+          "when": "adure-sfx-toolkit:isSalesforceProject",
+          "visibility": "collapsed"
         },
         {
           "id": "adure-sfx-toolkit.traces",
@@ -431,11 +480,11 @@
           "when": "adure-sfx-toolkit:isSalesforceProject"
         }
       ],
-      "adure-sfx-toolkit-panel": [
+      "adure-sfx-toolkit-workbench": [
         {
           "type": "webview",
-          "id": "adure-sfx-toolkit.anonymousApexPanel",
-          "name": "Apex",
+          "id": "adure-sfx-toolkit.apexWorkbench",
+          "name": "ASFX Workbench",
           "when": "adure-sfx-toolkit:isSalesforceProject"
         }
       ]
@@ -499,16 +548,6 @@
           "group": "navigation"
         },
         {
-          "command": "adure-sfx-toolkit.startPolling",
-          "when": "view == adure-sfx-toolkit.logs && !adure-sfx-toolkit:polling",
-          "group": "navigation"
-        },
-        {
-          "command": "adure-sfx-toolkit.stopPolling",
-          "when": "view == adure-sfx-toolkit.logs && adure-sfx-toolkit:polling",
-          "group": "navigation"
-        },
-        {
           "command": "adure-sfx-toolkit.refreshTraces",
           "when": "view == adure-sfx-toolkit.traces",
           "group": "navigation"
@@ -565,11 +604,6 @@
         },
         {
           "command": "adure-sfx-toolkit.retrieveCurrentFile",
-          "when": "view == adure-sfx-toolkit.development",
-          "group": "inline"
-        },
-        {
-          "command": "adure-sfx-toolkit.runLocalTests",
           "when": "view == adure-sfx-toolkit.development",
           "group": "inline"
         },
@@ -636,6 +670,21 @@
           "group": "inline"
         },
         {
+          "command": "adure-sfx-toolkit.openPackageExplorer",
+          "when": "view == adure-sfx-toolkit.orgs && viewItem == org-devhub",
+          "group": "inline"
+        },
+        {
+          "command": "adure-sfx-toolkit.openPackageExplorer",
+          "when": "view == adure-sfx-toolkit.orgs && viewItem == org-devhub",
+          "group": "2_copy"
+        },
+        {
+          "command": "adure-sfx-toolkit.listInstalledPackages",
+          "when": "view == adure-sfx-toolkit.orgs && viewItem =~ /^org-/",
+          "group": "2_copy"
+        },
+        {
           "command": "adure-sfx-toolkit.renameAlias",
           "when": "view == adure-sfx-toolkit.orgs && viewItem =~ /org-*/",
           "group": "1_modify"
@@ -666,6 +715,11 @@
           "command": "adure-sfx-toolkit.executeAnonymous",
           "when": "resourceLangId == apex",
           "group": "navigation@1"
+        },
+        {
+          "command": "adure-sfx-toolkit.validateApexFile",
+          "when": "resourceExtname == .cls || resourceExtname == .trigger",
+          "group": "navigation@2"
         },
         {
           "command": "adure-sfx-toolkit.rerunLastApex",
@@ -793,12 +847,12 @@
     "configuration": {
       "title": "Adure SFX Toolkit",
       "properties": {
-        "adure-sfx-toolkit.pollingIntervalSeconds": {
+        "adure-sfx-toolkit.liveLogIntervalSeconds": {
           "type": "number",
-          "default": 5,
-          "minimum": 1,
+          "default": 3,
+          "minimum": 2,
           "maximum": 60,
-          "description": "Interval in seconds for polling new debug logs from the org."
+          "description": "How often (seconds) the log views refresh while live — i.e. while a debug trace is active. Logs are not polled when no trace is active."
         },
         "adure-sfx-toolkit.maxLogFiles": {
           "type": "number",
@@ -821,8 +875,138 @@
         },
         "adure-sfx-toolkit.toolingApiVersion": {
           "type": "string",
-          "default": "v60.0",
+          "default": "v67.0",
           "description": "Salesforce Tooling API version."
+        },
+        "adure-sfx-toolkit.apexLog.highlightPatterns": {
+          "type": "array",
+          "scope": "resource",
+          "markdownDescription": "Line-highlighting rules for Salesforce debug logs (`.log` files and the Execute Apex results pane). Each rule is a regular expression with a color and optional style. Order matters: the first matching rule wins for a line.",
+          "default": [
+            {
+              "pattern": "\\|FATAL_ERROR\\|.*",
+              "foreground": "#f64b4b",
+              "highlightEntireLine": true
+            },
+            {
+              "pattern": "\\|EXCEPTION_THROWN\\|.*",
+              "foreground": "#f64b4b",
+              "highlightEntireLine": true
+            },
+            {
+              "pattern": "\\|USER_DEBUG\\|.*",
+              "foreground": "#6c64ff",
+              "fontStyle": "bold",
+              "highlightEntireLine": true
+            },
+            {
+              "pattern": "\\|SOQL_EXECUTE_BEGIN\\|.*",
+              "foreground": "#15d274",
+              "fontStyle": "bold",
+              "highlightEntireLine": true
+            },
+            {
+              "pattern": "\\|DML_BEGIN\\|.*",
+              "foreground": "#e2c08d",
+              "fontStyle": "bold",
+              "highlightEntireLine": true
+            }
+          ],
+          "items": {
+            "type": "object",
+            "required": [
+              "pattern"
+            ],
+            "properties": {
+              "pattern": {
+                "type": "string",
+                "description": "Regular expression matched against each log line."
+              },
+              "foreground": {
+                "type": "string",
+                "description": "Text color (hex, e.g. #f64b4b)."
+              },
+              "fontStyle": {
+                "type": "string",
+                "enum": [
+                  "normal",
+                  "bold",
+                  "italic",
+                  "bold italic"
+                ],
+                "description": "Font style for matched text."
+              },
+              "highlightEntireLine": {
+                "type": "boolean",
+                "default": false,
+                "description": "Color the whole line rather than only the matched text."
+              }
+            }
+          }
+        },
+        "adure-sfx-toolkit.soql.enableCompletion": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable org-aware SOQL code completion (objects, fields, relationships, subqueries, picklist values) in .soql files."
+        },
+        "adure-sfx-toolkit.apex.languageServer": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "on",
+            "off"
+          ],
+          "default": "on",
+          "markdownDescription": "Apex *semantic* features (outline, syntax diagnostics, go-to-definition for your own classes, signature help) from the SFX language server. `on` (default): always enabled. `auto`: enabled only when the official Salesforce Apex extension is not installed (avoids duplicates). `off`: disabled."
+        },
+        "adure-sfx-toolkit.apex.enableCompletion": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Org-aware Apex code completion (SObject fields on `var.`, `new` constructors, and SObject type names). This is additive to the Salesforce Apex extension. Turn **off** if you see duplicate suggestions and prefer the Salesforce extension's completion."
+        },
+        "adure-sfx-toolkit.apex.validateSemantics": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Offline schema validation: flag `variable.Field` accesses whose field or relationship does not exist on the SObject, checked against cached org metadata (no org round-trip). Warnings appear as you open/save Apex files. Conservative — only flags members it can confidently resolve. Requires Apex semantic features (`apex.languageServer` not `off`)."
+        },
+        "adure-sfx-toolkit.deploy.liveStatus": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "In the **Deploy Metadata** panel, show live status by polling the Metadata REST API for structured progress (stage, components X/Y, tests X/Y) and routing failures to the Problems view. Turn **off** to stream the classic `sf project deploy start` CLI output instead. (Push/Pull always run a synchronous deploy so source tracking stays correct — this setting does not affect them.)"
+        },
+        "adure-sfx-toolkit.apex.validateOnSave": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "On save, validate the Apex file against the default org with a check-only (dry-run) deploy and show compiler errors in the Problems view. Authoritative (catches type/reference errors the offline check cannot) but performs an org round-trip on every save, so it is **off by default**. Also available on demand via **ASFXT: Validate Apex Against Org**."
+        },
+        "adure-sfx-toolkit.apex.autoRestartLanguageServer": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "After generating/updating SObject stubs, restart the Salesforce Apex Language Server. **Off by default and not recommended:** the Salesforce LS already picks up stub-file changes incrementally via its file watcher, and restarting on large change sets can trigger a Salesforce indexer crash. Enable only if you specifically need a forced re-index. Throttled to once every 30s."
+        },
+        "adure-sfx-toolkit.apex.restartAfterInitialLoad": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Once, after the Salesforce Apex Language Server finishes its initial load, perform a single clean restart so the SObject stubs generated this session are indexed and the new types are available. Waits for loading to complete (never restarts mid-index) and runs at most once per session. Requires the Salesforce Apex extension and stub generation."
+        },
+        "adure-sfx-toolkit.apex.monitorLanguageServer": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Watch the Salesforce Apex Language Server and, if it crashes and stays down (after its own retries), perform a **clean restart** (reset the Apex DB) to recover from DB corruption. Bounded to 2 attempts — if it still fails, shows an error and stops (no restart loop). Requires the Salesforce Apex extension."
+        },
+        "adure-sfx-toolkit.apex.stubScope": {
+          "type": "string",
+          "enum": [
+            "referenced",
+            "all"
+          ],
+          "default": "referenced",
+          "markdownDescription": "Which objects get generated stubs. `referenced` (default, lean): only objects used in your code get full stubs — tens of files, minimal CPU/IO. `all`: additionally writes lightweight type-only stubs for every org object (heavier; thousands of files) so any object resolves and is discoverable by AI."
+        },
+        "adure-sfx-toolkit.apex.generateSObjectStubs": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Generate SObject schema stubs into `.sfdx/tools/sobjects` in the background so the Salesforce Apex Language Server recognizes objects its own refresh skips (custom metadata types, platform events, namespaced objects) and so AI tooling can discover the schema. Full field stubs are written for objects referenced in your code; lightweight type-only stubs for the rest. Salesforce-generated stubs for objects you use are **extended** with any missing fields (inside a delimited, re-runnable region; Salesforce's own content is preserved). Regenerated after org switch, pull, and Refresh Metadata."
         },
         "adure-sfx-toolkit.parallelDeletes": {
           "type": "number",
@@ -855,36 +1039,13 @@
           "default": true,
           "description": "Show a confirmation dialog before deploying metadata, pushing source, or executing Apex against a non-sandbox org (production, Developer Edition, or Dev Hub)."
         },
-        "adure-sfx-toolkit.removeFinalNewline.enabled": {
-          "type": "boolean",
-          "default": false,
-          "description": "When enabled, the toolkit strips the trailing end-of-file newline(s) from saved documents whose language is in 'languages' AND whose workspace-relative path matches at least one glob in 'patterns'. Useful when Prettier insists on appending a final newline that you do not want for specific files (e.g., LWC bundles)."
-        },
-        "adure-sfx-toolkit.removeFinalNewline.patterns": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "Workspace-relative globs (forward-slash separated) selecting which files participate. A document is only stripped if it matches at least one of these globs. Example: [\"force-app/main/Polca/components/lwc/**/*.js\", \"force-app/main/Polca/components/lwc/**/*.html\", \"force-app/main/Polca/components/lwc/**/*.css\"]."
-        },
-        "adure-sfx-toolkit.removeFinalNewline.languages": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [
-            "javascript",
-            "javascriptreact",
-            "html",
-            "css"
-          ],
-          "description": "VS Code language identifiers eligible for trailing-newline stripping. A document must have one of these language ids in addition to matching a configured pattern."
-        },
-        "adure-sfx-toolkit.removeFinalNewline.runOnSave": {
+        "adure-sfx-toolkit.telemetry.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "When true, strip trailing newlines automatically as part of the save lifecycle (onWillSaveTextDocument). Set to false to disable the save-time behaviour while keeping the feature configured."
+          "markdownDescription": "Send anonymous usage telemetry (which features are used, success/failure rates, durations) to help prioritize development. No code, queries, org details, or personal data are ever collected. This setting also respects VS Code's global `#telemetry.telemetryLevel#` — disabling either one turns telemetry off.",
+          "tags": [
+            "telemetry"
+          ]
         }
       }
     }
@@ -895,9 +1056,10 @@
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src --ext ts",
-    "test": "node ./out/test/runTest.js",
+    "test": "npm run compile && node ./out/test/runTest.js",
     "package": "vsce package",
-    "test:unit": "npm run compile && mocha --reporter spec \"out/test/**/*.test.js\"",
+    "test:unit": "npm run compile && mocha --reporter spec --timeout 15000 \"out/test/**/*.test.js\"",
+    "test:server": "npm run compile && mocha --reporter spec --timeout 15000 out/test/languageServer.test.js out/test/sobjectStubSync.test.js out/test/soqlValidate.test.js out/test/nameMatch.test.js out/test/apexLogParse.test.js out/test/soqlError.test.js out/test/soqlEdit.test.js",
     "bundle": "node esbuild.js --production",
     "bundle:dev": "node esbuild.js"
   },
@@ -914,16 +1076,24 @@
     "esbuild": "^0.28.1",
     "eslint": "^8.41.0",
     "mocha": "^10.8.2",
-    "typescript": "^5.1.3"
+    "typescript": "^5.1.3",
+    "vscode-jsonrpc": "^9.0.0"
   },
   "dependencies": {
+    "@apexdevtools/apex-parser": "5.0.0",
+    "@salesforce/soql-language-server": "1.1.0",
+    "@vscode/extension-telemetry": "^1.5.2",
     "cytoscape": "^3.34.0",
     "cytoscape-dagre": "^4.0.0",
     "cytoscape-node-html-label": "^1.2.2",
     "cytoscape-svg": "^0.4.0",
     "dagre": "^0.8.5",
-    "fast-xml-parser": "^5.5.7",
+    "fast-xml-parser": "^5.10.1",
     "glob": "^8.1.0",
-    "minimatch": "^10.2.5"
+    "minimatch": "^10.2.5",
+    "monaco-editor": "^0.52.2",
+    "vscode-languageclient": "^9.0.1",
+    "vscode-languageserver": "^9.0.1",
+    "vscode-languageserver-textdocument": "^1.0.12"
   }
 }

@@ -7,69 +7,26 @@
  * Complements OrgMetadataCache (which serves the lighter SOQL-completion describe)
  * with the richer schema information needed by data operations.
  */
-import { AuthInfo } from "./authInfo";
-import { getToolingApiVersion } from "./constants";
-import { outputChannel } from "./outputChannel";
+import { DescribeStore } from "./describeStore";
 import type { SObjectDescribe, FieldDescribe, ChildRelationship } from "./dataMigration";
-
-// ─── Constants ────────────────────────────────────────────────────────────────
-
-const CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
-const CACHE_KEY_DEFAULT = "__default__";
-
-// ─── Internal types ────────────────────────────────────────────────────────────
-
-interface CacheEntry {
-  describe: SObjectDescribe;
-  fetchedAt: number;
-}
-
-function orgKey(org: string | null): string {
-  return org === null || org === "" ? CACHE_KEY_DEFAULT : org;
-}
 
 // ─── Cache implementation ─────────────────────────────────────────────────────
 
+// Rich describes are not cached here — they're parsed on demand from the shared
+// DescribeStore (the single per-org, ~10-min cache). This class only adds the
+// richer parsing shape on top.
 class SchemaCacheImpl {
-  private cache = new Map<string, Map<string, CacheEntry>>();
-
-  private getOrgMap(org: string | null): Map<string, CacheEntry> {
-    const key = orgKey(org);
-    let m = this.cache.get(key);
-    if (!m) {
-      m = new Map();
-      this.cache.set(key, m);
-    }
-    return m;
-  }
-
   /**
    * Get a rich SObject describe (fields with createable, externalId, unique, nillable, etc).
-   * Results are cached per org+sobject with a 15-minute TTL.
+   * Sourced from the shared DescribeStore (the single per-org, ~10-min cache); we parse on
+   * each call rather than keeping a parsed copy that could outlive the store's TTL.
    * Uses AuthInfo for authenticated REST calls with automatic 401 retry.
    */
   async getRichDescribe(org: string | null, sobject: string): Promise<SObjectDescribe | null> {
     if (!sobject) return null;
-    const map = this.getOrgMap(org);
-    const entry = map.get(sobject);
-    if (entry && Date.now() - entry.fetchedAt < CACHE_TTL_MS) {
-      return entry.describe;
-    }
-
-    const version = getToolingApiVersion();
-    try {
-      const { body } = await AuthInfo.get(org, (a) =>
-        `${a.instanceUrl.replace(/\/$/, "")}/services/data/${version}/sobjects/${encodeURIComponent(sobject)}/describe`
-      );
-      const raw = JSON.parse(body) as Record<string, unknown>;
-      const describe = this.parseDescribe(raw);
-      map.set(sobject, { describe, fetchedAt: Date.now() });
-      return describe;
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : String(e);
-      outputChannel.appendLine(`SchemaCache: describe ${sobject} failed: ${msg}`);
-      return null;
-    }
+    const raw = (await DescribeStore.getRaw(org, sobject)) as Record<string, unknown> | null;
+    if (!raw) return null;
+    return this.parseDescribe(raw);
   }
 
   private parseDescribe(raw: Record<string, unknown>): SObjectDescribe {
@@ -115,23 +72,17 @@ class SchemaCacheImpl {
    * Call after the user refreshes metadata or after a deploy that changed field definitions.
    */
   invalidate(org: string | null): void {
-    this.cache.delete(orgKey(org));
+    DescribeStore.invalidate(org);
   }
 
   /** Invalidate a specific sobject's cached describe. */
   invalidateSObject(org: string | null, sobject: string): void {
-    this.getOrgMap(org).delete(sobject);
+    DescribeStore.invalidateSObject(org, sobject);
   }
 
   /** Clear all cached describes across all orgs. */
   clear(): void {
-    this.cache.clear();
-  }
-
-  /** Stats for a given org: how many describes are currently cached. */
-  stats(org: string | null): { count: number; sobjects: string[] } {
-    const map = this.getOrgMap(org);
-    return { count: map.size, sobjects: Array.from(map.keys()) };
+    DescribeStore.invalidateAll();
   }
 }
 

@@ -19,6 +19,7 @@ import {
   type FieldDescribe,
   type MigrationProgress
 } from "../utils/dataMigration";
+import { Telemetry } from "../utils/telemetry";
 
 // ─── Field availability comparison (source vs target org) ──────────────────────
 
@@ -212,6 +213,7 @@ export class DataMigrationPanelProvider {
           return;
         }
         try {
+          Telemetry.event("dataMigration");
           panel.webview.postMessage({ command: "migrationStarted" });
           const [srcOrg, tgtOrg] = await Promise.all([
             resolveOrgToInfo(sourceOrg || null),

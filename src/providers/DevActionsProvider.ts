@@ -33,6 +33,7 @@ export class DevActionsProvider implements vscode.TreeDataProvider<vscode.TreeIt
 				this.createItem("Push Source", "adure-sfx-toolkit.pushSource", "cloud-upload", "Deploy all source to default org"),
 				this.createItem("Push Source (Force)", "adure-sfx-toolkit.pushSourceForce", "alert", "Force push source (overwrite conflicts)"),
 				this.createItem("Pull Source", "adure-sfx-toolkit.pullSource", "cloud-download", "Retrieve all source from default org"),
+					this.createItem("Pull Source (Force)", "adure-sfx-toolkit.pullSourceForce", "alert", "Force pull source (overwrite conflicts)"),
 				this.createItem("Reset Source Tracking", "adure-sfx-toolkit.resetSourceTracking", "history", "Reset source tracking for default org"),
 			]),
 			new DevGroupItem("Deploy & Retrieve", "package", [
@@ -43,6 +44,10 @@ export class DevActionsProvider implements vscode.TreeDataProvider<vscode.TreeIt
 			]),
 			new DevGroupItem("Test", "beaker", [
 				this.createItem("Apex Tests (Test Explorer)", "adure-sfx-toolkit.openApexTests", "beaker", "Open the native Testing view — run Apex tests with results & code coverage"),
+				this.createItem("Apex Coverage", "adure-sfx-toolkit.openApexCoverage", "shield", "Org-wide Apex coverage — worst-first table, with % badges in the Explorer"),
+				this.createItem("Toggle Coverage Line Highlights", "adure-sfx-toolkit.toggleApexCoverageLines", "list-selection", "Show/hide covered & uncovered line highlights in Apex files (stays live while on)"),
+				this.createItem("Toggle Coverage % Badge", "adure-sfx-toolkit.toggleApexCoverageBadge", "eye", "Show/hide the coverage % badge on files in the Explorer (coverage stays on hover)"),
+				this.createItem("Clear Test Results", "adure-sfx-toolkit.clearApexTestResults", "clear-all", "Delete local .sfdx/tools/testresults and clear coverage"),
 			]),
 			new DevGroupItem("Query & API", "database", [
 				this.createItem("SOQL Builder & Editor", "adure-sfx-toolkit.openSOQLEditor", "database", "Build and run SOQL queries"),
@@ -51,10 +56,12 @@ export class DevActionsProvider implements vscode.TreeDataProvider<vscode.TreeIt
 					this.createItem("REST / API Explorer", "adure-sfx-toolkit.restExplorer", "globe", "Send REST/Tooling API requests to an org"),
 			]),
 			new DevGroupItem("Tools", "tools", [
+				this.createItem("ASFX Workbench", "adure-sfx-toolkit.apexWorkbench.focus", "beaker", "Open the ASFX Workbench (org-aware logs, traces, execute & SOQL)"),
 				this.createItem("Refresh Org Metadata", "adure-sfx-toolkit.refreshMetadata", "refresh", "Refresh sobject/field cache for SOQL and builders"),
 				this.createItem("Apex Snippets", "adure-sfx-toolkit.showSnippets", "play", "Run, add, edit or delete Apex snippets"),
 				this.createItem("Apex Snippets Overview", "adure-sfx-toolkit.openSnippetsPanel", "list-unordered", "Open panel with all snippets"),
 				this.createItem("Org Health", "adure-sfx-toolkit.orgHealth", "dashboard", "View org limits and health metrics"),
+				this.createItem("Hide/Show -meta.xml Files", "adure-sfx-toolkit.toggleHideMetaXml", "eye-closed", "Toggle hiding Apex .cls-meta.xml / .trigger-meta.xml files in the Explorer"),
 			]),
 		];
 	}

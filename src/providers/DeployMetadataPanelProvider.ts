@@ -18,10 +18,12 @@ import { confirmProductionOrgOperation } from "../utils/orgSafety";
 import { loadPresets, addPreset, type DeployPreset, type DeployTypeKey } from "../utils/deployPresets";
 import { getAnonymousApexOrgList } from "../commands/executeAnonymous";
 import { runCommand } from "../utils/commandRunner";
-import { Logger } from "../utils/outputChannel";
+import { Logger, DeployLog } from "../utils/outputChannel";
 import { cleanDeployOutput, parseDeployStats, parseCoverageData } from "../commands/devCommands";
 import { addDeployHistoryEntry } from "../commands/deployHistory";
-import { clearDeployDiagnostics, setDeployDiagnosticsFromFailure } from "../utils/deployDiagnostics";
+import { clearDeployDiagnostics, setDeployDiagnosticsFromFailure, setDeployDiagnosticsFromApiResult, formatApiDeployResultForLog } from "../utils/deployDiagnostics";
+import { runJsonDeploy } from "../utils/deployEngine";
+import { statsFromResult, coverageFromResult, toApiDeployResult, formatStatus, formatElapsed, formatResultSummary, type DeployStats, type CoverageRow } from "../utils/deployStatusMap";
 import { AuthInfo } from "../utils/authInfo";
 import { upsertTestSuite, deleteTestSuite as deleteTestSuiteEntry, loadTestSuites, type TestSuite } from "../utils/testSuites";
 
@@ -335,117 +337,146 @@ export class DeployMetadataPanelProvider {
         }
         const resolved = resolveSourcePaths(msg.sourcePaths, workspaceRoot);
         const absPaths = filterPathsToPackageDirs(workspaceRoot, resolved);
-        type DeployOutcome =
-          | { done: true; success: true; result: string }
-          | { done: true; success: false; error: string }
-          | { done: true; cancelled: true };
+        const targetOrg = msg.targetOrg || null;
+
+        // Normalized result the post-processing consumes, whichever deploy path ran.
+        // `apiResult` (REST) feeds Problems directly; `errorText` (CLI fallback) is
+        // parsed for diagnostics the legacy way.
+        type FinalOutcome =
+          | { kind: "cancelled" }
+          | { kind: "success"; stats: DeployStats; coverage: CoverageRow[]; apiResult?: import("../utils/deployDiagnostics").ApiDeployResult }
+          | { kind: "failed"; stats: DeployStats; coverage: CoverageRow[]; apiResult?: import("../utils/deployDiagnostics").ApiDeployResult; errorText?: string };
+
         const deployStartTime = Date.now();
         panel.webview.postMessage({ command: "deployStart", dryRun });
-        let resolveProgress: (outcome: DeployOutcome) => void;
-        const progressPromise = new Promise<DeployOutcome>((resolve) => {
-          resolveProgress = resolve;
-        });
-        let progressSettled = false;
-        const outcome: DeployOutcome = await vscode.window.withProgress(
+
+        const liveStatus = vscode.workspace
+          .getConfiguration("adure-sfx-toolkit")
+          .get<boolean>("deploy.liveStatus", true);
+
+        const outcome: FinalOutcome = await vscode.window.withProgress(
           {
             location: vscode.ProgressLocation.Notification,
             title: dryRun ? "Validating deployment…" : "Deploying",
             cancellable: true
           },
-          async (progress, token): Promise<DeployOutcome> => {
+          async (progress, token): Promise<FinalOutcome> => {
             clearDeployDiagnostics();
             progress.report({ message: "Preparing…" });
-            const cmd = buildDeployCommand(
-              absPaths,
-              testLevel,
-              testFlags,
-              dryRun,
-              workspaceRoot,
-              msg.targetOrg || undefined
-            );
-            const progressHandler = createDeployProgressHandler((message) => progress.report({ message }), {
-              onStatusFailed: () => {
-                progress.report({ message: "Status: Failed" });
-              }
-            });
-            runCommand(cmd, workspaceRoot, progressHandler, false, token, DEPLOY_TIMEOUT_MS)
-              .then((result) => {
-                if (!progressSettled) {
-                  progressSettled = true;
-                  resolveProgress({ done: true, success: true, result });
-                }
-              })
-              .catch((e: unknown) => {
+
+            // ── CLI streaming fallback (original behavior), normalized to FinalOutcome ──
+            const runCliStreaming = async (): Promise<FinalOutcome> => {
+              const cmd = buildDeployCommand(absPaths, testLevel, testFlags, dryRun, workspaceRoot, msg.targetOrg || undefined);
+              const progressHandler = createDeployProgressHandler(
+                (message) => progress.report({ message }),
+                { onStatusFailed: () => progress.report({ message: "Status: Failed" }) }
+              );
+              try {
+                const result = await runCommand(cmd, workspaceRoot, progressHandler, false, token, DEPLOY_TIMEOUT_MS);
+                DeployLog.line(`Deploy result (from CLI output):\n${cleanDeployOutput(result)}`);
+                return { kind: "success", stats: parseDeployStats(result), coverage: parseCoverageData(result) };
+              } catch (e: unknown) {
                 const err = e as { cancelled?: boolean; message?: string };
-                if (err.cancelled) {
-                  if (!progressSettled) {
-                    progressSettled = true;
-                    resolveProgress({ done: true, cancelled: true });
-                  }
-                } else {
-                  const fullOutput = err.message ?? String(e);
-                  if (!progressSettled) {
-                    progressSettled = true;
-                    resolveProgress({ done: true, success: false, error: fullOutput });
-                  }
+                if (err.cancelled) return { kind: "cancelled" };
+                const errorText = err.message ?? String(e);
+                return { kind: "failed", stats: parseDeployStats(errorText), coverage: [], errorText };
+              }
+            };
+
+            if (!liveStatus) return runCliStreaming();
+
+            // ── Synchronous --json deploy (updates source tracking) + live REST status ──
+            const submitCmd = buildDeployCommand(absPaths, testLevel, testFlags, dryRun, workspaceRoot, msg.targetOrg || undefined);
+            try {
+              const res = await runJsonDeploy({
+                submitCommand: submitCmd,
+                cwd: workspaceRoot,
+                org: targetOrg,
+                token,
+                timeoutMs: DEPLOY_TIMEOUT_MS,
+                onStatus: (s) => {
+                  progress.report({ message: formatStatus(s) });
+                  panel.webview.postMessage({ command: "deployProgress", status: s });
                 }
               });
-            return progressPromise;
+              if (res.kind === "cancelled") return { kind: "cancelled" };
+              if (res.kind === "nothing") {
+                return { kind: "success", stats: { components: 0, componentErrors: 0, testsPassed: 0, testsFailed: 0 }, coverage: [] };
+              }
+              if (res.kind === "failed") {
+                const dr = res.result;
+                return dr
+                  ? { kind: "failed", stats: statsFromResult(dr), coverage: coverageFromResult(dr), apiResult: toApiDeployResult(dr) }
+                  : { kind: "failed", stats: { components: 0, componentErrors: 0, testsPassed: 0, testsFailed: 0 }, coverage: [], errorText: res.errorText };
+              }
+              const dr = res.result;
+              return { kind: "success", stats: statsFromResult(dr), coverage: coverageFromResult(dr), apiResult: toApiDeployResult(dr) };
+            } catch (e: unknown) {
+              // Unexpected engine error → fall back to the classic CLI streaming path.
+              Logger.info(`Live deploy failed unexpectedly; falling back to CLI streaming: ${(e as { message?: string })?.message ?? String(e)}`);
+              return runCliStreaming();
+            }
           }
         );
-        if ("cancelled" in outcome && outcome.cancelled) {
-          const durationMs = Date.now() - deployStartTime;
+
+        const durationMs = Date.now() - deployStartTime;
+
+        if (outcome.kind === "cancelled") {
           panel.webview.postMessage({ command: "deployResult", success: false, cancelled: true, dryRun, components: 0, componentErrors: 0, testsPassed: 0, testsFailed: 0, durationMs, targetOrg: msg.targetOrg ?? "" });
           addDeployHistoryEntry({ timestamp: deployStartTime, status: "Cancelled", dryRun, components: 0, componentErrors: 0, testsPassed: 0, testsFailed: 0, durationMs, targetOrg: msg.targetOrg ?? "", sourcePaths: msg.sourcePaths ?? [], presetName: msg.presetName ?? null });
+          vscode.window.showInformationMessage(dryRun ? "Validation cancelled." : "Deploy cancelled.");
           return;
         }
-        if ("success" in outcome && outcome.success) {
-          // Log a concise, cleaned summary of the successful deploy so users can see details like Status and components.
-          const cleaned = cleanDeployOutput(outcome.result);
-          Logger.info(`Deploy result (from CLI output):\n${cleaned}`);
-          const stats = parseDeployStats(outcome.result);
-          const coverage = parseCoverageData(outcome.result);
-          const durationMs = Date.now() - deployStartTime;
+
+        if (outcome.kind === "success") {
+          const { stats, coverage, apiResult } = outcome;
+          // Result summary (status, deployed components, tests) → deploy log.
+          if (apiResult) {
+            DeployLog.line(formatApiDeployResultForLog(apiResult, `${dryRun ? "Validation" : "Deploy"} succeeded (${formatElapsed(durationMs)}):`));
+          }
           panel.webview.postMessage({ command: "deployResult", success: true, cancelled: false, dryRun, ...stats, coverage, durationMs, targetOrg: msg.targetOrg ?? "" });
           addDeployHistoryEntry({ timestamp: deployStartTime, status: "Succeeded", dryRun, ...stats, durationMs, targetOrg: msg.targetOrg ?? "", sourcePaths: msg.sourcePaths ?? [], presetName: msg.presetName ?? null });
-          if (dryRun) {
-            vscode.window.showInformationMessage("Validation completed successfully.");
-          } else {
-            vscode.window.showInformationMessage("Deploy completed successfully.");
-          }
-        } else if ("error" in outcome) {
-          Logger.show();
-          const stats = parseDeployStats(outcome.error);
-          const durationMs = Date.now() - deployStartTime;
-          panel.webview.postMessage({ command: "deployResult", success: false, cancelled: false, dryRun, ...stats, durationMs, targetOrg: msg.targetOrg ?? "" });
-          addDeployHistoryEntry({ timestamp: deployStartTime, status: "Failed", dryRun, ...stats, durationMs, targetOrg: msg.targetOrg ?? "", sourcePaths: msg.sourcePaths ?? [], presetName: msg.presetName ?? null });
-          vscode.window.showErrorMessage("Deploy failed. Check Output for details.", "View Log").then((choice) => {
-            if (choice === "View Log") {
-              Logger.show();
-            }
-          });
-          void vscode.window
-            .withProgress(
-              {
-                location: vscode.ProgressLocation.Notification,
-                title: "Parsing failure details…",
-                cancellable: false
-              },
-              async (progress) => {
-                progress.report({ message: "Setting diagnostics from deploy output…" });
-                await setDeployDiagnosticsFromFailure(workspaceRoot, outcome.error, msg.targetOrg ?? null);
-              }
-            )
-            .then(() => {
-              vscode.window
-                .showInformationMessage("Failure details are in the Problems view.", "Show diagnostics")
-                .then((choice) => {
-                  if (choice === "Show diagnostics") {
-                    void vscode.commands.executeCommand("workbench.actions.view.problems");
-                  }
-                });
-            });
+          const okSummary = apiResult ? formatResultSummary(apiResult) : "";
+          vscode.window.showInformationMessage(
+            `${dryRun ? "Validation" : "Deploy"} completed in ${formatElapsed(durationMs)}${okSummary ? ` · ${okSummary}` : ""}.`
+          );
+          return;
         }
+
+        // outcome.kind === "failed"
+        DeployLog.show();
+        const { stats, coverage, apiResult, errorText } = outcome;
+        panel.webview.postMessage({ command: "deployResult", success: false, cancelled: false, dryRun, ...stats, coverage, durationMs, targetOrg: msg.targetOrg ?? "" });
+        addDeployHistoryEntry({ timestamp: deployStartTime, status: "Failed", dryRun, ...stats, durationMs, targetOrg: msg.targetOrg ?? "", sourcePaths: msg.sourcePaths ?? [], presetName: msg.presetName ?? null });
+        const failSummary = apiResult ? formatResultSummary(apiResult) : "";
+        vscode.window.showErrorMessage(
+          `Deploy failed after ${formatElapsed(durationMs)}${failSummary ? ` · ${failSummary}` : ""}. See the deploy log.`,
+          "View Log"
+        ).then((choice) => {
+          if (choice === "View Log") DeployLog.show();
+        });
+        void vscode.window
+          .withProgress(
+            { location: vscode.ProgressLocation.Notification, title: "Parsing failure details…", cancellable: false },
+            async (p) => {
+              p.report({ message: "Setting diagnostics…" });
+              if (apiResult) {
+                // Structured failures straight from the Metadata API → Problems.
+                setDeployDiagnosticsFromApiResult(workspaceRoot, apiResult);
+              } else {
+                await setDeployDiagnosticsFromFailure(workspaceRoot, errorText ?? "", targetOrg);
+              }
+            }
+          )
+          .then(() => {
+            vscode.window
+              .showInformationMessage("Failure details are in the Problems view.", "Show diagnostics")
+              .then((choice) => {
+                if (choice === "Show diagnostics") {
+                  void vscode.commands.executeCommand("workbench.actions.view.problems");
+                }
+              });
+          });
       },
       null,
       []
@@ -541,6 +572,9 @@ export class DeployMetadataPanelProvider {
 		body { font-family: var(--vscode-font-family); font-size: 13px; color: var(--vscode-foreground); background: var(--vscode-editor-background); height: 100vh; display: flex; overflow: hidden; min-width: 720px; }
 		.panel-left { flex: 1; min-width: 360px; display: flex; flex-direction: column; overflow: hidden; border-right: 1px solid var(--asfx-border); background: var(--vscode-sideBar-background, var(--vscode-editor-background)); }
 		.panel-right { width: 340px; min-width: 300px; flex-shrink: 0; display: flex; flex-direction: column; overflow: hidden; background: var(--vscode-editor-background); }
+		#panelSplit { flex: 0 0 7px; cursor: col-resize; display: flex; justify-content: center; align-items: stretch; background: transparent; }
+		#panelSplit span { width: 3px; border-radius: 2px; background: var(--asfx-border); transition: background 0.12s; }
+		#panelSplit:hover span { background: var(--asfx-accent); }
 		.panel-left .section { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 		/* Right panel becomes a header / scroll-body / sticky-footer column */
 		.panel-right .section { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
@@ -697,6 +731,7 @@ export class DeployMetadataPanelProvider {
 			<div class="tree-wrap" id="tree-wrap"></div>
 		</div>
 	</div>
+	<div id="panelSplit" title="Drag to resize"><span></span></div>
 	<div class="panel-right">
 		<div class="section">
 			<div class="section-title"><span class="st-icon" aria-hidden="true">⚡</span><span>Deployment</span></div>
@@ -784,6 +819,16 @@ export class DeployMetadataPanelProvider {
 		var vsCodeApi = null;
 		try { if (typeof acquireVsCodeApi !== 'undefined') vsCodeApi = acquireVsCodeApi(); } catch (e) { console.error('acquireVsCodeApi failed', e); }
 		function postToHost(payload) { try { if (vsCodeApi) vsCodeApi.postMessage(payload); } catch (err) { console.error('postMessage failed', err); } }
+		// ── panel-right (sidebar) horizontal resizer ─────────────────────────────
+		(function(){
+			var sp = document.getElementById('panelSplit');
+			var right = document.querySelector('.panel-right');
+			if (!sp || !right) return;
+			var drag = false, sx = 0, sw = 0;
+			sp.addEventListener('mousedown', function(e){ drag = true; sx = e.clientX; sw = right.getBoundingClientRect().width; document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none'; e.preventDefault(); });
+			window.addEventListener('mousemove', function(e){ if (!drag) return; var max = Math.max(300, window.innerWidth - 360); right.style.width = Math.min(max, Math.max(300, sw + (sx - e.clientX))) + 'px'; });
+			window.addEventListener('mouseup', function(){ drag = false; document.body.style.cursor = ''; document.body.style.userSelect = ''; });
+		})();
 		var saveStateTimer = null;
 		function saveState() {
 			try {
