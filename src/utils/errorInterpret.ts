@@ -1,11 +1,11 @@
 /**
- * Interpret a Salesforce deploy/push failure into plain-language problems with
- * suggested fixes. Pure + testable (no `vscode` import) so it can back a webview
- * and be unit-tested against real error strings.
+ * Interpret ANY Salesforce CLI / command failure into plain-language problems with suggested
+ * fixes. Pure + testable (no `vscode` import) so it can back a webview and be unit-tested
+ * against real error strings.
  *
- * Input is the normalized set of component failures (from the Metadata API deploy
- * result) plus/or a top-level error string (CLI/auth/project errors). Output keeps
- * the original `problem` text on every issue so the panel can always reveal the raw error.
+ * Input is a raw error payload (CLI `--json` blob, stderr text, or an Error message), optionally
+ * with the structured component failures a Metadata API deploy returns. The exact original text is
+ * ALWAYS preserved on every issue — the interpretation is a helper on top, never a replacement.
  */
 
 import type { ApiComponentFailure } from "./deployDiagnostics";
@@ -134,6 +134,37 @@ const RULES: Rule[] = [
         explanation: "The deploy didn't finish in time.",
         suggestion: "Retry — if it keeps timing out, deploy fewer components at once or check the org's status."
     },
+    // ── CLI / environment (apply to every command, not just deploys) ──────────────────────────
+    {
+        test: /(INVALID_SESSION_ID|expired access\/refresh token|Session expired or invalid|refresh token is invalid)/i,
+        category: "Session expired",
+        explanation: "The org's access token is no longer valid.",
+        suggestion: "Re-authenticate the org (`sf org login web`), then retry."
+    },
+    {
+        test: /(No authorization information|No org configuration found|no default (?:target )?org|Requires a username but none was defined|NoDefaultEnvError)/i,
+        category: "No target org",
+        explanation: "No org was specified and there's no default target org set for this project.",
+        suggestion: "Set a default with `sf config set target-org <alias>`, or pass an org explicitly."
+    },
+    {
+        test: /(ENOTFOUND|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up|network|getaddrinfo)/i,
+        category: "Network",
+        explanation: "The CLI couldn't reach Salesforce.",
+        suggestion: "Check your connection/VPN or proxy settings, then retry."
+    },
+    {
+        test: /(command not found|'sf' is not recognized|ENOENT.*\bsf\b|Cannot find module .*@salesforce)/i,
+        category: "CLI not found",
+        explanation: "The Salesforce CLI (`sf`) couldn't be run from this environment.",
+        suggestion: "Install the CLI, or make sure `sf` is on the PATH VS Code inherits, then reload."
+    },
+    {
+        test: /(not a valid Salesforce DX project|sfdx-project\.json)/i,
+        category: "Not an SFDX project",
+        explanation: "This command needs a Salesforce DX project (an `sfdx-project.json` at the workspace root).",
+        suggestion: "Open the project folder that contains sfdx-project.json."
+    },
     {
         test: /(isomorphic-git|Index file is empty|\.git[\\/]index)/i,
         category: "Git index error",
@@ -199,8 +230,28 @@ const shortName = (file?: string, full?: string): string | undefined => {
     return base.replace(/\.[^.]+$/, "");
 };
 
-/** Turn structured component failures + an optional top-level error into an interpreted report. */
-export function interpretDeployFailure(input: { failures?: ApiComponentFailure[]; topError?: string; raw: string; warnings?: string[] }): InterpretedDeploy {
+/** Normalize anything thrown (Error, CLI payload, string) into raw error text. */
+export function toRawError(error: unknown): string {
+    if (typeof error === "string") return error;
+    if (error && typeof error === "object") {
+        const e = error as { message?: unknown; stderr?: unknown; stdout?: unknown };
+        const parts = [e.message, e.stderr, e.stdout].filter((v): v is string => typeof v === "string" && v.trim().length > 0);
+        if (parts.length) return parts[0];
+    }
+    return String(error ?? "Unknown error");
+}
+
+/**
+ * Interpret a failure. `operation` names what was being done ("Push", "Deploy", "Create scratch
+ * org", …) and drives the panel title; `failures` is optional Metadata API component detail.
+ */
+export function interpretError(input: {
+    operation?: string;
+    failures?: ApiComponentFailure[];
+    topError?: string;
+    raw: string;
+    warnings?: string[];
+}): InterpretedDeploy {
     const failures = (input.failures ?? []).filter((f) => f && (f.problem || f.fullName));
     const issues: DeployIssue[] = failures.map((f) => {
         const problem = (f.problem ?? "").trim() || "(no message)";
@@ -221,7 +272,9 @@ export function interpretDeployFailure(input: { failures?: ApiComponentFailure[]
     // The CLI reports fatal (non-component) failures as a JSON blob — recover its message/name/warnings.
     const cli = parseCliError(input.raw ?? "");
     const warnings = (input.warnings && input.warnings.length ? input.warnings : cli.warnings) ?? [];
-    const topRaw = (input.topError && input.topError.trim()) || cli.message || "";
+    // Fall back to the raw text itself when there's no explicit top error and no CLI JSON message —
+    // most command failures are plain stderr, and they must still produce an issue to show.
+    const topRaw = (input.topError && input.topError.trim()) || cli.message || (issues.length ? "" : (input.raw ?? "").trim());
 
     let headline: string | undefined;
     if (topRaw) {
@@ -242,6 +295,7 @@ export function interpretDeployFailure(input: { failures?: ApiComponentFailure[]
     }
 
     const n = issues.length;
-    const title = n ? `Push failed — ${n} problem${n === 1 ? "" : "s"}` : "Push failed";
+    const what = `${input.operation ?? "Command"} failed`;
+    const title = n > 1 ? `${what} — ${n} problems` : what;
     return { title, headline, issues, warnings, raw: input.raw, counts: { errors: n } };
 }

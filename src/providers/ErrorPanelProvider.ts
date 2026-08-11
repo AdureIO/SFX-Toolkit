@@ -1,35 +1,35 @@
 import * as vscode from "vscode";
-import { InterpretedDeploy } from "../utils/deployErrorInterpret";
+import { InterpretedDeploy } from "../utils/errorInterpret";
 import { getNonce, escapeHtml as esc } from "../utils/htmlUtils";
 
 /**
- * Interpreted deploy/push error panel. Shows each failure in plain language with a
- * suggested fix and a click-through to the offending file, plus the original raw
- * error on demand. Opened programmatically when a push/deploy fails.
+ * Interpreted error panel for any failed CLI/command operation. Shows each failure with its
+ * exact message, a plain-language category and fix when recognised, a click-through to the
+ * offending file, and the full original payload on demand. Driven by utils/reportError.
  */
-export class DeployErrorPanelProvider {
-    public static readonly viewType = "adure-sfx-toolkit.deployError";
+export class ErrorPanelProvider {
+    public static readonly viewType = "adure-sfx-toolkit.errorPanel";
     private static _panel: vscode.WebviewPanel | undefined;
     private static _onRetry: (() => void) | undefined;
 
     public static show(report: InterpretedDeploy, org?: string, onRetry?: () => void): void {
-        DeployErrorPanelProvider._onRetry = onRetry;
+        ErrorPanelProvider._onRetry = onRetry;
         // Open in the active editor group (full), not a split.
         const column = vscode.ViewColumn.Active;
-        if (!DeployErrorPanelProvider._panel) {
-            DeployErrorPanelProvider._panel = vscode.window.createWebviewPanel(
-                DeployErrorPanelProvider.viewType,
-                "Deploy Errors",
+        if (!ErrorPanelProvider._panel) {
+            ErrorPanelProvider._panel = vscode.window.createWebviewPanel(
+                ErrorPanelProvider.viewType,
+                "Errors",
                 { viewColumn: column, preserveFocus: false },
                 { enableScripts: true, retainContextWhenHidden: true }
             );
-            DeployErrorPanelProvider._panel.onDidDispose(() => {
-                DeployErrorPanelProvider._panel = undefined;
-                DeployErrorPanelProvider._onRetry = undefined;
+            ErrorPanelProvider._panel.onDidDispose(() => {
+                ErrorPanelProvider._panel = undefined;
+                ErrorPanelProvider._onRetry = undefined;
             });
-            DeployErrorPanelProvider._panel.webview.onDidReceiveMessage((msg: { command: string; [k: string]: unknown }) => {
+            ErrorPanelProvider._panel.webview.onDidReceiveMessage((msg: { command: string; [k: string]: unknown }) => {
                 if (msg.command === "openFile") {
-                    void DeployErrorPanelProvider.openFile(
+                    void ErrorPanelProvider.openFile(
                         typeof msg.file === "string" ? msg.file : undefined,
                         typeof msg.line === "number" ? msg.line : undefined,
                         typeof msg.column === "number" ? msg.column : undefined
@@ -38,15 +38,15 @@ export class DeployErrorPanelProvider {
                     void vscode.env.clipboard.writeText(msg.text);
                     vscode.window.setStatusBarMessage("Copied error to clipboard", 2000);
                 } else if (msg.command === "retry") {
-                    const retry = DeployErrorPanelProvider._onRetry;
-                    DeployErrorPanelProvider._panel?.dispose(); // the push reopens this panel if it fails again
+                    const retry = ErrorPanelProvider._onRetry;
+                    ErrorPanelProvider._panel?.dispose(); // the push reopens this panel if it fails again
                     retry?.();
                 }
             });
         }
-        const panel = DeployErrorPanelProvider._panel;
-        panel.title = report.counts.errors ? `Deploy Errors (${report.counts.errors})` : "Deploy Errors";
-        panel.webview.html = DeployErrorPanelProvider.getHtml(panel.webview, report, org, !!onRetry);
+        const panel = ErrorPanelProvider._panel;
+        panel.title = report.counts.errors > 1 ? `Errors (${report.counts.errors})` : "Error";
+        panel.webview.html = ErrorPanelProvider.getHtml(panel.webview, report, org, !!onRetry);
         panel.reveal(column, false);
     }
 
@@ -155,9 +155,9 @@ export class DeployErrorPanelProvider {
   <header>
     <div class="title-row">
       <div class="title"><span class="dot"></span>${esc(report.title)}</div>
-      ${canRetry ? '<button class="retry" id="retry">↻ Retry deploy</button>' : ""}
+      ${canRetry ? '<button class="retry" id="retry">↻ Retry</button>' : ""}
     </div>
-    <div class="sub">${org ? "Org: " + esc(org) + " · " : ""}Interpreted from the deploy result — the exact Salesforce message is under each item.</div>
+    <div class="sub">${org ? "Org: " + esc(org) + " · " : ""}The exact Salesforce/CLI message is shown for each problem; the interpretation is a hint on top.</div>
   </header>
   ${report.headline ? `<div class="headline">${esc(report.headline)}</div>` : ""}
   ${

@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { reportError } from "../utils/reportError";
 import { runCommandArgs } from "../utils/commandRunner";
 import { Logger, outputChannel } from "../utils/outputChannel";
 import { Telemetry } from "../utils/telemetry";
@@ -54,15 +55,7 @@ export async function executeSOQL() {
       } catch (e: any) {
         if (e.cancelled) return;
         Telemetry.event("soqlExecute", { success: "0" });
-        Logger.error("SOQL query failed", e);
-        outputChannel.show();
-        vscode.window
-          .showErrorMessage('SOQL query failed. Check "Adure SFX Toolkit" output for details.', "View Log")
-          .then((choice) => {
-            if (choice === "View Log") {
-              outputChannel.show();
-            }
-          });
+        reportError({ operation: "SOQL query", error: e });
       }
     }
   );

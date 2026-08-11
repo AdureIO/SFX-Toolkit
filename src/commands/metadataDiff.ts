@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { reportError } from "../utils/reportError";
 import * as path from "path";
 import * as fs from "fs";
 import * as os from "os";
@@ -77,7 +78,7 @@ export async function metadataDiff() {
           vscode.window.showWarningMessage(`${fileName} does not exist in the org.`);
         } else {
           Logger.error("Metadata diff failed", e);
-          vscode.window.showErrorMessage(`Compare failed: ${msg}`);
+          reportError({ operation: "Compare with org", error: e });
         }
       }
     }

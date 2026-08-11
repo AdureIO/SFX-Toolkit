@@ -64,7 +64,7 @@ export async function openLogById(
         try {
             await doOpen();
         } catch (e: any) {
-            vscode.window.showErrorMessage(`Error opening log: ${e?.message ?? e}`);
+            reportError({ operation: "Open log", error: e });
         }
         return;
     }
@@ -75,7 +75,7 @@ export async function openLogById(
             try {
                 await doOpen();
             } catch (e: any) {
-                vscode.window.showErrorMessage(`Error opening log: ${e?.message ?? e}`);
+                reportError({ operation: "Open log", error: e });
             }
         }
     );

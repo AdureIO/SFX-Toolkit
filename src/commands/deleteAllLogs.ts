@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { outputChannel } from "../utils/outputChannel";
+import { reportError } from "../utils/reportError";
 import { deleteAllApexLogs } from "../utils/apexLogApi";
 
 /**
@@ -23,9 +23,7 @@ export async function deleteAllLogs() {
           deleted > 0 ? `Deleted ${deleted} log(s) from the org.` : "No logs to delete."
         );
       } catch (e: any) {
-        const msg = e?.message ?? "Unknown error";
-        outputChannel.appendLine(`deleteAllLogs: ${msg}`);
-        vscode.window.showErrorMessage(`Failed to delete logs: ${msg}`);
+        reportError({ operation: "Delete all logs", error: e });
       }
     }
   );

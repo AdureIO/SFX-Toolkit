@@ -68,7 +68,7 @@ export async function createTrace(durationMinutes: number, userId: string | null
 
         } catch (e: any) {
             if (e.cancelled) return;
-            vscode.window.showErrorMessage(`Failed to set trace: ${e.stderr || e.message}`);
+            reportError({ operation: "Create debug trace", error: e });
         }
     });
 }
@@ -90,7 +90,7 @@ export async function deleteTrace(traceId: string) {
              vscode.commands.executeCommand('adure-sfx-toolkit.refreshTraces');
          } catch (e: any) {
              if (e.cancelled) return;
-             vscode.window.showErrorMessage(`Failed to delete trace: ${e.message}`);
+             reportError({ operation: "Delete debug trace", error: e });
          }
     });
 }

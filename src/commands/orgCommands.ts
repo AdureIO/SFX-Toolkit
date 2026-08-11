@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { reportError } from "../utils/reportError";
 import { runCommand } from "../utils/commandRunner";
 import { OrgItem, orgTreeProvider } from "../providers/OrgTreeProvider";
 import { AuthInfo } from "../utils/authInfo";
@@ -19,7 +20,7 @@ export async function openOrg(item: OrgItem) {
         await runCommand(`sf org open -o ${item.orgData.username}`, undefined, undefined, true, token);
       } catch (e: any) {
         if (e.cancelled) return;
-        vscode.window.showErrorMessage(`Failed to open org: ${e.message}`);
+        reportError({ operation: "Open org", error: e });
       }
     }
   );
@@ -45,7 +46,7 @@ export async function setAsDefault(item: OrgItem) {
         vscode.commands.executeCommand("adure-sfx-toolkit.refreshTraces");
       } catch (e: any) {
         if (e.cancelled) return;
-        vscode.window.showErrorMessage(`Failed to set default: ${e.message}`);
+        reportError({ operation: "Set default org", error: e });
       }
     }
   );
@@ -68,7 +69,7 @@ export async function setAsDefaultDevHub(item: OrgItem) {
         orgTreeProvider.refresh();
       } catch (e: any) {
         if (e.cancelled) return;
-        vscode.window.showErrorMessage(`Failed to set default hub: ${e.message}`);
+        reportError({ operation: "Set default Dev Hub", error: e });
       }
     }
   );
@@ -112,7 +113,7 @@ export async function deleteOrg(item: OrgItem) {
         orgTreeProvider.refresh();
       } catch (e: any) {
         if (e.cancelled) return;
-        vscode.window.showErrorMessage(`Failed: ${e.message}`);
+        reportError({ operation: "Delete/logout org", error: e });
       }
     }
   );
@@ -147,7 +148,7 @@ export async function generatePassword(item: OrgItem) {
         }
       } catch (e: any) {
         if (e.cancelled) return;
-        vscode.window.showErrorMessage(`Error: ${e.message}`);
+        reportError({ operation: "Generate password", error: e });
       }
     }
   );
@@ -186,7 +187,7 @@ export async function renameAlias(item: OrgItem) {
         orgTreeProvider.refresh();
       } catch (e: any) {
         if (e.cancelled) return;
-        vscode.window.showErrorMessage(`Failed to set alias: ${e.message}`);
+        reportError({ operation: "Rename alias", error: e });
       }
     }
   );
@@ -241,7 +242,7 @@ export async function connectOrg() {
         orgTreeProvider.refresh();
       } catch (e: any) {
         if (e.cancelled) return;
-        vscode.window.showErrorMessage(`Connection failed: ${e.message}`);
+        reportError({ operation: "Connect org", error: e });
       }
     }
   );
@@ -360,7 +361,7 @@ export async function createScratch() {
     );
   } catch (e: any) {
     if (e.cancelled) return;
-    vscode.window.showErrorMessage("Failed to start scratch creation: " + e.message);
+    reportError({ operation: "Create scratch org", error: e });
   }
 }
 
@@ -439,6 +440,6 @@ export async function quickScratch() {
     );
   } catch (e: any) {
     if (e.cancelled) return;
-    vscode.window.showErrorMessage("Error: " + e.message);
+    reportError({ operation: "Quick scratch org", error: e });
   }
 }
