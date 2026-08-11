@@ -2,6 +2,7 @@ import * as https from "https";
 import * as http from "http";
 import * as fs from "fs";
 import * as path from "path";
+import { Logger } from "./outputChannel";
 import { AuthInfo } from "./authInfo";
 import { getToolingApiVersion } from "./constants";
 
@@ -446,17 +447,36 @@ export async function runMigration(
   // new target Id of the already-migrated record, never copied as a source Id.
   const includedSObjects = new Set(profile.nodes.map((n) => n.sobject));
   const refMeta = new Map<string, Map<string, string[]>>(); // sobject → (field → referenceTo[])
+  // Fields the TARGET org will actually accept. A profile can be built before the target is
+  // chosen (or against a differently-configured org), so a field may exist in the source and not
+  // in the target — State & Country picklists (BillingCountryCode) are the classic case. Without
+  // this the insert fails wholesale with "No such column".
+  const targetWritable = new Map<string, Set<string>>(); // sobject → lower-cased createable field names
   for (const node of profile.nodes) {
-    if (refMeta.has(node.sobject)) continue;
-    try {
-      const desc = await describeObject(sourceOrg, node.sobject);
-      const m = new Map<string, string[]>();
-      for (const f of desc.fields) {
-        if (f.referenceTo && f.referenceTo.length) m.set(f.name, f.referenceTo);
+    if (!refMeta.has(node.sobject)) {
+      try {
+        const desc = await describeObject(sourceOrg, node.sobject);
+        const m = new Map<string, string[]>();
+        for (const f of desc.fields) {
+          if (f.referenceTo && f.referenceTo.length) m.set(f.name, f.referenceTo);
+        }
+        refMeta.set(node.sobject, m);
+      } catch {
+        refMeta.set(node.sobject, new Map());
       }
-      refMeta.set(node.sobject, m);
-    } catch {
-      refMeta.set(node.sobject, new Map());
+    }
+    if (!targetWritable.has(node.sobject)) {
+      try {
+        const desc = await describeObject(targetOrg, node.sobject);
+        targetWritable.set(
+          node.sobject,
+          new Set(desc.fields.filter((f) => f.createable).map((f) => f.name.toLowerCase()))
+        );
+      } catch {
+        // Target describe unavailable — send the profile's fields unchanged rather than
+        // dropping everything.
+        targetWritable.set(node.sobject, new Set());
+      }
     }
   }
 
@@ -543,10 +563,20 @@ export async function runMigration(
     // never meaningful — omit it so Salesforce applies defaults. On UPSERT a null is
     // intentional (clear the field), so it's kept.
     const isInsert = !node.externalIdField;
+    const writable = targetWritable.get(node.sobject) ?? new Set<string>();
+    const skipped = writable.size
+      ? node.includeFields.filter((f) => f !== "Id" && !writable.has(f.toLowerCase()))
+      : [];
+    if (skipped.length) {
+      Logger.info(`Data migration — ${node.sobject}: skipping ${skipped.length} field(s) the target org can't accept: ${skipped.join(", ")}`);
+    }
     const targetRecords: CollectionsRecord[] = sourceRecords.map((rec) => {
       const out: CollectionsRecord = { attributes: { type: node.sobject } };
       for (const field of node.includeFields) {
         if (field === "Id") continue; // never copy the record's own Id
+        // Not present/creatable in the target → omit (an empty set means "describe failed", so
+        // fall through and send everything as before).
+        if (writable.size && !writable.has(field.toLowerCase())) continue;
         const val: unknown = rec[field] === "" ? null : rec[field] ?? null;
         const referenceTo = nodeRefs.get(field);
         if (referenceTo && referenceTo.length) {
