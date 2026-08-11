@@ -85,7 +85,7 @@ export function findAuraEnabledMethods(source: string): AuraMethod[] {
 
     // @AuraEnabled [(cacheable=true)] … modifiers … <ReturnType> name ( params )
     const re =
-        /@AuraEnabled\s*(\([^)]*\))?\s*((?:(?:public|global|private|protected|static|override|virtual|abstract|final|transient)\s+)*)([\w.<>,\[\]\s]+?)\s+([A-Za-z_]\w*)\s*\(([^)]*)\)/g;
+        /@AuraEnabled\s*(\([^)]*\))?\s*((?:(?:public|global|private|protected|static|override|virtual|abstract|final|transient)\s+)*)([\w.<>,[\]\s]+?)\s+([A-Za-z_]\w*)\s*\(([^)]*)\)/g;
     let m: RegExpExecArray | null;
     while ((m = re.exec(code)) !== null) {
         const [, annotationArgs, , returnTypeRaw, name, paramList] = m;

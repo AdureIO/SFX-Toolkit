@@ -840,6 +840,11 @@
     "configuration": {
       "title": "Adure SFX Toolkit",
       "properties": {
+      "adure-sfx-toolkit.lwcApexTypings.autoGenerate": {
+        "type": "boolean",
+        "default": true,
+        "description": "Automatically keep @salesforce/apex LWC typings in sync with your Apex @AuraEnabled methods (real parameter and return types instead of any)."
+      },
         "adure-sfx-toolkit.liveLogIntervalSeconds": {
           "type": "number",
           "default": 3,

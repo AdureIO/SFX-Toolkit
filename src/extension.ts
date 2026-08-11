@@ -53,7 +53,7 @@ import { quickSoqlFromSelection } from "./commands/quickSoql";
 import { DeployHistoryProvider, initDeployHistory, setOpenDeployPanelCallback } from "./commands/deployHistory";
 import { lwcNavigate, lwcGoToJs, lwcGoToHtml, lwcGoToMeta, lwcGoToCss } from "./commands/lwcNavigator";
 import { registerLwcApexProviders } from "./providers/LwcApexProvider";
-import { generateLwcApexTypings } from "./commands/lwcApexTypings";
+import { generateLwcApexTypings, registerLwcApexTypingsSync } from "./commands/lwcApexTypings";
 import {
   showSnippets,
   runSnippet,
@@ -383,6 +383,8 @@ export function activate(context: vscode.ExtensionContext) {
     // it for the true signature (Salesforce's generated .d.ts types everything as `any`).
     registerLwcApexProviders(context);
     const lwcApexTypingsCmd = register("adure-sfx-toolkit.generateLwcApexTypings", generateLwcApexTypings);
+    // Keep the typings in step with the Apex source automatically (initial sync + on save/change).
+    registerLwcApexTypingsSync(context);
     const refreshMetadataCmd = register("adure-sfx-toolkit.refreshMetadata", async () => {
       await vscode.window.withProgress(
         {
