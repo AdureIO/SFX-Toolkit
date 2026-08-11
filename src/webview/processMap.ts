@@ -756,7 +756,7 @@ $("build").addEventListener("click", () => {
   const seeds = selection.values();
   if (!seeds.length) { statusEl.textContent = "Pick at least one object first (use the “Objects” button)."; return; }
   showLoading(true);
-  post({ command: "build", org: orgSelect.value, scanApex: ($("scanApex") as HTMLInputElement).checked, seeds });
+  post({ command: "build", org: orgSelect.value, seeds });
 });
 // Object picker
 pickBtn.addEventListener("click", openPicker);

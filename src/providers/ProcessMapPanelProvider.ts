@@ -43,7 +43,7 @@ export class ProcessMapPanelProvider {
                     break;
                 }
                 case "build":
-                    await this.build(panel, s("org"), msg.scanApex === true, Array.isArray(msg.seeds) ? (msg.seeds as string[]) : []);
+                    await this.build(panel, s("org"), Array.isArray(msg.seeds) ? (msg.seeds as string[]) : []);
                     break;
                 case "export":
                     await this.export(s("filename"), s("content"), msg.base64 === true);
@@ -68,14 +68,13 @@ export class ProcessMapPanelProvider {
         });
     }
 
-    private static async build(panel: vscode.WebviewPanel, org?: string, scanApex = false, seeds: string[] = []): Promise<void> {
+    private static async build(panel: vscode.WebviewPanel, org?: string, seeds: string[] = []): Promise<void> {
         ProcessMapPanelProvider._org = org;
         panel.webview.postMessage({ command: "loading", value: true });
         try {
             const metadata = await fetchProcessMetadata(
                 org,
-                (p) => panel.webview.postMessage({ command: "progress", label: p.label, completed: p.completed, total: p.total }),
-                { scanApex }
+                (p) => panel.webview.postMessage({ command: "progress", label: p.label, completed: p.completed, total: p.total })
             );
             panel.webview.postMessage({ command: "progress", label: "Building graph", completed: 1, total: 1, phase: "build" });
             const scoped = seeds.length ? scopeMetadataToObjects(metadata, seeds) : metadata;
@@ -329,7 +328,6 @@ export class ProcessMapPanelProvider {
     <select id="org"></select>
     <button class="ghost" id="pick" title="Choose which objects to include">◈ Objects: none</button>
     <button id="build">⚡ Build map</button>
-    <label class="chk" title="Scan Apex class/trigger bodies from the org to find which set each field (slower)"><input type="checkbox" id="scanApex" /> Scan Apex</label>
     <span class="sep"></span>
     <span class="lbl">Layout</span>
     <span class="seg" id="layout">

@@ -76,13 +76,8 @@ export interface FetchProgress {
     total: number;
 }
 
-export interface FetchOptions {
-    /** Also scan Apex class/trigger bodies (from the org) to find which set/reference each field. */
-    scanApex?: boolean;
-}
-
 /** Fetch and normalize the org's automation metadata. `onProgress` reports query completion for a loading UI. */
-export async function fetchProcessMetadata(org?: string, onProgress?: (p: FetchProgress) => void, opts?: FetchOptions): Promise<ProcessMetadata> {
+export async function fetchProcessMetadata(org?: string, onProgress?: (p: FetchProgress) => void): Promise<ProcessMetadata> {
     // Named parallel queries — each reports progress as it resolves so the UI shows a real bar.
     const steps: { label: string; soql: string; tooling: boolean }[] = [
         {
@@ -113,24 +108,17 @@ export async function fetchProcessMetadata(org?: string, onProgress?: (p: FetchP
     const tick = (label: string) => onProgress?.({ label, completed: ++completed, total });
 
     // Launch the independent (and heavier) queries up front so different types run concurrently
-    // instead of type-by-type: Flow metadata, and — when enabled — Apex bodies + the dependency
-    // graph, all fire alongside the base batch. Each is isolated (a failure yields []).
-    const scan = opts?.scanApex === true;
+    // instead of type-by-type: Flow metadata, Apex bodies and the dependency graph all fire
+    // alongside the base batch. Each is isolated (a failure yields []).
     const flowMetaP: Promise<Rec[]> = query(org, "SELECT DeveloperName, Metadata FROM Flow WHERE Status = 'Active'", true).catch(() => []);
-    const classBodyP: Promise<Rec[]> = scan
-        ? query(org, "SELECT Name, NamespacePrefix, Body FROM ApexClass WHERE Status = 'Active'", true).catch(() => [])
-        : Promise.resolve([]);
-    const trigBodyP: Promise<Rec[]> = scan
-        ? query(org, "SELECT Name, NamespacePrefix, Body, EntityDefinition.QualifiedApiName FROM ApexTrigger", true).catch(() => [])
-        : Promise.resolve([]);
-    const depsP: Promise<Rec[]> = scan
-        ? query(
+    const classBodyP: Promise<Rec[]> = query(org, "SELECT Name, NamespacePrefix, Body FROM ApexClass WHERE Status = 'Active'", true).catch(() => []);
+    const trigBodyP: Promise<Rec[]> = query(org, "SELECT Name, NamespacePrefix, Body, EntityDefinition.QualifiedApiName FROM ApexTrigger", true).catch(() => []);
+    const depsP: Promise<Rec[]> = query(
               org,
               "SELECT MetadataComponentName, MetadataComponentType, RefMetadataComponentName " +
                   "FROM MetadataComponentDependency WHERE MetadataComponentType IN ('ApexClass','ApexTrigger') AND RefMetadataComponentType = 'CustomField'",
               true
-          ).catch(() => [])
-        : Promise.resolve([]);
+          ).catch(() => []);
 
     const [triggerRecs, flowRecs, vrRecs, wrRecs, cronRecs, classRecs, wfuRecs] = await Promise.all(
         steps.map((st) => query(org, st.soql, st.tooling).then((recs) => (tick(st.label), recs)))
@@ -267,10 +255,10 @@ export async function fetchProcessMetadata(org?: string, onProgress?: (p: FetchP
     }
     tick("Flow metadata");
 
-    // ── Apex field lineage (opt-in): scan class/trigger bodies retrieved from the org ──────────
+    // ── Apex field lineage: scan class/trigger bodies retrieved from the org ──────────────────
     const fieldReferences: NonNullable<ProcessMetadata["fieldReferences"]> = [];
     const apexCalls: NonNullable<ProcessMetadata["apexCalls"]> = [];
-    if (scan) {
+    {
         try {
             const [classRows, triggerRows] = await Promise.all([classBodyP, trigBodyP]); // already in flight
             const knownClasses = new Set(classRows.map((c) => str(c.Name)).filter((n): n is string => !!n));
