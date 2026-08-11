@@ -1,5 +1,5 @@
 import * as assert from "assert";
-import { buildProcessGraph, filterProcessGraph, focusSubgraph } from "../utils/processGraph";
+import { buildProcessGraph, filterProcessGraph, focusSubgraph, scopeMetadataToObjects } from "../utils/processGraph";
 
 describe("processGraph.buildProcessGraph", () => {
   it("links triggers, flows, validation and workflow rules to their object", () => {
@@ -112,6 +112,82 @@ describe("processGraph.buildProcessGraph", () => {
       g.edges.some((e) => e.kind === "triggers" && e.source === "flow:AccToContact" && e.target === "object:Contact"),
       "cross-object hop links the writing flow to the target object"
     );
+  });
+
+  it("links Apex classes/triggers that write a field, and keeps references distinct from writes", () => {
+    const g = buildProcessGraph({
+      fieldUpdates: [
+        { source: "AccountService", sourceKind: "apexClass", object: "Account", field: "Rating" },
+        { source: "AccountTrigger", sourceKind: "apexTrigger", object: "Account", field: "Rating" }
+      ],
+      fieldReferences: [
+        // Same class already writes Rating → must NOT be downgraded to a reference.
+        { source: "AccountService", sourceKind: "apexClass", object: "Account", field: "Rating" },
+        // A different class only references it.
+        { source: "ReportUtil", sourceKind: "apexClass", object: "Account", field: "Rating" }
+      ]
+    });
+    const fieldId = "field:Account.Rating";
+    const writers = g.edges.filter((e) => e.kind === "updates" && e.target === fieldId).map((e) => e.source);
+    assert.ok(writers.includes("apexClass:AccountService"));
+    assert.ok(writers.includes("trigger:AccountTrigger"));
+    const refs = g.edges.filter((e) => e.kind === "references" && e.target === fieldId).map((e) => e.source);
+    assert.ok(refs.includes("apexClass:ReportUtil"), "reference-only class is linked as a reference");
+    assert.ok(!refs.includes("apexClass:AccountService"), "a confirmed writer is not also a faint reference");
+  });
+
+  it("hangs a field off the automation that sets it, to the right (no field→object edge)", () => {
+    const g = buildProcessGraph({
+      flows: [{ apiName: "SetOwner", triggerType: "RecordBeforeSave", object: "Account" }],
+      fieldUpdates: [{ source: "SetOwner", sourceKind: "flow", object: "Account", field: "OwnerId" }]
+    });
+    assert.ok(g.edges.some((e) => e.kind === "updates" && e.source === "flow:SetOwner" && e.target === "field:Account.OwnerId"), "setter → field edge present");
+    assert.ok(!g.nodes.some((n) => n.id.startsWith("fieldbox:")), "no field box");
+  });
+
+  it("builds the Apex call chain and prunes util classes off the write path", () => {
+    const g = buildProcessGraph({
+      triggers: [{ name: "AccountTrigger", object: "Account", events: ["before insert"] }],
+      fieldUpdates: [{ source: "ServiceB", sourceKind: "apexClass", object: "Account", field: "Rating" }],
+      apexCalls: [
+        { caller: "AccountTrigger", callerKind: "apexTrigger", callee: "ServiceA" },
+        { caller: "ServiceA", callerKind: "apexClass", callee: "ServiceB" }, // ServiceB writes Rating
+        { caller: "ServiceA", callerKind: "apexClass", callee: "LoggerUtil" } // dead-end util → pruned
+      ]
+    });
+    // Chain trigger → ServiceA → ServiceB → field is present.
+    assert.ok(g.edges.some((e) => e.kind === "calls" && e.source === "trigger:AccountTrigger" && e.target === "apexClass:ServiceA"));
+    assert.ok(g.edges.some((e) => e.kind === "calls" && e.source === "apexClass:ServiceA" && e.target === "apexClass:ServiceB"));
+    assert.ok(g.edges.some((e) => e.kind === "updates" && e.source === "apexClass:ServiceB" && e.target === "field:Account.Rating"));
+    // The util that leads nowhere is pruned.
+    assert.ok(!g.nodes.some((n) => n.id === "apexClass:LoggerUtil"), "dead-end util pruned");
+  });
+
+  it("scopes metadata to selected objects (seeds)", () => {
+    const md = {
+      triggers: [
+        { name: "AccT", object: "Account" },
+        { name: "ConT", object: "Contact" }
+      ],
+      flows: [
+        { apiName: "AccFlow", triggerType: "RecordAfterSave", object: "Account" },
+        { apiName: "LeadFlow", triggerType: "RecordAfterSave", object: "Lead" },
+        { apiName: "Nightly", processType: "ScheduledFlow" }
+      ],
+      fieldUpdates: [
+        { source: "Svc", sourceKind: "apexClass" as const, object: "Account", field: "Rating" },
+        { source: "Svc", sourceKind: "apexClass" as const, object: "Lead", field: "Status" }
+      ],
+      flowObjects: [{ flow: "Nightly", object: "Account" }],
+      scheduledJobs: [{ name: "Job1" }]
+    };
+    const scoped = scopeMetadataToObjects(md, ["Account"]);
+    assert.deepStrictEqual(scoped.triggers?.map((t) => t.object), ["Account"], "only Account triggers");
+    assert.ok(scoped.flows?.some((f) => f.apiName === "AccFlow"));
+    assert.ok(scoped.flows?.some((f) => f.apiName === "Nightly"), "scheduled flow kept because it writes Account");
+    assert.ok(!scoped.flows?.some((f) => f.apiName === "LeadFlow"), "Lead flow dropped");
+    assert.strictEqual(scoped.fieldUpdates?.length, 1, "only the Account field write");
+    assert.strictEqual(scoped.scheduledJobs?.length, 0, "non-object async dropped when scoping");
   });
 
   it("focus subgraph returns a node and its neighbours", () => {

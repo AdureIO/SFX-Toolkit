@@ -46,11 +46,13 @@ export type ProcessEdgeKind =
     | "schedules"
     | "invokes"
     | "updates"
-    | "fieldOf"
     | "then" // execution-order spine: one automation, then the next, on the same object
     | "triggers" // cross-object hop: an automation writes/creates another object, continuing the process
     | "operatesOn" // scheduled / autolaunched flow reads or writes this object (not in the record-save order)
-    | "member"; // a phase hub to one of its parallel same-phase automations
+    | "member" // a phase hub to one of its parallel same-phase automations
+    | "references" // an Apex class/trigger references a field (read/write unknown — from the dependency API)
+    | "calls" // a trigger/class calls another Apex class (the call chain to a field write)
+    | "processedBy"; // object → an Apex writer that isn't reached by a call, so it sits to the right of the object
 
 export interface ProcessEdge {
     id: string;
@@ -83,19 +85,59 @@ export interface ProcessMetadata {
     workflowRules?: { name: string; object: string; active?: boolean; namespace?: string; recordId?: string }[];
     apexJobClasses?: { name: string; interfaces: ("Batchable" | "Queueable" | "Schedulable")[]; namespace?: string; recordId?: string }[];
     scheduledJobs?: { name: string; className?: string; cron?: string; nextFire?: string }[];
-    /** Phase 2 — field lineage: automations that write a field. */
+    /** Phase 2 — field lineage: automations / Apex that WRITE a field. */
     fieldUpdates?: {
-        source: string; // the flow apiName or the workflow-field-update name
-        sourceKind: "flow" | "fieldUpdate";
+        source: string; // the flow apiName, workflow-field-update name, or Apex class/trigger name
+        sourceKind: "flow" | "fieldUpdate" | "apexClass" | "apexTrigger";
         sourceLabel?: string;
+        object: string;
+        field: string;
+        namespace?: string;
+    }[];
+    /** Field lineage (references): a component references a field, read/write unknown (dependency API). */
+    fieldReferences?: {
+        source: string;
+        sourceKind: "apexClass" | "apexTrigger" | "flow";
         object: string;
         field: string;
         namespace?: string;
     }[];
     /** Phase 3 — a flow invoking an Apex class (invocable action). */
     invocations?: { flow: string; apexClass: string }[];
+    /** Apex call chain: a trigger/class calls another class (static parse). Builds trigger→class→class→field. */
+    apexCalls?: { caller: string; callerKind: "apexClass" | "apexTrigger"; callee: string }[];
     /** Objects a flow reads/writes (from Flow metadata record ops) — used to tie scheduled/autolaunched flows to their objects. */
     flowObjects?: { flow: string; object: string }[];
+}
+
+/**
+ * Scope raw metadata to a chosen set of objects (like the Object Visualizer's seeds) so the graph
+ * stays focused and readable. Keeps automations/fields on those objects, and the flows/invocations
+ * that operate on them. Non-object-scoped async (scheduled jobs, job classes) is dropped when scoping.
+ */
+export function scopeMetadataToObjects(md: ProcessMetadata, seeds: string[]): ProcessMetadata {
+    const set = new Set(seeds);
+    const keep = (o?: string): boolean => !!o && set.has(o);
+
+    // Flows that either run on a seed object or read/write one → keep them and their invocations.
+    const flowNames = new Set<string>();
+    for (const f of md.flows ?? []) if (keep(f.object)) flowNames.add(f.apiName);
+    for (const fo of md.flowObjects ?? []) if (keep(fo.object)) flowNames.add(fo.flow);
+
+    return {
+        triggers: (md.triggers ?? []).filter((t) => keep(t.object)),
+        flows: (md.flows ?? []).filter((f) => keep(f.object) || flowNames.has(f.apiName)),
+        validationRules: (md.validationRules ?? []).filter((v) => keep(v.object)),
+        workflowRules: (md.workflowRules ?? []).filter((w) => keep(w.object)),
+        fieldUpdates: (md.fieldUpdates ?? []).filter((u) => keep(u.object)),
+        fieldReferences: (md.fieldReferences ?? []).filter((r) => keep(r.object)),
+        flowObjects: (md.flowObjects ?? []).filter((fo) => keep(fo.object)),
+        invocations: (md.invocations ?? []).filter((i) => flowNames.has(i.flow)),
+        // Keep the whole call graph — the builder prunes it to chains that end in a scoped field write.
+        apexCalls: md.apexCalls,
+        apexJobClasses: [],
+        scheduledJobs: []
+    };
 }
 
 /** Salesforce order-of-execution phase (1 = earliest) for a node, or 0 if not in the sync path. */
@@ -266,28 +308,74 @@ export function buildProcessGraph(input: ProcessMetadata): ProcessGraph {
         if (nodes.has(flowId)) link(flowId, clsId, "invokes");
     }
 
-    // Phase 2 — field lineage.
-    for (const u of input.fieldUpdates ?? []) {
-        const obj = ensureObject(u.object);
-        const fieldId = `field:${u.object}.${u.field}`;
-        put({ id: fieldId, kind: "field", label: u.field, object: u.object });
-        if (obj) link(fieldId, obj, "fieldOf");
-        let sourceId: string;
-        if (u.sourceKind === "flow") {
-            sourceId = `flow:${u.source}`;
-            if (!nodes.has(sourceId)) continue; // flow not in scope
-        } else {
-            sourceId = `fieldUpdate:${u.source}`;
-            put({
-                id: sourceId,
-                kind: "fieldUpdate",
-                label: nsLabel(u.sourceLabel || u.source, u.namespace),
-                object: u.object,
-                namespace: u.namespace
-            });
-            if (obj) link(sourceId, obj, "runsOn");
+    // Resolve (and lazily create) the node that is the source of a field write/reference.
+    const ensureFieldSource = (
+        source: string,
+        sourceKind: "flow" | "fieldUpdate" | "apexClass" | "apexTrigger",
+        object: string,
+        namespace?: string,
+        sourceLabel?: string
+    ): string | undefined => {
+        if (sourceKind === "flow") {
+            const id = `flow:${source}`;
+            return nodes.has(id) ? id : undefined; // flow not in scope
         }
-        link(sourceId, fieldId, "updates");
+        if (sourceKind === "apexClass") {
+            const id = `apexClass:${source}`;
+            put({ id, kind: "apexClass", label: nsLabel(source, namespace), namespace, meta: {} });
+            return id;
+        }
+        if (sourceKind === "apexTrigger") {
+            const id = `trigger:${source}`;
+            if (!nodes.has(id)) put({ id, kind: "trigger", label: nsLabel(source, namespace), object, namespace, meta: {} });
+            return id;
+        }
+        const id = `fieldUpdate:${source}`;
+        put({ id, kind: "fieldUpdate", label: nsLabel(sourceLabel || source, namespace), object, namespace });
+        if (nodes.has(`object:${object}`)) link(id, `object:${object}`, "runsOn");
+        return id;
+    };
+
+    // Phase 2 — field lineage. A field hangs off the automation/class that touches it (writer → field),
+    // placed to the RIGHT — never in front of the object. Writes use `updates`; dependency-API
+    // references use `references`, skipped when the same source already has a confirmed write.
+    const addFieldSource = (
+        s: { source: string; sourceKind: "flow" | "fieldUpdate" | "apexClass" | "apexTrigger"; object: string; field: string; namespace?: string; sourceLabel?: string },
+        kind: "updates" | "references"
+    ) => {
+        ensureObject(s.object);
+        const fieldId = `field:${s.object}.${s.field}`;
+        put({ id: fieldId, kind: "field", label: s.field, object: s.object });
+        const sourceId = ensureFieldSource(s.source, s.sourceKind, s.object, s.namespace, s.sourceLabel);
+        if (!sourceId) return;
+        if (kind === "references" && edges.has(`${sourceId}=>${fieldId}:updates`)) return;
+        link(sourceId, fieldId, kind);
+    };
+    for (const u of input.fieldUpdates ?? []) addFieldSource(u, "updates");
+    for (const r of input.fieldReferences ?? []) addFieldSource(r, "references");
+
+    // ── Apex call chain: trigger/class → class → … (edges) ────────────────────────────────────
+    for (const c of input.apexCalls ?? []) {
+        const callerId = c.callerKind === "apexTrigger" ? `trigger:${c.caller}` : `apexClass:${c.caller}`;
+        const calleeId = `apexClass:${c.callee}`;
+        if (!nodes.has(callerId)) put({ id: callerId, kind: c.callerKind === "apexTrigger" ? "trigger" : "apexClass", label: c.caller, meta: {} });
+        put({ id: calleeId, kind: "apexClass", label: c.callee, meta: {} });
+        if (callerId !== calleeId) link(callerId, calleeId, "calls");
+    }
+
+    // Prune util noise (classes that never lead to a write) and get back the set of called classes.
+    const calledClasses = pruneApexNoise(nodes, edges);
+
+    // Any Apex writer NOT reached by a call hangs off the object it writes, so it reads to the RIGHT
+    // of the object rather than floating disconnected.
+    for (const e of [...edges.values()]) {
+        if (e.kind !== "updates" && e.kind !== "references") continue;
+        const src = nodes.get(e.source);
+        const field = nodes.get(e.target);
+        if (src?.kind === "apexClass" && field?.object && !calledClasses.has(src.id)) {
+            const objId = `object:${field.object}`;
+            if (nodes.has(objId)) link(objId, src.id, "processedBy");
+        }
     }
 
     // Scheduled / autolaunched flows aren't in the record-save order, but they read/write objects.
@@ -378,6 +466,56 @@ export function buildProcessGraph(input: ProcessMetadata): ProcessGraph {
     }
 
     return { nodes: [...nodes.values()], edges: [...edges.values()] };
+}
+
+/**
+ * Drop Apex classes that are pure-util noise: keep a class only if it writes a field, transitively
+ * CALLS a class that writes one, or is invoked/scheduled/async. This keeps the call chain focused on
+ * paths that actually end in a field change (trigger → class → class → field). Returns the set of
+ * classes that are the target of a `calls` edge (reused by the caller to anchor uncalled writers).
+ */
+function pruneApexNoise(nodes: Map<string, ProcessNode>, edges: Map<string, ProcessEdge>): Set<string> {
+    const isApex = (id: string) => nodes.get(id)?.kind === "apexClass";
+    const writers = new Set<string>(); // apex classes that write a field
+    const callsIn = new Map<string, Set<string>>(); // callee → callers
+    const calledClasses = new Set<string>(); // any calls target
+    const keepAnyway = new Set<string>(); // invoked/scheduled targets + reference sources
+    const incident = new Map<string, string[]>(); // nodeId → edgeIds touching it
+    const touch = (nodeId: string, edgeId: string) => (incident.get(nodeId) ?? incident.set(nodeId, []).get(nodeId)!).push(edgeId);
+
+    // Single pass over the edges: classify + build the incidence map for O(1) node removal later.
+    for (const [id, e] of edges) {
+        touch(e.source, id);
+        touch(e.target, id);
+        if (e.kind === "updates" && isApex(e.source)) writers.add(e.source);
+        else if (e.kind === "calls") {
+            calledClasses.add(e.target);
+            (callsIn.get(e.target) ?? callsIn.set(e.target, new Set()).get(e.target)!).add(e.source);
+        } else if ((e.kind === "invokes" || e.kind === "schedules") && isApex(e.target)) keepAnyway.add(e.target);
+        else if (e.kind === "references" && isApex(e.source)) keepAnyway.add(e.source);
+    }
+
+    // Reverse BFS from writers along calls → every class on a path that ends in a write.
+    const leadsToWrite = new Set<string>(writers);
+    const stack = [...writers];
+    while (stack.length) {
+        const n = stack.pop() as string;
+        for (const pred of callsIn.get(n) ?? []) {
+            if (isApex(pred) && !leadsToWrite.has(pred)) {
+                leadsToWrite.add(pred);
+                stack.push(pred);
+            }
+        }
+    }
+
+    for (const n of nodes.values()) {
+        if (n.kind !== "apexClass") continue;
+        const isJob = Array.isArray(n.meta?.interfaces) && (n.meta!.interfaces as string[]).length > 0;
+        if (leadsToWrite.has(n.id) || keepAnyway.has(n.id) || isJob) continue;
+        nodes.delete(n.id);
+        for (const eid of incident.get(n.id) ?? []) edges.delete(eid);
+    }
+    return calledClasses;
 }
 
 // ── UI helpers (pure) ─────────────────────────────────────────────────────────

@@ -1,5 +1,6 @@
 import { runCommandArgs } from "./commandRunner";
 import { ProcessMetadata } from "./processGraph";
+import { scanApexBody, isApexTestClass } from "./apexFieldWrites";
 
 /**
  * Retrieval layer for the Process / Automation Map. Runs a handful of Tooling/SOQL
@@ -75,8 +76,13 @@ export interface FetchProgress {
     total: number;
 }
 
+export interface FetchOptions {
+    /** Also scan Apex class/trigger bodies (from the org) to find which set/reference each field. */
+    scanApex?: boolean;
+}
+
 /** Fetch and normalize the org's automation metadata. `onProgress` reports query completion for a loading UI. */
-export async function fetchProcessMetadata(org?: string, onProgress?: (p: FetchProgress) => void): Promise<ProcessMetadata> {
+export async function fetchProcessMetadata(org?: string, onProgress?: (p: FetchProgress) => void, opts?: FetchOptions): Promise<ProcessMetadata> {
     // Named parallel queries — each reports progress as it resolves so the UI shows a real bar.
     const steps: { label: string; soql: string; tooling: boolean }[] = [
         {
@@ -101,10 +107,30 @@ export async function fetchProcessMetadata(org?: string, onProgress?: (p: FetchP
         { label: "Apex classes", soql: "SELECT Id, Name, NamespacePrefix, SymbolTable FROM ApexClass", tooling: true },
         { label: "Field updates", soql: "SELECT Name, Field, NamespacePrefix FROM WorkflowFieldUpdate", tooling: true }
     ];
-    // +2 downstream phases (object refs, flow metadata) so the bar reaches 100% at the end.
-    const total = steps.length + 2;
+    // +3 downstream phases (object refs, flow metadata, Apex field lineage) so the bar reaches 100%.
+    const total = steps.length + 3;
     let completed = 0;
     const tick = (label: string) => onProgress?.({ label, completed: ++completed, total });
+
+    // Launch the independent (and heavier) queries up front so different types run concurrently
+    // instead of type-by-type: Flow metadata, and — when enabled — Apex bodies + the dependency
+    // graph, all fire alongside the base batch. Each is isolated (a failure yields []).
+    const scan = opts?.scanApex === true;
+    const flowMetaP: Promise<Rec[]> = query(org, "SELECT DeveloperName, Metadata FROM Flow WHERE Status = 'Active'", true).catch(() => []);
+    const classBodyP: Promise<Rec[]> = scan
+        ? query(org, "SELECT Name, NamespacePrefix, Body FROM ApexClass WHERE Status = 'Active'", true).catch(() => [])
+        : Promise.resolve([]);
+    const trigBodyP: Promise<Rec[]> = scan
+        ? query(org, "SELECT Name, NamespacePrefix, Body, EntityDefinition.QualifiedApiName FROM ApexTrigger", true).catch(() => [])
+        : Promise.resolve([]);
+    const depsP: Promise<Rec[]> = scan
+        ? query(
+              org,
+              "SELECT MetadataComponentName, MetadataComponentType, RefMetadataComponentName " +
+                  "FROM MetadataComponentDependency WHERE MetadataComponentType IN ('ApexClass','ApexTrigger') AND RefMetadataComponentType = 'CustomField'",
+              true
+          ).catch(() => [])
+        : Promise.resolve([]);
 
     const [triggerRecs, flowRecs, vrRecs, wrRecs, cronRecs, classRecs, wfuRecs] = await Promise.all(
         steps.map((st) => query(org, st.soql, st.tooling).then((recs) => (tick(st.label), recs)))
@@ -196,7 +222,7 @@ export async function fetchProcessMetadata(org?: string, onProgress?: (p: FetchP
     // Flow.Metadata (Tooling) carries element details: `actionCalls` (apex) + record
     // writes (`recordUpdates`/`recordCreates` → field lineage). Shape varies by version.
     try {
-        const flowMeta = await query(org, "SELECT DeveloperName, Metadata FROM Flow WHERE Status = 'Active'", true);
+        const flowMeta = await flowMetaP; // already in flight since the top
         for (const fr of flowMeta) {
             const dev = str(fr.DeveloperName);
             if (!dev) continue;
@@ -241,7 +267,56 @@ export async function fetchProcessMetadata(org?: string, onProgress?: (p: FetchP
     }
     tick("Flow metadata");
 
-    return { triggers, flows, validationRules, workflowRules, scheduledJobs, apexJobClasses, fieldUpdates, invocations, flowObjects };
+    // ── Apex field lineage (opt-in): scan class/trigger bodies retrieved from the org ──────────
+    const fieldReferences: NonNullable<ProcessMetadata["fieldReferences"]> = [];
+    const apexCalls: NonNullable<ProcessMetadata["apexCalls"]> = [];
+    if (scan) {
+        try {
+            const [classRows, triggerRows] = await Promise.all([classBodyP, trigBodyP]); // already in flight
+            const knownClasses = new Set(classRows.map((c) => str(c.Name)).filter((n): n is string => !!n));
+            // Scan one body once → its field writes AND its calls (used to build the call chain).
+            const scanBody = (name: string, body: string, kind: "apexClass" | "apexTrigger", namespace?: string, defaultObject?: string) => {
+                const { writes, calls } = scanApexBody(body, { knownClasses, defaultObject, self: name });
+                for (const w of writes) fieldUpdates.push({ source: name, sourceKind: kind, object: w.object, field: w.field, namespace });
+                for (const callee of calls) apexCalls.push({ caller: name, callerKind: kind, callee });
+            };
+            for (const c of classRows) {
+                const name = str(c.Name);
+                const body = str(c.Body);
+                // Test classes set fields as test-data setup — not the process.
+                if (name && body && body !== "(hidden)" && !isApexTestClass(body)) scanBody(name, body, "apexClass", str(c.NamespacePrefix));
+            }
+            for (const t of triggerRows) {
+                const name = str(t.Name);
+                const body = str(t.Body);
+                if (name && body && body !== "(hidden)") scanBody(name, body, "apexTrigger", str(t.NamespacePrefix), rel(t, "EntityDefinition.QualifiedApiName"));
+            }
+        } catch {
+            /* Apex bodies not retrievable — field lineage stays flow/workflow-only. */
+        }
+
+        // Dependency references (beta API): which Apex components reference a field (read/write unknown).
+        // Best-effort: only attach to fields we already track and can map to an object.
+        try {
+            const known = new Set(fieldUpdates.map((u) => `${u.object}.${u.field}`.toLowerCase()));
+            const deps = await depsP; // already in flight
+            for (const d of deps) {
+                const comp = str(d.MetadataComponentName);
+                const ref = str(d.RefMetadataComponentName); // often "Object.Field__c"
+                if (!comp || !ref || !ref.includes(".")) continue;
+                const [object, ...rest] = ref.split(".");
+                const field = rest.join(".");
+                if (!known.has(`${object}.${field}`.toLowerCase())) continue; // only enrich tracked fields
+                const sourceKind = str(d.MetadataComponentType) === "ApexTrigger" ? "apexTrigger" : "apexClass";
+                fieldReferences.push({ source: comp, sourceKind, object, field });
+            }
+        } catch {
+            /* MetadataComponentDependency not enabled on this org — references stay empty. */
+        }
+    }
+    tick("Apex field lineage");
+
+    return { triggers, flows, validationRules, workflowRules, scheduledJobs, apexJobClasses, fieldUpdates, fieldReferences, invocations, flowObjects, apexCalls };
 }
 
 function safeParse(s: string): unknown {
