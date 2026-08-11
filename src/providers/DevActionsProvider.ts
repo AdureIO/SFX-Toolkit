@@ -51,12 +51,12 @@ export class DevActionsProvider implements vscode.TreeDataProvider<vscode.TreeIt
 			]),
 			new DevGroupItem("Query & API", "database", [
 				this.createItem("SOQL Builder & Editor", "adure-sfx-toolkit.openSOQLEditor", "database", "Build and run SOQL queries"),
-				this.createItem("Object Visualizer", "adure-sfx-toolkit.objectVisualizer", "type-hierarchy", "Render an ERD of objects and their 1-hop relationships"),
-				this.createItem("Process Visualizer", "adure-sfx-toolkit.processMap", "circuit-board", "Map the org's automation — triggers, flows, rules, jobs — connected to their objects"),
-					this.createItem("REST / API Explorer", "adure-sfx-toolkit.restExplorer", "globe", "Send REST/Tooling API requests to an org"),
+				this.createItem("REST / API Explorer", "adure-sfx-toolkit.restExplorer", "globe", "Send REST/Tooling API requests to an org"),
 			]),
 			new DevGroupItem("Tools", "tools", [
 				this.createItem("ASFX Workbench", "adure-sfx-toolkit.apexWorkbench.focus", "beaker", "Open the ASFX Workbench (org-aware logs, traces, execute & SOQL)"),
+				this.createItem("Object Visualizer", "adure-sfx-toolkit.objectVisualizer", "type-hierarchy", "Render an ERD of objects and their 1-hop relationships"),
+				this.createItem("Process Visualizer", "adure-sfx-toolkit.processMap", "circuit-board", "Map the org's automation — triggers, flows, rules, jobs — connected to their objects"),
 				this.createItem("Refresh Org Metadata", "adure-sfx-toolkit.refreshMetadata", "refresh", "Refresh sobject/field cache for SOQL and builders"),
 				this.createItem("Apex Snippets", "adure-sfx-toolkit.showSnippets", "play", "Run, add, edit or delete Apex snippets"),
 				this.createItem("Apex Snippets Overview", "adure-sfx-toolkit.openSnippetsPanel", "list-unordered", "Open panel with all snippets"),
