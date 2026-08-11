@@ -19,6 +19,20 @@ Maps an org's automation as a process, not a list of components.
 - Scheduled and autolaunched flows connect to the objects they operate on with a dotted edge.
 - Labelled edges, collision-free layout, re-layout when a filter is applied, search that navigates to each match, and a right-click menu to open any component in the org.
 
+#### 🧠 Language server
+
+Annotation and snippet completion (`@IsTest`, `@AuraEnabled(cacheable=true)`, `sysdebug`, `soqlfor`, `testmethod`, batchable/queueable/schedulable, trigger, asserts, DML), standard exceptions in `catch (…)`, org-aware SOQL bind variables, picklist values and Trigger context typing, SOQL date literals, aggregate functions and `FIELDS()`, workspace symbols, and polymorphic-aware lookup typing.
+
+**Code actions** — surround with try/catch, `System.assert*` → `Assert.*`, generate constructor, implement a standard interface, generate a test class.
+
+**Inline lint** — SOQL/DML in loops, hardcoded record Ids, leftover `System.debug`, missing sharing declaration.
+
+#### 🔗 Apex ↔ LWC and REST
+
+- CodeLens on every `@AuraEnabled` method showing its LWC consumers; click to peek them.
+- Completion and go-to-definition for `@salesforce/label`, `resourceUrl` and `messageChannel`, and a usage CodeLens on `<c-…>` references.
+- **Test in REST Explorer** CodeLens on `@RestResource` methods, opening the panel prefilled with the apexrest URL and method.
+
 #### 🔍 Apex Find References
 
 Cmd+click a symbol to see every usage. Locals are confined to the method that declares them, so two methods using the same variable name never bleed into each other. Overrides the default Salesforce provider and is on by default.

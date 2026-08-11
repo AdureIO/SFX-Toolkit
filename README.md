@@ -30,6 +30,10 @@ A built-in, **JVM-free** language server (pure Node, shipped inside the extensio
 - **SObject type-name completion** in declarations, casts, generics and `instanceof`.
 - **Outline** and **syntax diagnostics**, **go-to-definition** (in-file and cross-file), and **signature help**.
 - **Find references** — every usage of a symbol. A local is confined to the method that declares it, so two methods reusing a name never bleed into each other.
+- **Annotations and snippets** — completion after `@` (`@IsTest`, `@AuraEnabled(cacheable=true)`, `@InvocableMethod`, `HttpGet`/`HttpPost`, …), collection and statement snippets (`sysdebug`, `soqlfor`, `testmethod`, batchable/queueable/schedulable, trigger, asserts, DML), and standard exceptions inside `catch (…)`.
+- **Code actions** — surround with try/catch, `System.assert*` → `Assert.*`, generate a constructor, implement a standard interface, generate a test class.
+- **Inline lint** — SOQL/DML in loops, hardcoded record Ids, leftover `System.debug`, missing sharing declaration.
+- **Org-aware extras** — SOQL bind variables, picklist values, `Trigger.new`/`Trigger.old` typing, SOQL date literals, aggregate functions and `FIELDS()`, plus workspace symbols and polymorphic-aware lookup typing.
 
 **Org-aware extras:**
 
@@ -44,6 +48,8 @@ A built-in, **JVM-free** language server (pure Node, shipped inside the extensio
 - Cmd+click an imported Apex method lands on the **class and method itself**, not a generated stub.
 - Typings come from your `@AuraEnabled` signatures with real parameter and return types, and are regenerated as those change (`lwcApexTypings.autoGenerate`).
 - Custom Apex types become TypeScript **interfaces** rather than `any`, inner classes included.
+- A **CodeLens on every `@AuraEnabled` method** shows how many LWC components import it; click to peek those call sites.
+- Completion and go-to-definition for the other `@salesforce/*` imports too — `label`, `resourceUrl`, `messageChannel` — and a usage CodeLens on `<c-…>` component references.
 - If a component's IntelliSense is broken — `c/*` imports, subdirectories, Salesforce modules — **Tools → Repair → Repair LWC jsconfig** fixes each `lwc` folder's `jsconfig.json`. Nothing under Repair ever runs on its own.
 
 Schema is read from your **default org** via the REST describe API (auth resolved from `sf org display`); the language server itself stays credential-free. Everything is gated to SFDX projects and individually toggleable — see [Settings](#settings).
