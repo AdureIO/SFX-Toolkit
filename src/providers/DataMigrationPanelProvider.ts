@@ -402,7 +402,8 @@ body { font-family: var(--vscode-font-family); font-size: 13px; color: var(--vsc
 .btn-danger:hover { opacity: 1; }
 .btn-refresh { padding: 4px 8px; font-size: 11px; background: transparent; color: var(--vscode-descriptionForeground); border: 1px solid transparent; border-radius: 3px; cursor: pointer; font-family: inherit; opacity: .7; transition: opacity .1s; }
 .btn-refresh:hover { opacity: 1; background: var(--vscode-list-hoverBackground); border-color: var(--vscode-panel-border); }
-.btn-refresh.spinning { animation: spin .8s linear infinite; pointer-events: none; }
+.btn-refresh.spinning { pointer-events: none; opacity: .6; }
+.btn-refresh.spinning .spin-icon { display: inline-block; animation: spin .8s linear infinite; }
 .cache-status { font-size: 10px; color: var(--vscode-descriptionForeground); align-self: center; }
 .divider { border: none; border-top: 1px solid var(--vscode-panel-border); margin: 4px 0; }
 .status-bar { padding: 8px 12px; border-radius: 3px; font-size: 12px; font-weight: 500; border-left: 3px solid transparent; display: none; }
@@ -612,7 +613,7 @@ body { font-family: var(--vscode-font-family); font-size: 13px; color: var(--vsc
       <div class="card-head">
         <span class="card-title">Source &amp; Target</span>
         <span class="spacer"></span>
-        <button class="btn-refresh" id="refresh-cache-btn" title="Refresh org list &amp; metadata cache" onclick="refreshCache()">🔄 Refresh cache</button>
+        <button class="btn-refresh" id="refresh-cache-btn" title="Refresh org list &amp; metadata cache" onclick="refreshCache()"><span class="spin-icon">🔄</span> Refresh cache</button>
         <span class="cache-status" id="cache-status-label"></span>
       </div>
       <div style="display:flex; gap:12px; flex-wrap:wrap;">
@@ -1342,6 +1343,15 @@ function toggleExcluded(sobject) {
   if (tog) tog.textContent = open ? 'hide' : 'show';
 }
 
+/* Re-describe every object currently in the tree. The describe cache was just cleared, but the
+   field lists on screen came from the old describe — without this a field created since the last
+   describe (typically a new external Id) never appears until the panel is rebuilt. */
+function redescribeSelected() {
+  var names = Object.keys(nodes || {});
+  if (!names.length) return;
+  names.forEach(function(sobject) { requestDescribeChild(sobject); });
+}
+
 function requestDescribeChild(sobject) {
   var srcOrg = safeGet('src-org') && safeGet('src-org').value;
   if (!srcOrg) return;
@@ -1649,6 +1659,9 @@ window.addEventListener('message', function(ev) {
     var lbl2 = safeGet('cache-status-label');
     if (btn2) { btn2.classList.remove('spinning'); btn2.disabled = false; }
     if (d.orgs) { orgsData = d.orgs; populateOrgSelects(orgsData); }
+    // The cache is cleared, but the field lists on screen were built from the OLD describe.
+    // Re-describe whatever is selected so newly created fields (external Ids) appear.
+    try { redescribeSelected(); } catch (e) { /* nothing selected yet */ }
     if (lbl2) {
       var now = new Date(); lbl2.textContent = 'Updated ' + now.getHours() + ':' + String(now.getMinutes()).padStart(2,'0');
       setTimeout(function() { if (lbl2) lbl2.textContent = ''; }, 5000);
