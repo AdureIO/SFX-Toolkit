@@ -400,6 +400,7 @@ document.querySelectorAll('input[name="ov-filter"]').forEach((r) =>
   })
 );
 
+showFullFields = fullFieldsToggle.checked; // follow the markup's default (full fields on)
 fullFieldsToggle.addEventListener("change", () => {
   showFullFields = fullFieldsToggle.checked;
   relabelNodes();

@@ -337,22 +337,12 @@ export class ObjectVisualizerPanelProvider {
     <button id="ov-refresh" class="btn-secondary" title="Refresh org & schema cache">↻</button>
     <button id="ov-pick">⊕ Pick objects</button>
     <button id="ov-project" class="btn-secondary" title="Auto-select the objects defined in this project's source">★ Project objects</button>
-    <span class="tb-label">Related</span>
-    <select id="ov-direction" title="How far out to pull related objects">
-      <option value="self">Selected only</option>
-      <option value="parents">+ Parents (lookups)</option>
-      <option value="both" selected>+ Parents &amp; children</option>
-    </select>
-    <span class="tb-label">Max children</span>
-    <select id="ov-childcap" title="Max child relationships pulled in per object">
-      <option value="0">None</option>
-      <option value="10">10</option>
-      <option value="25" selected>25</option>
-      <option value="50">50</option>
-      <option value="all">All</option>
-    </select>
-    <label class="inline" title="Include polymorphic lookups (OwnerId, WhatId, …) that point at many object types"><input type="checkbox" id="ov-poly"> Polymorphic</label>
-    <label class="inline" title="Include audit lookups (CreatedById / LastModifiedById → User)"><input type="checkbox" id="ov-audit"> Audit</label>
+    <!-- Fixed at their previous defaults: parents & children, 25 children per object, no
+         polymorphic or audit lookups. Kept as inputs so the graph builder is unchanged. -->
+    <input type="hidden" id="ov-direction" value="both">
+    <input type="hidden" id="ov-childcap" value="25">
+    <input type="checkbox" id="ov-poly" hidden>
+    <input type="checkbox" id="ov-audit" hidden>
     <span class="tb-label">Layout</span>
     <select id="ov-layout" title="Graph layout">
       <option value="dagre-lr" selected>Hierarchical →</option>
@@ -363,8 +353,8 @@ export class ObjectVisualizerPanelProvider {
       <option value="cose">Force</option>
     </select>
     <button id="ov-fit" class="btn-secondary" title="Fit graph to view">⤢ Fit</button>
-    <label class="inline"><input type="checkbox" id="ov-fullfields"> Full fields</label>
-    <label class="inline" title="Show system / read-only fields (CreatedDate, SystemModstamp, …)"><input type="checkbox" id="ov-system"> System</label>
+    <label class="inline"><input type="checkbox" id="ov-fullfields" checked> Full fields</label>
+    <label class="inline" title="Show system / read-only fields (CreatedDate, SystemModstamp, …)"><input type="checkbox" id="ov-system"> System fields</label>
     <span class="tb-spacer"></span>
     <button id="ov-export-png" class="btn-secondary">⬇ PNG</button>
     <button id="ov-export-svg" class="btn-secondary">⬇ SVG</button>
