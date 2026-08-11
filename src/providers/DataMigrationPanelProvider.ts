@@ -11,6 +11,7 @@ import {
   extractSObjectFromQuery,
   countQuery,
   runMigration,
+  collectMigrationData,
   describeObject,
   findUnmappedLookups,
   ORG_ASSIGNED_LOOKUPS,
@@ -30,6 +31,7 @@ import {
   type RevertSelection,
   type OrgInfo
 } from "../utils/dataMigration";
+import { toApexScript, toCsvExports, toJsonExport, type ExportFieldMeta } from "../utils/migrationExport";
 import { Telemetry } from "../utils/telemetry";
 import { confirmProductionOrgOperation } from "../utils/orgSafety";
 
@@ -164,6 +166,7 @@ export class DataMigrationPanelProvider {
       retry?: { retryOnly?: Record<string, string[]>; priorIdMaps?: Record<string, Record<string, string>> };
       revertOnFail?: boolean;
       selection?: RevertSelection;
+      format?: "org" | "apex" | "csv" | "json";
     }) => {
 
       // ── Init ─────────────────────────────────────────────────────────────
@@ -360,7 +363,8 @@ export class DataMigrationPanelProvider {
             results, idMaps, journal,
             canRevert: counts.inserted + counts.restorable > 0,
             revertCounts: counts,
-            targetInstanceUrl: tgtOrg.instanceUrl
+            targetInstanceUrl: tgtOrg.instanceUrl,
+            sourceInstanceUrl: srcOrg.instanceUrl
           });
 
           // Revert on failure. Ticking the box IS the decision — asking again at the moment it
@@ -412,6 +416,90 @@ export class DataMigrationPanelProvider {
         const remaining = isPartial ? subtractJournal(run.journal, picked) : null;
         lastRun = remaining ? { ...run, journal: remaining } : null;
         await performRevert(panel, run.orgInfo, run.order, picked, run.org, remaining);
+        return;
+      }
+
+      // ── Export instead of migrate (Apex / CSV / JSON) ─────────────────────
+      // The same selection and the same rules, written to a file rather than into a second org.
+      // No target org is involved, so no production guard applies — nothing is written anywhere
+      // but the user's own workspace.
+      if (msg.command === "exportMigration") {
+        const { sourceOrg = "", profile, format = "json" } = msg;
+        if (!sourceOrg || !profile) {
+          panel.webview.postMessage({ command: "migrationError", error: "Source org and a configured object tree are required." });
+          return;
+        }
+        try {
+          Telemetry.event("dataMigrationExport");
+          panel.webview.postMessage({ command: "migrationStarted" });
+          const srcOrg = await resolveOrgToInfo(sourceOrg || null);
+
+          const data = await collectMigrationData(srcOrg, profile, (sobject, fetched) => {
+            panel.webview.postMessage({
+              command: "migrationProgress",
+              progress: { sobject, phase: "querying", done: fetched, total: 0, inserted: 0, updated: 0, failed: 0 }
+            });
+          });
+
+          // Field types and lookup targets drive the Apex literals and the lookup re-pointing.
+          const meta: ExportFieldMeta = new Map();
+          for (const node of profile.nodes) {
+            const desc = await SchemaCache.getRichDescribe(sourceOrg || null, node.sobject);
+            const m = new Map<string, { type: string; referenceTo: string[] }>();
+            for (const f of desc?.fields ?? []) m.set(f.name, { type: f.type, referenceTo: f.referenceTo ?? [] });
+            meta.set(node.sobject, m);
+          }
+
+          const stamp = new Date().toISOString();
+          const safeName = (profile.name || "migration").replace(/[^a-zA-Z0-9_-]/g, "_");
+          const outDir = path.join(workspaceRoot, ".sfdx", "asfx", "exports");
+
+          if (format === "csv") {
+            const uri = await vscode.window.showOpenDialog({
+              canSelectFiles: false, canSelectFolders: true, canSelectMany: false,
+              defaultUri: vscode.Uri.file(outDir), title: "Choose a folder for the CSV files", openLabel: "Export here"
+            });
+            if (!uri?.length) { panel.webview.postMessage({ command: "exportCancelled" }); return; }
+            const files = toCsvExports(data, (sobject) => {
+              const node = profile.nodes.find((n: { sobject: string }) => n.sobject === sobject);
+              return ["Id", ...(node?.includeFields ?? []).filter((f: string) => f !== "Id")];
+            });
+            fs.mkdirSync(uri[0].fsPath, { recursive: true });
+            for (const f of files) fs.writeFileSync(path.join(uri[0].fsPath, f.fileName), f.content, "utf8");
+            const total = data.reduce((n, d) => n + d.records.length, 0);
+            panel.webview.postMessage({
+              command: "exportComplete", format,
+              summary: `${files.length} CSV file(s), ${total} record(s) → ${uri[0].fsPath}`
+            });
+            vscode.window.showInformationMessage(`Exported ${files.length} CSV file(s) to ${uri[0].fsPath}`);
+            return;
+          }
+
+          const isApex = format === "apex";
+          const content = isApex
+            ? toApexScript(profile, data, meta, stamp)
+            : toJsonExport(profile, data, stamp);
+          const uri = await vscode.window.showSaveDialog({
+            defaultUri: vscode.Uri.file(path.join(outDir, `${safeName}.${isApex ? "apex" : "json"}`)),
+            filters: isApex ? { "Anonymous Apex": ["apex", "cls"] } : { JSON: ["json"] },
+            title: isApex ? "Save the generated Apex script" : "Save the exported records"
+          });
+          if (!uri) { panel.webview.postMessage({ command: "exportCancelled" }); return; }
+          fs.mkdirSync(path.dirname(uri.fsPath), { recursive: true });
+          fs.writeFileSync(uri.fsPath, content, "utf8");
+          const total = data.reduce((n, d) => n + d.records.length, 0);
+          panel.webview.postMessage({
+            command: "exportComplete", format,
+            summary: `${total} record(s) across ${data.length} object(s) → ${path.basename(uri.fsPath)}`
+          });
+          const doc = await vscode.workspace.openTextDocument(uri);
+          await vscode.window.showTextDocument(doc, { preview: false });
+          return;
+        } catch (e) {
+          const err = e instanceof Error ? e.message : String(e);
+          Logger.error("Migration export failed", e);
+          panel.webview.postMessage({ command: "migrationError", error: err.substring(0, 600) });
+        }
         return;
       }
 
@@ -874,6 +962,14 @@ table.changes .st-failed { color: var(--vscode-errorForeground); }
 <div class="page" id="page3">
   <div class="run-toolbar">
     <button class="btn-secondary" id="back-to-tree-btn" onclick="goToTree()">← Adjust settings</button>
+    <label class="inline" style="font-size:12px;" title="Where the selected records go. The org option writes them into the target org; the others produce a file from the same selection and the same rules.">Output
+      <select id="migration-type" onchange="onMigrationTypeChange()">
+        <option value="org">Org → Org</option>
+        <option value="apex">Org → Apex script</option>
+        <option value="csv">Org → CSV</option>
+        <option value="json">Org → JSON</option>
+      </select>
+    </label>
     <span style="flex:1; font-size:12px; color:var(--vscode-descriptionForeground);" id="run-status-label">Ready to run</span>
     <label class="inline" style="font-size:12px;" title="If any record fails, offer to undo the whole run: delete the records it created and restore the records it overwrote to their previous values. Only rows this run touched are affected, and you are asked to confirm first."><input type="checkbox" id="revert-on-fail"> Revert on failure</label>
     <button class="btn-secondary" id="retry-failed-btn" onclick="retryFailed()" style="display:none;">⟳ Retry failed rows</button>
@@ -922,6 +1018,7 @@ var orgRefreshedOnce = false;     // guard: auto-refresh empty org list only onc
 var lastIdMaps = {};              // sobject -> { srcId: targetId } from the last run (for retry)
 var lastJournal = null;           // what the last run changed: { inserted: {...}, updated: {...} }
 var targetInstanceUrl = '';       // target org base URL, so a new record Id links straight to it
+var sourceInstanceUrl = '';       // source org base URL, for the source Ids in the result table
 var lastFailed = {};              // sobject -> [srcId, …] that failed in the last run
 
 /*
@@ -1665,6 +1762,7 @@ function prepareRunPage() {
   safeGet('revert-run-btn') && (safeGet('revert-run-btn').style.display = 'none');
   safeGet('changes-table') && (safeGet('changes-table').innerHTML = '');
   lastJournal = null;
+  onMigrationTypeChange(); // the button and the revert controls follow the chosen output
 }
 
 function toggleObjErrors(sobject) {
@@ -1713,23 +1811,71 @@ function saveProfile() {
   post({ command: 'saveProfile', profile: profile, name: profile.name });
 }
 
+function migrationType() {
+  var el = safeGet('migration-type');
+  return (el && el.value) || 'org';
+}
+
+var TYPE_LABEL = { org: '⚡ Start Migration', apex: '⚡ Generate Apex', csv: '⚡ Export CSV', json: '⚡ Export JSON' };
+
+/**
+ * Only an org-to-org run writes into a second org, so the target-org controls and the revert
+ * machinery are meaningless for the file outputs — hide them rather than leave dead switches on
+ * screen.
+ */
+function onMigrationTypeChange() {
+  var t = migrationType();
+  var toOrg = t === 'org';
+  var btn = safeGet('start-run-btn');
+  if (btn) btn.textContent = TYPE_LABEL[t] || TYPE_LABEL.org;
+  var rev = safeGet('revert-on-fail');
+  if (rev && rev.parentElement) rev.parentElement.style.display = toOrg ? '' : 'none';
+  var rbtn = safeGet('revert-run-btn');
+  if (!toOrg && rbtn) rbtn.style.display = 'none';
+  var lbl = safeGet('run-status-label');
+  if (lbl) {
+    lbl.textContent = toOrg
+      ? 'Ready to run'
+      : 'Ready — the same selection and rules, written to a file instead of an org.';
+  }
+}
+
 function startMigration() {
   var srcOrg = safeGet('src-org') && safeGet('src-org').value;
   var tgtOrg = safeGet('tgt-org') && safeGet('tgt-org').value;
   var profile = buildProfile();
-  if (!srcOrg || !tgtOrg || !profile || !profile.nodes.length) {
+  var type = migrationType();
+  var needsTarget = type === 'org';
+  if (!srcOrg || !profile || !profile.nodes.length || (needsTarget && !tgtOrg)) {
     safeGet('global-error') && (safeGet('global-error').className = 'global-error visible');
-    safeGet('global-error') && (safeGet('global-error').textContent = 'Source org, target org and at least one included object are required.');
+    safeGet('global-error') && (safeGet('global-error').textContent = needsTarget
+      ? 'Source org, target org and at least one included object are required.'
+      : 'Source org and at least one included object are required.');
     return;
   }
   safeGet('global-error') && (safeGet('global-error').classList.remove('visible'));
   safeGet('start-run-btn') && (safeGet('start-run-btn').disabled = true);
-  safeGet('start-run-btn') && (safeGet('start-run-btn').textContent = '⏳ Running…');
+  safeGet('start-run-btn') && (safeGet('start-run-btn').textContent = needsTarget ? '⏳ Running…' : '⏳ Exporting…');
   safeGet('back-to-tree-btn') && (safeGet('back-to-tree-btn').disabled = true);
-  safeGet('run-status-label') && (safeGet('run-status-label').textContent = 'Migration running…');
+  safeGet('run-status-label') && (safeGet('run-status-label').textContent = needsTarget ? 'Migration running…' : 'Reading records…');
+  if (!needsTarget) {
+    post({ command: 'exportMigration', sourceOrg: srcOrg, profile: profile, format: type });
+    return;
+  }
   var revertEl = safeGet('revert-on-fail');
   post({ command: 'runMigration', sourceOrg: srcOrg, targetOrg: tgtOrg, profile: profile,
     revertOnFail: !!(revertEl && revertEl.checked) });
+}
+
+function finishExport(text, cls) {
+  safeGet('start-run-btn') && (safeGet('start-run-btn').disabled = false);
+  safeGet('start-run-btn') && (safeGet('start-run-btn').textContent = TYPE_LABEL[migrationType()] || TYPE_LABEL.org);
+  safeGet('back-to-tree-btn') && (safeGet('back-to-tree-btn').disabled = false);
+  safeGet('run-status-label') && (safeGet('run-status-label').textContent = text);
+  if (cls === 'error') {
+    var ge = safeGet('global-error');
+    if (ge) { ge.className = 'global-error visible'; ge.textContent = '❌ ' + text; }
+  }
 }
 
 function updateProgressRow(progress) {
@@ -1849,12 +1995,14 @@ function fmtVal(v) {
   return String(v);
 }
 
-/** A target record Id, as a link into the target org when we know its instance URL. */
-function recordCell(id) {
+/** A record Id as a link into the org it lives in, plain text when we have no URL for it. */
+function orgLink(id, baseUrl, title) {
   if (!id) return '—';
-  if (!targetInstanceUrl) return escHtml(id);
-  return '<a href="' + escHtml(targetInstanceUrl) + '/' + escHtml(id) + '" title="Open in the target org">' + escHtml(id) + '</a>';
+  if (!baseUrl) return escHtml(id);
+  return '<a href="' + escHtml(baseUrl) + '/' + escHtml(id) + '" title="' + escHtml(title) + '">' + escHtml(id) + '</a>';
 }
+function recordCell(id) { return orgLink(id, targetInstanceUrl, 'Open in the target org'); }
+function sourceCell(id) { return orgLink(id, sourceInstanceUrl, 'Open in the source org'); }
 
 /** The field-by-field diff for one overwritten record, one "field was → now" line each. */
 function diffCell(entry) {
@@ -1910,7 +2058,7 @@ function renderChangesTable(journal) {
         '<td class="pick"><input type="checkbox" class="rv rv-ins" checked ' +
           'data-obj="' + escHtml(r.sobject) + '" data-id="' + escHtml(r.id) + '" onchange="updateRevertBtn()"></td>' +
         '<td>' + escHtml(r.sobject) + '</td>' +
-        '<td>' + escHtml(r.srcId || '—') + '</td>' +
+        '<td>' + sourceCell(r.srcId) + '</td>' +
         '<td>' + recordCell(r.id) + '</td>' +
         '<td class="st-updated">created</td>' +
         '</tr>';
@@ -1941,7 +2089,7 @@ function renderChangesTable(journal) {
       '<div class="changes-scroll"><table class="changes"><thead><tr>' +
       '<th class="pick"><input type="checkbox" checked title="Select every restorable record" ' +
       'onchange="setRevertAll(\\'upd\\', this.checked)"></th>' +
-      '<th>Object</th><th>Record</th><th>Changes (was → now)</th><th>Status</th>' +
+      '<th>Object</th><th>Source Id</th><th>Record</th><th>Changes (was → now)</th><th>Status</th>' +
       '</tr></thead><tbody>';
     updated.slice(0, CHANGES_ROW_LIMIT).forEach(function(u) {
       var failed = u.e.status === 'failed';
@@ -1950,6 +2098,7 @@ function renderChangesTable(journal) {
           '<input type="checkbox" class="rv rv-upd" checked data-obj="' + escHtml(u.sobject) +
           '" data-id="' + escHtml(u.e.id) + '" onchange="updateRevertBtn()">') + '</td>' +
         '<td>' + escHtml(u.sobject) + '</td>' +
+        '<td>' + sourceCell(u.e.srcId) + '</td>' +
         '<td>' + recordCell(u.e.id) + '</td>' +
         '<td>' + diffCell(u.e) + '</td>' +
         '<td class="' + (failed ? 'st-failed' : 'st-updated') + '">' +
@@ -2151,6 +2300,16 @@ window.addEventListener('message', function(ev) {
     return;
   }
 
+  if (d.command === 'exportComplete') {
+    finishExport('✅ Exported — ' + (d.summary || 'done'));
+    return;
+  }
+
+  if (d.command === 'exportCancelled') {
+    finishExport('Export cancelled.');
+    return;
+  }
+
   if (d.command === 'validated') {
     renderValidation(d);
     return;
@@ -2170,6 +2329,7 @@ window.addEventListener('message', function(ev) {
     if (d.idMaps) lastIdMaps = d.idMaps;
     lastJournal = d.journal || null;
     targetInstanceUrl = (d.targetInstanceUrl || '').replace(/\\/$/, '');
+    sourceInstanceUrl = (d.sourceInstanceUrl || '').replace(/\\/$/, '');
     showMigrationResults(d.results || []);
     renderChangesTable(lastJournal);
     var rbtn = safeGet('revert-run-btn');

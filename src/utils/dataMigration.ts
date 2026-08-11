@@ -15,6 +15,8 @@ export {
   type RevertSelection,
   type RevertSummary
 } from "./migrationRevert";
+import { topoSortNodes, type OrderableNode } from "./migrationOrder";
+export { topoSortNodes, type OrderableNode } from "./migrationOrder";
 import { buildRevertPlan, type MigrationJournal, type RevertUpdateEntry, type RevertSummary } from "./migrationRevert";
 import { AuthInfo } from "./authInfo";
 import { getToolingApiVersion } from "./constants";
@@ -524,62 +526,6 @@ function sentValues(rec: CollectionsRecord | undefined): Record<string, unknown>
 // ─── Main migration runner ────────────────────────────────────────────────────
 
 /**
- * Order nodes so each object is migrated after every migrated object it
- * references (tree parent + any other lookups). Junction objects therefore
- * come after both their linked parents. Cycles (self-references, mutual
- * lookups) are broken by falling back to the original order.
- */
-function topoSortNodes(
-  nodes: MigrationNodeConfig[],
-  refMeta: Map<string, Map<string, string[]>>,
-  included: Set<string>
-): MigrationNodeConfig[] {
-  const deps = new Map<string, Set<string>>();
-  for (const n of nodes) {
-    const d = new Set<string>();
-    if (n.parentSObject && included.has(n.parentSObject) && n.parentSObject !== n.sobject) {
-      d.add(n.parentSObject);
-    }
-    const m = refMeta.get(n.sobject);
-    if (m) {
-      for (const field of n.includeFields) {
-        const refs = m.get(field);
-        if (!refs) continue;
-        for (const r of refs) {
-          if (included.has(r) && r !== n.sobject) d.add(r);
-        }
-      }
-    }
-    deps.set(n.sobject, d);
-  }
-  const bySObject = new Map(nodes.map((n) => [n.sobject, n]));
-  const origIndex = new Map(nodes.map((n, i) => [n.sobject, i]));
-  const remaining = new Set(nodes.map((n) => n.sobject));
-  const ordered: MigrationNodeConfig[] = [];
-  while (remaining.size) {
-    let pick: string | null = null;
-    let pickIdx = Infinity;
-    // Prefer a node whose dependencies are all already emitted.
-    for (const s of remaining) {
-      const d = deps.get(s)!;
-      let ready = true;
-      for (const dep of d) { if (remaining.has(dep)) { ready = false; break; } }
-      if (ready && origIndex.get(s)! < pickIdx) { pick = s; pickIdx = origIndex.get(s)!; }
-    }
-    // Cycle: nothing is ready — break it by taking the earliest remaining node.
-    if (pick === null) {
-      for (const s of remaining) {
-        if (origIndex.get(s)! < pickIdx) { pick = s; pickIdx = origIndex.get(s)!; }
-      }
-    }
-    if (pick === null) break;
-    ordered.push(bySObject.get(pick)!);
-    remaining.delete(pick);
-  }
-  return ordered;
-}
-
-/**
  * Execute a full org-to-org migration based on a MigrationProfile.
  * Processes nodes in topological order (root first).
  * Maintains an ID map per SObject so child lookup fields are remapped
@@ -1020,6 +966,53 @@ export async function runMigration(
     idMapsOut[sobj] = Object.fromEntries(m);
   }
   return { results, idMaps: idMapsOut, journal };
+}
+
+// ─── Collect-only (export) ────────────────────────────────────────────────────
+
+/**
+ * Query everything a migration would write, without writing any of it.
+ *
+ * This is the read half of `runMigration` and it selects the same rows: the root by its SOQL,
+ * each child by its parent's Ids. What differs is that children are matched on the SOURCE parent
+ * Ids — there are no target Ids, because nothing is created. The formats in `migrationExport`
+ * turn the result into Apex, CSV or JSON.
+ */
+export async function collectMigrationData(
+  sourceOrg: OrgInfo,
+  profile: MigrationProfile,
+  onProgress?: (sobject: string, fetched: number) => void
+): Promise<Array<{ sobject: string; records: Record<string, string>[] }>> {
+  const out: Array<{ sobject: string; records: Record<string, string>[] }> = [];
+  const srcIdsBySObject = new Map<string, string[]>();
+
+  // Same rule as a migration: Owner / Record Type / audit lookups are not migratable data.
+  const nodes = profile.nodes.map((n) => {
+    let includeFields = n.includeFields.filter((f) => !ORG_ASSIGNED_LOOKUPS.has(f.toLowerCase()));
+    if (n.externalIdField && !includeFields.includes(n.externalIdField)) {
+      includeFields = [...includeFields, n.externalIdField];
+    }
+    return includeFields.length === n.includeFields.length ? n : { ...n, includeFields };
+  });
+
+  for (const node of nodes) {
+    let records: Record<string, string>[] = [];
+    if (!node.parentSObject) {
+      const fields = ["Id", ...node.includeFields.filter((f) => f !== "Id")];
+      const soql = profile.sourceQuery.replace(/SELECT\s+.+?\s+FROM/is, `SELECT ${fields.join(",")} FROM`);
+      records = await queryAllRecords(sourceOrg, soql, (fetched) => onProgress?.(node.sobject, fetched));
+    } else {
+      const parentIds = srcIdsBySObject.get(node.parentSObject) ?? [];
+      for (let i = 0; i < parentIds.length; i += 500) {
+        const chunk = await queryAllRecords(sourceOrg, buildChildQuery(node, parentIds.slice(i, i + 500)));
+        records.push(...chunk);
+        onProgress?.(node.sobject, records.length);
+      }
+    }
+    srcIdsBySObject.set(node.sobject, records.map((r) => r["Id"]).filter(Boolean));
+    out.push({ sobject: node.sobject, records });
+  }
+  return out;
 }
 
 // ─── Profile I/O ─────────────────────────────────────────────────────────────
