@@ -20,14 +20,16 @@ function write(dir: string, name: string, mtime?: number): void {
 }
 
 describe("migrationPresets.presetDirs", () => {
+  const GLOBAL = "/Users/me/Library/Application Support/Code/User/globalStorage/adure.sfx";
+
   it("puts project presets with the project's own source", () => {
-    const dirs = presetDirs("/work/app");
+    const dirs = presetDirs("/work/app", GLOBAL);
     assert.strictEqual(dirs.project, path.join("/work/app", ".sfdx", "asfx", "migrations"));
   });
 
-  it("puts global presets under the user's home, not the project", () => {
-    const dirs = presetDirs("/work/app");
-    assert.ok(dirs.global.startsWith(os.homedir()));
+  it("puts global presets in the extension's own storage, never in the project", () => {
+    const dirs = presetDirs("/work/app", GLOBAL);
+    assert.strictEqual(dirs.global, path.join(GLOBAL, "migrations"));
     assert.ok(!dirs.global.includes("/work/app"));
   });
 });

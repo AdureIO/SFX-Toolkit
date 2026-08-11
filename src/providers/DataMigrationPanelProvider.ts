@@ -134,7 +134,7 @@ async function performRevert(
 export class DataMigrationPanelProvider {
   public static readonly viewType = "adure-sfx-toolkit.dataMigration";
 
-  public static async show(): Promise<void> {
+  public static async show(globalStorageDir: string): Promise<void> {
     const folder = vscode.workspace.workspaceFolders?.[0];
     if (!folder) { vscode.window.showErrorMessage("No workspace open."); return; }
     const workspaceRoot = folder.uri.fsPath;
@@ -574,7 +574,7 @@ export class DataMigrationPanelProvider {
       if (msg.command === "saveProfile") {
         const { profile, name = "migration" } = msg;
         if (!profile) return;
-        const dirs = presetDirs(workspaceRoot);
+        const dirs = presetDirs(workspaceRoot, globalStorageDir);
 
         const presetName = await vscode.window.showInputBox({
           title: "Save migration preset",
@@ -589,7 +589,7 @@ export class DataMigrationPanelProvider {
         const scopePick = await vscode.window.showQuickPick(
           [
             { label: "$(root-folder) This project", detail: dirs.project, scope: "project" as PresetScope },
-            { label: "$(globe) Global", detail: `${dirs.global} — available in every project on this machine`, scope: "global" as PresetScope }
+            { label: "$(globe) Global", detail: `Available in every project on this machine — ${dirs.global}`, scope: "global" as PresetScope }
           ],
           { title: `Where should "${presetName.trim()}" be saved?`, placeHolder: "Preset location" }
         );
@@ -619,7 +619,7 @@ export class DataMigrationPanelProvider {
 
       // ── Load preset ───────────────────────────────────────────────────────
       if (msg.command === "loadProfile") {
-        const dirs = presetDirs(workspaceRoot);
+        const dirs = presetDirs(workspaceRoot, globalStorageDir);
         const legacyDir = path.join(workspaceRoot, ".sfdx", "asfx");
         const presets = listPresets(dirs, legacyDir);
 

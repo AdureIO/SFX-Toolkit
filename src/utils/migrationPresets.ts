@@ -7,7 +7,6 @@
  */
 
 import * as fs from "fs";
-import * as os from "os";
 import * as path from "path";
 
 export type PresetScope = "project" | "global";
@@ -21,10 +20,15 @@ export interface PresetDirs {
   global: string;
 }
 
-export function presetDirs(workspaceRoot: string): PresetDirs {
+/**
+ * `globalStorageDir` is the extension's own global storage path, which VS Code manages and keeps
+ * out of any project. It is passed in rather than derived so this module needs no `vscode` import
+ * and stays testable.
+ */
+export function presetDirs(workspaceRoot: string, globalStorageDir: string): PresetDirs {
   return {
     project: path.join(workspaceRoot, ".sfdx", "asfx", "migrations"),
-    global: path.join(os.homedir(), ".adure-sfx", "migrations")
+    global: path.join(globalStorageDir, "migrations")
   };
 }
 

@@ -565,7 +565,9 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     // 21. Data Migration Wizard
-    const dataMigrationCmd = register("adure-sfx-toolkit.dataMigration", () => DataMigrationPanelProvider.show());
+    const dataMigrationCmd = register("adure-sfx-toolkit.dataMigration", () =>
+      DataMigrationPanelProvider.show(context.globalStorageUri.fsPath)
+    );
 
     // 22. Package Explorer (Dev Hub 2GP)
     const packageExplorerCmd = register("adure-sfx-toolkit.openPackageExplorer", (arg?: { orgData?: { username?: string } }) =>
