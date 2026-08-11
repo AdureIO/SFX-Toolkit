@@ -72,6 +72,9 @@ import { CoveragePanelProvider } from "./providers/CoveragePanelProvider";
 import { ApexCoverageDecorationProvider } from "./providers/ApexCoverageDecorationProvider";
 import { CoverageLineDecorator } from "./providers/CoverageLineDecorator";
 import { toggleHideMetaXml } from "./commands/toggleHideMeta";
+import { registerLwcApexBridge } from "./providers/LwcApexBridge";
+import { registerLwcProviders } from "./providers/LwcProviders";
+import { registerRestResourceCodeLens } from "./providers/RestResourceCodeLens";
 import { apexCoverage, registerCoverageWatchers, clearApexTestResults } from "./utils/apexCoverageService";
 import { SnippetTreeProvider } from "./providers/SnippetTreeProvider";
 import { addToGitignore, addToForceignore, addToIgnore } from "./commands/addToIgnore";
@@ -584,6 +587,13 @@ export function activate(context: vscode.ExtensionContext) {
         return PackageExplorerPanelProvider.showInstalled(username);
       }
     );
+
+    // 24. Apex ↔ LWC bridge — go-to-definition from LWC apex imports + @AuraEnabled CodeLens
+    registerLwcApexBridge(context);
+    // 25. LWC @salesforce/* import completion + go-to-def + component usage CodeLens
+    registerLwcProviders(context);
+    // 26. @RestResource → "Test in REST Explorer" CodeLens
+    registerRestResourceCodeLens(context);
 
     // 23. Apex coverage — Explorer badges + structured panel (shared store)
     const covDecorator = new ApexCoverageDecorationProvider(context);

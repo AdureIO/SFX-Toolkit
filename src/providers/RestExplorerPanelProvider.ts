@@ -118,11 +118,14 @@ export class RestExplorerPanelProvider {
 
   /** Persisted state per workspace so the panel restores on reopen / window reload. */
   private static stateByWorkspace: Record<string, RestExplorerState> = {};
+  /** A request to preload into the panel once it's ready (e.g. from an @RestResource CodeLens). */
+  private static _pendingPrefill: { method?: string; url?: string } | undefined;
 
-  public static async show(): Promise<void> {
+  public static async show(prefill?: { method?: string; url?: string }): Promise<void> {
     const folder = vscode.workspace.workspaceFolders?.[0];
     if (!folder) { vscode.window.showErrorMessage("No workspace open."); return; }
 
+    RestExplorerPanelProvider._pendingPrefill = prefill;
     const panel = vscode.window.createWebviewPanel(
       RestExplorerPanelProvider.viewType,
       "REST API Explorer",
@@ -170,6 +173,10 @@ export class RestExplorerPanelProvider {
           restResources,
           savedState
         });
+        if (RestExplorerPanelProvider._pendingPrefill) {
+          panel.webview.postMessage({ command: "prefill", ...RestExplorerPanelProvider._pendingPrefill });
+          RestExplorerPanelProvider._pendingPrefill = undefined;
+        }
         return;
       }
 
@@ -852,6 +859,15 @@ export class RestExplorerPanelProvider {
     if (!d || !d.command) return;
 
     var sendBtn = safeGet('send-btn');
+
+    if (d.command === 'prefill') {
+      var mSel = safeGet('method');
+      var uInp = safeGet('url-input');
+      if (mSel && d.method) mSel.value = String(d.method).toUpperCase();
+      if (uInp && d.url) uInp.value = d.url;
+      if (typeof onConfigChange === 'function') onConfigChange();
+      return;
+    }
 
     if (d.command === 'init') {
       orgsData = d.orgs || [];
