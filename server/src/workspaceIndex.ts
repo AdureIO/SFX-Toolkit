@@ -43,6 +43,12 @@ class WorkspaceIndexImpl {
     }
 
     /** All known top-level Apex type (class/trigger) names, original-cased. */
+    /** Every indexed Apex file path — used for workspace-wide reference search. */
+    allFiles(): string[] {
+        if (!this.scanned) this.scan();
+        return [...new Set(this.files.values())];
+    }
+
     allTypeNames(): string[] {
         if (!this.scanned) this.scan();
         return [...this.names.values()];

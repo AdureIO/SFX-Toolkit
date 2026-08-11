@@ -24,10 +24,12 @@ import {
     Range,
     InsertTextFormat,
 } from 'vscode-languageserver/node';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
+import * as fs from 'fs';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { completionsFor } from '@salesforce/soql-language-server/lib/completion';
 import { parseApex, enclosingClass, resolveVarType, ApexParseResult, ApexMember } from './apexSymbols';
+import { symbolAt, findReferencesInText } from '../../src/utils/apexReferences';
 import { validateFieldAccesses } from './apexSemantics';
 import { WorkspaceIndex } from './workspaceIndex';
 import { getStub, setStubRoot, clearStubs, stubbedObjectNames, invalidateStubbedNames } from './sobjectStub';
@@ -146,6 +148,8 @@ connection.onInitialize((params): InitializeResult => {
             // Definition is always on: SObject/field click-through to schema stubs
             // needs no Apex gating; Apex-symbol resolution is gated in the handler.
             definitionProvider: true,
+            // References for Apex symbols (scope-aware for locals/params).
+            referencesProvider: apexFeatures ? true : undefined,
             signatureHelpProvider: apexFeatures ? { triggerCharacters: ['(', ','] } : undefined,
             // Hover is always on: SOQL field/object info needs no Apex gating;
             // Apex hover content is gated inside the handler.
@@ -1249,6 +1253,45 @@ async function apexDefinition(doc: TextDocument, offset: number, pos: { line: nu
     if (await describe(doc.uri, word)) return stubLocation(doc.uri, word, null);
     return null;
 }
+
+/**
+ * References for Apex symbols. Locals/params stay inside their declaring method (scope-aware);
+ * fields, methods and types also search the other Apex files in the project.
+ */
+connection.onReferences(async (params): Promise<Location[]> => {
+    const doc = documents.get(params.textDocument.uri);
+    if (!doc || !apexFeatures || !isApex(doc.uri)) return [];
+    const text = doc.getText();
+    const ref = symbolAt(text, getApexParse(doc).index, params.position);
+    if (!ref) return [];
+
+    const out: Location[] = findReferencesInText(text, ref.name, ref.scope).map((range) =>
+        Location.create(doc.uri, range)
+    );
+
+    // A local/param can't be referenced from another file — stop here.
+    if (ref.localOnly) return out;
+
+    // Otherwise scan the rest of the project's Apex. Cap the work so a huge org can't hang the
+    // editor; the current file's results are already included above.
+    const MAX_FILES = 2000;
+    const thisPath = fileURLToPath(doc.uri);
+    let scanned = 0;
+    for (const file of WorkspaceIndex.allFiles()) {
+        if (scanned++ >= MAX_FILES) break;
+        if (file === thisPath) continue;
+        let body: string;
+        try {
+            body = fs.readFileSync(file, 'utf8');
+        } catch {
+            continue;
+        }
+        if (!body.includes(ref.name)) continue; // cheap reject before the regex pass
+        const uri = pathToFileURL(file).toString();
+        for (const range of findReferencesInText(body, ref.name)) out.push(Location.create(uri, range));
+    }
+    return out;
+});
 
 connection.onDefinition(async (params): Promise<Location | null> => {
     const doc = documents.get(params.textDocument.uri);
