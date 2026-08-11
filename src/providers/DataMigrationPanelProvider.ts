@@ -32,7 +32,7 @@ import {
   type OrgInfo
 } from "../utils/dataMigration";
 import { toApexParts, toCsvExports, toJsonExport, APEX_CONSOLE_MAX_CHARS, type ExportFieldMeta } from "../utils/migrationExport";
-import { listPresets, presetDirs, presetPath, type PresetScope } from "../utils/migrationPresets";
+import { legacyPresetDirs, listPresets, presetDirs, presetPath, type PresetScope } from "../utils/migrationPresets";
 import { Telemetry } from "../utils/telemetry";
 import { confirmProductionOrgOperation } from "../utils/orgSafety";
 
@@ -620,8 +620,7 @@ export class DataMigrationPanelProvider {
       // ── Load preset ───────────────────────────────────────────────────────
       if (msg.command === "loadProfile") {
         const dirs = presetDirs(workspaceRoot, globalStorageDir);
-        const legacyDir = path.join(workspaceRoot, ".sfdx", "asfx");
-        const presets = listPresets(dirs, legacyDir);
+        const presets = listPresets(dirs, legacyPresetDirs(workspaceRoot));
 
         const BROWSE = "$(folder-opened) Browse for a file…";
         const picks: Array<vscode.QuickPickItem & { filePath?: string }> = presets.map((p) => ({

@@ -22,9 +22,12 @@ function write(dir: string, name: string, mtime?: number): void {
 describe("migrationPresets.presetDirs", () => {
   const GLOBAL = "/Users/me/Library/Application Support/Code/User/globalStorage/adure.sfx";
 
-  it("puts project presets with the project's own source", () => {
+  it("puts project presets somewhere the project actually tracks", () => {
+    // .sfdx is gitignored by the standard SFDX scaffold, so a preset there could never be
+    // committed — which is the entire point of the project scope.
     const dirs = presetDirs("/work/app", GLOBAL);
-    assert.strictEqual(dirs.project, path.join("/work/app", ".sfdx", "asfx", "migrations"));
+    assert.strictEqual(dirs.project, path.join("/work/app", "config", "asfx", "migrations"));
+    assert.ok(!dirs.project.includes(".sfdx"));
   });
 
   it("puts global presets in the extension's own storage, never in the project", () => {
@@ -85,15 +88,27 @@ describe("migrationPresets.listPresets", () => {
     assert.deepStrictEqual(listPresets(dirs).map((p) => p.name), ["Newer", "Older"]);
   });
 
-  it("still finds presets saved before there were scopes", () => {
-    // They sit directly in .sfdx/asfx; an upgrade must not appear to lose them.
+  it("still finds presets saved to an older location", () => {
+    // An upgrade must not appear to lose them.
     const { root, dirs } = makeTree();
     const legacy = path.join(root, "legacy");
     fs.mkdirSync(legacy);
     write(legacy, "FromBefore");
-    const found = listPresets(dirs, legacy);
+    const found = listPresets(dirs, [legacy]);
     assert.strictEqual(found.length, 1);
     assert.strictEqual(found[0].scope, "project");
+  });
+
+  it("lists a preset once when the old and new locations both have it", () => {
+    // Saving after the move leaves a copy behind; the current location wins.
+    const { root, dirs } = makeTree();
+    const legacy = path.join(root, "legacy");
+    fs.mkdirSync(legacy);
+    write(dirs.project, "Accounts");
+    write(legacy, "Accounts");
+    const found = listPresets(dirs, [legacy]).filter((p) => p.name === "Accounts");
+    assert.strictEqual(found.length, 1);
+    assert.strictEqual(found[0].filePath, path.join(dirs.project, "Accounts.migration.json"));
   });
 
   it("ignores files that are not presets", () => {

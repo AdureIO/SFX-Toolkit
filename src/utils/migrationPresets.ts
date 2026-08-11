@@ -24,12 +24,26 @@ export interface PresetDirs {
  * `globalStorageDir` is the extension's own global storage path, which VS Code manages and keeps
  * out of any project. It is passed in rather than derived so this module needs no `vscode` import
  * and stays testable.
+ *
+ * Project presets live under `config/`, not `.sfdx/`: the scaffold that `sf project generate`
+ * produces gitignores `.sfdx`, so a preset there could not be committed — which is the whole
+ * point of the project scope. `config/` is tracked by default.
  */
 export function presetDirs(workspaceRoot: string, globalStorageDir: string): PresetDirs {
   return {
-    project: path.join(workspaceRoot, ".sfdx", "asfx", "migrations"),
+    project: path.join(workspaceRoot, "config", "asfx", "migrations"),
     global: path.join(globalStorageDir, "migrations")
   };
+}
+
+/**
+ * Where presets used to be written. Still read, so an upgrade does not appear to lose them.
+ */
+export function legacyPresetDirs(workspaceRoot: string): string[] {
+  return [
+    path.join(workspaceRoot, ".sfdx", "asfx", "migrations"),
+    path.join(workspaceRoot, ".sfdx", "asfx")
+  ];
 }
 
 export interface PresetEntry {
@@ -74,13 +88,24 @@ function readDir(dir: string, scope: PresetScope): PresetEntry[] {
 /**
  * Every preset available, newest first.
  *
- * Presets saved before there were scopes sit directly in `.sfdx/asfx`; they are listed as project
- * presets so an upgrade does not appear to lose them. A project preset shadows a global one of the
- * same name — the more specific location wins, the same way it does for settings.
+ * Presets written to an older location are still listed as project presets, so an upgrade does not
+ * appear to lose them. A project preset shadows a global one of the same name — the more specific
+ * location wins, the same way it does for settings, and a name found twice is listed once.
  */
-export function listPresets(dirs: PresetDirs, legacyDir?: string): PresetEntry[] {
-  const project = [...readDir(dirs.project, "project"), ...(legacyDir ? readDir(legacyDir, "project") : [])];
-  const seen = new Set(project.map((p) => p.name.toLowerCase()));
-  const global = readDir(dirs.global, "global").filter((p) => !seen.has(p.name.toLowerCase()));
+export function listPresets(dirs: PresetDirs, legacyDirs: string[] = []): PresetEntry[] {
+  const seen = new Set<string>();
+  const keep = (entries: PresetEntry[]): PresetEntry[] =>
+    entries.filter((e) => {
+      const key = e.name.toLowerCase();
+      if (seen.has(key)) return false; // an earlier, more specific location already claimed it
+      seen.add(key);
+      return true;
+    });
+  // Current project location first, then the older ones, then global.
+  const project = [
+    ...keep(readDir(dirs.project, "project")),
+    ...legacyDirs.flatMap((d) => keep(readDir(d, "project")))
+  ];
+  const global = keep(readDir(dirs.global, "global"));
   return [...project, ...global].sort((a, b) => b.modified - a.modified);
 }
