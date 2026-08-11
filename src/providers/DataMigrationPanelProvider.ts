@@ -11,6 +11,8 @@ import {
   extractSObjectFromQuery,
   countQuery,
   runMigration,
+  describeObject,
+  findUnmappedLookups,
   revertMigration,
   resolveOrgToInfo,
   saveProfile,
@@ -228,6 +230,39 @@ export class DataMigrationPanelProvider {
             resolveOrgToInfo(sourceOrg || null),
             resolveOrgToInfo(targetOrg || null)
           ]);
+
+          // Validate BEFORE writing: a lookup pointing at an object that isn't in the migration
+          // will land empty, and the only fix is to include that object — so ask now, not after.
+          const refMeta = new Map<string, Map<string, string[]>>();
+          for (const node of profile.nodes) {
+            if (refMeta.has(node.sobject)) continue;
+            try {
+              const desc = await describeObject(srcOrg, node.sobject);
+              const m = new Map<string, string[]>();
+              for (const f of desc.fields) if (f.referenceTo?.length) m.set(f.name, f.referenceTo);
+              refMeta.set(node.sobject, m);
+            } catch { /* described again by the engine — don't block on a describe failure */ }
+          }
+          const unmapped = findUnmappedLookups(profile.nodes, refMeta);
+          if (unmapped.length) {
+            const missing = [...new Set(unmapped.flatMap((u) => u.referenceTo))].sort();
+            const detail = unmapped
+              .slice(0, 12)
+              .map((u) => `• ${u.sobject}.${u.field} → ${u.referenceTo.join("/")}`)
+              .join("\n");
+            const choice = await vscode.window.showWarningMessage(
+              `${unmapped.length} lookup field(s) can't be preserved — the object they point at isn't in this migration, so they will be left empty.`,
+              {
+                modal: true,
+                detail: `${detail}${unmapped.length > 12 ? `\n… and ${unmapped.length - 12} more` : ""}\n\nAdd to the migration to keep these links: ${missing.join(", ")}`
+              },
+              "Migrate anyway (links left empty)"
+            );
+            if (choice !== "Migrate anyway (links left empty)") {
+              panel.webview.postMessage({ command: "migrationError", error: "Migration cancelled — add the missing objects to preserve the lookups." });
+              return;
+            }
+          }
           const retryOpts = msg.retry
             ? { retryOnly: msg.retry.retryOnly, priorIdMaps: msg.retry.priorIdMaps }
             : undefined;
