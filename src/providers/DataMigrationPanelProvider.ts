@@ -31,7 +31,7 @@ import {
   type RevertSelection,
   type OrgInfo
 } from "../utils/dataMigration";
-import { toApexScript, toCsvExports, toJsonExport, type ExportFieldMeta } from "../utils/migrationExport";
+import { toApexParts, toCsvExports, toJsonExport, APEX_CONSOLE_MAX_CHARS, type ExportFieldMeta } from "../utils/migrationExport";
 import { Telemetry } from "../utils/telemetry";
 import { confirmProductionOrgOperation } from "../utils/orgSafety";
 
@@ -445,8 +445,8 @@ export class DataMigrationPanelProvider {
           const meta: ExportFieldMeta = new Map();
           for (const node of profile.nodes) {
             const desc = await SchemaCache.getRichDescribe(sourceOrg || null, node.sobject);
-            const m = new Map<string, { type: string; referenceTo: string[] }>();
-            for (const f of desc?.fields ?? []) m.set(f.name, { type: f.type, referenceTo: f.referenceTo ?? [] });
+            const m = new Map<string, { type: string; referenceTo: string[]; relationshipName?: string | null }>();
+            for (const f of desc?.fields ?? []) m.set(f.name, { type: f.type, referenceTo: f.referenceTo ?? [], relationshipName: f.relationshipName });
             meta.set(node.sobject, m);
           }
 
@@ -475,19 +475,54 @@ export class DataMigrationPanelProvider {
             return;
           }
 
-          const isApex = format === "apex";
-          const content = isApex
-            ? toApexScript(profile, data, meta, stamp)
-            : toJsonExport(profile, data, stamp);
+          const total = data.reduce((n, d) => n + d.records.length, 0);
+
+          if (format === "apex") {
+            // Split to the Execute Anonymous window, so what lands on disk can actually be pasted.
+            const parts = toApexParts(profile, data, meta, stamp, APEX_CONSOLE_MAX_CHARS);
+            const uri = await vscode.window.showSaveDialog({
+              defaultUri: vscode.Uri.file(path.join(outDir, `${safeName}.apex`)),
+              filters: { "Anonymous Apex": ["apex", "cls"] },
+              title: parts.length > 1 ? `Save the generated Apex (${parts.length} parts)` : "Save the generated Apex script"
+            });
+            if (!uri) { panel.webview.postMessage({ command: "exportCancelled" }); return; }
+            fs.mkdirSync(path.dirname(uri.fsPath), { recursive: true });
+            const ext = path.extname(uri.fsPath) || ".apex";
+            const stem = uri.fsPath.slice(0, uri.fsPath.length - ext.length);
+            const written = parts.map((p) => {
+              const file = parts.length === 1 ? uri.fsPath : `${stem}.part${p.index}${ext}`;
+              fs.writeFileSync(file, p.content, "utf8");
+              return file;
+            });
+            const oversized = parts.filter((p) => p.oversize);
+            for (const p of oversized) {
+              Logger.info(`Apex export part ${p.index} is ${p.chars} chars, over the Execute Anonymous window. ${p.oversizeReason ?? ""}`);
+            }
+            panel.webview.postMessage({
+              command: "exportComplete", format,
+              summary: `${total} record(s) → ${written.length === 1 ? path.basename(written[0]) : `${written.length} parts, run them in order`}` +
+                       (oversized.length ? ` — ${oversized.length} part(s) exceed the Execute Anonymous window, use \`sf apex run --file\`` : "")
+            });
+            if (oversized.length) {
+              vscode.window.showWarningMessage(
+                `${oversized.length} part(s) are larger than the Execute Anonymous window. ` +
+                `Run them with \`sf apex run --file\`, or export CSV/JSON instead. ` +
+                (oversized[0].oversizeReason ?? "")
+              );
+            }
+            const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(written[0]));
+            await vscode.window.showTextDocument(doc, { preview: false });
+            return;
+          }
+
           const uri = await vscode.window.showSaveDialog({
-            defaultUri: vscode.Uri.file(path.join(outDir, `${safeName}.${isApex ? "apex" : "json"}`)),
-            filters: isApex ? { "Anonymous Apex": ["apex", "cls"] } : { JSON: ["json"] },
-            title: isApex ? "Save the generated Apex script" : "Save the exported records"
+            defaultUri: vscode.Uri.file(path.join(outDir, `${safeName}.json`)),
+            filters: { JSON: ["json"] },
+            title: "Save the exported records"
           });
           if (!uri) { panel.webview.postMessage({ command: "exportCancelled" }); return; }
           fs.mkdirSync(path.dirname(uri.fsPath), { recursive: true });
-          fs.writeFileSync(uri.fsPath, content, "utf8");
-          const total = data.reduce((n, d) => n + d.records.length, 0);
+          fs.writeFileSync(uri.fsPath, toJsonExport(profile, data, stamp), "utf8");
           panel.webview.postMessage({
             command: "exportComplete", format,
             summary: `${total} record(s) across ${data.length} object(s) → ${path.basename(uri.fsPath)}`

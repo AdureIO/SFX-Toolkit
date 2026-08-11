@@ -17,8 +17,16 @@ export interface ExportObjectData {
   records: Record<string, string>[];
 }
 
-/** Field type + lookup targets, per object. Drives literal formatting and lookup re-pointing. */
-export type ExportFieldMeta = Map<string, Map<string, { type: string; referenceTo: string[] }>>;
+/**
+ * Field type, lookup targets and relationship name, per object. Drives literal formatting and
+ * how a lookup is re-pointed — the relationship name is what makes the external-Id form
+ * (`Account = new Account(Ext__c = 'E1')`) possible.
+ */
+export type ExportFieldMeta = Map<string, Map<string, {
+  type: string;
+  referenceTo: string[];
+  relationshipName?: string | null;
+}>>;
 
 export interface ExportProfileLike {
   name: string;
@@ -68,14 +76,16 @@ export function toJsonExport(profile: ExportProfileLike, data: ExportObjectData[
 
 // ─── Apex ─────────────────────────────────────────────────────────────────────
 
-/** Anonymous Apex is rejected above roughly 1 MB, and one transaction can only DML 10,000 rows. */
-export const APEX_MAX_CHARS = 1_000_000;
+/**
+ * The Developer Console's Execute Anonymous window truncates past this, so it is the budget a
+ * generated script is split to fit.
+ */
+export const APEX_CONSOLE_MAX_CHARS = 32_000;
+/** What the Tooling API accepts — the ceiling for `sf apex run --file`, well above the console. */
+export const APEX_API_MAX_CHARS = 1_000_000;
+/** One transaction cannot DML more rows than this. */
 export const APEX_MAX_DML_ROWS = 10_000;
 
-const STRINGY = new Set([
-  "string", "textarea", "picklist", "multipicklist", "phone", "email", "url",
-  "id", "reference", "encryptedstring", "combobox", "base64", "address", "anytype"
-]);
 const NUMERIC = new Set(["int", "integer", "long", "double", "currency", "percent"]);
 
 export function apexString(value: string): string {
@@ -101,7 +111,6 @@ export function apexLiteral(value: string, type: string): string | null {
     return m ? `Datetime.valueOfGmt(${apexString(`${m[1]} ${m[2]}`)})` : `Datetime.valueOfGmt(${apexString(value)})`;
   }
   if (t === "time") return `Time.newInstance(${value.substring(0, 2)}, ${value.substring(3, 5)}, ${value.substring(6, 8)}, 0)`;
-  if (STRINGY.has(t)) return apexString(value);
   return apexString(value);
 }
 
@@ -112,20 +121,254 @@ export function apexVar(sobject: string): string {
 }
 
 /**
- * Generate an Anonymous Apex script that recreates the migrated records in whatever org it is
- * run against.
+ * One DML-able slice of an object's records.
  *
- * Each object gets a list and a source-Id → record map. Children reference their parent through
- * that map, so the link is to the record the script just created — never a source Id, which would
- * not resolve. Nodes with an external Id upsert on it instead of inserting, which also makes the
- * script safe to re-run for those objects.
+ * An object is usually one chunk. It is split into several only when that is provably safe —
+ * see `chunkable` — because every part is a separate execution with its own variables.
  */
-export function toApexScript(
+interface Chunk {
+  sobject: string;
+  externalIdField: string | null;
+  rowLiterals: string[];
+  /** Source Ids, aligned with `rowLiterals`. */
+  srcIds: string[];
+  /** Self-reference assignments; only ever present on an object kept in one piece. */
+  selfLinks: string[];
+  /** Per referenced object, the source Ids this chunk looks up. */
+  needsIds: Map<string, Set<string>>;
+  /** Whether anything has to find these records again by source Id. */
+  exposesMap: boolean;
+  chars: number;
+}
+
+/** One record's generated literal, plus which parent maps it reads. */
+interface RowData {
+  literal: string;
+  srcId: string;
+  needs: Map<string, Set<string>>;
+}
+
+/** Room left for the part header, hoisted map declarations and any rehydration query. */
+const PART_OVERHEAD_RESERVE = 3_000;
+
+function chunkBody(chunk: Chunk, suffix: string): string[] {
+  const v = apexVar(chunk.sobject);
+  const rows = `${v}_rows${suffix}`;
+  const lines: string[] = [];
+  lines.push(`List<${chunk.sobject}> ${rows} = new List<${chunk.sobject}>{`);
+  chunk.rowLiterals.forEach((r, i) => lines.push(`  ${r}${i < chunk.rowLiterals.length - 1 ? "," : ""}`));
+  lines.push(`};`);
+  lines.push(chunk.externalIdField
+    ? `upsert ${rows} ${chunk.sobject}.${chunk.externalIdField};`
+    : `insert ${rows};`);
+  if (chunk.exposesMap) {
+    // The list order survives the DML, so the source Ids zip straight back onto it — far shorter
+    // than giving every row its own variable.
+    const src = `${v}_src${suffix}`;
+    lines.push(`List<String> ${src} = new List<String>{${chunk.srcIds.map(apexString).join(",")}};`);
+    lines.push(`for (Integer i = 0; i < ${rows}.size(); i++) ${v}_byId.put(${src}[i], ${rows}[i]);`);
+  }
+  if (chunk.selfLinks.length) {
+    lines.push(...chunk.selfLinks);
+    lines.push(`update ${rows};`);
+  }
+  return lines;
+}
+
+/**
+ * Build the chunks for one object.
+ *
+ * Splitting an object's records is only safe when no part can end up needing rows that another
+ * part holds in a variable. That rules it out when the object links to itself, and requires an
+ * external Id whenever a later object has to look these records up — otherwise the object stays
+ * in one piece even if that overflows the budget.
+ */
+function buildRows(
+  node: ExportProfileLike["nodes"][number],
+  records: Record<string, string>[],
+  meta: ExportFieldMeta,
+  included: Set<string>,
+  srcIdsBySObject: Map<string, Set<string>>,
+  externalKeys: Map<string, Map<string, string>>,
+  externalIdOf: Map<string, string | null>
+): { rows: RowData[]; selfRefs: Array<{ srcId: string; field: string; refSrcId: string }> } {
+  const sobject = node.sobject;
+  const fieldMeta = meta.get(sobject) ?? new Map();
+  const selfRefs: Array<{ srcId: string; field: string; refSrcId: string }> = [];
+
+  const rows = records.map((rec) => {
+    const assignments: string[] = [];
+    const needs = new Map<string, Set<string>>();
+    for (const field of node.includeFields) {
+      if (field === "Id") continue;
+      const info = fieldMeta.get(field);
+      const raw = rec[field] ?? "";
+      const referenceTo = info?.referenceTo ?? [];
+      if (referenceTo.length) {
+        if (!raw) continue;
+        // A lookup is only written when the record it points at is part of this export. Outside
+        // it the link can only be left empty — a source Id would not resolve in the org this runs
+        // against, and a map lookup that misses would throw.
+        const target = referenceTo.find((r: string) => included.has(r) && srcIdsBySObject.get(r)?.has(raw));
+        if (!target) continue;
+
+        if (referenceTo.includes(sobject) && srcIdsBySObject.get(sobject)?.has(raw)) {
+          // Self-reference. The external-Id form cannot help here: the parent is in the very same
+          // DML statement, and a foreign key by external Id only resolves against rows that
+          // already exist. So it is linked in a second pass, after the insert gives every row an
+          // Id. This is checked before the external-Id branch for exactly that reason.
+          selfRefs.push({ srcId: rec["Id"] ?? "", field, refSrcId: raw });
+          continue;
+        }
+
+        // Preferred form: point the RELATIONSHIP at a stub carrying the parent's external Id and
+        // let the DML resolve it. No variable, no ordering beyond "the parent already exists" —
+        // which holds, since a different object is a separate, earlier DML statement — and it
+        // survives across executions, which is what makes a script splittable at all.
+        const parentKey = externalKeys.get(target)?.get(raw);
+        const relationship = info?.relationshipName;
+        if (parentKey && relationship) {
+          assignments.push(`${relationship}=new ${target}(${externalIdOf.get(target)}=${apexString(parentKey)})`);
+          continue;
+        }
+        // Fallback: the parent has no external Id, so the only handle on it is the record this
+        // script created. That costs a map, and pins the two objects into the same execution.
+        (needs.get(target) ?? needs.set(target, new Set()).get(target)!).add(raw);
+        assignments.push(`${field}=${apexVar(target)}_byId.get(${apexString(raw)}).Id`);
+        continue;
+      }
+      const literal = apexLiteral(raw, info?.type ?? "string");
+      if (literal !== null) assignments.push(`${field}=${literal}`);
+    }
+    return { literal: `new ${sobject}(${assignments.join(", ")})`, srcId: rec["Id"] ?? "", needs };
+  });
+  return { rows, selfRefs };
+}
+
+/**
+ * Slice one object's rows into chunks that fit the budget.
+ *
+ * Splitting is only safe when no part can end up needing rows another part holds in a variable:
+ * that rules it out when the object links to itself through a map, and requires an external Id
+ * whenever a later object still has to look these records up. Otherwise the object stays whole,
+ * even if that overflows.
+ */
+function chunkRows(
+  node: ExportProfileLike["nodes"][number],
+  rows: RowData[],
+  selfRefs: Array<{ srcId: string; field: string; refSrcId: string }>,
+  mapNeeded: boolean,
+  budget: number
+): Chunk[] {
+  const sobject = node.sobject;
+  const v = apexVar(sobject);
+  const exposesMap = mapNeeded || selfRefs.length > 0;
+  const selfLinks = selfRefs
+    .filter((r) => r.srcId && r.refSrcId)
+    .map(({ srcId, field, refSrcId }) =>
+      `${v}_byId.get(${apexString(srcId)}).${field} = ${v}_byId.get(${apexString(refSrcId)}).Id;`);
+
+  const chunkable = selfLinks.length === 0 && (!mapNeeded || !!node.externalIdField);
+  const limit = Math.max(1_000, budget - PART_OVERHEAD_RESERVE);
+
+  const chunks: Chunk[] = [];
+  let cur: RowData[] = [];
+  let curChars = 0;
+  const flush = () => {
+    if (!cur.length) return;
+    const needsIds = new Map<string, Set<string>>();
+    for (const b of cur) {
+      for (const [target, ids] of b.needs) {
+        const set = needsIds.get(target) ?? needsIds.set(target, new Set()).get(target)!;
+        for (const id of ids) set.add(id);
+      }
+    }
+    const chunk: Chunk = {
+      sobject, externalIdField: node.externalIdField,
+      rowLiterals: cur.map((b) => b.literal),
+      srcIds: cur.map((b) => b.srcId),
+      selfLinks: chunks.length === 0 ? selfLinks : [],
+      needsIds, exposesMap, chars: 0
+    };
+    chunk.chars = chunkBody(chunk, "").reduce((n, l) => n + l.length + 1, 0);
+    chunks.push(chunk);
+    cur = [];
+    curChars = 0;
+  };
+
+  for (const b of rows) {
+    // The source Id list roughly adds its own length again when a map is emitted.
+    const cost = b.literal.length + (exposesMap ? b.srcId.length + 6 : 0) + 4;
+    if (chunkable && cur.length && curChars + cost > limit) flush();
+    cur.push(b);
+    curChars += cost;
+  }
+  flush();
+  return chunks;
+}
+
+/**
+ * Rebuild an earlier part's source-Id → record map by querying the org.
+ *
+ * Variables do not survive from one anonymous execution to the next, so a part that references
+ * records an earlier part created has to find them again. The external Id is the only thing that
+ * can do that, which is why a split is only ever placed where every object still needed has one.
+ */
+function rehydrateLines(
+  sobject: string,
+  externalIdField: string,
+  keyBySrcId: Map<string, string>,
+  wantedSrcIds: Set<string>
+): string[] {
+  const v = apexVar(sobject);
+  const pairs = [...wantedSrcIds]
+    .map((srcId) => [srcId, keyBySrcId.get(srcId)] as const)
+    .filter((p): p is readonly [string, string] => !!p[1]);
+  if (!pairs.length) return [];
+  return [
+    `// ${sobject} was loaded by an earlier part — find those records again by ${externalIdField}`,
+    `Map<String, String> ${v}_srcByKey = new Map<String, String>{${
+      pairs.map(([srcId, key]) => `${apexString(key)}=>${apexString(srcId)}`).join(",")
+    }};`,
+    `for (${sobject} r : [SELECT Id, ${externalIdField} FROM ${sobject} WHERE ${externalIdField} IN :${v}_srcByKey.keySet()]) {`,
+    `  ${v}_byId.put(${v}_srcByKey.get(String.valueOf(r.get(${apexString(externalIdField)}))), r);`,
+    `}`,
+    ``
+  ];
+}
+
+export interface ApexPart {
+  /** 1-based. */
+  index: number;
+  content: string;
+  chars: number;
+  rows: number;
+  objects: string[];
+  /** True when this part could not be split small enough — see `oversizeReason`. */
+  oversize: boolean;
+  oversizeReason?: string;
+}
+
+/**
+ * Generate Anonymous Apex that recreates the exported records, split into parts that each fit the
+ * Execute Anonymous character budget.
+ *
+ * Records go in as list literals, and only objects that something later has to find again pay for
+ * a source-Id → record map — zipped onto the list after the DML rather than naming every row.
+ *
+ * Splitting is constrained by the platform, not by preference: an anonymous block's variables are
+ * gone by the next execution, so a part may only begin where every object it still references can
+ * be re-queried, which means an external Id. Where one is missing the objects stay together even
+ * if the result is over budget, and the part says so rather than handing over a script that will
+ * silently truncate when pasted.
+ */
+export function toApexParts(
   profile: ExportProfileLike,
   data: ExportObjectData[],
   meta: ExportFieldMeta,
-  generatedAt: string
-): string {
+  generatedAt: string,
+  budget: number = APEX_CONSOLE_MAX_CHARS
+): ApexPart[] {
   const byObject = new Map(data.map((d) => [d.sobject, d.records]));
   const included = new Set(profile.nodes.map((n) => n.sobject));
   const refMeta = new Map<string, Map<string, string[]>>();
@@ -134,116 +377,183 @@ export function toApexScript(
     for (const [field, info] of fields) if (info.referenceTo?.length) m.set(field, info.referenceTo);
     refMeta.set(sobject, m);
   }
-  const ordered = topoSortNodes(profile.nodes, refMeta, included);
-  // Which source Ids each object actually carries. A lookup is only written when its record is
-  // in here — the same rule the live migration applies, and it is also what keeps the script from
-  // throwing: a `.get()` on a key the map never received would be a null dereference at runtime.
-  const srcIds = new Map<string, Set<string>>();
+  const ordered = topoSortNodes(profile.nodes, refMeta, included)
+    .filter((n) => (byObject.get(n.sobject)?.length ?? 0) > 0);
+
+  // Which source Ids each object carries — a lookup is only emitted when its record is here.
+  const srcIdsBySObject = new Map<string, Set<string>>();
   for (const [sobject, records] of byObject) {
-    srcIds.set(sobject, new Set(records.map((r) => r["Id"]).filter(Boolean)));
+    srcIdsBySObject.set(sobject, new Set(records.map((r) => r["Id"]).filter(Boolean)));
   }
 
-  const totalRows = ordered.reduce((n, node) => n + (byObject.get(node.sobject)?.length ?? 0), 0);
-  const out: string[] = [];
-
-  out.push(`/*`);
-  out.push(` * ${profile.name} — generated by the Adure SFX Toolkit Data Migration Wizard`);
-  out.push(` * ${generatedAt}`);
-  out.push(` *`);
-  out.push(` * Run in Anonymous Apex against the target org. Objects are created parent-first and`);
-  out.push(` * every lookup points at a record this script creates, so source Ids never leak into`);
-  out.push(` * the target. Objects with an external Id upsert on it and are safe to re-run;`);
-  out.push(` * everything else inserts and will duplicate if you run it twice.`);
-  out.push(` *`);
-  out.push(` * ${totalRows} record(s) across ${ordered.length} object(s).`);
-  if (totalRows > APEX_MAX_DML_ROWS) {
-    out.push(` *`);
-    out.push(` * WARNING: ${totalRows} rows exceeds the ${APEX_MAX_DML_ROWS}-row DML limit for a single`);
-    out.push(` * transaction. Split this script or load it in batches.`);
-  }
-  out.push(` */`);
-  out.push("");
-
+  const externalIdOf = new Map(ordered.map((n) => [n.sobject, n.externalIdField]));
+  // source Id → external Id value, per object. This is what lets a lookup be written as
+  // `Account = new Account(Ext__c = 'E1')` instead of going through a map.
+  const externalKeys = new Map<string, Map<string, string>>();
   for (const node of ordered) {
-    const sobject = node.sobject;
-    const records = byObject.get(sobject) ?? [];
-    const v = apexVar(sobject);
-    const listVar = `${v}_rows`;
-    const mapVar = `${v}_bySrc`;
-    const fieldMeta = meta.get(sobject) ?? new Map();
-    const selfRefs: Array<{ srcId: string; field: string; refSrcId: string }> = [];
-
-    out.push(`// ── ${sobject} — ${records.length} record(s) ${"─".repeat(Math.max(2, 48 - sobject.length))}`);
-    if (!records.length) {
-      out.push(`// nothing to load`);
-      out.push("");
-      continue;
+    if (!node.externalIdField) continue;
+    const m = new Map<string, string>();
+    for (const rec of byObject.get(node.sobject) ?? []) {
+      if (rec["Id"] && rec[node.externalIdField]) m.set(rec["Id"], rec[node.externalIdField]);
     }
-    out.push(`List<${sobject}> ${listVar} = new List<${sobject}>();`);
-    out.push(`Map<String, ${sobject}> ${mapVar} = new Map<String, ${sobject}>();`);
-
-    records.forEach((rec, idx) => {
-      const rowVar = `${v}_${idx}`;
-      const assignments: string[] = [];
-      for (const field of node.includeFields) {
-        if (field === "Id") continue;
-        const info = fieldMeta.get(field);
-        const raw = rec[field] ?? "";
-        const referenceTo = info?.referenceTo ?? [];
-        if (referenceTo.length) {
-          if (!raw) continue;
-          if (referenceTo.includes(sobject) && srcIds.get(sobject)?.has(raw)) {
-            // Self-reference: the parent is in this same list and has no Id until after the
-            // insert, so it is linked in a second pass below.
-            selfRefs.push({ srcId: rec["Id"] ?? "", field, refSrcId: raw });
-            continue;
-          }
-          // A lookup is only written when the record it points at is part of this export. Outside
-          // it, the link can only be left empty — a source Id would not resolve in the org this
-          // runs against, and a map lookup that misses would throw.
-          const target = referenceTo.find((r: string) => included.has(r) && srcIds.get(r)?.has(raw));
-          if (target) assignments.push(`${field} = ${apexVar(target)}_bySrc.get(${apexString(raw)}).Id`);
-          continue;
-        }
-        const literal = apexLiteral(raw, info?.type ?? "string");
-        if (literal !== null) assignments.push(`${field} = ${literal}`);
-      }
-      if (!assignments.length) {
-        out.push(`${sobject} ${rowVar} = new ${sobject}();`);
-      } else {
-        out.push(`${sobject} ${rowVar} = new ${sobject}(`);
-        assignments.forEach((a, i) => out.push(`    ${a}${i < assignments.length - 1 ? "," : ""}`));
-        out.push(`);`);
-      }
-      out.push(`${listVar}.add(${rowVar}); ${mapVar}.put(${apexString(rec["Id"] ?? "")}, ${rowVar});`);
-    });
-
-    out.push("");
-    if (node.externalIdField) {
-      out.push(`upsert ${listVar} ${sobject}.${node.externalIdField};`);
-    } else {
-      out.push(`insert ${listVar};`);
-    }
-
-    const linkable = selfRefs.filter((r) => r.srcId && r.refSrcId);
-    if (linkable.length) {
-      out.push("");
-      out.push(`// re-link self-references now that every ${sobject} row has an Id`);
-      for (const { srcId, field, refSrcId } of linkable) {
-        out.push(`${mapVar}.get(${apexString(srcId)}).${field} = ${mapVar}.get(${apexString(refSrcId)}).Id;`);
-      }
-      out.push(`update ${listVar};`);
-    }
-    out.push("");
+    externalKeys.set(node.sobject, m);
   }
 
-  out.push(`System.debug('Loaded ${totalRows} record(s).');`);
-
-  const script = out.join("\n");
-  if (script.length > APEX_MAX_CHARS) {
-    return `/*\n * WARNING: this script is ${script.length} characters — Anonymous Apex rejects\n` +
-           ` * anything over about ${APEX_MAX_CHARS}. Export fewer records, or split it by object.\n */\n\n` +
-           script;
+  // Build every row first. Only then is it known which objects actually had to fall back to a
+  // map — a parent reachable by external Id costs nothing, so most exports need no maps at all.
+  const rowsByObject = new Map<string, ReturnType<typeof buildRows>>();
+  for (const node of ordered) {
+    rowsByObject.set(node.sobject, buildRows(
+      node, byObject.get(node.sobject) ?? [], meta, included, srcIdsBySObject, externalKeys, externalIdOf
+    ));
   }
-  return script;
+  const mapNeeded = new Set<string>();
+  for (const { rows } of rowsByObject.values()) {
+    for (const row of rows) for (const target of row.needs.keys()) mapNeeded.add(target);
+  }
+
+  const chunks: Chunk[] = [];
+  for (const node of ordered) {
+    const built = rowsByObject.get(node.sobject)!;
+    chunks.push(...chunkRows(node, built.rows, built.selfRefs, mapNeeded.has(node.sobject), budget));
+  }
+
+  // ── Pack chunks into parts ────────────────────────────────────────────────
+  const partChunks: Chunk[][] = [];
+  let current: Chunk[] = [];
+  let currentChars = 0;
+  for (const chunk of chunks) {
+    const inPart = new Set(current.map((c) => c.sobject));
+    // A new part can only start if everything this chunk still needs can be found again by query.
+    const unrecoverable = [...chunk.needsIds.keys()].filter((s) => !inPart.has(s) && !externalIdOf.get(s));
+    if (current.length && currentChars + chunk.chars > budget - PART_OVERHEAD_RESERVE && !unrecoverable.length) {
+      partChunks.push(current);
+      current = [];
+      currentChars = 0;
+    }
+    current.push(chunk);
+    currentChars += chunk.chars;
+  }
+  if (current.length) partChunks.push(current);
+
+  // ── Emit ──────────────────────────────────────────────────────────────────
+  const totalRows = chunks.reduce((n, c) => n + c.rowLiterals.length, 0);
+  const emittedBefore = new Map<string, Set<string>>(); // sobject → source Ids already loaded
+
+  return partChunks.map((part, idx) => {
+    const objects = [...new Set(part.map((c) => c.sobject))];
+    const partRows = part.reduce((n, c) => n + c.rowLiterals.length, 0);
+    const lines: string[] = [];
+    const label = partChunks.length > 1 ? ` — part ${idx + 1} of ${partChunks.length}` : "";
+
+    lines.push(`/*`);
+    lines.push(` * ${profile.name}${label} — Adure SFX Toolkit Data Migration Wizard, ${generatedAt}`);
+    lines.push(` *`);
+    lines.push(` * Run in Anonymous Apex against the target org. Lookups point at records this`);
+    lines.push(` * script creates, so no source Id ever reaches the target. Objects with an`);
+    lines.push(` * external Id upsert on it and are safe to re-run; the rest insert and will`);
+    lines.push(` * duplicate if run twice.`);
+    if (partChunks.length > 1) {
+      lines.push(` *`);
+      lines.push(` * Run the parts in order — this one expects parts 1..${idx} to have run already.`);
+    }
+    lines.push(` *`);
+    lines.push(` * ${partRows} record(s), ${objects.join(", ")}` +
+               (partChunks.length > 1 ? ` (${totalRows} across all parts)` : ""));
+    if (partRows > APEX_MAX_DML_ROWS) {
+      lines.push(` *`);
+      lines.push(` * WARNING: ${partRows} rows exceeds the ${APEX_MAX_DML_ROWS}-row DML limit for one`);
+      lines.push(` * transaction. Load this part's objects from CSV instead.`);
+    }
+    lines.push(` */`);
+    lines.push("");
+
+    // Every map this part reads or fills, declared once up front — several chunks of the same
+    // object share one map, and a rehydrated object fills the same one.
+    const needsMap = new Set<string>();
+    for (const chunk of part) {
+      if (chunk.exposesMap) needsMap.add(chunk.sobject);
+      for (const s of chunk.needsIds.keys()) needsMap.add(s);
+    }
+    for (const sobject of needsMap) {
+      lines.push(`Map<String, ${sobject}> ${apexVar(sobject)}_byId = new Map<String, ${sobject}>();`);
+    }
+    if (needsMap.size) lines.push("");
+
+    // Anything referenced here that an earlier part created has to be looked up again.
+    const rehydrated = new Set<string>();
+    for (const chunk of part) {
+      for (const [sobject, wanted] of chunk.needsIds) {
+        if (rehydrated.has(sobject)) continue;
+        const fromEarlier = new Set([...wanted].filter((id) => emittedBefore.get(sobject)?.has(id)));
+        if (!fromEarlier.size) continue;
+        const ext = externalIdOf.get(sobject);
+        if (!ext) continue;
+        rehydrated.add(sobject);
+        lines.push(...rehydrateLines(sobject, ext, externalKeys.get(sobject) ?? new Map(), fromEarlier));
+      }
+    }
+
+    const seenInPart = new Map<string, number>();
+    for (const chunk of part) {
+      const n = (seenInPart.get(chunk.sobject) ?? 0) + 1;
+      seenInPart.set(chunk.sobject, n);
+      const suffix = n > 1 ? `_${n}` : "";
+      lines.push(`// ── ${chunk.sobject} — ${chunk.rowLiterals.length} record(s)`);
+      lines.push(...chunkBody(chunk, suffix));
+      lines.push("");
+      const seen = emittedBefore.get(chunk.sobject) ?? new Set<string>();
+      for (const id of chunk.srcIds) seen.add(id);
+      emittedBefore.set(chunk.sobject, seen);
+    }
+    lines.push(`System.debug('Part ${idx + 1}: loaded ${partRows} record(s).');`);
+
+    const content = lines.join("\n");
+    const oversize = content.length > budget;
+    return {
+      index: idx + 1,
+      content: oversize ? withOversizeNotice(content, content.length, budget) : content,
+      chars: content.length,
+      rows: partRows,
+      objects,
+      oversize,
+      oversizeReason: oversize ? oversizeReason(part, externalIdOf) : undefined
+    };
+  });
+}
+
+function oversizeReason(part: Chunk[], externalIdOf: Map<string, string | null>): string {
+  const pinned = [...new Set(part
+    .filter((c) => c.selfLinks.length || [...c.needsIds.keys()].some((s) => !externalIdOf.get(s)))
+    .map((c) => c.sobject))];
+  return pinned.length
+    ? `${pinned.join(", ")} cannot be split up: an object is only divisible when it does not link ` +
+      `to itself and the objects it looks up have an external Id to find them by.`
+    : `A single record is larger than the budget allows.`;
+}
+
+function withOversizeNotice(content: string, chars: number, budget: number): string {
+  return [
+    `/*`,
+    ` * NOTE: this part is ${chars} characters, over the ${budget}-character Execute Anonymous`,
+    ` * window. Run it with the CLI instead, which accepts far more:`,
+    ` *`,
+    ` *   sf apex run --file <this file>`,
+    ` *`,
+    ` * Or export CSV/JSON for a load this size.`,
+    ` */`,
+    ``,
+    content
+  ].join("\n");
+}
+
+/** The whole script as one string — what a caller wanting a single file gets. */
+export function toApexScript(
+  profile: ExportProfileLike,
+  data: ExportObjectData[],
+  meta: ExportFieldMeta,
+  generatedAt: string,
+  budget: number = APEX_API_MAX_CHARS
+): string {
+  return toApexParts(profile, data, meta, generatedAt, budget).map((p) => p.content).join("\n\n");
 }
