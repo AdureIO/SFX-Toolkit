@@ -4,6 +4,14 @@ import * as fs from "fs";
 import * as path from "path";
 import { Logger } from "./outputChannel";
 export { findUnmappedLookups, type UnmappedLookup } from "./migrationValidate";
+export {
+  countJournal,
+  buildRevertPlan,
+  type MigrationJournal,
+  type RevertUpdateEntry,
+  type RevertSummary
+} from "./migrationRevert";
+import { buildRevertPlan, type MigrationJournal, type RevertUpdateEntry, type RevertSummary } from "./migrationRevert";
 import { AuthInfo } from "./authInfo";
 import { getToolingApiVersion } from "./constants";
 
@@ -100,6 +108,7 @@ export interface MigrationResult {
   /** Fields that were NOT written, and why. A migration must never drop data silently. */
   warnings: Array<{ field: string; reason: string; count: number }>;
 }
+
 
 // ─── Auth resolution ─────────────────────────────────────────────────────────
 
@@ -247,12 +256,17 @@ export async function countQuery(org: OrgInfo, soql: string): Promise<number> {
 
 // ─── Query all records (paginated) ────────────────────────────────────────────
 
-export async function queryAllRecords(
+/**
+ * Query with the raw JSON values kept as-is — `null` stays `null` rather than becoming "".
+ * A revert snapshot needs that distinction: restoring a field that was empty means sending
+ * `null` to clear it, and "" is not the same thing for every field type.
+ */
+export async function queryRawRecords(
   org: OrgInfo,
   soql: string,
   onProgress?: (fetched: number, total: number) => void
-): Promise<Record<string, string>[]> {
-  const all: Record<string, string>[] = [];
+): Promise<Record<string, unknown>[]> {
+  const all: Record<string, unknown>[] = [];
   let url = `/services/data/v${org.apiVersion}/query?q=${encodeURIComponent(soql)}`;
 
   while (url) {
@@ -263,12 +277,11 @@ export async function queryAllRecords(
     const page = JSON.parse(resp.body);
     const records = (page.records ?? []) as Record<string, unknown>[];
     for (const r of records) {
-      const flat: Record<string, string> = {};
+      const flat: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(r)) {
         if (k === "attributes") continue;
-        if (v === null || v === undefined) flat[k] = "";
-        else if (typeof v === "object") flat[k] = ""; // skip nested relationships
-        else flat[k] = String(v);
+        if (v !== null && typeof v === "object") continue; // skip nested relationships
+        flat[k] = v ?? null;
       }
       all.push(flat);
     }
@@ -276,6 +289,19 @@ export async function queryAllRecords(
     url = page.done ? "" : ((page.nextRecordsUrl as string) ?? "");
   }
   return all;
+}
+
+export async function queryAllRecords(
+  org: OrgInfo,
+  soql: string,
+  onProgress?: (fetched: number, total: number) => void
+): Promise<Record<string, string>[]> {
+  const raw = await queryRawRecords(org, soql, onProgress);
+  return raw.map((r) => {
+    const flat: Record<string, string> = {};
+    for (const [k, v] of Object.entries(r)) flat[k] = v === null || v === undefined ? "" : String(v);
+    return flat;
+  });
 }
 
 // ─── Build SOQL for a child node given parent record IDs ─────────────────────
@@ -356,9 +382,13 @@ async function batchCollections(
  * Only ever called with Ids this run inserted (tracked in idMaps), so a revert can never touch
  * pre-existing data. `allOrNone=false` so one undeletable record doesn't strand the rest.
  */
-async function deleteRecords(org: OrgInfo, ids: string[]): Promise<{ deleted: number; failed: number }> {
+async function deleteRecords(
+  org: OrgInfo,
+  ids: string[]
+): Promise<{ deleted: number; failed: number; errors: Array<{ id: string; message: string }> }> {
   let deleted = 0;
   let failed = 0;
+  const errors: Array<{ id: string; message: string }> = [];
   for (let i = 0; i < ids.length; i += BATCH_SIZE) {
     const chunk = ids.slice(i, i + BATCH_SIZE);
     const urlPath =
@@ -366,60 +396,119 @@ async function deleteRecords(org: OrgInfo, ids: string[]): Promise<{ deleted: nu
     const resp = await sfRequest(org.instanceUrl, urlPath, "DELETE", org.accessToken);
     if (resp.status >= 200 && resp.status < 300) {
       try {
-        for (const r of JSON.parse(resp.body) as CollectionsItem[]) r.success ? deleted++ : failed++;
+        (JSON.parse(resp.body) as CollectionsItem[]).forEach((r, idx) => {
+          if (r.success) deleted++;
+          else {
+            failed++;
+            errors.push({ id: chunk[idx] ?? "", message: r.errors?.[0]?.message ?? "Delete failed" });
+          }
+        });
       } catch {
         failed += chunk.length;
+        errors.push({ id: chunk[0] ?? "", message: "Unparseable delete response" });
       }
     } else {
       failed += chunk.length;
+      errors.push({ id: chunk[0] ?? "", message: `HTTP ${resp.status}: ${resp.body.substring(0, 200)}` });
     }
   }
-  return { deleted, failed };
+  return { deleted, failed, errors };
 }
 
-/**
- * Undo a run by deleting everything it inserted, children before parents (profile order reversed)
- * so lookups never block the delete.
- */
-export async function revertMigration(
-  org: OrgInfo,
-  order: string[],
-  idMaps: Record<string, Record<string, string>>,
-  onProgress?: (sobject: string, deleted: number, failed: number) => void
-): Promise<{ deleted: number; failed: number }> {
-  let deleted = 0;
-  let failed = 0;
-  for (const sobject of [...order].reverse()) {
-    const ids = Object.values(idMaps[sobject] ?? {}).filter(Boolean);
-    if (!ids.length) continue;
-    const r = await deleteRecords(org, ids);
-    deleted += r.deleted;
-    failed += r.failed;
-    Logger.info(`Data migration revert — ${sobject}: deleted ${r.deleted}, failed ${r.failed}`);
-    onProgress?.(sobject, r.deleted, r.failed);
-  }
-  return { deleted, failed };
-}
-
-/** PATCH existing records by Id (used to re-link self-referencing lookups after insert). */
-async function updateRecords(org: OrgInfo, records: CollectionsRecord[]): Promise<{ updated: number; failed: number }> {
-  let updated = 0;
-  let failed = 0;
+/** PATCH existing records by Id. Returns one result per input row, in order. */
+async function patchRecords(org: OrgInfo, records: CollectionsRecord[]): Promise<CollectionsItem[]> {
+  const out: CollectionsItem[] = [];
   for (let i = 0; i < records.length; i += BATCH_SIZE) {
     const chunk = records.slice(i, i + BATCH_SIZE);
     const urlPath = `/services/data/v${org.apiVersion}/composite/sobjects`;
     const resp = await sfRequest(org.instanceUrl, urlPath, "PATCH", org.accessToken, { allOrNone: false, records: chunk });
     if (resp.status >= 200 && resp.status < 300) {
       try {
-        for (const r of JSON.parse(resp.body) as CollectionsItem[]) r.success ? updated++ : failed++;
+        out.push(...(JSON.parse(resp.body) as CollectionsItem[]));
       } catch {
-        failed += chunk.length;
+        out.push(...chunk.map(() => ({ id: null, success: false, errors: [{ message: "Unparseable response", errorCode: "PARSE_ERROR" }] })));
       }
     } else {
-      failed += chunk.length;
+      const errMsg = `HTTP ${resp.status}: ${resp.body.substring(0, 200)}`;
+      out.push(...chunk.map(() => ({ id: null, success: false, errors: [{ message: errMsg, errorCode: "API_ERROR" }] })));
     }
   }
-  return { updated, failed };
+  return out;
+}
+
+/** PATCH existing records by Id (used to re-link self-referencing lookups after insert). */
+async function updateRecords(org: OrgInfo, records: CollectionsRecord[]): Promise<{ updated: number; failed: number }> {
+  const res = await patchRecords(org, records);
+  return {
+    updated: res.filter((r) => r.success).length,
+    failed: res.filter((r) => !r.success).length
+  };
+}
+
+/**
+ * Undo a run: put every overwritten record back to its pre-migration values, then delete
+ * everything the run inserted (children before parents, profile order reversed, so lookups
+ * never block a delete).
+ *
+ * Restore runs before delete on purpose — an updated record may point at a record this run
+ * inserted, and writing the old value back releases that reference first.
+ *
+ * Only Ids this run created and rows this run overwrote are ever touched; pre-existing data
+ * the migration did not write to is out of reach by construction.
+ */
+export async function revertMigration(
+  org: OrgInfo,
+  order: string[],
+  journal: MigrationJournal,
+  onProgress?: (sobject: string, step: "restoring" | "deleting", done: number, failed: number) => void
+): Promise<RevertSummary> {
+  const summary: RevertSummary = { deleted: 0, restored: 0, failed: 0, errors: [] };
+  const plan = buildRevertPlan(order, journal);
+
+  // ── 1. Restore overwritten rows ──────────────────────────────────────────────
+  for (const { sobject, rows, entries } of plan.restores) {
+    const res = await patchRecords(org, rows);
+    let ok = 0;
+    let bad = 0;
+    res.forEach((r, idx) => {
+      if (r.success) ok++;
+      else {
+        bad++;
+        summary.errors.push({ sobject, id: entries[idx]?.id ?? "", message: r.errors?.[0]?.message ?? "Restore failed" });
+      }
+    });
+    summary.restored += ok;
+    summary.failed += bad;
+    Logger.info(`Data migration revert — ${sobject}: restored ${ok}, failed ${bad}`);
+    onProgress?.(sobject, "restoring", ok, bad);
+  }
+
+  // ── 2. Delete inserted rows ──────────────────────────────────────────────────
+  for (const { sobject, ids } of plan.deletes) {
+    const r = await deleteRecords(org, ids);
+    summary.deleted += r.deleted;
+    summary.failed += r.failed;
+    for (const e of r.errors) summary.errors.push({ sobject, id: e.id, message: e.message });
+    Logger.info(`Data migration revert — ${sobject}: deleted ${r.deleted}, failed ${r.failed}`);
+    onProgress?.(sobject, "deleting", r.deleted, r.failed);
+  }
+
+  return summary;
+}
+
+/** A snapshot row without its Id — the Id is carried separately on the journal entry. */
+function stripId(row: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(row)) if (k !== "Id") out[k] = v;
+  return out;
+}
+
+/** The field values actually sent for a row, without the composite `attributes` envelope. */
+function sentValues(rec: CollectionsRecord | undefined): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (!rec) return out;
+  for (const [k, v] of Object.entries(rec)) if (k !== "attributes" && k !== "Id") out[k] = v;
+  return out;
 }
 
 // ─── Main migration runner ────────────────────────────────────────────────────
@@ -490,6 +579,8 @@ export interface MigrationRunResult {
   results: MigrationResult[];
   /** sobject → (sourceId → targetId) for everything created/matched this run. */
   idMaps: Record<string, Record<string, string>>;
+  /** Everything this run changed in the target, in the form `revertMigration` needs. */
+  journal: MigrationJournal;
 }
 
 export interface MigrationRetryOptions {
@@ -507,6 +598,15 @@ export async function runMigration(
   opts?: MigrationRetryOptions
 ): Promise<MigrationRunResult> {
   const results: MigrationResult[] = [];
+  // Everything this run changes in the target, recorded as it happens so a revert has
+  // something concrete to undo — Ids to delete, and pre-migration values to write back.
+  const journal: MigrationJournal = { inserted: {}, updated: {} };
+  const noteInserted = (sobject: string, id: string) => {
+    (journal.inserted[sobject] ??= []).push(id);
+  };
+  const noteUpdated = (sobject: string, entry: RevertUpdateEntry) => {
+    (journal.updated[sobject] ??= []).push(entry);
+  };
   // idMaps: sobject → Map<sourceId, targetId>
   const idMaps = new Map<string, Map<string, string>>();
   // Seed from a prior run (retry): links to already-created records still resolve.
@@ -559,7 +659,15 @@ export async function runMigration(
   // object it references — its tree parent AND any extra lookups. This is what
   // makes junction objects work: both linked parents are inserted before the
   // junction row, so both of its lookups can be remapped to new target Ids.
-  const orderedNodes = topoSortNodes(profile.nodes, refMeta, includedSObjects);
+  // The external Id is the upsert's match key: it has to be queried from the source and sent to
+  // the target, otherwise the write has nothing to match on and the revert snapshot can't be
+  // keyed back to a row. Add it if the profile left it out.
+  const withKeys = profile.nodes.map((n) =>
+    n.externalIdField && !n.includeFields.includes(n.externalIdField)
+      ? { ...n, includeFields: [...n.includeFields, n.externalIdField] }
+      : n
+  );
+  const orderedNodes = topoSortNodes(withKeys, refMeta, includedSObjects);
 
   for (const node of orderedNodes) {
     const result: MigrationResult = { sobject: node.sobject, queried: 0, inserted: 0, updated: 0, failed: 0, errors: [], warnings: [] };
@@ -703,6 +811,41 @@ export async function runMigration(
       return out;
     });
 
+    // ── 3b. Read the target rows an upsert is about to overwrite ────────────
+    // An external-Id upsert overwrites whatever is already there, and the API gives back no
+    // trace of the old values — so an upsert is always run as query-then-write. Without this
+    // read there is nothing to revert to.
+    const snapshot = new Map<string, Record<string, unknown>>(); // ext-id value (lower-cased) → old values
+    if (node.externalIdField) {
+      const extField = node.externalIdField;
+      const snapFields = Array.from(new Set([
+        "Id",
+        extField,
+        ...node.includeFields.filter((f) => f !== "Id" && (!writable.size || writable.has(f.toLowerCase())))
+      ]));
+      const extValues = Array.from(new Set(
+        sourceRecords.map((r) => r[extField]).filter((v): v is string => !!v)
+      ));
+      for (let i = 0; i < extValues.length; i += 200) {
+        const chunk = extValues.slice(i, i + 200);
+        const quoted = chunk.map((v) => `'${v.replace(/'/g, "\\'")}'`).join(",");
+        const soql = `SELECT ${snapFields.join(",")} FROM ${node.sobject} WHERE ${extField} IN (${quoted})`;
+        try {
+          for (const row of await queryRawRecords(targetOrg, soql)) {
+            const key = String(row[extField] ?? "");
+            if (key) snapshot.set(key.toLowerCase(), row);
+          }
+        } catch (e) {
+          // Never silent: a run that can't be reverted has to say so before it is trusted.
+          result.warnings.push({
+            field: "(revert snapshot)",
+            reason: `Could not read the target rows before writing — overwritten records in this batch cannot be restored: ${e instanceof Error ? e.message : String(e)}`,
+            count: chunk.length
+          });
+        }
+      }
+    }
+
     // ── 4. Send to target org ───────────────────────────────────────────────
     const responses = await batchCollections(targetOrg, node.sobject, targetRecords, node.externalIdField);
 
@@ -719,20 +862,72 @@ export async function runMigration(
         if (r.success) {
           r.created !== false ? ins++ : upd++;
           if (r.id && srcId) idMap.set(srcId, r.id);
+          if (r.id) noteInserted(node.sobject, r.id); // POST always creates → revert by deleting
         } else {
           fail++;
           result.errors.push({ row: idx, srcId, message: r.errors?.[0]?.message ?? "Unknown error" });
         }
       });
     } else {
-      // UPSERT: after sending, query target org to get new IDs by matching external ID values
-      responses.forEach((r) => { r.success ? (r.created ? ins++ : upd++) : fail++; });
-      if (responses.some((r) => !r.success)) {
-        responses.forEach((r, idx) => {
-          if (!r.success) {
-            const srcId = sourceRecords[idx]?.["Id"] ?? "";
-            result.errors.push({ row: idx, srcId, message: r.errors?.[0]?.message ?? "Unknown error" });
+      // UPSERT: the response tells us, per row, whether it created or overwrote — that is the
+      // split the revert needs. Created rows are deleted on revert; overwritten rows get the
+      // values captured in step 3b written back.
+      const extField = node.externalIdField;
+      let unrestorable = 0;
+      responses.forEach((r, idx) => {
+        const srcRec = sourceRecords[idx];
+        const srcId = srcRec?.["Id"] ?? "";
+        if (!r.success) {
+          fail++;
+          const key = String(srcRec?.[extField] ?? "").toLowerCase();
+          const before = key ? snapshot.get(key) : undefined;
+          result.errors.push({ row: idx, srcId, message: r.errors?.[0]?.message ?? "Unknown error" });
+          // A failed write against a row that already existed still belongs in the table, so the
+          // run can be reviewed in full — it just isn't restored (nothing changed).
+          if (before) {
+            noteUpdated(node.sobject, {
+              id: String(before["Id"] ?? ""),
+              srcId,
+              before: stripId(before),
+              after: sentValues(targetRecords[idx]),
+              status: "failed",
+              message: r.errors?.[0]?.message ?? "Unknown error"
+            });
           }
+          return;
+        }
+        if (r.created) {
+          ins++;
+          if (r.id) {
+            if (srcId) idMap.set(srcId, r.id);
+            noteInserted(node.sobject, r.id);
+          }
+        } else {
+          upd++;
+          const key = String(srcRec?.[extField] ?? "").toLowerCase();
+          const before = key ? snapshot.get(key) : undefined;
+          const targetId = r.id || String(before?.["Id"] ?? "");
+          if (targetId && srcId) idMap.set(srcId, targetId);
+          if (before && targetId) {
+            noteUpdated(node.sobject, {
+              id: targetId,
+              srcId,
+              before: stripId(before),
+              after: sentValues(targetRecords[idx]),
+              status: "updated"
+            });
+          } else if (targetId) {
+            // Overwritten, but we never read the old values — say so rather than let the run
+            // look fully revertible.
+            unrestorable++;
+          }
+        }
+      });
+      if (unrestorable) {
+        result.warnings.push({
+          field: "(revert snapshot)",
+          reason: "Record was overwritten but its previous values could not be read — it cannot be restored",
+          count: unrestorable
         });
       }
       // Build srcId → extIdValue map
@@ -802,7 +997,7 @@ export async function runMigration(
   for (const [sobj, m] of idMaps.entries()) {
     idMapsOut[sobj] = Object.fromEntries(m);
   }
-  return { results, idMaps: idMapsOut };
+  return { results, idMaps: idMapsOut, journal };
 }
 
 // ─── Profile I/O ─────────────────────────────────────────────────────────────
