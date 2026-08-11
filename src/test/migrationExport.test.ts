@@ -4,6 +4,7 @@ import {
   apexString,
   apexVar,
   csvCell,
+  resolveKeyFor,
   toApexParts,
   toApexScript,
   toCsvExports,
@@ -175,6 +176,36 @@ describe("migrationExport.toApexScript", () => {
     assert.ok(!out.includes("Account_byId"), "no lookup map is needed at all");
   });
 
+  it("resolves through any external Id on the parent, not only the chosen upsert key", () => {
+    const legacy: ExportProfileLike = {
+      name: "legacy", rootSObject: "Account",
+      nodes: [
+        // No upsert key selected — but Legacy_Id__c is an external Id and is exported.
+        { sobject: "Account", parentSObject: null, externalIdField: null,
+          includeFields: ["Id", "Name", "Legacy_Id__c"] },
+        { sobject: "Contact", parentSObject: "Account", externalIdField: null,
+          includeFields: ["Id", "LastName", "AccountId"] }
+      ]
+    };
+    const meta: ExportFieldMeta = new Map([
+      ["Account", new Map([
+        ["Name", { type: "string", referenceTo: [] as string[] }],
+        ["Legacy_Id__c", { type: "string", referenceTo: [] as string[], externalId: true, unique: true }]
+      ])],
+      ["Contact", new Map([
+        ["LastName", { type: "string", referenceTo: [] as string[] }],
+        ["AccountId", { type: "reference", referenceTo: ["Account"], relationshipName: "Account" }]
+      ])]
+    ]);
+    const out = toApexScript(legacy, [
+      { sobject: "Account", records: [{ Id: "001S1", Name: "Acme", Legacy_Id__c: "L-1" }] },
+      { sobject: "Contact", records: [{ Id: "003S1", LastName: "Vance", AccountId: "001S1" }] }
+    ], meta, "2026-08-11T00:00:00Z");
+    assert.ok(out.includes("Account=new Account(Legacy_Id__c='L-1')"));
+    assert.ok(!out.includes("Account_byId"), "still no map — any external Id will resolve the link");
+    assert.ok(out.includes("insert Account_rows;"), "and it is still an insert, not an upsert");
+  });
+
   it("drops a lookup whose record was never collected, rather than emitting a get() that throws", () => {
     const junction: ExportProfileLike = {
       name: "junction", rootSObject: "Account",
@@ -295,6 +326,35 @@ describe("migrationExport.toApexParts", () => {
     assert.ok(parts[0].oversize);
     assert.ok(/sf apex run --file/.test(parts[0].content), "the usable alternative is named");
     assert.ok(/Account/.test(parts[0].oversizeReason ?? ""), "and what pinned it");
+  });
+});
+
+describe("migrationExport.resolveKeyFor", () => {
+  const fields: ExportFieldMeta = new Map([["Account", new Map([
+    ["Chosen__c", { type: "string", referenceTo: [] as string[], externalId: true, unique: true }],
+    ["Loose__c", { type: "string", referenceTo: [] as string[], externalId: true, unique: false }],
+    ["Tight__c", { type: "string", referenceTo: [] as string[], externalId: true, unique: true }],
+    ["Name", { type: "string", referenceTo: [] as string[] }]
+  ])]]);
+  const node = (externalIdField: string | null, includeFields: string[]) =>
+    ({ sobject: "Account", parentSObject: null, externalIdField, includeFields });
+
+  it("prefers the chosen upsert key", () => {
+    assert.strictEqual(resolveKeyFor(node("Chosen__c", ["Chosen__c", "Loose__c"]), fields), "Chosen__c");
+  });
+
+  it("falls back to a unique external Id over a non-unique one", () => {
+    // A non-unique external Id makes the foreign key ambiguous and the DML rejects it.
+    assert.strictEqual(resolveKeyFor(node(null, ["Name", "Loose__c", "Tight__c"]), fields), "Tight__c");
+  });
+
+  it("will not name a field the export does not write", () => {
+    // The stub only resolves if the value is actually in the org, so the field has to be exported.
+    assert.strictEqual(resolveKeyFor(node(null, ["Name"]), fields), null);
+  });
+
+  it("returns nothing when the object has no external Id at all", () => {
+    assert.strictEqual(resolveKeyFor(node(null, ["Name"]), new Map()), null);
   });
 });
 

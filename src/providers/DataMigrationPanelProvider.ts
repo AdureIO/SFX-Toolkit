@@ -434,21 +434,41 @@ export class DataMigrationPanelProvider {
           panel.webview.postMessage({ command: "migrationStarted" });
           const srcOrg = await resolveOrgToInfo(sourceOrg || null);
 
-          const data = await collectMigrationData(srcOrg, profile, (sobject, fetched) => {
+          // Describe first: the external Id fields have to be known before the records are read,
+          // because a lookup can only be written as `Account = new Account(Ext__c = 'E1')` if the
+          // export actually carries that field's value.
+          const meta: ExportFieldMeta = new Map();
+          for (const node of profile.nodes) {
+            const desc = await SchemaCache.getRichDescribe(sourceOrg || null, node.sobject);
+            const m = new Map<string, { type: string; referenceTo: string[]; relationshipName?: string | null; externalId?: boolean; unique?: boolean }>();
+            for (const f of desc?.fields ?? []) {
+              m.set(f.name, {
+                type: f.type, referenceTo: f.referenceTo ?? [], relationshipName: f.relationshipName,
+                externalId: f.externalId, unique: f.unique
+              });
+            }
+            meta.set(node.sobject, m);
+          }
+
+          // Pull in each object's external Id fields even when the user did not tick them. They
+          // cost one column and they are what lets every lookup between exported objects resolve
+          // by key instead of by a variable that does not survive the next execution.
+          const exportProfile: MigrationProfile = {
+            ...profile,
+            nodes: profile.nodes.map((node) => {
+              const extras = [...(meta.get(node.sobject) ?? new Map())]
+                .filter(([name, f]) => f.externalId && !node.includeFields.includes(name))
+                .map(([name]) => name);
+              return extras.length ? { ...node, includeFields: [...node.includeFields, ...extras] } : node;
+            })
+          };
+
+          const data = await collectMigrationData(srcOrg, exportProfile, (sobject, fetched) => {
             panel.webview.postMessage({
               command: "migrationProgress",
               progress: { sobject, phase: "querying", done: fetched, total: 0, inserted: 0, updated: 0, failed: 0 }
             });
           });
-
-          // Field types and lookup targets drive the Apex literals and the lookup re-pointing.
-          const meta: ExportFieldMeta = new Map();
-          for (const node of profile.nodes) {
-            const desc = await SchemaCache.getRichDescribe(sourceOrg || null, node.sobject);
-            const m = new Map<string, { type: string; referenceTo: string[]; relationshipName?: string | null }>();
-            for (const f of desc?.fields ?? []) m.set(f.name, { type: f.type, referenceTo: f.referenceTo ?? [], relationshipName: f.relationshipName });
-            meta.set(node.sobject, m);
-          }
 
           const stamp = new Date().toISOString();
           const safeName = (profile.name || "migration").replace(/[^a-zA-Z0-9_-]/g, "_");
@@ -461,7 +481,7 @@ export class DataMigrationPanelProvider {
             });
             if (!uri?.length) { panel.webview.postMessage({ command: "exportCancelled" }); return; }
             const files = toCsvExports(data, (sobject) => {
-              const node = profile.nodes.find((n: { sobject: string }) => n.sobject === sobject);
+              const node = exportProfile.nodes.find((n: { sobject: string }) => n.sobject === sobject);
               return ["Id", ...(node?.includeFields ?? []).filter((f: string) => f !== "Id")];
             });
             fs.mkdirSync(uri[0].fsPath, { recursive: true });
@@ -479,7 +499,7 @@ export class DataMigrationPanelProvider {
 
           if (format === "apex") {
             // Split to the Execute Anonymous window, so what lands on disk can actually be pasted.
-            const parts = toApexParts(profile, data, meta, stamp, APEX_CONSOLE_MAX_CHARS);
+            const parts = toApexParts(exportProfile, data, meta, stamp, APEX_CONSOLE_MAX_CHARS);
             const uri = await vscode.window.showSaveDialog({
               defaultUri: vscode.Uri.file(path.join(outDir, `${safeName}.apex`)),
               filters: { "Anonymous Apex": ["apex", "cls"] },
@@ -522,7 +542,7 @@ export class DataMigrationPanelProvider {
           });
           if (!uri) { panel.webview.postMessage({ command: "exportCancelled" }); return; }
           fs.mkdirSync(path.dirname(uri.fsPath), { recursive: true });
-          fs.writeFileSync(uri.fsPath, toJsonExport(profile, data, stamp), "utf8");
+          fs.writeFileSync(uri.fsPath, toJsonExport(exportProfile, data, stamp), "utf8");
           panel.webview.postMessage({
             command: "exportComplete", format,
             summary: `${total} record(s) across ${data.length} object(s) → ${path.basename(uri.fsPath)}`

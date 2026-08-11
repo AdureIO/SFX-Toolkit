@@ -26,6 +26,9 @@ export type ExportFieldMeta = Map<string, Map<string, {
   type: string;
   referenceTo: string[];
   relationshipName?: string | null;
+  /** Marked as an external Id on the object — usable as a foreign key in a relationship stub. */
+  externalId?: boolean;
+  unique?: boolean;
 }>>;
 
 export interface ExportProfileLike {
@@ -114,6 +117,27 @@ export function apexLiteral(value: string, type: string): string | null {
   return apexString(value);
 }
 
+/**
+ * The field a lookup to this object can be resolved through.
+ *
+ * Any external Id will do, not just the one chosen as the upsert key — the DML resolves a
+ * relationship stub against whichever external Id it carries. The only requirement is that the
+ * script actually writes the field, so it has to be one of the object's included fields. A unique
+ * one is preferred: a non-unique external Id makes the foreign key ambiguous and the DML rejects
+ * it.
+ */
+export function resolveKeyFor(
+  node: ExportProfileLike["nodes"][number],
+  meta: ExportFieldMeta
+): string | null {
+  const included = node.includeFields;
+  if (node.externalIdField && included.includes(node.externalIdField)) return node.externalIdField;
+  const fields = meta.get(node.sobject);
+  if (!fields) return null;
+  const candidates = included.filter((f) => fields.get(f)?.externalId);
+  return candidates.find((f) => fields.get(f)?.unique) ?? candidates[0] ?? null;
+}
+
 /** A valid, collision-free Apex identifier stem for an object (Order__c → Order__c, ns__X → ns__X). */
 export function apexVar(sobject: string): string {
   const cleaned = sobject.replace(/[^A-Za-z0-9_]/g, "_");
@@ -190,7 +214,7 @@ function buildRows(
   included: Set<string>,
   srcIdsBySObject: Map<string, Set<string>>,
   externalKeys: Map<string, Map<string, string>>,
-  externalIdOf: Map<string, string | null>
+  resolveKeyOf: Map<string, string | null>
 ): { rows: RowData[]; selfRefs: Array<{ srcId: string; field: string; refSrcId: string }> } {
   const sobject = node.sobject;
   const fieldMeta = meta.get(sobject) ?? new Map();
@@ -228,7 +252,7 @@ function buildRows(
         const parentKey = externalKeys.get(target)?.get(raw);
         const relationship = info?.relationshipName;
         if (parentKey && relationship) {
-          assignments.push(`${relationship}=new ${target}(${externalIdOf.get(target)}=${apexString(parentKey)})`);
+          assignments.push(`${relationship}=new ${target}(${resolveKeyOf.get(target)}=${apexString(parentKey)})`);
           continue;
         }
         // Fallback: the parent has no external Id, so the only handle on it is the record this
@@ -258,6 +282,7 @@ function chunkRows(
   rows: RowData[],
   selfRefs: Array<{ srcId: string; field: string; refSrcId: string }>,
   mapNeeded: boolean,
+  resolveKey: string | null,
   budget: number
 ): Chunk[] {
   const sobject = node.sobject;
@@ -268,7 +293,7 @@ function chunkRows(
     .map(({ srcId, field, refSrcId }) =>
       `${v}_byId.get(${apexString(srcId)}).${field} = ${v}_byId.get(${apexString(refSrcId)}).Id;`);
 
-  const chunkable = selfLinks.length === 0 && (!mapNeeded || !!node.externalIdField);
+  const chunkable = selfLinks.length === 0 && (!mapNeeded || !!resolveKey);
   const limit = Math.max(1_000, budget - PART_OVERHEAD_RESERVE);
 
   const chunks: Chunk[] = [];
@@ -386,15 +411,17 @@ export function toApexParts(
     srcIdsBySObject.set(sobject, new Set(records.map((r) => r["Id"]).filter(Boolean)));
   }
 
-  const externalIdOf = new Map(ordered.map((n) => [n.sobject, n.externalIdField]));
-  // source Id → external Id value, per object. This is what lets a lookup be written as
+  // The field each object's lookups resolve through — the upsert key when there is one, otherwise
+  // any external Id the script writes. source Id → its value is what lets a lookup be written as
   // `Account = new Account(Ext__c = 'E1')` instead of going through a map.
+  const resolveKeyOf = new Map<string, string | null>(ordered.map((n) => [n.sobject, resolveKeyFor(n, meta)]));
   const externalKeys = new Map<string, Map<string, string>>();
   for (const node of ordered) {
-    if (!node.externalIdField) continue;
+    const key = resolveKeyOf.get(node.sobject);
+    if (!key) continue;
     const m = new Map<string, string>();
     for (const rec of byObject.get(node.sobject) ?? []) {
-      if (rec["Id"] && rec[node.externalIdField]) m.set(rec["Id"], rec[node.externalIdField]);
+      if (rec["Id"] && rec[key]) m.set(rec["Id"], rec[key]);
     }
     externalKeys.set(node.sobject, m);
   }
@@ -404,7 +431,7 @@ export function toApexParts(
   const rowsByObject = new Map<string, ReturnType<typeof buildRows>>();
   for (const node of ordered) {
     rowsByObject.set(node.sobject, buildRows(
-      node, byObject.get(node.sobject) ?? [], meta, included, srcIdsBySObject, externalKeys, externalIdOf
+      node, byObject.get(node.sobject) ?? [], meta, included, srcIdsBySObject, externalKeys, resolveKeyOf
     ));
   }
   const mapNeeded = new Set<string>();
@@ -415,7 +442,7 @@ export function toApexParts(
   const chunks: Chunk[] = [];
   for (const node of ordered) {
     const built = rowsByObject.get(node.sobject)!;
-    chunks.push(...chunkRows(node, built.rows, built.selfRefs, mapNeeded.has(node.sobject), budget));
+    chunks.push(...chunkRows(node, built.rows, built.selfRefs, mapNeeded.has(node.sobject), resolveKeyOf.get(node.sobject) ?? null, budget));
   }
 
   // ── Pack chunks into parts ────────────────────────────────────────────────
@@ -425,7 +452,7 @@ export function toApexParts(
   for (const chunk of chunks) {
     const inPart = new Set(current.map((c) => c.sobject));
     // A new part can only start if everything this chunk still needs can be found again by query.
-    const unrecoverable = [...chunk.needsIds.keys()].filter((s) => !inPart.has(s) && !externalIdOf.get(s));
+    const unrecoverable = [...chunk.needsIds.keys()].filter((s) => !inPart.has(s) && !resolveKeyOf.get(s));
     if (current.length && currentChars + chunk.chars > budget - PART_OVERHEAD_RESERVE && !unrecoverable.length) {
       partChunks.push(current);
       current = [];
@@ -487,7 +514,7 @@ export function toApexParts(
         if (rehydrated.has(sobject)) continue;
         const fromEarlier = new Set([...wanted].filter((id) => emittedBefore.get(sobject)?.has(id)));
         if (!fromEarlier.size) continue;
-        const ext = externalIdOf.get(sobject);
+        const ext = resolveKeyOf.get(sobject);
         if (!ext) continue;
         rehydrated.add(sobject);
         lines.push(...rehydrateLines(sobject, ext, externalKeys.get(sobject) ?? new Map(), fromEarlier));
@@ -517,14 +544,14 @@ export function toApexParts(
       rows: partRows,
       objects,
       oversize,
-      oversizeReason: oversize ? oversizeReason(part, externalIdOf) : undefined
+      oversizeReason: oversize ? oversizeReason(part, resolveKeyOf) : undefined
     };
   });
 }
 
-function oversizeReason(part: Chunk[], externalIdOf: Map<string, string | null>): string {
+function oversizeReason(part: Chunk[], resolveKeyOf: Map<string, string | null>): string {
   const pinned = [...new Set(part
-    .filter((c) => c.selfLinks.length || [...c.needsIds.keys()].some((s) => !externalIdOf.get(s)))
+    .filter((c) => c.selfLinks.length || [...c.needsIds.keys()].some((s) => !resolveKeyOf.get(s)))
     .map((c) => c.sobject))];
   return pinned.length
     ? `${pinned.join(", ")} cannot be split up: an object is only divisible when it does not link ` +
