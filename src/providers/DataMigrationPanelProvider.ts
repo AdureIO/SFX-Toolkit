@@ -1514,6 +1514,30 @@ function showMigrationResults(results) {
         det.classList.add('open'); // auto-expand so the reason is visible
       }
     }
+    // Fields that were NOT written. Never let a run look clean while data was dropped.
+    if (r.warnings && r.warnings.length) {
+      var det2 = safeGet('edet-'+r.sobject);
+      if (det2) {
+        var missing = {};
+        var wHtml = '<div class="err-group" style="border-left-color:var(--vscode-editorWarning-foreground,#cca700);">';
+        wHtml += '<div class="err-count" style="color:var(--vscode-editorWarning-foreground,#cca700);">⚠ '+r.warnings.length+' field(s) not migrated</div>';
+        r.warnings.forEach(function(w) {
+          wHtml += '<div class="err-line">• '+escHtml(w.field)+' — '+escHtml(w.reason)+' ('+w.count+' record'+(w.count!==1?'s':'')+')</div>';
+          var m = /Lookup to ([^—]+) —/.exec(w.reason);
+          if (m) { m[1].trim().split('/').forEach(function(o) { missing[o.trim()] = true; }); }
+        });
+        var names = Object.keys(missing);
+        if (names.length) {
+          wHtml += '<div class="err-line" style="margin-top:6px;">↳ Add ' + names.map(escHtml).join(', ') +
+                   ' to this migration to keep ' + (names.length > 1 ? 'these links' : 'this link') + '.</div>';
+        }
+        wHtml += '</div>';
+        det2.innerHTML = (det2.innerHTML || '') + wHtml;
+        det2.classList.add('open');
+        var tog2 = safeGet('etog-'+r.sobject);
+        if (tog2 && tog2.style.display === 'none') { tog2.textContent = '▲ Hide details'; tog2.style.display = ''; }
+      }
+    }
     if (safeGet('fill-'+r.sobject)) safeGet('fill-'+r.sobject).style.width = '100%';
   });
   var statusLbl = safeGet('run-status-label');

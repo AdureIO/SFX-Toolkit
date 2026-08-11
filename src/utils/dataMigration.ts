@@ -96,6 +96,8 @@ export interface MigrationResult {
   updated: number;
   failed: number;
   errors: Array<{ row: number; srcId: string; message: string }>;
+  /** Fields that were NOT written, and why. A migration must never drop data silently. */
+  warnings: Array<{ field: string; reason: string; count: number }>;
 }
 
 // ─── Auth resolution ─────────────────────────────────────────────────────────
@@ -559,7 +561,7 @@ export async function runMigration(
   const orderedNodes = topoSortNodes(profile.nodes, refMeta, includedSObjects);
 
   for (const node of orderedNodes) {
-    const result: MigrationResult = { sobject: node.sobject, queried: 0, inserted: 0, updated: 0, failed: 0, errors: [] };
+    const result: MigrationResult = { sobject: node.sobject, queried: 0, inserted: 0, updated: 0, failed: 0, errors: [], warnings: [] };
 
     // ── 1 & 2. Obtain the source records to migrate ─────────────────────────
     let sourceRecords: Record<string, string>[];
@@ -645,13 +647,24 @@ export async function runMigration(
     // Self-referencing lookups can't be resolved during the build (the parent is in this same
     // batch), so they're collected here and patched once every row has a target Id.
     const selfRefs: Array<{ srcId: string; field: string; refSrcId: string }> = [];
+    // Every field we choose not to write is counted here and reported — silence would let a
+    // migration look successful while quietly losing data.
+    const omitted = new Map<string, { reason: string; count: number }>();
+    const noteOmitted = (field: string, reason: string) => {
+      const e = omitted.get(field) ?? { reason, count: 0 };
+      e.count++;
+      omitted.set(field, e);
+    };
     const targetRecords: CollectionsRecord[] = sourceRecords.map((rec) => {
       const out: CollectionsRecord = { attributes: { type: node.sobject } };
       for (const field of node.includeFields) {
         if (field === "Id") continue; // never copy the record's own Id
         // Not present/creatable in the target → omit (an empty set means "describe failed", so
         // fall through and send everything as before).
-        if (writable.size && !writable.has(field.toLowerCase())) continue;
+        if (writable.size && !writable.has(field.toLowerCase())) {
+          noteOmitted(field, "Not present or not writable in the target org");
+          continue;
+        }
         const val: unknown = rec[field] === "" ? null : rec[field] ?? null;
         const referenceTo = nodeRefs.get(field);
         if (referenceTo && referenceTo.length) {
@@ -669,7 +682,10 @@ export async function runMigration(
             }
           }
           if (remapped) out[field] = remapped;
-          else if (val && typeof val === "string" && referenceTo.includes(node.sobject)) {
+          else if (val && typeof val === "string" && !referenceTo.includes(node.sobject)) {
+            noteOmitted(field, `Lookup to ${referenceTo.join("/")} — that record is not part of this migration`);
+          }
+          if (!remapped && val && typeof val === "string" && referenceTo.includes(node.sobject)) {
             // A self-reference (Account.ParentId → Account): the parent is in this same batch
             // and has no target Id yet. Record it and re-link in a second pass after insert.
             const srcId = rec["Id"];
@@ -749,6 +765,9 @@ export async function runMigration(
     idMap.forEach((v, k) => merged.set(k, v));
     idMaps.set(node.sobject, merged);
 
+    // Surface everything that wasn't written, so a "successful" run can't hide dropped data.
+    for (const [field, info] of omitted) result.warnings.push({ field, reason: info.reason, count: info.count });
+
     // ── 5b. Re-link self-references now that every row in this object has a target Id ────────
     if (selfRefs.length) {
       const patches = new Map<string, CollectionsRecord>();
@@ -767,6 +786,9 @@ export async function runMigration(
           `Data migration — ${node.sobject}: re-linked ${linked.updated} self-reference(s)` +
             (linked.failed ? `, ${linked.failed} failed` : "")
         );
+        if (linked.failed) {
+          result.warnings.push({ field: "(self-reference)", reason: "Could not be re-linked after insert", count: linked.failed });
+        }
       }
     }
 
