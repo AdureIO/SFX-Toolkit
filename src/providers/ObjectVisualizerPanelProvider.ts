@@ -135,10 +135,19 @@ export class ObjectVisualizerPanelProvider {
   /** Object API names defined in this project's SFDX source (objects/<Name>/<Name>.object-meta.xml). */
   private static async sendProjectObjects(panel: vscode.WebviewPanel) {
     try {
-      const files = await vscode.workspace.findFiles("**/objects/*/*.object-meta.xml", "**/node_modules/**", 5000);
+      // Both shapes count as "in this project": a full object definition, and a standard object
+      // that the project only extends with custom fields (those have no .object-meta.xml).
+      const [objectFiles, fieldFiles] = await Promise.all([
+        vscode.workspace.findFiles("**/objects/*/*.object-meta.xml", "**/node_modules/**", 5000),
+        vscode.workspace.findFiles("**/objects/*/fields/*.field-meta.xml", "**/node_modules/**", 5000)
+      ]);
       const names = new Set<string>();
-      for (const f of files) {
-        const m = f.path.match(/\/objects\/([^/]+)\/[^/]+\.object-meta\.xml$/);
+      for (const f of objectFiles) {
+        const m = f.path.match(/\/objects\/([^/]+)\//);
+        if (m) names.add(m[1]);
+      }
+      for (const f of fieldFiles) {
+        const m = f.path.match(/\/objects\/([^/]+)\/fields\//);
         if (m) names.add(m[1]);
       }
       panel.webview.postMessage({ command: "projectObjects", objects: Array.from(names).sort((a, b) => a.localeCompare(b)) });

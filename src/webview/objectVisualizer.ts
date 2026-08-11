@@ -2,7 +2,7 @@ import cytoscape = require("cytoscape");
 import dagre = require("cytoscape-dagre");
 import svg = require("cytoscape-svg");
 import nodeHtmlLabel = require("cytoscape-node-html-label");
-import { ObjectSelection, PickerKind } from "./objectSelection";
+import { ObjectSelection, PickerKind, resolveProjectObjects } from "./objectSelection";
 
 cytoscape.use(dagre);
 cytoscape.use(svg);
@@ -499,8 +499,9 @@ window.addEventListener("message", (event: MessageEvent) => {
     case "projectObjects": {
       // Auto-select the project's own objects (those defined in the SFDX source).
       const projObjects = (msg.objects as string[]) || [];
-      const available = new Set(selectedSeeds.names());
-      const usable = projObjects.filter((n) => available.size === 0 || available.has(n));
+      // Match to the org's API names (handles namespaces and casing) rather than requiring an
+      // exact hit — a namespaced org reports `ns__Thing__c` for a `Thing__c` source folder.
+      const usable = resolveProjectObjects(projObjects, selectedSeeds.names());
       if (usable.length === 0) {
         setStatus("No project objects found in the workspace source.");
         break;

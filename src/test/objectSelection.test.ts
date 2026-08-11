@@ -1,5 +1,5 @@
 import * as assert from "assert";
-import { ObjectSelection } from "../webview/objectSelection";
+import { ObjectSelection, resolveProjectObjects } from "../webview/objectSelection";
 
 describe("webview.ObjectSelection", () => {
   const sel = () => {
@@ -58,5 +58,33 @@ describe("webview.ObjectSelection", () => {
     s.set("Account", true);
     s.replaceAll(["Contact", "Order__c"]);
     assert.deepStrictEqual(s.values(), ["Contact", "Order__c"]);
+  });
+});
+
+describe("objectSelection.resolveProjectObjects", () => {
+  it("matches a source folder to the org's namespaced API name", () => {
+    const org = ["sfy24__DataSet__c", "sfy24__DataSource__c", "Account"];
+    assert.deepStrictEqual(resolveProjectObjects(["DataSet__c", "Account"], org), ["sfy24__DataSet__c", "Account"]);
+  });
+
+  it("matches regardless of folder casing", () => {
+    assert.deepStrictEqual(resolveProjectObjects(["dataset__c"], ["sfy24__DataSet__c"]), ["sfy24__DataSet__c"]);
+  });
+
+  it("prefers an exact hit over a namespace-stripped one", () => {
+    const org = ["DataSet__c", "sfy24__DataSet__c"];
+    assert.deepStrictEqual(resolveProjectObjects(["DataSet__c"], org), ["DataSet__c"]);
+  });
+
+  it("keeps an object the org doesn't report instead of dropping it", () => {
+    assert.deepStrictEqual(resolveProjectObjects(["Brand_New__c"], ["Account"]), ["Brand_New__c"]);
+  });
+
+  it("passes everything through when the org list hasn't loaded", () => {
+    assert.deepStrictEqual(resolveProjectObjects(["A__c", "B__c"], []), ["A__c", "B__c"]);
+  });
+
+  it("de-duplicates when two folders resolve to the same org name", () => {
+    assert.deepStrictEqual(resolveProjectObjects(["DataSet__c", "dataset__c"], ["sfy24__DataSet__c"]), ["sfy24__DataSet__c"]);
   });
 });

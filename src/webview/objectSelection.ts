@@ -90,3 +90,31 @@ export class ObjectSelection {
         return { shown, total: matches.length, hidden: matches.length - shown.length };
     }
 }
+
+/**
+ * Match objects found in the SFDX source to the API names the org reports.
+ *
+ * Two things make a plain equality check fail:
+ *  • Namespaces — a folder is `DataSet__c` while a namespaced org reports `sfy24__DataSet__c`.
+ *  • Case — folder names don't always match the org's casing.
+ * Resolves to the ORG's name (what the graph builder needs). A project object the org doesn't
+ * know is kept as-is rather than silently dropped, so the user sees it instead of "none found".
+ */
+export function resolveProjectObjects(projectNames: string[], orgNames: string[]): string[] {
+    if (!orgNames.length) return [...projectNames];
+    const byExact = new Map<string, string>();
+    const bySuffix = new Map<string, string>(); // name without its namespace prefix
+    for (const name of orgNames) {
+        byExact.set(name.toLowerCase(), name);
+        const parts = name.split("__");
+        // ns__Object__c → Object__c ; ns__Object → Object
+        if (parts.length > 2) bySuffix.set(parts.slice(1).join("__").toLowerCase(), name);
+        else if (parts.length === 2 && !/^c$/i.test(parts[1])) bySuffix.set(parts[1].toLowerCase(), name);
+    }
+    const out: string[] = [];
+    for (const p of projectNames) {
+        const key = p.toLowerCase();
+        out.push(byExact.get(key) ?? bySuffix.get(key) ?? p);
+    }
+    return [...new Set(out)];
+}
