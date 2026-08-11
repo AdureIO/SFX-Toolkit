@@ -398,6 +398,27 @@ export async function revertMigration(
   return { deleted, failed };
 }
 
+/** PATCH existing records by Id (used to re-link self-referencing lookups after insert). */
+async function updateRecords(org: OrgInfo, records: CollectionsRecord[]): Promise<{ updated: number; failed: number }> {
+  let updated = 0;
+  let failed = 0;
+  for (let i = 0; i < records.length; i += BATCH_SIZE) {
+    const chunk = records.slice(i, i + BATCH_SIZE);
+    const urlPath = `/services/data/v${org.apiVersion}/composite/sobjects`;
+    const resp = await sfRequest(org.instanceUrl, urlPath, "PATCH", org.accessToken, { allOrNone: false, records: chunk });
+    if (resp.status >= 200 && resp.status < 300) {
+      try {
+        for (const r of JSON.parse(resp.body) as CollectionsItem[]) r.success ? updated++ : failed++;
+      } catch {
+        failed += chunk.length;
+      }
+    } else {
+      failed += chunk.length;
+    }
+  }
+  return { updated, failed };
+}
+
 // ─── Main migration runner ────────────────────────────────────────────────────
 
 /**
@@ -621,6 +642,9 @@ export async function runMigration(
     if (skipped.length) {
       Logger.info(`Data migration — ${node.sobject}: skipping ${skipped.length} field(s) the target org can't accept: ${skipped.join(", ")}`);
     }
+    // Self-referencing lookups can't be resolved during the build (the parent is in this same
+    // batch), so they're collected here and patched once every row has a target Id.
+    const selfRefs: Array<{ srcId: string; field: string; refSrcId: string }> = [];
     const targetRecords: CollectionsRecord[] = sourceRecords.map((rec) => {
       const out: CollectionsRecord = { attributes: { type: node.sobject } };
       for (const field of node.includeFields) {
@@ -645,6 +669,12 @@ export async function runMigration(
             }
           }
           if (remapped) out[field] = remapped;
+          else if (val && typeof val === "string" && referenceTo.includes(node.sobject)) {
+            // A self-reference (Account.ParentId → Account): the parent is in this same batch
+            // and has no target Id yet. Record it and re-link in a second pass after insert.
+            const srcId = rec["Id"];
+            if (srcId) selfRefs.push({ srcId, field, refSrcId: val });
+          }
           continue; // omit when not remappable
         }
         // On INSERT, omit nulls (no reason to send them); on UPSERT, keep them
@@ -718,6 +748,27 @@ export async function runMigration(
     const merged = idMaps.get(node.sobject) ?? new Map<string, string>();
     idMap.forEach((v, k) => merged.set(k, v));
     idMaps.set(node.sobject, merged);
+
+    // ── 5b. Re-link self-references now that every row in this object has a target Id ────────
+    if (selfRefs.length) {
+      const patches = new Map<string, CollectionsRecord>();
+      for (const { srcId, field, refSrcId } of selfRefs) {
+        const childTargetId = merged.get(srcId);
+        const parentTargetId = merged.get(refSrcId);
+        if (!childTargetId || !parentTargetId) continue; // one of them failed to insert
+        const patch = patches.get(childTargetId) ?? { attributes: { type: node.sobject }, Id: childTargetId };
+        patch[field] = parentTargetId;
+        patches.set(childTargetId, patch);
+      }
+      if (patches.size) {
+        const rows = [...patches.values()];
+        const linked = await updateRecords(targetOrg, rows);
+        Logger.info(
+          `Data migration — ${node.sobject}: re-linked ${linked.updated} self-reference(s)` +
+            (linked.failed ? `, ${linked.failed} failed` : "")
+        );
+      }
+    }
 
     onProgress({ sobject: node.sobject, phase: "done", done: sourceRecords.length, total: sourceRecords.length, inserted: ins, updated: upd, failed: fail });
     results.push(result);
