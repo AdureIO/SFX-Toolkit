@@ -46,7 +46,7 @@ async function resolveApexMethod(
  */
 function apexSpecAt(document: vscode.TextDocument, position: vscode.Position): string | undefined {
     const line = document.lineAt(position.line).text;
-    for (const m of line.matchAll(/['"](@salesforce\/apex\/[\w.]+)['"]/g)) {
+    for (const m of line.matchAll(/['"]((?:@salesforce\/|c\/|lightning\/)[\w./-]+)['"]/g)) {
         const start = m.index ?? 0;
         if (position.character >= start && position.character <= start + m[0].length) return m[1];
     }
@@ -54,11 +54,29 @@ function apexSpecAt(document: vscode.TextDocument, position: vscode.Position): s
     const range = document.getWordRangeAtPosition(position, /[A-Za-z_]\w*/);
     if (!range) return undefined;
     const word = document.getText(range);
-    const importRe = /import\s+(\w+)\s+from\s+['"](@salesforce\/apex\/[\w.]+)['"]/g;
+    const importRe = /import\s+(?:\*\s+as\s+)?(\w+)[^'"\n]*from\s+['"]((?:@salesforce\/|c\/|lightning\/)[\w./-]+)['"]/g;
     for (const m of document.getText().matchAll(importRe)) {
         if (m[1] === word) return m[2];
     }
     return undefined;
+}
+
+
+/** `c/myComponent` → the component's own .js file in any `lwc` folder. */
+async function resolveLwcComponent(spec: string): Promise<vscode.Uri | undefined> {
+    const m = /^c\/(\w+)$/.exec(spec.trim());
+    if (!m) return undefined;
+    const name = m[1];
+    const hits = await vscode.workspace.findFiles(`**/lwc/${name}/${name}.js`, "**/node_modules/**", 2);
+    return hits[0];
+}
+
+/** `@salesforce/schema/Account.Name` → { object, field }. */
+export function parseSchemaImport(spec: string): { object: string; field?: string } | undefined {
+    const m = /^@salesforce\/schema\/([\w.]+)$/.exec(spec.trim());
+    if (!m) return undefined;
+    const parts = m[1].split(".");
+    return parts.length > 1 ? { object: parts[0], field: parts.slice(1).join(".") } : { object: parts[0] };
 }
 
 export class LwcApexDefinitionProvider implements vscode.DefinitionProvider {
@@ -68,6 +86,10 @@ export class LwcApexDefinitionProvider implements vscode.DefinitionProvider {
     ): Promise<vscode.Definition | undefined> {
         const spec = apexSpecAt(document, position);
         if (!spec) return undefined;
+
+        const component = await resolveLwcComponent(spec);
+        if (component) return new vscode.Location(component, new vscode.Position(0, 0));
+
         const resolved = await resolveApexMethod(spec);
         if (!resolved) return undefined;
         // Land on the method when we found it; otherwise the top of the class.
@@ -82,6 +104,24 @@ export class LwcApexHoverProvider implements vscode.HoverProvider {
     async provideHover(document: vscode.TextDocument, position: vscode.Position): Promise<vscode.Hover | undefined> {
         const spec = apexSpecAt(document, position);
         if (!spec) return undefined;
+
+        const component = await resolveLwcComponent(spec);
+        if (component) {
+            const md = new vscode.MarkdownString(`LWC component \`${spec}\`\n\n`);
+            md.appendMarkdown(`_— ASFX Toolkit · ${vscode.workspace.asRelativePath(component)}_`);
+            return new vscode.Hover(md);
+        }
+        const schema = parseSchemaImport(spec);
+        if (schema) {
+            const md = new vscode.MarkdownString(
+                schema.field
+                    ? `Field reference — \`${schema.object}.${schema.field}\`\n\n`
+                    : `Object reference — \`${schema.object}\`\n\n`
+            );
+            md.appendMarkdown("_— ASFX Toolkit_");
+            return new vscode.Hover(md);
+        }
+
         const resolved = await resolveApexMethod(spec);
         if (!resolved) return undefined;
 
