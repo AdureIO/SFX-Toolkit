@@ -2,6 +2,7 @@ import cytoscape = require("cytoscape");
 import dagre = require("cytoscape-dagre");
 import svg = require("cytoscape-svg");
 import nodeHtmlLabel = require("cytoscape-node-html-label");
+import { ObjectSelection, PickerKind } from "./objectSelection";
 
 cytoscape.use(dagre);
 cytoscape.use(svg);
@@ -58,9 +59,8 @@ const pickerSearch = $("ov-picker-search") as HTMLInputElement;
 const pickerList = $("ov-picker-list");
 const pickerCount = $("ov-picker-count");
 
-let objectList: ObjectItem[] = [];
-let selectedSeeds = new Set<string>();
-let pickerFilter: "all" | "standard" | "custom" = "all";
+const selectedSeeds = new ObjectSelection();
+let pickerFilter: PickerKind = "all";
 let currentNodes: GraphNode[] = [];
 let showFullFields = false;
 
@@ -340,15 +340,9 @@ function relabelNodes() {
   runLayout();
 }
 
-// ── Object picker ────────────────────────────────────────────────────────────
+// ── Object picker (selection state shared with the Process Visualizer) ───────
 function renderPickerList() {
-  const term = pickerSearch.value.trim().toLowerCase();
-  const items = objectList.filter((o) => {
-    if (pickerFilter === "standard" && o.custom) return false;
-    if (pickerFilter === "custom" && !o.custom) return false;
-    return !term || o.name.toLowerCase().includes(term);
-  });
-  const shown = items.slice(0, 300);
+  const { shown, hidden } = selectedSeeds.visible(pickerSearch.value, { kind: pickerFilter, cap: 300 });
   pickerList.innerHTML = shown
     .map(
       (o) =>
@@ -362,17 +356,15 @@ function renderPickerList() {
         "</label>"
     )
     .join("");
-  pickerList.querySelectorAll('input[type="checkbox"]').forEach((cb) => {
-    cb.addEventListener("change", (e) => {
-      const t = e.target as HTMLInputElement;
-      if (t.checked) selectedSeeds.add(t.value);
-      else selectedSeeds.delete(t.value);
-      updatePickerCount();
-    });
-  });
-  const hiddenNote = items.length > shown.length ? " (" + (items.length - shown.length) + " more — refine search)" : "";
-  updatePickerCount(hiddenNote);
+  updatePickerCount(hidden ? " (" + hidden + " more — refine search)" : "");
 }
+// One delegated listener for the whole list (not one per checkbox per render).
+pickerList.addEventListener("change", (e) => {
+  const t = e.target as HTMLInputElement;
+  if (t.type !== "checkbox") return;
+  selectedSeeds.set(t.value, t.checked);
+  updatePickerCount();
+});
 function updatePickerCount(extra = "") {
   pickerCount.textContent = selectedSeeds.size + " selected" + extra;
 }
@@ -456,7 +448,7 @@ function build() {
   }
   post({
     command: "buildGraph",
-    seeds: Array.from(selectedSeeds),
+    seeds: selectedSeeds.values(),
     targetOrg: orgSelect.value || null,
     cap: childCap(),
     direction: directionSelect.value,
@@ -482,10 +474,12 @@ window.addEventListener("message", (event: MessageEvent) => {
       post({ command: "getObjectList", targetOrg: orgSelect.value || null });
       break;
     }
-    case "objectList":
-      objectList = (msg.objects as ObjectItem[]) || [];
-      setStatus(objectList.length + " objects available — click “Pick objects” to start.");
+    case "objectList": {
+      const objects = (msg.objects as ObjectItem[]) || [];
+      selectedSeeds.setItems(objects);
+      setStatus(objects.length + " objects available — click “Pick objects” to start.");
       break;
+    }
     case "progress":
       setStatus("Describing " + msg.done + "/" + msg.total + " objects…");
       break;
@@ -504,13 +498,13 @@ window.addEventListener("message", (event: MessageEvent) => {
     case "projectObjects": {
       // Auto-select the project's own objects (those defined in the SFDX source).
       const projObjects = (msg.objects as string[]) || [];
-      const available = new Set(objectList.map((o) => o.name));
+      const available = new Set(selectedSeeds.names());
       const usable = projObjects.filter((n) => available.size === 0 || available.has(n));
       if (usable.length === 0) {
         setStatus("No project objects found in the workspace source.");
         break;
       }
-      selectedSeeds = new Set(usable);
+      selectedSeeds.replaceAll(usable);
       setStatus("Selected " + usable.length + " project object(s).");
       build();
       break;
