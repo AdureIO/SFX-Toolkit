@@ -29,6 +29,7 @@ A built-in, **JVM-free** language server (pure Node, shipped inside the extensio
 - **`new` constructor completion** — suggests the type being assigned first (`Account a = new |`).
 - **SObject type-name completion** in declarations, casts, generics and `instanceof`.
 - **Outline** and **syntax diagnostics**, **go-to-definition** (in-file and cross-file), and **signature help**.
+- **Find references** — every usage of a symbol. A local is confined to the method that declares it, so two methods reusing a name never bleed into each other.
 
 **Org-aware extras:**
 
@@ -37,6 +38,13 @@ A built-in, **JVM-free** language server (pure Node, shipped inside the extensio
 - **Result weighting** — auxiliary objects (`*History`, `*Share`, `*Feed`, `*ChangeEvent`) and standard audit fields sink below the business objects/fields you actually use.
 - **Schema stubs** generated in the background for go-to-definition and to ground AI tooling; refreshed on org switch, pull, and Refresh Metadata.
 - **Self-healing** — if the Salesforce Apex Language Server gets stuck, it's restarted (bounded), with a clear notification if it keeps failing.
+
+**LWC → Apex:**
+
+- Cmd+click an imported Apex method lands on the **class and method itself**, not a generated stub.
+- Typings come from your `@AuraEnabled` signatures with real parameter and return types, and are regenerated as those change (`lwcApexTypings.autoGenerate`).
+- Custom Apex types become TypeScript **interfaces** rather than `any`, inner classes included.
+- If a component's IntelliSense is broken — `c/*` imports, subdirectories, Salesforce modules — **Tools → Repair → Repair LWC jsconfig** fixes each `lwc` folder's `jsconfig.json`. Nothing under Repair ever runs on its own.
 
 Schema is read from your **default org** via the REST describe API (auth resolved from `sf org display`); the language server itself stays credential-free. Everything is gated to SFDX projects and individually toggleable — see [Settings](#settings).
 
@@ -116,15 +124,38 @@ Org-wide Apex coverage surfaced three ways, all sharing one **auto-refreshing** 
 - **Coverage panel** (`ASFXT: Apex Coverage`) — overall org %, a classes-below-75% count, and a **worst-first**, searchable table with a below-threshold filter; click a row to open the class. Includes **Refresh** and **Clear results** (deletes local `.sfdx/tools/testresults` and resets the display).
 - **Line highlights** (`ASFXT: Toggle Apex Coverage Line Highlights`) — opt-in, persisted covered/uncovered line decorations in the open class that stay live while enabled.
 
+### 🗺️ Object & Process Visualizers
+
+Two graphs for understanding an org, both under **Tools**.
+
+**`ASFXT: Object Visualizer`** — an ERD of the objects you pick and their relationships, with fields inline. Filter, search, and pull in the objects that live in your SFDX project in one click.
+
+**`ASFXT: Process Visualizer`** — what actually happens when a record changes, in order.
+
+- Pick the objects first, then build, so the graph stays readable instead of rendering the whole org.
+- An **execution-order spine**: before triggers → validation rules → after triggers → flows → workflow rules, with each automation on the phase it runs in.
+- **Full call chains** — `Contact → before update → (trigger → ClassA → ClassB → field is set)`. Apex bodies are scanned for calls and field writes; test classes are left out.
+- Automations sharing a phase are grouped in a labelled box with a single edge onward, instead of a fan of crossing lines.
+- Scheduled and autolaunched flows link to the objects they operate on with a dotted edge.
+- Labelled edges, collision-free layout, re-layout on filter, search that navigates to each hit, and right-click to open any component in the org.
+
 ### 🔄 Data Migration Wizard
 
 `ASFXT: Data Migration Wizard` — move entire Salesforce object trees from one connected org to another, with no CSV and no manual ID management.
 
-1. **Source & Target** — pick orgs, write a root SOQL query, name the migration (or load a saved `.migration.json` profile).
-2. **Object Tree** — child relationships are described lazily into a checkable tree (unbounded depth); per object, choose fields and an **external ID / upsert key**.
-3. **Run** — root records are inserted/upserted, a `sourceId → targetId` map is built per object, child lookups are remapped, and each depth level runs in topological order with live progress and per-object error details.
+1. **Source & Target** — choose what the run produces (**Org → Org**, or an **Apex script / CSV / JSON** file), pick orgs, write a root SOQL query, and name it or load a saved preset.
+2. **Object Tree** — child relationships are described lazily into a checkable tree (unbounded depth); per object, choose fields and an **external ID / upsert key**. Fields the target org can't accept, and ones it assigns itself (Owner, Record Type, audit), are listed as excluded with the reason rather than silently dropped.
+3. **Overview** — lookups that can't be preserved are reported *before* you start, with the objects to add to fix them. Then run, with per-object progress.
 
-Referential integrity is preserved via per-object ID remapping; large datasets use REST pagination (no CLI row limits) with `WHERE IN` chunked at 500; profiles make re-runs exact; SObject Collections batches of 200 with partial success.
+**Referential integrity** is preserved by remapping every lookup to the record the run created — a source Id never reaches the target. Self-references (`Account.ParentId`) are re-linked after insert. Objects are ordered topologically, so junction objects land after both parents.
+
+**Undo.** An upsert runs as query-then-write, so the rows it overwrites are read first and can be restored. The results table lists every record created and every record overwritten — old value beside new, Ids linking into their own orgs — each with a checkbox, so you can revert the whole run or just part of it. Reverting restores overwritten rows and deletes created ones, children before parents. Opt into **Revert on failure** to have that happen automatically when any record fails.
+
+**Presets** save per project (`config/asfx/migrations`, committable) or globally. Loading one re-describes against the org, so fields, relationships and upsert keys are real — anything the org no longer has is reported rather than assumed.
+
+**Export instead of migrate.** The same selection and the same rules can produce a file. The **Apex** output is an Anonymous Apex script that resolves lookups through the parent's external Id where there is one, upserts on that key so it is safe to re-run, and splits into parts that each fit the Execute Anonymous window.
+
+Large datasets use REST pagination (no CLI row limits) with `WHERE IN` chunked at 500; writes go through SObject Collections in batches of 200 with partial success. Writing into a production org is confirmed first.
 
 ### 📂 Data Export / Import
 
@@ -156,6 +187,7 @@ All calls are made server-side (Node `https`) — no CORS issues.
 
 - **Project Validation**: checks for `sfdx-project.json`; features and views hide outside SFDX projects.
 - **Output Logging**: detailed logs in the **ASFX Toolkit** output channel (suppressed during deploys, opened on errors).
+- **Interpreted error panel**: any failed CLI or command operation — push, pull, deploy, retrieve, test run, scratch org — opens one panel with the exact Salesforce message, a plain-language cause and fix where it's recognised, a click-through to the offending file, and the original payload on demand. The full payload still goes to the log; the panel never replaces the record.
 - **Configurable**: see [Settings](#settings).
 
 ## Keyboard Shortcuts
@@ -183,12 +215,15 @@ All settings live under the `adure-sfx-toolkit.*` namespace.
 | `apex.restartAfterInitialLoad` | `true` | Once, after the Salesforce Apex LS finishes loading, do a single clean restart so newly generated stub types are indexed (never restarts mid-index). |
 | `apex.monitorLanguageServer` | `true` | Watch the Salesforce Apex LS and recover it if it crashes and stays down (bounded; shows an error if it keeps failing). |
 | `apex.autoRestartLanguageServer` | `false` | Restart the Salesforce Apex LS after every stub change. Off by default — the Salesforce LS already picks up changes incrementally. |
+| `apex.validateSemantics` | `true` | Flag unknown fields on a typed SObject variable against the org's schema. |
+| `apex.validateOnSave` | `true` | Re-run Apex validation when a file is saved. |
+| `lwcApexTypings.autoGenerate` | `true` | Keep `@salesforce/apex` typings in step with your `@AuraEnabled` methods automatically, instead of only on command. |
 
 ### Logs, traces, deploy & API
 
 | Setting | Default | Description |
 | --- | --- | --- |
-| `pollingIntervalSeconds` | `5` | Background poll interval for new debug logs. |
+| `liveLogIntervalSeconds` | `5` | Background poll interval for new debug logs. |
 | `maxLogFiles` | — | Maximum number of logs to fetch. |
 | `quickTraceDurationMinutes` | — | Quick Trace duration. |
 | `quickTraceDebugLevel` | — | Debug level used by Quick Trace. |
@@ -196,6 +231,11 @@ All settings live under the `adure-sfx-toolkit.*` namespace.
 | `parallelDeletes` | `8` | Parallel API calls when deleting logs. |
 | `testRunTimeoutMinutes` | — | Timeout for test runs. |
 | `autoSaveBeforePush` | — | Save dirty editors before a push. |
+| `httpTimeoutMs` | — | Timeout for REST/Tooling calls made by the extension. |
+| `deploy.liveStatus` | `true` | Poll and show component-level progress while a deploy runs. |
+| `apexLog.highlightPatterns` | — | Extra patterns highlighted in the log viewer. |
+| `warnOnProductionOrg` | `true` | Confirm before an operation that writes to a production org or Dev Hub. |
+| `telemetry.enabled` | `true` | Anonymous usage counts — see [Telemetry](#telemetry). |
 
 ## Requirements
 

@@ -66,6 +66,11 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      # Gate the release on the tests. Everything that runs outside the VS Code host;
+      # the few that need the host itself run under `npm test`, which needs a display.
+      - name: Unit tests
+        run: npm run test:unit
+
       - name: Package .vsix
         run: npx --yes @vscode/vsce@3 package --no-git-tag-version -o extension.vsix
 
