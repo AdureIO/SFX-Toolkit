@@ -385,7 +385,7 @@ async function pushSourceHelper(force: boolean) {
               topError: apiResult?.errorMessage ?? apiResult?.stateDetail,
               raw
             });
-            DeployErrorPanelProvider.show(report, getDefaultOrgSync()?.displayName);
+            DeployErrorPanelProvider.show(report, getDefaultOrgSync()?.displayName, () => { void pushSourceHelper(force); });
             vscode.window.showErrorMessage("Push failed — opened the Deploy Errors panel.", "View Raw Log").then((sel) => {
               if (sel === "View Raw Log") DeployLog.show();
             });
@@ -444,7 +444,7 @@ async function pushSourceHelper(force: boolean) {
           // Feed the interpreter the UNcleaned text — the CLI's JSON error (message/name/warnings)
           // is what carries the exact cause; cleanDeployOutput strips it for the log.
           const report = interpretDeployFailure({ raw });
-          DeployErrorPanelProvider.show(report, getDefaultOrgSync()?.displayName);
+          DeployErrorPanelProvider.show(report, getDefaultOrgSync()?.displayName, () => { void pushSourceHelper(force); });
           vscode.window.showErrorMessage(`Push failed — opened the Deploy Errors panel.`, "View Raw Log").then((selection) => {
             if (selection === "View Raw Log") DeployLog.show();
           });

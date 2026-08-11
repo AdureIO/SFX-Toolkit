@@ -1,18 +1,6 @@
 import * as vscode from "vscode";
 import { InterpretedDeploy } from "../utils/deployErrorInterpret";
-
-function getNonce(): string {
-    let text = "";
-    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    for (let i = 0; i < 32; i++) text += chars.charAt(Math.floor(Math.random() * chars.length));
-    return text;
-}
-
-const esc = (t: unknown): string =>
-    String(t ?? "")
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;");
+import { getNonce, escapeHtml as esc } from "../utils/htmlUtils";
 
 /**
  * Interpreted deploy/push error panel. Shows each failure in plain language with a
@@ -22,8 +10,10 @@ const esc = (t: unknown): string =>
 export class DeployErrorPanelProvider {
     public static readonly viewType = "adure-sfx-toolkit.deployError";
     private static _panel: vscode.WebviewPanel | undefined;
+    private static _onRetry: (() => void) | undefined;
 
-    public static show(report: InterpretedDeploy, org?: string): void {
+    public static show(report: InterpretedDeploy, org?: string, onRetry?: () => void): void {
+        DeployErrorPanelProvider._onRetry = onRetry;
         // Open in the active editor group (full), not a split.
         const column = vscode.ViewColumn.Active;
         if (!DeployErrorPanelProvider._panel) {
@@ -33,7 +23,10 @@ export class DeployErrorPanelProvider {
                 { viewColumn: column, preserveFocus: false },
                 { enableScripts: true, retainContextWhenHidden: true }
             );
-            DeployErrorPanelProvider._panel.onDidDispose(() => (DeployErrorPanelProvider._panel = undefined));
+            DeployErrorPanelProvider._panel.onDidDispose(() => {
+                DeployErrorPanelProvider._panel = undefined;
+                DeployErrorPanelProvider._onRetry = undefined;
+            });
             DeployErrorPanelProvider._panel.webview.onDidReceiveMessage((msg: { command: string; [k: string]: unknown }) => {
                 if (msg.command === "openFile") {
                     void DeployErrorPanelProvider.openFile(
@@ -44,12 +37,16 @@ export class DeployErrorPanelProvider {
                 } else if (msg.command === "copy" && typeof msg.text === "string") {
                     void vscode.env.clipboard.writeText(msg.text);
                     vscode.window.setStatusBarMessage("Copied error to clipboard", 2000);
+                } else if (msg.command === "retry") {
+                    const retry = DeployErrorPanelProvider._onRetry;
+                    DeployErrorPanelProvider._panel?.dispose(); // the push reopens this panel if it fails again
+                    retry?.();
                 }
             });
         }
         const panel = DeployErrorPanelProvider._panel;
         panel.title = report.counts.errors ? `Deploy Errors (${report.counts.errors})` : "Deploy Errors";
-        panel.webview.html = DeployErrorPanelProvider.getHtml(panel.webview, report, org);
+        panel.webview.html = DeployErrorPanelProvider.getHtml(panel.webview, report, org, !!onRetry);
         panel.reveal(column, false);
     }
 
@@ -73,7 +70,7 @@ export class DeployErrorPanelProvider {
         }
     }
 
-    private static getHtml(webview: vscode.Webview, report: InterpretedDeploy, org?: string): string {
+    private static getHtml(webview: vscode.Webview, report: InterpretedDeploy, org?: string, canRetry = false): string {
         const nonce = getNonce();
         const csp = ["default-src 'none'", "style-src 'unsafe-inline'", `script-src 'nonce-${nonce}'`].join("; ");
 
@@ -111,7 +108,11 @@ export class DeployErrorPanelProvider {
     background: var(--vscode-editor-background); margin: 0; padding: 0; }
   header { position: sticky; top: 0; z-index: 2; padding: 14px 18px; border-bottom: 1px solid var(--b);
     background: linear-gradient(180deg, var(--surface), color-mix(in srgb, var(--surface) 90%, transparent)); }
-  .title { font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .title-row { display: flex; align-items: center; gap: 12px; }
+  .title { font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; flex: 1; }
+  .retry { background: var(--vscode-button-background, #0e639c); color: var(--vscode-button-foreground, #fff); border: none;
+    padding: 6px 14px; font-weight: 600; }
+  .retry:hover { filter: brightness(1.12); }
   .title .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--err); box-shadow: 0 0 0 3px color-mix(in srgb, var(--err) 25%, transparent); }
   .sub { margin-top: 3px; font-size: 12px; color: var(--vscode-descriptionForeground); }
   .headline { margin: 10px 18px 0; padding: 10px 12px; border-radius: 8px; background: color-mix(in srgb, var(--err) 12%, transparent);
@@ -152,7 +153,10 @@ export class DeployErrorPanelProvider {
 </style></head>
 <body>
   <header>
-    <div class="title"><span class="dot"></span>${esc(report.title)}</div>
+    <div class="title-row">
+      <div class="title"><span class="dot"></span>${esc(report.title)}</div>
+      ${canRetry ? '<button class="retry" id="retry">↻ Retry deploy</button>' : ""}
+    </div>
     <div class="sub">${org ? "Org: " + esc(org) + " · " : ""}Interpreted from the deploy result — the exact Salesforce message is under each item.</div>
   </header>
   ${report.headline ? `<div class="headline">${esc(report.headline)}</div>` : ""}
@@ -182,6 +186,8 @@ export class DeployErrorPanelProvider {
     const copyBtn = document.getElementById("copyRaw");
     if (copyBtn) copyBtn.addEventListener("click", () =>
       vscode.postMessage({ command: "copy", text: document.getElementById("raw").textContent }));
+    const retryBtn = document.getElementById("retry");
+    if (retryBtn) retryBtn.addEventListener("click", () => { retryBtn.disabled = true; retryBtn.textContent = "↻ Retrying…"; vscode.postMessage({ command: "retry" }); });
   </script>
 </body></html>`;
     }
