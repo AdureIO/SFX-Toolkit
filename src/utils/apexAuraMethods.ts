@@ -116,14 +116,71 @@ export function formatSignature(m: AuraMethod): string {
     return `${m.returnType} ${m.name}(${params})`;
 }
 
-/** Map an Apex type to the closest TypeScript type, for generated LWC typings. */
-export function apexTypeToTs(apexType: string): string {
+/** A custom Apex type (class) exposed to LWC, and the `@AuraEnabled` members it serializes. */
+export interface ApexTypeShape {
+    name: string;
+    properties: ApexParam[];
+}
+
+/**
+ * Find the `@AuraEnabled` properties/fields of every class in a source file — including inner
+ * classes, which is how most wrapper/DTO types are written. These become TypeScript interfaces so
+ * a custom parameter or return type stops being `any`.
+ */
+export function findApexTypeShapes(source: string): ApexTypeShape[] {
+    if (!source) return [];
+    const code = blankComments(source);
+    const shapes: ApexTypeShape[] = [];
+    const classRe = /\bclass\s+([A-Za-z_]\w*)/g;
+    let c: RegExpExecArray | null;
+    while ((c = classRe.exec(code)) !== null) {
+        const bodyStart = code.indexOf("{", c.index);
+        if (bodyStart < 0) continue;
+        // Walk to the matching close brace so inner classes are scoped correctly.
+        let depth = 0;
+        let end = bodyStart;
+        for (let i = bodyStart; i < code.length; i++) {
+            if (code[i] === "{") depth++;
+            else if (code[i] === "}") {
+                depth--;
+                if (depth === 0) {
+                    end = i;
+                    break;
+                }
+            }
+        }
+        const body = code.slice(bodyStart + 1, end);
+        // Only direct members: strip nested class bodies so inner members aren't double-counted.
+        const own = body.replace(/\bclass\s+[A-Za-z_]\w*[^{]*\{[\s\S]*?\n\s*\}/g, "");
+        const properties: ApexParam[] = [];
+        // @AuraEnabled … <Type> name ; | = | { get; set; }   (never a method — no "(" after the name)
+        const propRe =
+            /@AuraEnabled\s*(?:\([^)]*\))?\s*(?:(?:public|global|private|protected|static|final|transient)\s+)*([\w.<>,[\]\s]+?)\s+([A-Za-z_]\w*)\s*(?=[;={])/g;
+        let p: RegExpExecArray | null;
+        while ((p = propRe.exec(own)) !== null) {
+            const type = p[1].replace(/\s+/g, " ").trim();
+            if (!type || /\bclass\b/.test(type)) continue;
+            properties.push({ type, name: p[2] });
+        }
+        if (properties.length) shapes.push({ name: c[1], properties });
+    }
+    return shapes;
+}
+
+/**
+ * Map an Apex type to the closest TypeScript type. `knownTypes` are custom Apex classes we emit
+ * interfaces for — when a type is in that set it is referenced by name instead of collapsing to `any`.
+ */
+export function apexTypeToTs(apexType: string, knownTypes?: Set<string>): string {
     const t = apexType.trim();
     const generic = /^(List|Set|Iterable)\s*<\s*([\s\S]+)\s*>$/i.exec(t);
-    if (generic) return `${apexTypeToTs(generic[2])}[]`;
+    if (generic) return `${apexTypeToTs(generic[2], knownTypes)}[]`;
     const map = /^Map\s*<\s*([^,]+),\s*([\s\S]+)\s*>$/i.exec(t);
-    if (map) return `Record<string, ${apexTypeToTs(map[2])}>`;
-    if (/\[\]$/.test(t)) return `${apexTypeToTs(t.replace(/\[\]$/, ""))}[]`;
+    if (map) return `Record<string, ${apexTypeToTs(map[2], knownTypes)}>`;
+    if (/\[\]$/.test(t)) return `${apexTypeToTs(t.replace(/\[\]$/, ""), knownTypes)}[]`;
+    // A custom Apex class we have a shape for → use its generated interface.
+    const bare = t.includes(".") ? t.split(".").pop()!.trim() : t;
+    if (knownTypes?.has(bare)) return bare;
 
     switch (t.toLowerCase()) {
         case "string":
@@ -160,9 +217,9 @@ export function parseApexImport(spec: string): { className: string; methodName: 
 }
 
 /** The TypeScript declaration for one `@AuraEnabled` method, as LWC imports it. */
-export function declarationFor(className: string, m: AuraMethod): string {
-    const ret = apexTypeToTs(m.returnType);
-    const params = m.params.map((p) => `${p.name}: ${apexTypeToTs(p.type)}`).join(", ");
+export function declarationFor(className: string, m: AuraMethod, knownTypes?: Set<string>): string {
+    const ret = apexTypeToTs(m.returnType, knownTypes);
+    const params = m.params.map((p) => `${p.name}: ${apexTypeToTs(p.type, knownTypes)}`).join(", ");
     // Apex methods are called from LWC with a single object of named params.
     const arg = m.params.length ? `param: {${params}}` : "";
     const docLines = [`Apex: \`${formatSignature(m)}\``];
@@ -178,7 +235,7 @@ export function declarationFor(className: string, m: AuraMethod): string {
 }
 
 /** Full .d.ts body for one Apex class, or undefined when it exposes nothing to LWC. */
-export function typingsForClass(className: string, source: string): string | undefined {
+export function typingsForClass(className: string, source: string, knownTypes?: Set<string>): string | undefined {
     const methods = findAuraEnabledMethods(source);
     if (!methods.length) return undefined;
     const header = [
@@ -186,5 +243,28 @@ export function typingsForClass(className: string, source: string): string | und
         "// signatures. Regenerate with: ASFXT: Generate LWC Apex Typings.",
         ""
     ].join("\n");
-    return header + methods.map((m) => declarationFor(className, m)).join("\n") + "\n";
+    return header + methods.map((m) => declarationFor(className, m, knownTypes)).join("\n") + "\n";
+}
+
+/**
+ * Emit the shared TypeScript interfaces for custom Apex types. Written to a single ambient .d.ts
+ * (no imports/exports, so the interfaces are global) which the per-class module declarations then
+ * reference by name.
+ */
+export function interfacesForShapes(shapes: ApexTypeShape[]): string {
+    const known = new Set(shapes.map((s) => s.name));
+    const header = [
+        "// Generated by ASFX Toolkit from your Apex @AuraEnabled types.",
+        "// Ambient interfaces referenced by the @salesforce/apex module declarations.",
+        ""
+    ].join("\n");
+    const body = shapes
+        .map((shape) => {
+            const props = shape.properties
+                .map((p) => `  /** Apex: \`${p.type}\` */\n  ${p.name}?: ${apexTypeToTs(p.type, known)};`)
+                .join("\n");
+            return `interface ${shape.name} {\n${props}\n}`;
+        })
+        .join("\n\n");
+    return header + body + "\n";
 }

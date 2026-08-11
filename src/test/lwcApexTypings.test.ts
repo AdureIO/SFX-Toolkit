@@ -1,5 +1,13 @@
 import * as assert from "assert";
-import { typingsForClass, declarationFor, findAuraEnabledMethods, parseApexImport } from "../utils/apexAuraMethods";
+import {
+  typingsForClass,
+  declarationFor,
+  findAuraEnabledMethods,
+  parseApexImport,
+  findApexTypeShapes,
+  interfacesForShapes,
+  apexTypeToTs
+} from "../utils/apexAuraMethods";
 
 const SRC = `
 public class DataSourceController {
@@ -68,5 +76,62 @@ describe("apexAuraMethods.parseApexImport", () => {
   it("ignores non-apex module specifiers", () => {
     assert.strictEqual(parseApexImport("lightning/navigation"), undefined);
     assert.strictEqual(parseApexImport("@salesforce/schema/Account.Name"), undefined);
+  });
+});
+
+// ── Custom Apex types become real interfaces instead of `any` ────────────────────────────────
+
+const CUSTOM = `
+public with sharing class DataSourceController {
+    @AuraEnabled(cacheable=true)
+    public static PlannerData getEventData(EventQueryParams params) { return null; }
+
+    public class EventQueryParams {
+        @AuraEnabled public String objectType;
+        @AuraEnabled public Integer pageSize;
+        @AuraEnabled public List<String> fields { get; set; }
+    }
+
+    public class PlannerData {
+        @AuraEnabled public List<EventQueryParams> events;
+        @AuraEnabled public Boolean hasMore;
+    }
+}
+`;
+
+describe("apexAuraMethods — custom Apex types", () => {
+  const shapes = findApexTypeShapes(CUSTOM);
+  const known = new Set(shapes.map((s) => s.name));
+
+  it("finds inner classes and their @AuraEnabled members", () => {
+    assert.deepStrictEqual(shapes.map((s) => s.name).sort(), ["EventQueryParams", "PlannerData"]);
+    const q = shapes.find((s) => s.name === "EventQueryParams")!;
+    assert.deepStrictEqual(q.properties, [
+      { type: "String", name: "objectType" },
+      { type: "Integer", name: "pageSize" },
+      { type: "List<String>", name: "fields" }
+    ]);
+  });
+
+  it("references the interface instead of collapsing to any", () => {
+    assert.strictEqual(apexTypeToTs("EventQueryParams", known), "EventQueryParams");
+    assert.strictEqual(apexTypeToTs("List<PlannerData>", known), "PlannerData[]");
+    assert.strictEqual(apexTypeToTs("EventQueryParams"), "any", "without the type set it still degrades");
+  });
+
+  it("emits the method signature with the real types", () => {
+    const dts = typingsForClass("DataSourceController", CUSTOM, known)!;
+    assert.ok(dts.includes("param: {params: EventQueryParams}"), dts);
+    assert.ok(dts.includes("Promise<PlannerData>"), dts);
+  });
+
+  it("emits ambient interfaces with mapped member types", () => {
+    const out = interfacesForShapes(shapes);
+    assert.ok(out.includes("interface EventQueryParams {"), out);
+    assert.ok(out.includes("objectType?: string;"), out);
+    assert.ok(out.includes("pageSize?: number;"), out);
+    assert.ok(out.includes("fields?: string[];"), out);
+    assert.ok(out.includes("events?: EventQueryParams[];"), `nested custom types resolve too:\n${out}`);
+    assert.ok(out.includes("hasMore?: boolean;"), out);
   });
 });

@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import * as path from "path";
 import * as fs from "fs";
-import { typingsForClass } from "../utils/apexAuraMethods";
+import { typingsForClass, findApexTypeShapes, interfacesForShapes, ApexTypeShape } from "../utils/apexAuraMethods";
 import { reportError } from "../utils/reportError";
 import { Logger } from "../utils/outputChannel";
 import { isSalesforceProject } from "../utils/projectUtils";
@@ -20,6 +20,12 @@ import { isSalesforceProject } from "../utils/projectUtils";
  */
 
 const TYPINGS_DIR = path.join(".sfdx", "typings", "lwc", "apex");
+/** Ambient interfaces for custom Apex types, shared by every generated module declaration. */
+const TYPES_FILE = "__asfx-apex-types.d.ts";
+
+/** Cache of custom Apex type shapes, so a single-file save doesn't rescan the whole workspace. */
+let knownShapes: ApexTypeShape[] = [];
+let knownTypeNames = new Set<string>();
 
 function workspaceRoot(): string | undefined {
     return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -39,7 +45,7 @@ function writeTypingsFor(root: string, classFile: string): boolean {
     } catch {
         return false; // deleted between the event and the read
     }
-    const body = typingsForClass(className, source);
+    const body = typingsForClass(className, source, knownTypeNames);
     if (!body) {
         // No @AuraEnabled methods — drop a stale file we previously generated.
         try {
@@ -59,9 +65,28 @@ export async function syncAllLwcApexTypings(silent = false): Promise<{ classes: 
     const root = workspaceRoot();
     if (!root) return { classes: 0 };
     const files = await vscode.workspace.findFiles("**/*.cls", "**/node_modules/**");
+
+    // Pass 1 — collect every custom Apex type (incl. inner classes) so parameters and return
+    // values reference a real interface instead of `any`.
+    const byName = new Map<string, ApexTypeShape>();
+    for (const file of files) {
+        try {
+            const text = fs.readFileSync(file.fsPath, "utf8");
+            for (const shape of findApexTypeShapes(text)) if (!byName.has(shape.name)) byName.set(shape.name, shape);
+        } catch {
+            /* unreadable file — skip */
+        }
+    }
+    knownShapes = [...byName.values()];
+    knownTypeNames = new Set(byName.keys());
+
+    fs.mkdirSync(path.join(root, TYPINGS_DIR), { recursive: true });
+    fs.writeFileSync(path.join(root, TYPINGS_DIR, TYPES_FILE), interfacesForShapes(knownShapes), "utf8");
+
+    // Pass 2 — module declarations, now able to name those types.
     let classes = 0;
     for (const file of files) if (writeTypingsFor(root, file.fsPath)) classes++;
-    Logger.info(`LWC Apex typings: synced ${classes} class(es) → ${TYPINGS_DIR}`);
+    Logger.info(`LWC Apex typings: synced ${classes} class(es), ${knownShapes.length} custom type(s) → ${TYPINGS_DIR}`);
     if (!silent) {
         vscode.window.showInformationMessage(
             classes ? `Generated LWC typings for ${classes} Apex class(es).` : "No @AuraEnabled methods found."
