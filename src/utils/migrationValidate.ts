@@ -4,6 +4,25 @@
  * can still fix it by including the missing object, not reported afterwards.
  */
 
+/**
+ * Lookups the target org fills in itself. No selection the user makes can preserve these — the
+ * owner is the running user, the record type is resolved by the target's own configuration, and
+ * audit fields are set by the platform. Recommending "add User to this migration" for them is
+ * advice that can never be followed.
+ */
+export const ORG_ASSIGNED_LOOKUPS = new Set([
+  "ownerid", "recordtypeid", "createdbyid", "lastmodifiedbyid"
+]);
+
+/** Why a given org-assigned lookup is never carried across. */
+export function orgAssignedReason(field: string): string {
+  switch (field.toLowerCase()) {
+    case "ownerid": return "Owner is assigned by the target org — record ownership is never migrated";
+    case "recordtypeid": return "Record Type is resolved by the target org's own configuration";
+    default: return "Audit field — always set by the platform";
+  }
+}
+
 /** A lookup that will be left empty because the object it points at isn't in the migration. */
 export interface UnmappedLookup {
   sobject: string;
@@ -25,13 +44,12 @@ export function findUnmappedLookups(
   refMeta: Map<string, Map<string, string[]>>
 ): UnmappedLookup[] {
   const included = new Set(nodes.map((n) => n.sobject.toLowerCase()));
-  const alwaysEmpty = new Set(["ownerid", "recordtypeid", "createdbyid", "lastmodifiedbyid"]);
   const out: UnmappedLookup[] = [];
   for (const node of nodes) {
     const fields = refMeta.get(node.sobject);
     if (!fields) continue;
     for (const field of node.includeFields) {
-      if (field === "Id" || alwaysEmpty.has(field.toLowerCase())) continue;
+      if (field === "Id" || ORG_ASSIGNED_LOOKUPS.has(field.toLowerCase())) continue;
       const referenceTo = fields.get(field);
       if (!referenceTo || !referenceTo.length) continue;
       if (referenceTo.some((r) => included.has(r.toLowerCase()))) continue; // resolvable (incl. self)

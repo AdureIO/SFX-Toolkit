@@ -3,7 +3,8 @@ import * as http from "http";
 import * as fs from "fs";
 import * as path from "path";
 import { Logger } from "./outputChannel";
-export { findUnmappedLookups, type UnmappedLookup } from "./migrationValidate";
+export { findUnmappedLookups, ORG_ASSIGNED_LOOKUPS, type UnmappedLookup } from "./migrationValidate";
+import { ORG_ASSIGNED_LOOKUPS, orgAssignedReason } from "./migrationValidate";
 export {
   countJournal,
   buildRevertPlan,
@@ -105,8 +106,14 @@ export interface MigrationResult {
   updated: number;
   failed: number;
   errors: Array<{ row: number; srcId: string; message: string }>;
-  /** Fields that were NOT written, and why. A migration must never drop data silently. */
-  warnings: Array<{ field: string; reason: string; count: number }>;
+  /**
+   * Fields that were NOT written, and why. A migration must never drop data silently.
+   *
+   * `fixable` separates "include the missing object and this link is preserved" from things the
+   * user can do nothing about (Owner, Record Type, audit fields) — telling someone to migrate
+   * Users is advice that can never be followed.
+   */
+  warnings: Array<{ field: string; reason: string; count: number; fixable: boolean }>;
 }
 
 
@@ -601,8 +608,8 @@ export async function runMigration(
   // Everything this run changes in the target, recorded as it happens so a revert has
   // something concrete to undo — Ids to delete, and pre-migration values to write back.
   const journal: MigrationJournal = { inserted: {}, updated: {} };
-  const noteInserted = (sobject: string, id: string) => {
-    (journal.inserted[sobject] ??= []).push(id);
+  const noteInserted = (sobject: string, id: string, srcId: string) => {
+    (journal.inserted[sobject] ??= []).push({ id, srcId });
   };
   const noteUpdated = (sobject: string, entry: RevertUpdateEntry) => {
     (journal.updated[sobject] ??= []).push(entry);
@@ -758,9 +765,9 @@ export async function runMigration(
     const selfRefs: Array<{ srcId: string; field: string; refSrcId: string }> = [];
     // Every field we choose not to write is counted here and reported — silence would let a
     // migration look successful while quietly losing data.
-    const omitted = new Map<string, { reason: string; count: number }>();
-    const noteOmitted = (field: string, reason: string) => {
-      const e = omitted.get(field) ?? { reason, count: 0 };
+    const omitted = new Map<string, { reason: string; count: number; fixable: boolean }>();
+    const noteOmitted = (field: string, reason: string, fixable = true) => {
+      const e = omitted.get(field) ?? { reason, count: 0, fixable };
       e.count++;
       omitted.set(field, e);
     };
@@ -792,7 +799,11 @@ export async function runMigration(
           }
           if (remapped) out[field] = remapped;
           else if (val && typeof val === "string" && !referenceTo.includes(node.sobject)) {
-            noteOmitted(field, `Lookup to ${referenceTo.join("/")} — that record is not part of this migration`);
+            // Owner / Record Type / audit lookups are filled in by the target org. Reporting them
+            // as "add that object to the migration" would be advice nobody can act on.
+            ORG_ASSIGNED_LOOKUPS.has(field.toLowerCase())
+              ? noteOmitted(field, orgAssignedReason(field), false)
+              : noteOmitted(field, `Lookup to ${referenceTo.join("/")} — that record is not part of this migration`);
           }
           if (!remapped && val && typeof val === "string" && referenceTo.includes(node.sobject)) {
             // A self-reference (Account.ParentId → Account): the parent is in this same batch
@@ -840,7 +851,8 @@ export async function runMigration(
           result.warnings.push({
             field: "(revert snapshot)",
             reason: `Could not read the target rows before writing — overwritten records in this batch cannot be restored: ${e instanceof Error ? e.message : String(e)}`,
-            count: chunk.length
+            count: chunk.length,
+            fixable: false
           });
         }
       }
@@ -862,7 +874,7 @@ export async function runMigration(
         if (r.success) {
           r.created !== false ? ins++ : upd++;
           if (r.id && srcId) idMap.set(srcId, r.id);
-          if (r.id) noteInserted(node.sobject, r.id); // POST always creates → revert by deleting
+          if (r.id) noteInserted(node.sobject, r.id, srcId); // POST always creates → revert by deleting
         } else {
           fail++;
           result.errors.push({ row: idx, srcId, message: r.errors?.[0]?.message ?? "Unknown error" });
@@ -900,7 +912,7 @@ export async function runMigration(
           ins++;
           if (r.id) {
             if (srcId) idMap.set(srcId, r.id);
-            noteInserted(node.sobject, r.id);
+            noteInserted(node.sobject, r.id, srcId);
           }
         } else {
           upd++;
@@ -927,7 +939,8 @@ export async function runMigration(
         result.warnings.push({
           field: "(revert snapshot)",
           reason: "Record was overwritten but its previous values could not be read — it cannot be restored",
-          count: unrestorable
+          count: unrestorable,
+          fixable: false
         });
       }
       // Build srcId → extIdValue map
@@ -962,7 +975,7 @@ export async function runMigration(
     idMaps.set(node.sobject, merged);
 
     // Surface everything that wasn't written, so a "successful" run can't hide dropped data.
-    for (const [field, info] of omitted) result.warnings.push({ field, reason: info.reason, count: info.count });
+    for (const [field, info] of omitted) result.warnings.push({ field, reason: info.reason, count: info.count, fixable: info.fixable });
 
     // ── 5b. Re-link self-references now that every row in this object has a target Id ────────
     if (selfRefs.length) {
@@ -983,7 +996,7 @@ export async function runMigration(
             (linked.failed ? `, ${linked.failed} failed` : "")
         );
         if (linked.failed) {
-          result.warnings.push({ field: "(self-reference)", reason: "Could not be re-linked after insert", count: linked.failed });
+          result.warnings.push({ field: "(self-reference)", reason: "Could not be re-linked after insert", count: linked.failed, fixable: false });
         }
       }
     }

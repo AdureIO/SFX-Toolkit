@@ -8,7 +8,10 @@ import {
 
 /** A run that created two Contacts and overwrote one existing Account. */
 const JOURNAL: MigrationJournal = {
-  inserted: { Account: ["001T1"], Contact: ["003T1", "003T2"] },
+  inserted: {
+    Account: [{ id: "001T1", srcId: "001S1" }],
+    Contact: [{ id: "003T1", srcId: "003S1" }, { id: "003T2", srcId: "003S2" }]
+  },
   updated: {
     Account: [
       {

@@ -1,5 +1,5 @@
 import * as assert from "assert";
-import { findUnmappedLookups } from "../utils/migrationValidate";
+import { findUnmappedLookups, ORG_ASSIGNED_LOOKUPS, orgAssignedReason } from "../utils/migrationValidate";
 
 const refMeta = new Map<string, Map<string, string[]>>([
   ["Account", new Map([["ParentId", ["Account"]], ["OwnerId", ["User"]]])],
@@ -38,5 +38,25 @@ describe("dataMigration.findUnmappedLookups", () => {
     // OwnerId/RecordTypeId/audit fields are never remappable — reporting them would be noise.
     const out = findUnmappedLookups([{ sobject: "Account", includeFields: ["OwnerId"] }], refMeta);
     assert.deepStrictEqual(out, []);
+  });
+});
+
+describe("dataMigration.ORG_ASSIGNED_LOOKUPS", () => {
+  it("covers the lookups the target org fills in itself", () => {
+    // Recommending "add User to this migration" for OwnerId is advice nobody can follow —
+    // ownership is assigned by the target org, never carried across.
+    ["OwnerId", "RecordTypeId", "CreatedById", "LastModifiedById"].forEach((f) => {
+      assert.ok(ORG_ASSIGNED_LOOKUPS.has(f.toLowerCase()), `${f} is org-assigned`);
+    });
+    assert.ok(!ORG_ASSIGNED_LOOKUPS.has("accountid"), "a real lookup stays actionable");
+  });
+
+  it("explains each one in its own terms, not as a missing object", () => {
+    assert.match(orgAssignedReason("OwnerId"), /assigned by the target org/i);
+    assert.match(orgAssignedReason("RecordTypeId"), /target org/i);
+    assert.match(orgAssignedReason("CreatedById"), /Audit field/i);
+    ["OwnerId", "RecordTypeId", "CreatedById"].forEach((f) => {
+      assert.ok(!/add .* to this migration/i.test(orgAssignedReason(f)), `${f} suggests no fix`);
+    });
   });
 });

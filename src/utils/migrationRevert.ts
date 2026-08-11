@@ -31,13 +31,21 @@ export interface RevertUpdateEntry {
   message?: string;
 }
 
+/** One target record this run created. The source Id is kept so the result can be traced back. */
+export interface InsertedRecord {
+  /** Target record Id. */
+  id: string;
+  /** Source record Id it came from (empty if it could not be matched back). */
+  srcId: string;
+}
+
 /**
  * Everything a run changed in the target org, in the form a revert needs:
  * inserts are undone by deleting, updates by writing `before` back.
  */
 export interface MigrationJournal {
-  /** sobject → target Ids this run created. */
-  inserted: Record<string, string[]>;
+  /** sobject → the records this run created. */
+  inserted: Record<string, InsertedRecord[]>;
   /** sobject → the rows this run overwrote, with their pre-migration values. */
   updated: Record<string, RevertUpdateEntry[]>;
 }
@@ -56,7 +64,7 @@ export function countJournal(journal: MigrationJournal): {
   unrestorable: number;
 } {
   let inserted = 0, restorable = 0, unrestorable = 0;
-  for (const ids of Object.values(journal?.inserted ?? {})) inserted += ids.length;
+  for (const recs of Object.values(journal?.inserted ?? {})) inserted += recs.length;
   for (const entries of Object.values(journal?.updated ?? {})) {
     for (const e of entries) e.status === "updated" ? restorable++ : unrestorable++;
   }
@@ -105,7 +113,7 @@ export function buildRevertPlan(order: string[], journal: MigrationJournal): Rev
     if (entries.length) plan.restores.push({ sobject, rows: buildRestoreRows(sobject, entries), entries });
   }
   for (const sobject of reversed) {
-    const ids = (journal?.inserted?.[sobject] ?? []).filter(Boolean);
+    const ids = (journal?.inserted?.[sobject] ?? []).map((r) => r.id).filter(Boolean);
     if (ids.length) plan.deletes.push({ sobject, ids });
   }
   return plan;

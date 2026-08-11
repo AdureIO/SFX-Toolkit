@@ -342,7 +342,8 @@ export class DataMigrationPanelProvider {
             command: "migrationComplete",
             results, idMaps, journal,
             canRevert: counts.inserted + counts.restorable > 0,
-            revertCounts: counts
+            revertCounts: counts,
+            targetInstanceUrl: tgtOrg.instanceUrl
           });
 
           // Revert on failure — opt-in, and always confirmed: this DELETES and OVERWRITES
@@ -618,6 +619,10 @@ body { font-family: var(--vscode-font-family); font-size: 13px; color: var(--vsc
 .err-group { margin-bottom: 6px; }
 .err-count { font-weight: 700; color: var(--vscode-errorForeground); margin-bottom: 2px; }
 .err-line { color: var(--vscode-errorForeground); padding: 1px 0; }
+/* Expected omissions (Owner, Record Type, audit fields) — stated, not flagged as a problem. */
+.note-group { margin-bottom: 6px; background: color-mix(in srgb, var(--vscode-foreground) 7%, transparent); border-radius: 2px; padding: 4px 6px; }
+.note-count { font-weight: 700; color: var(--vscode-descriptionForeground); margin-bottom: 2px; }
+.note-line { color: var(--vscode-descriptionForeground); padding: 1px 0; }
 .global-error { padding: 10px 12px; border-radius: 3px; border-left: 3px solid var(--vscode-errorForeground); background: color-mix(in srgb, var(--vscode-errorForeground) 10%, transparent); font-size: 12px; color: var(--vscode-errorForeground); display: none; }
 .global-error.visible { display: block; }
 
@@ -630,6 +635,9 @@ table.changes { width: 100%; border-collapse: collapse; font-size: 11px; }
 table.changes th { position: sticky; top: 0; text-align: left; font-weight: 600; padding: 6px 10px; background: var(--vscode-editorWidget-background, var(--vscode-input-background)); border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-panel-border)); white-space: nowrap; }
 table.changes td { padding: 4px 10px; border-bottom: 1px solid color-mix(in srgb, var(--vscode-foreground) 8%, transparent); vertical-align: top; font-family: var(--vscode-editor-font-family, monospace); }
 table.changes td.was { color: var(--vscode-descriptionForeground); text-decoration: line-through; }
+table.changes a { color: var(--vscode-textLink-foreground); text-decoration: none; }
+table.changes a:hover { text-decoration: underline; }
+.changes-card + .changes-card { margin-top: 10px; }
 table.changes .st-updated { color: var(--vscode-charts-green, #3fb950); }
 table.changes .st-failed { color: var(--vscode-errorForeground); }
 .changes-more { padding: 8px 14px; font-size: 11px; color: var(--vscode-descriptionForeground); }
@@ -870,7 +878,8 @@ var comboActiveIdx = -1;          // keyboard nav index in the combo list
 var filterSeq = 0;                // unique id seq for filter rows
 var orgRefreshedOnce = false;     // guard: auto-refresh empty org list only once
 var lastIdMaps = {};              // sobject -> { srcId: targetId } from the last run (for retry)
-var lastJournal = null;           // { inserted: {sobject:[id]}, updated: {sobject:[entry]} } from the last run
+var lastJournal = null;           // what the last run changed: { inserted: {...}, updated: {...} }
+var targetInstanceUrl = '';       // target org base URL, so a new record Id links straight to it
 var lastFailed = {};              // sobject -> [srcId, …] that failed in the last run
 
 /*
@@ -1690,20 +1699,36 @@ function showMigrationResults(results) {
     if (r.warnings && r.warnings.length) {
       var det2 = safeGet('edet-'+r.sobject);
       if (det2) {
+        // Two different things wear the "not migrated" label, and mixing them is what produced
+        // "add User to this migration" for OwnerId — advice nobody can follow. Split them:
+        // fixable ones get the recommendation, org-assigned ones are stated and left alone.
         var missing = {};
-        var wHtml = '<div class="err-group" style="border-left-color:var(--vscode-editorWarning-foreground,#cca700);">';
-        wHtml += '<div class="err-count" style="color:var(--vscode-editorWarning-foreground,#cca700);">⚠ '+r.warnings.length+' field(s) not migrated</div>';
-        r.warnings.forEach(function(w) {
-          wHtml += '<div class="err-line">• '+escHtml(w.field)+' — '+escHtml(w.reason)+' ('+w.count+' record'+(w.count!==1?'s':'')+')</div>';
-          var m = /Lookup to ([^—]+) —/.exec(w.reason);
-          if (m) { m[1].trim().split('/').forEach(function(o) { missing[o.trim()] = true; }); }
-        });
-        var names = Object.keys(missing);
-        if (names.length) {
-          wHtml += '<div class="err-line" style="margin-top:6px;">↳ Add ' + names.map(escHtml).join(', ') +
-                   ' to this migration to keep ' + (names.length > 1 ? 'these links' : 'this link') + '.</div>';
+        var fixable = r.warnings.filter(function(w) { return w.fixable !== false; });
+        var expected = r.warnings.filter(function(w) { return w.fixable === false; });
+        var wHtml = '';
+        if (fixable.length) {
+          wHtml += '<div class="err-group" style="border-left-color:var(--vscode-editorWarning-foreground,#cca700);">';
+          wHtml += '<div class="err-count" style="color:var(--vscode-editorWarning-foreground,#cca700);">⚠ '+fixable.length+' field(s) not migrated</div>';
+          fixable.forEach(function(w) {
+            wHtml += '<div class="err-line">• '+escHtml(w.field)+' — '+escHtml(w.reason)+' ('+w.count+' record'+(w.count!==1?'s':'')+')</div>';
+            var m = /Lookup to ([^—]+) —/.exec(w.reason);
+            if (m) { m[1].trim().split('/').forEach(function(o) { missing[o.trim()] = true; }); }
+          });
+          var names = Object.keys(missing);
+          if (names.length) {
+            wHtml += '<div class="err-line" style="margin-top:6px;">↳ Add ' + names.map(escHtml).join(', ') +
+                     ' to this migration to keep ' + (names.length > 1 ? 'these links' : 'this link') + '.</div>';
+          }
+          wHtml += '</div>';
         }
-        wHtml += '</div>';
+        if (expected.length) {
+          wHtml += '<div class="err-group note-group">';
+          wHtml += '<div class="note-count">ℹ '+expected.length+' field(s) the target org fills in itself</div>';
+          expected.forEach(function(w) {
+            wHtml += '<div class="note-line">• '+escHtml(w.field)+' — '+escHtml(w.reason)+' ('+w.count+' record'+(w.count!==1?'s':'')+')</div>';
+          });
+          wHtml += '</div>';
+        }
         det2.innerHTML = (det2.innerHTML || '') + wHtml;
         det2.classList.add('open');
         var tog2 = safeGet('etog-'+r.sobject);
@@ -1737,23 +1762,68 @@ function fmtVal(v) {
   return String(v);
 }
 
+/** A target record Id, as a link into the target org when we know its instance URL. */
+function recordCell(id) {
+  if (!id) return '—';
+  if (!targetInstanceUrl) return escHtml(id);
+  return '<a href="' + escHtml(targetInstanceUrl) + '/' + escHtml(id) + '" title="Open in the target org">' + escHtml(id) + '</a>';
+}
+
 /**
- * Render every record this run OVERWROTE, with its old and new value per field.
- * This is the review surface when "Revert on failure" is off: nothing was undone
- * automatically, so the run has to be inspectable in full.
+ * The record-level result of the run: every record created, and every record overwritten with
+ * its old value beside the new one.
+ *
+ * The per-object counters say how many; this says which. It is also the review surface when
+ * "Revert on failure" is off — nothing was undone automatically, so the run has to be
+ * inspectable in full before it is accepted.
  */
 function renderChangesTable(journal) {
   var host = safeGet('changes-table');
   if (!host) return;
   host.innerHTML = '';
-  if (!journal || !journal.updated) return;
+  if (!journal) return;
 
+  var html = '';
+
+  // ── Created records ───────────────────────────────────────────────────────
+  var created = [];
+  Object.keys(journal.inserted || {}).forEach(function(sobject) {
+    (journal.inserted[sobject] || []).forEach(function(rec) {
+      created.push({ sobject: sobject, id: rec.id, srcId: rec.srcId });
+    });
+  });
+  if (created.length) {
+    html += '<div class="changes-card">' +
+      '<div class="changes-head">Records created' +
+      '<span class="sub">' + created.length + ' new record(s) in the target org. ' +
+      '"Revert this run" deletes exactly these.</span></div>' +
+      '<div class="changes-scroll"><table class="changes"><thead><tr>' +
+      '<th>Object</th><th>Source Id</th><th>New record</th><th>Status</th>' +
+      '</tr></thead><tbody>';
+    created.slice(0, CHANGES_ROW_LIMIT).forEach(function(r) {
+      html += '<tr>' +
+        '<td>' + escHtml(r.sobject) + '</td>' +
+        '<td>' + escHtml(r.srcId || '—') + '</td>' +
+        '<td>' + recordCell(r.id) + '</td>' +
+        '<td class="st-updated">created</td>' +
+        '</tr>';
+    });
+    html += '</tbody></table></div>';
+    if (created.length > CHANGES_ROW_LIMIT) {
+      html += '<div class="changes-more">Showing the first ' + CHANGES_ROW_LIMIT + ' of ' +
+              created.length + ' records. A revert still covers all of them.</div>';
+    }
+    html += '</div>';
+  }
+
+  // ── Overwritten records (upsert only — an insert overwrites nothing) ──────
   var rows = [];
-  Object.keys(journal.updated).forEach(function(sobject) {
+  var recordCount = 0;
+  Object.keys(journal.updated || {}).forEach(function(sobject) {
     (journal.updated[sobject] || []).forEach(function(e) {
-      var fields = Object.keys(e.after || {});
-      // A field is only interesting if the write actually changed it.
-      fields.forEach(function(f) {
+      recordCount++;
+      // A field is only worth a row if the write actually changed it.
+      Object.keys(e.after || {}).forEach(function(f) {
         var before = (e.before || {})[f];
         var after = (e.after || {})[f];
         if (fmtVal(before) === fmtVal(after)) return;
@@ -1762,35 +1832,33 @@ function renderChangesTable(journal) {
       });
     });
   });
-  if (!rows.length) return;
-
-  var recordCount = 0;
-  Object.keys(journal.updated).forEach(function(s) { recordCount += (journal.updated[s] || []).length; });
-
-  var html = '<div class="changes-card">' +
-    '<div class="changes-head">Overwritten records' +
-    '<span class="sub">' + recordCount + ' existing record(s) were updated — ' + rows.length +
-    ' field change(s). "Revert this run" restores the previous values.</span></div>' +
-    '<div class="changes-scroll"><table class="changes"><thead><tr>' +
-    '<th>Object</th><th>Target Id</th><th>Field</th><th>Was</th><th>Now</th><th>Status</th>' +
-    '</tr></thead><tbody>';
-  rows.slice(0, CHANGES_ROW_LIMIT).forEach(function(r) {
-    html += '<tr>' +
-      '<td>' + escHtml(r.sobject) + '</td>' +
-      '<td>' + escHtml(r.id) + '</td>' +
-      '<td>' + escHtml(r.field) + '</td>' +
-      '<td class="was">' + escHtml(fmtVal(r.before)) + '</td>' +
-      '<td>' + escHtml(fmtVal(r.after)) + '</td>' +
-      '<td class="' + (r.status === 'failed' ? 'st-failed' : 'st-updated') + '">' +
-        escHtml(r.status === 'failed' ? ('failed — ' + (r.message || '')) : 'updated') + '</td>' +
-      '</tr>';
-  });
-  html += '</tbody></table></div>';
-  if (rows.length > CHANGES_ROW_LIMIT) {
-    html += '<div class="changes-more">Showing the first ' + CHANGES_ROW_LIMIT + ' of ' + rows.length +
-            ' field changes. A revert still covers all of them.</div>';
+  if (rows.length) {
+    html += '<div class="changes-card">' +
+      '<div class="changes-head">Records overwritten' +
+      '<span class="sub">' + recordCount + ' existing record(s) updated — ' + rows.length +
+      ' field change(s). "Revert this run" restores the previous values.</span></div>' +
+      '<div class="changes-scroll"><table class="changes"><thead><tr>' +
+      '<th>Object</th><th>Record</th><th>Field</th><th>Was</th><th>Now</th><th>Status</th>' +
+      '</tr></thead><tbody>';
+    rows.slice(0, CHANGES_ROW_LIMIT).forEach(function(r) {
+      html += '<tr>' +
+        '<td>' + escHtml(r.sobject) + '</td>' +
+        '<td>' + recordCell(r.id) + '</td>' +
+        '<td>' + escHtml(r.field) + '</td>' +
+        '<td class="was">' + escHtml(fmtVal(r.before)) + '</td>' +
+        '<td>' + escHtml(fmtVal(r.after)) + '</td>' +
+        '<td class="' + (r.status === 'failed' ? 'st-failed' : 'st-updated') + '">' +
+          escHtml(r.status === 'failed' ? ('failed — ' + (r.message || '')) : 'updated') + '</td>' +
+        '</tr>';
+    });
+    html += '</tbody></table></div>';
+    if (rows.length > CHANGES_ROW_LIMIT) {
+      html += '<div class="changes-more">Showing the first ' + CHANGES_ROW_LIMIT + ' of ' + rows.length +
+              ' field changes. A revert still covers all of them.</div>';
+    }
+    html += '</div>';
   }
-  html += '</div>';
+
   host.innerHTML = html;
 }
 
@@ -1947,6 +2015,7 @@ window.addEventListener('message', function(ev) {
   if (d.command === 'migrationComplete') {
     if (d.idMaps) lastIdMaps = d.idMaps;
     lastJournal = d.journal || null;
+    targetInstanceUrl = (d.targetInstanceUrl || '').replace(/\\/$/, '');
     showMigrationResults(d.results || []);
     renderChangesTable(lastJournal);
     var rbtn = safeGet('revert-run-btn');
