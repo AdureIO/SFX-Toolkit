@@ -54,7 +54,7 @@ import { DeployHistoryProvider, initDeployHistory, setOpenDeployPanelCallback } 
 import { lwcNavigate, lwcGoToJs, lwcGoToHtml, lwcGoToMeta, lwcGoToCss } from "./commands/lwcNavigator";
 import { registerLwcApexProviders } from "./providers/LwcApexProvider";
 import { generateLwcApexTypings, registerLwcApexTypingsSync } from "./commands/lwcApexTypings";
-import { repairLwcJsconfigCommand, registerLwcJsconfigRepair } from "./commands/lwcJsconfigRepair";
+import { repairLwcJsconfigCommand } from "./commands/lwcJsconfigRepair";
 import {
   showSnippets,
   runSnippet,
@@ -386,10 +386,8 @@ export function activate(context: vscode.ExtensionContext) {
     const lwcApexTypingsCmd = register("adure-sfx-toolkit.generateLwcApexTypings", generateLwcApexTypings);
     // Keep the typings in step with the Apex source automatically (initial sync + on save/change).
     registerLwcApexTypingsSync(context);
-    // Repair each lwc folder's jsconfig so c/* imports, component subdirectories and the generated
-    // typings all resolve — the usual cause of "IntelliSense does not work across LWC files".
+    // Repairs are opt-in (sidebar "Repair" section / command palette) — they edit the workspace.
     const lwcJsconfigCmd = register("adure-sfx-toolkit.repairLwcJsconfig", repairLwcJsconfigCommand);
-    registerLwcJsconfigRepair(context);
     const refreshMetadataCmd = register("adure-sfx-toolkit.refreshMetadata", async () => {
       await vscode.window.withProgress(
         {

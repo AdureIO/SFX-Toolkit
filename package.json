@@ -845,11 +845,6 @@
     "configuration": {
       "title": "Adure SFX Toolkit",
       "properties": {
-      "adure-sfx-toolkit.lwcJsconfig.autoRepair": {
-        "type": "boolean",
-        "default": true,
-        "description": "Keep each LWC folder's jsconfig.json correct so c/* imports, component subdirectories and generated Salesforce typings resolve in IntelliSense."
-      },
       "adure-sfx-toolkit.lwcApexTypings.autoGenerate": {
         "type": "boolean",
         "default": true,

@@ -4,17 +4,15 @@ import * as fs from "fs";
 import { buildLwcJsconfig, jsconfigNeedsUpdate, JsconfigShape } from "../utils/lwcJsconfig";
 import { reportError } from "../utils/reportError";
 import { Logger } from "../utils/outputChannel";
-import { isSalesforceProject } from "../utils/projectUtils";
 
 /**
  * Repair the `jsconfig.json` in every `lwc` folder so IntelliSense resolves modules the way the
  * platform does: `c/*` cross-component imports, relative imports into a component's own
  * subdirectories, and the generated `@salesforce/...` typings. Settings we don't own are kept.
+ *
+ * Explicitly opt-in — run from the sidebar's Repair section or the command palette. It edits files
+ * in the workspace, so it never runs on its own.
  */
-
-function autoRepairEnabled(): boolean {
-    return vscode.workspace.getConfiguration("adure-sfx-toolkit").get<boolean>("lwcJsconfig.autoRepair", true);
-}
 
 /** Relative path from an lwc folder to `.sfdx/typings/lwc`, POSIX-style for JSON. */
 function typingsRelPath(lwcDir: string, root: string): string {
@@ -88,16 +86,4 @@ export async function repairLwcJsconfigCommand(): Promise<void> {
     } catch (error) {
         reportError({ operation: "Repair LWC jsconfig", error });
     }
-}
-
-/** Check once shortly after activation, and whenever a new component appears. */
-export function registerLwcJsconfigRepair(context: vscode.ExtensionContext): void {
-    if (!isSalesforceProject()) return;
-    const run = () => {
-        if (autoRepairEnabled()) void repairLwcJsconfigs(true).catch((e) => Logger.warn(`LWC jsconfig: ${e}`));
-    };
-    const watcher = vscode.workspace.createFileSystemWatcher("**/lwc/*/*.js-meta.xml");
-    watcher.onDidCreate(run); // a new component may mean a new lwc folder
-    context.subscriptions.push(watcher);
-    setTimeout(run, 3500);
 }

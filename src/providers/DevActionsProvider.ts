@@ -63,6 +63,12 @@ export class DevActionsProvider implements vscode.TreeDataProvider<vscode.TreeIt
 				this.createItem("Org Health", "adure-sfx-toolkit.orgHealth", "dashboard", "View org limits and health metrics"),
 				this.createItem("Hide/Show -meta.xml Files", "adure-sfx-toolkit.toggleHideMetaXml", "eye-closed", "Toggle hiding Apex .cls-meta.xml / .trigger-meta.xml files in the Explorer"),
 			]),
+			// Opt-in fixes for a broken local setup. Nothing here runs on its own — each item
+			// writes to the workspace only when you ask for it.
+			new DevGroupItem("Repair", "tools", [
+				this.createItem("Repair LWC jsconfig", "adure-sfx-toolkit.repairLwcJsconfig", "wrench", "Fix each lwc folder's jsconfig.json so c/* imports, component subdirectories and Salesforce typings resolve in IntelliSense (reload the window afterwards)"),
+				this.createItem("Regenerate LWC Apex Typings", "adure-sfx-toolkit.generateLwcApexTypings", "symbol-interface", "Rewrite the @salesforce/apex typings from your Apex @AuraEnabled signatures (real parameter and return types instead of any)"),
+			]),
 		];
 	}
 
