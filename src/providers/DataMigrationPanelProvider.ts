@@ -14,13 +14,16 @@ import {
   describeObject,
   findUnmappedLookups,
   revertMigration,
+  countJournal,
   resolveOrgToInfo,
   saveProfile,
   loadProfileFromFile,
   type MigrationProfile,
   type SObjectDescribe,
   type FieldDescribe,
-  type MigrationProgress
+  type MigrationProgress,
+  type MigrationJournal,
+  type OrgInfo
 } from "../utils/dataMigration";
 import { Telemetry } from "../utils/telemetry";
 import { confirmProductionOrgOperation } from "../utils/orgSafety";
@@ -53,6 +56,61 @@ function partitionFieldsByTarget(
   return { available, excluded };
 }
 
+/**
+ * Every field that could serve as an upsert key, including the ones the target org won't accept.
+ *
+ * Filtering those out entirely is what made a freshly created external Id look like it simply
+ * wasn't there. They are listed with the reason instead, so "my external Id is missing" always
+ * has an answer on screen.
+ */
+function externalIdCandidates(
+  sourceFields: FieldDescribe[],
+  excluded: ExcludedField[]
+): Array<{ name: string; type: string; usable: boolean; reason?: string }> {
+  const reasonByName = new Map(excluded.map((e) => [e.name.toLowerCase(), e.reason]));
+  return sourceFields
+    .filter((f) => f.externalId || f.unique)
+    .map((f) => {
+      const reason = reasonByName.get(f.name.toLowerCase());
+      return reason ? { name: f.name, type: f.type, usable: false, reason } : { name: f.name, type: f.type, usable: true };
+    });
+}
+
+// ─── Revert helpers ───────────────────────────────────────────────────────────
+
+function revertDetail(counts: { inserted: number; restorable: number }): string {
+  const parts: string[] = [];
+  if (counts.inserted) parts.push(`delete ${counts.inserted} record(s) this run created`);
+  if (counts.restorable) parts.push(`restore ${counts.restorable} record(s) it overwrote to their previous values`);
+  return `This will ${parts.join(" and ")}.\n\nNothing else in the target org is touched.`;
+}
+
+/** Run the revert and report it to both the panel and the user. */
+async function performRevert(
+  panel: vscode.WebviewPanel,
+  orgInfo: OrgInfo,
+  order: string[],
+  journal: MigrationJournal,
+  orgLabel: string
+): Promise<void> {
+  panel.webview.postMessage({ command: "revertStarted" });
+  try {
+    const r = await revertMigration(orgInfo, order, journal, (sobject, step, done, failed) =>
+      panel.webview.postMessage({ command: "revertProgress", sobject, step, done, failed })
+    );
+    panel.webview.postMessage({ command: "revertComplete", ...r });
+    const msg =
+      `Reverted ${orgLabel}: deleted ${r.deleted}, restored ${r.restored}` +
+      (r.failed ? `, ${r.failed} could not be undone` : "") + ".";
+    Logger.info(msg);
+    r.failed ? vscode.window.showWarningMessage(msg) : vscode.window.showInformationMessage(msg);
+  } catch (e) {
+    const err = e instanceof Error ? e.message : String(e);
+    Logger.error("Migration revert failed", e);
+    panel.webview.postMessage({ command: "revertError", error: err.substring(0, 600) });
+  }
+}
+
 // ─── Provider ─────────────────────────────────────────────────────────────────
 
 export class DataMigrationPanelProvider {
@@ -74,6 +132,10 @@ export class DataMigrationPanelProvider {
     // Warm caches in background on panel open
     warmOrgListCache();
     AuthInfo.warmAuthForOrg(null);
+
+    // The last run's undo information, kept here rather than in the webview so "Revert this run"
+    // always acts on what was really written. Cleared once reverted so it can't be replayed.
+    let lastRun: { org: string; orgInfo: OrgInfo; order: string[]; journal: MigrationJournal } | null = null;
 
     panel.webview.onDidReceiveMessage(async (msg: {
       command: string;
@@ -164,7 +226,7 @@ export class DataMigrationPanelProvider {
             fields: available,
             excludedFields: excluded,
             targetMissing: compareTarget && !targetDescribe ? true : false,
-            externalIdFields: available.filter((f) => f.externalId || f.unique),
+            externalIdFields: externalIdCandidates(creatableFields, excluded),
             childRelationships: describe.childRelationships
               .filter((cr) => cr.childSObject && cr.field)
               .map((cr) => ({ childSObject: cr.childSObject, field: cr.field, relationshipName: cr.relationshipName }))
@@ -195,7 +257,7 @@ export class DataMigrationPanelProvider {
             fields: available,
             excludedFields: excluded,
             targetMissing: compareTarget && !targetDescribe ? true : false,
-            externalIdFields: available.filter((f) => f.externalId || f.unique),
+            externalIdFields: externalIdCandidates(creatableFields, excluded),
             childRelationships: describe.childRelationships
               .filter((cr) => cr.childSObject && cr.field)
               .map((cr) => ({ childSObject: cr.childSObject, field: cr.field, relationshipName: cr.relationshipName }))
@@ -266,31 +328,34 @@ export class DataMigrationPanelProvider {
           const retryOpts = msg.retry
             ? { retryOnly: msg.retry.retryOnly, priorIdMaps: msg.retry.priorIdMaps }
             : undefined;
-          const { results, idMaps } = await runMigration(srcOrg, tgtOrg, profile, (progress: MigrationProgress) => {
+          const { results, idMaps, journal } = await runMigration(srcOrg, tgtOrg, profile, (progress: MigrationProgress) => {
             panel.webview.postMessage({ command: "migrationProgress", progress });
           }, retryOpts);
           Logger.info(`Migration complete: ${results.map((r) => `${r.sobject}: +${r.inserted} ^${r.updated} x${r.failed}`).join(", ")}`);
           const failedTotal = results.reduce((n, r) => n + r.failed, 0);
-          const insertedTotal = results.reduce((n, r) => n + r.inserted, 0);
-          panel.webview.postMessage({ command: "migrationComplete", results, idMaps, canRevert: insertedTotal > 0 });
+          const order: string[] = profile.nodes.map((n: { sobject: string }) => n.sobject);
+          // Keep the journal host-side: it is what a later "Revert this run" acts on, and it must
+          // not depend on the webview holding on to it.
+          lastRun = { org: targetOrg, orgInfo: tgtOrg, order, journal };
+          const counts = countJournal(journal);
+          panel.webview.postMessage({
+            command: "migrationComplete",
+            results, idMaps, journal,
+            canRevert: counts.inserted + counts.restorable > 0,
+            revertCounts: counts
+          });
 
-          // Revert on failure — opt-in, and always confirmed: this DELETES records from the
-          // target org. Only the Ids this run inserted are ever touched.
-          if (msg.revertOnFail && failedTotal > 0 && insertedTotal > 0) {
+          // Revert on failure — opt-in, and always confirmed: this DELETES and OVERWRITES
+          // records in the target org. Only rows this run created or changed are ever touched.
+          if (msg.revertOnFail && failedTotal > 0 && counts.inserted + counts.restorable > 0) {
             const choice = await vscode.window.showWarningMessage(
-              `Migration had ${failedTotal} failed record(s). Delete the ${insertedTotal} record(s) it inserted into ${targetOrg}?`,
-              { modal: true },
-              "Revert (delete inserted)"
+              `Migration had ${failedTotal} failed record(s). Undo this run in ${targetOrg}?`,
+              { modal: true, detail: revertDetail(counts) },
+              "Revert this run"
             );
-            if (choice === "Revert (delete inserted)") {
-              const order = profile.nodes.map((n: { sobject: string }) => n.sobject);
-              const r = await revertMigration(tgtOrg, order, idMaps, (sobject, deleted, failed) =>
-                panel.webview.postMessage({ command: "revertProgress", sobject, deleted, failed })
-              );
-              panel.webview.postMessage({ command: "revertComplete", ...r });
-              vscode.window.showInformationMessage(
-                `Reverted: deleted ${r.deleted} record(s)` + (r.failed ? `, ${r.failed} could not be deleted` : "") + "."
-              );
+            if (choice === "Revert this run") {
+              lastRun = null; // consumed — the journal describes a state that no longer exists
+              await performRevert(panel, tgtOrg, order, journal, targetOrg);
             }
           }
         } catch (e) {
@@ -298,6 +363,29 @@ export class DataMigrationPanelProvider {
           Logger.error("Migration failed", e);
           panel.webview.postMessage({ command: "migrationError", error: err.substring(0, 600) });
         }
+        return;
+      }
+
+      // ── Revert the last run ───────────────────────────────────────────────
+      if (msg.command === "revertRun") {
+        if (!lastRun) {
+          panel.webview.postMessage({ command: "revertError", error: "Nothing to revert — no migration has run in this panel." });
+          return;
+        }
+        const counts = countJournal(lastRun.journal);
+        if (counts.inserted + counts.restorable === 0) {
+          panel.webview.postMessage({ command: "revertError", error: "Nothing to revert — this run changed no records." });
+          return;
+        }
+        const choice = await vscode.window.showWarningMessage(
+          `Undo the last migration into ${lastRun.org}?`,
+          { modal: true, detail: revertDetail(counts) },
+          "Revert this run"
+        );
+        if (choice !== "Revert this run") return;
+        const run = lastRun;
+        lastRun = null; // a revert is not repeatable — the journal describes a state that's now gone
+        await performRevert(panel, run.orgInfo, run.order, run.journal, run.org);
         return;
       }
 
@@ -533,6 +621,19 @@ body { font-family: var(--vscode-font-family); font-size: 13px; color: var(--vsc
 .global-error { padding: 10px 12px; border-radius: 3px; border-left: 3px solid var(--vscode-errorForeground); background: color-mix(in srgb, var(--vscode-errorForeground) 10%, transparent); font-size: 12px; color: var(--vscode-errorForeground); display: none; }
 .global-error.visible { display: block; }
 
+/* ── Overwritten-records table (what a revert would put back) ── */
+.changes-card { margin-top: 14px; border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border)); border-radius: 8px; background: var(--vscode-editorWidget-background, var(--vscode-input-background)); overflow: hidden; }
+.changes-head { display: flex; align-items: center; gap: 8px; padding: 10px 14px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+.changes-head .sub { flex: 1; font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--vscode-descriptionForeground); }
+.changes-scroll { max-height: 380px; overflow: auto; }
+table.changes { width: 100%; border-collapse: collapse; font-size: 11px; }
+table.changes th { position: sticky; top: 0; text-align: left; font-weight: 600; padding: 6px 10px; background: var(--vscode-editorWidget-background, var(--vscode-input-background)); border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-panel-border)); white-space: nowrap; }
+table.changes td { padding: 4px 10px; border-bottom: 1px solid color-mix(in srgb, var(--vscode-foreground) 8%, transparent); vertical-align: top; font-family: var(--vscode-editor-font-family, monospace); }
+table.changes td.was { color: var(--vscode-descriptionForeground); text-decoration: line-through; }
+table.changes .st-updated { color: var(--vscode-charts-green, #3fb950); }
+table.changes .st-failed { color: var(--vscode-errorForeground); }
+.changes-more { padding: 8px 14px; font-size: 11px; color: var(--vscode-descriptionForeground); }
+
 /* ── Step 1 builder: cards ── */
 .card { background: var(--vscode-editorWidget-background, var(--vscode-input-background)); border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border)); border-radius: 8px; padding: 16px; display: flex; flex-direction: column; gap: 14px; }
 .card-head { display: flex; align-items: center; gap: 8px; }
@@ -725,14 +826,16 @@ body { font-family: var(--vscode-font-family); font-size: 13px; color: var(--vsc
   <div class="run-toolbar">
     <button class="btn-secondary" id="back-to-tree-btn" onclick="goToTree()">← Adjust settings</button>
     <span style="flex:1; font-size:12px; color:var(--vscode-descriptionForeground);" id="run-status-label">Ready to run</span>
-    <label class="inline" style="font-size:12px;" title="If any record fails, offer to delete the records this run inserted into the target org. Only Ids inserted by this run are deleted; you are asked to confirm first."><input type="checkbox" id="revert-on-fail"> Revert on failure</label>
+    <label class="inline" style="font-size:12px;" title="If any record fails, offer to undo the whole run: delete the records it created and restore the records it overwrote to their previous values. Only rows this run touched are affected, and you are asked to confirm first."><input type="checkbox" id="revert-on-fail"> Revert on failure</label>
     <button class="btn-secondary" id="retry-failed-btn" onclick="retryFailed()" style="display:none;">⟳ Retry failed rows</button>
+    <button class="btn-secondary" id="revert-run-btn" onclick="revertRun()" style="display:none;" title="Delete the records this run created and put the records it overwrote back to their previous values. Nothing else is touched.">↩ Revert this run</button>
     <button class="btn-primary" id="start-run-btn" onclick="startMigration()">⚡ Start Migration</button>
   </div>
   <div class="run-area" id="run-area">
     <div id="run-overview" class="run-overview"></div>
     <div class="global-error" id="global-error"></div>
     <div id="progress-list"></div>
+    <div id="changes-table"></div>
   </div>
 </div>
 
@@ -767,6 +870,7 @@ var comboActiveIdx = -1;          // keyboard nav index in the combo list
 var filterSeq = 0;                // unique id seq for filter rows
 var orgRefreshedOnce = false;     // guard: auto-refresh empty org list only once
 var lastIdMaps = {};              // sobject -> { srcId: targetId } from the last run (for retry)
+var lastJournal = null;           // { inserted: {sobject:[id]}, updated: {sobject:[entry]} } from the last run
 var lastFailed = {};              // sobject -> [srcId, …] that failed in the last run
 
 /*
@@ -1120,11 +1224,23 @@ function renderNodeHtml(sobject, lookupField, depth) {
     html += '<label>External ID / Upsert key:</label>';
     html += '<select id="extid-'+escHtml(sobject)+'" onchange="setExtId(\\''+escHtml(sobject)+'\\', this.value)">';
     html += '<option value="">(Insert — no external ID)</option>';
+    var extBlocked = [];
     (node.externalIdFields || []).forEach(function(f) {
+      // A key the target org can't accept is listed but not selectable — visible with a reason
+      // beats absent, which reads as "the field doesn't exist".
+      if (f.usable === false) {
+        extBlocked.push(f);
+        html += '<option value="" disabled>'+escHtml(f.name)+' — unavailable in target</option>';
+        return;
+      }
       html += '<option value="'+escHtml(f.name)+'"'+(node.externalIdField===f.name?' selected':'')+'>'
         +escHtml(f.name)+' ('+escHtml(f.type)+')</option>';
     });
     html += '</select></div>';
+    extBlocked.forEach(function(f) {
+      html += '<div class="err-line" style="font-size:10px; padding-left:2px;">⚠ ' + escHtml(f.name) +
+              ' cannot be used as an upsert key: ' + escHtml(f.reason || 'not writable in the target org') + '</div>';
+    });
 
     // Fields
     if (node.fields && node.fields.length) {
@@ -1449,6 +1565,10 @@ function prepareRunPage() {
   safeGet('start-run-btn') && (safeGet('start-run-btn').disabled = false);
   safeGet('start-run-btn') && (safeGet('start-run-btn').textContent = '⚡ Start Migration');
   safeGet('retry-failed-btn') && (safeGet('retry-failed-btn').style.display = 'none');
+  // The previous run's undo no longer describes the org once a new run starts.
+  safeGet('revert-run-btn') && (safeGet('revert-run-btn').style.display = 'none');
+  safeGet('changes-table') && (safeGet('changes-table').innerHTML = '');
+  lastJournal = null;
 }
 
 function toggleObjErrors(sobject) {
@@ -1607,6 +1727,79 @@ function showMigrationResults(results) {
   }
 }
 
+/* ══════════════════════════════════════════════════════════════════════════
+   Revert — what this run changed, and putting it back
+══════════════════════════════════════════════════════════════════════════ */
+var CHANGES_ROW_LIMIT = 500;   // render cap only; the revert always covers every row
+
+function fmtVal(v) {
+  if (v === null || v === undefined || v === '') return '∅';
+  return String(v);
+}
+
+/**
+ * Render every record this run OVERWROTE, with its old and new value per field.
+ * This is the review surface when "Revert on failure" is off: nothing was undone
+ * automatically, so the run has to be inspectable in full.
+ */
+function renderChangesTable(journal) {
+  var host = safeGet('changes-table');
+  if (!host) return;
+  host.innerHTML = '';
+  if (!journal || !journal.updated) return;
+
+  var rows = [];
+  Object.keys(journal.updated).forEach(function(sobject) {
+    (journal.updated[sobject] || []).forEach(function(e) {
+      var fields = Object.keys(e.after || {});
+      // A field is only interesting if the write actually changed it.
+      fields.forEach(function(f) {
+        var before = (e.before || {})[f];
+        var after = (e.after || {})[f];
+        if (fmtVal(before) === fmtVal(after)) return;
+        rows.push({ sobject: sobject, id: e.id, srcId: e.srcId, field: f,
+                    before: before, after: after, status: e.status, message: e.message });
+      });
+    });
+  });
+  if (!rows.length) return;
+
+  var recordCount = 0;
+  Object.keys(journal.updated).forEach(function(s) { recordCount += (journal.updated[s] || []).length; });
+
+  var html = '<div class="changes-card">' +
+    '<div class="changes-head">Overwritten records' +
+    '<span class="sub">' + recordCount + ' existing record(s) were updated — ' + rows.length +
+    ' field change(s). "Revert this run" restores the previous values.</span></div>' +
+    '<div class="changes-scroll"><table class="changes"><thead><tr>' +
+    '<th>Object</th><th>Target Id</th><th>Field</th><th>Was</th><th>Now</th><th>Status</th>' +
+    '</tr></thead><tbody>';
+  rows.slice(0, CHANGES_ROW_LIMIT).forEach(function(r) {
+    html += '<tr>' +
+      '<td>' + escHtml(r.sobject) + '</td>' +
+      '<td>' + escHtml(r.id) + '</td>' +
+      '<td>' + escHtml(r.field) + '</td>' +
+      '<td class="was">' + escHtml(fmtVal(r.before)) + '</td>' +
+      '<td>' + escHtml(fmtVal(r.after)) + '</td>' +
+      '<td class="' + (r.status === 'failed' ? 'st-failed' : 'st-updated') + '">' +
+        escHtml(r.status === 'failed' ? ('failed — ' + (r.message || '')) : 'updated') + '</td>' +
+      '</tr>';
+  });
+  html += '</tbody></table></div>';
+  if (rows.length > CHANGES_ROW_LIMIT) {
+    html += '<div class="changes-more">Showing the first ' + CHANGES_ROW_LIMIT + ' of ' + rows.length +
+            ' field changes. A revert still covers all of them.</div>';
+  }
+  html += '</div>';
+  host.innerHTML = html;
+}
+
+function revertRun() {
+  var btn = safeGet('revert-run-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Reverting…'; }
+  post({ command: 'revertRun' });
+}
+
 function retryFailed() {
   var srcOrg = safeGet('src-org') && safeGet('src-org').value;
   var tgtOrg = safeGet('tgt-org') && safeGet('tgt-org').value;
@@ -1753,7 +1946,60 @@ window.addEventListener('message', function(ev) {
 
   if (d.command === 'migrationComplete') {
     if (d.idMaps) lastIdMaps = d.idMaps;
+    lastJournal = d.journal || null;
     showMigrationResults(d.results || []);
+    renderChangesTable(lastJournal);
+    var rbtn = safeGet('revert-run-btn');
+    if (rbtn) {
+      var c = d.revertCounts || { inserted: 0, restorable: 0 };
+      rbtn.style.display = d.canRevert ? '' : 'none';
+      rbtn.disabled = false;
+      rbtn.textContent = '↩ Revert this run';
+      rbtn.title = 'Delete ' + c.inserted + ' created record(s) and restore ' + c.restorable +
+                   ' overwritten record(s) to their previous values. Nothing else is touched.';
+    }
+    return;
+  }
+
+  if (d.command === 'revertStarted') {
+    safeGet('run-status-label') && (safeGet('run-status-label').textContent = 'Reverting…');
+    return;
+  }
+
+  if (d.command === 'revertProgress') {
+    var lblR = safeGet('run-status-label');
+    if (lblR) {
+      lblR.textContent = (d.step === 'restoring' ? 'Restoring ' : 'Deleting ') + d.sobject +
+                         ' — ' + d.done + ' done' + (d.failed ? ', ' + d.failed + ' failed' : '');
+    }
+    return;
+  }
+
+  if (d.command === 'revertComplete') {
+    var rb = safeGet('revert-run-btn');
+    if (rb) { rb.style.display = 'none'; rb.disabled = false; }
+    lastJournal = null;
+    safeGet('changes-table') && (safeGet('changes-table').innerHTML = '');
+    safeGet('run-status-label') && (safeGet('run-status-label').textContent =
+      (d.failed ? '⚠' : '↩') + ' Reverted — deleted ' + (d.deleted || 0) + ', restored ' + (d.restored || 0) +
+      (d.failed ? ', ' + d.failed + ' could not be undone' : ''));
+    if (d.errors && d.errors.length) {
+      var geR = safeGet('global-error');
+      if (geR) {
+        geR.className = 'global-error visible';
+        geR.textContent = '⚠ Revert incomplete: ' + d.errors.slice(0, 5).map(function(e) {
+          return e.sobject + ' ' + e.id + ': ' + e.message;
+        }).join(' | ') + (d.errors.length > 5 ? ' … +' + (d.errors.length - 5) + ' more' : '');
+      }
+    }
+    return;
+  }
+
+  if (d.command === 'revertError') {
+    var rb2 = safeGet('revert-run-btn');
+    if (rb2) { rb2.disabled = false; rb2.textContent = '↩ Revert this run'; }
+    var geR2 = safeGet('global-error');
+    if (geR2) { geR2.className = 'global-error visible'; geR2.textContent = '❌ ' + (d.error || 'Revert failed'); }
     return;
   }
 
