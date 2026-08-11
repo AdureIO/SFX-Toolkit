@@ -25,3 +25,8 @@ jobs:
 
       - name: Lint
         run: npm run lint
+
+      # Everything that runs outside the VS Code host. The few tests that need the
+      # host itself run under `npm test`, which needs a display and is not run here.
+      - name: Unit tests
+        run: npm run test:unit

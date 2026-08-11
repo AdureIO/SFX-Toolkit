@@ -15,7 +15,7 @@ export {
   type RevertSelection,
   type RevertSummary
 } from "./migrationRevert";
-import { topoSortNodes, type OrderableNode } from "./migrationOrder";
+import { topoSortNodes } from "./migrationOrder";
 export { topoSortNodes, type OrderableNode } from "./migrationOrder";
 import { buildRevertPlan, type MigrationJournal, type RevertUpdateEntry, type RevertSummary } from "./migrationRevert";
 import { AuthInfo } from "./authInfo";

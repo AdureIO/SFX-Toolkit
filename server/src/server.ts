@@ -345,7 +345,9 @@ function relItem(owner: string, f: HostField): CompletionItem {
         label: f.relationshipName as string,
         kind: CompletionItemKind.Class,
         detail: `${typeStr} ${owner}.${f.relationshipName}`,
-        labelDetails: { detail: ` : ${typeStr}`, description: owner },
+        // An arrow, not a colon: a relationship is a traversal to another object, not a value of
+        // that type. Child relationships and the doc popup already read that way.
+        labelDetails: { detail: ` → ${typeStr}`, description: owner },
         // Sort relationships just after their owning fields.
         sortText: '1_' + f.relationshipName,
     };

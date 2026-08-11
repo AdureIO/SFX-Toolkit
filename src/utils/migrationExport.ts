@@ -41,7 +41,7 @@ export interface ExportProfileLike {
 
 /** RFC 4180: quote when the value contains a delimiter, quote or newline; double inner quotes. */
 export function csvCell(value: string): string {
-  if (value === "" || value == null) return "";
+  if (value === "" || value === null || value === undefined) return "";
   return /[",\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
 }
 
@@ -103,7 +103,7 @@ export function apexString(value: string): string {
  * and the target org's own defaults should apply — the same choice the live migration makes.
  */
 export function apexLiteral(value: string, type: string): string | null {
-  if (value === "" || value == null) return null;
+  if (value === "" || value === null || value === undefined) return null;
   const t = (type || "string").toLowerCase();
   if (t === "boolean") return value.toLowerCase() === "true" ? "true" : "false";
   if (NUMERIC.has(t)) return Number.isFinite(Number(value)) ? String(Number(value)) : apexString(value);
