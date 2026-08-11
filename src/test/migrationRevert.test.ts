@@ -3,6 +3,8 @@ import {
   countJournal,
   buildRestoreRows,
   buildRevertPlan,
+  filterJournal,
+  subtractJournal,
   type MigrationJournal
 } from "../utils/migrationRevert";
 
@@ -94,5 +96,54 @@ describe("migrationRevert.buildRevertPlan", () => {
     const empty = buildRevertPlan(["Account"], { inserted: {}, updated: {} });
     assert.strictEqual(empty.restores.length, 0);
     assert.strictEqual(empty.deletes.length, 0);
+  });
+});
+
+describe("migrationRevert.filterJournal", () => {
+  it("returns the whole journal when nothing is selected explicitly", () => {
+    assert.strictEqual(filterJournal(JOURNAL, null), JOURNAL);
+    assert.strictEqual(filterJournal(JOURNAL, undefined), JOURNAL);
+  });
+
+  it("keeps only the picked records", () => {
+    const picked = filterJournal(JOURNAL, {
+      inserted: { Contact: ["003T2"] },
+      updated: { Account: ["001T9"] }
+    });
+    assert.deepStrictEqual(picked.inserted, { Contact: [{ id: "003T2", srcId: "003S2" }] });
+    assert.strictEqual(picked.updated.Account.length, 1);
+    assert.strictEqual(picked.updated.Account[0].id, "001T9");
+  });
+
+  it("drops an object entirely when none of its records are picked", () => {
+    const picked = filterJournal(JOURNAL, { inserted: { Contact: ["003T1"] }, updated: {} });
+    assert.ok(!("Account" in picked.inserted), "Account had nothing selected");
+    assert.deepStrictEqual(picked.updated, {});
+  });
+
+  it("cannot reach a record the run never wrote", () => {
+    // A selection is a filter, never a source of Ids — an Id the journal does not know is ignored.
+    const picked = filterJournal(JOURNAL, { inserted: { Account: ["001XX_NOT_OURS"] }, updated: {} });
+    assert.deepStrictEqual(picked, { inserted: {}, updated: {} });
+  });
+});
+
+describe("migrationRevert.subtractJournal", () => {
+  it("leaves what a partial revert did not undo", () => {
+    const done = filterJournal(JOURNAL, { inserted: { Contact: ["003T1"] }, updated: {} });
+    const left = subtractJournal(JOURNAL, done);
+    assert.deepStrictEqual(left.inserted.Contact, [{ id: "003T2", srcId: "003S2" }]);
+    assert.deepStrictEqual(left.inserted.Account, [{ id: "001T1", srcId: "001S1" }]);
+    assert.strictEqual(left.updated.Account.length, 2, "updates were untouched");
+  });
+
+  it("is empty once everything has been undone", () => {
+    assert.deepStrictEqual(subtractJournal(JOURNAL, JOURNAL), { inserted: {}, updated: {} });
+  });
+
+  it("keeps a partial revert from being replayed against the same records", () => {
+    const done = filterJournal(JOURNAL, { inserted: {}, updated: { Account: ["001T9"] } });
+    const left = subtractJournal(JOURNAL, done);
+    assert.ok(!left.updated.Account.some((e) => e.id === "001T9"), "already restored");
   });
 });

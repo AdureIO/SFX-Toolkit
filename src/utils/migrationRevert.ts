@@ -57,6 +57,62 @@ export interface RevertSummary {
   errors: Array<{ sobject: string; id: string; message: string }>;
 }
 
+/**
+ * A subset of a journal to act on, by target record Id.
+ *
+ * Undoing a run is rarely all-or-nothing: one object landed wrong, the rest is fine. An absent
+ * sobject key means "nothing from that object", so an empty selection reverts nothing — the
+ * caller passes `undefined` when it means everything.
+ */
+export interface RevertSelection {
+  inserted: Record<string, string[]>;
+  updated: Record<string, string[]>;
+}
+
+/**
+ * Narrow a journal to the records the user picked. `undefined` means the whole run.
+ *
+ * Filtering here rather than at the API layer keeps one guarantee intact: a revert can only ever
+ * touch rows that are in the journal, so a stray Id in a selection cannot reach the org.
+ */
+export function filterJournal(journal: MigrationJournal, selection?: RevertSelection | null): MigrationJournal {
+  if (!selection) return journal;
+  const out: MigrationJournal = { inserted: {}, updated: {} };
+  for (const [sobject, recs] of Object.entries(journal?.inserted ?? {})) {
+    const keep = new Set(selection.inserted?.[sobject] ?? []);
+    const picked = recs.filter((r) => keep.has(r.id));
+    if (picked.length) out.inserted[sobject] = picked;
+  }
+  for (const [sobject, entries] of Object.entries(journal?.updated ?? {})) {
+    const keep = new Set(selection.updated?.[sobject] ?? []);
+    const picked = entries.filter((e) => keep.has(e.id));
+    if (picked.length) out.updated[sobject] = picked;
+  }
+  return out;
+}
+
+/**
+ * Everything in `journal` that is not in `done`.
+ *
+ * After a partial revert the rest of the run is still sitting in the org, so its journal stays
+ * valid — but the records just undone must drop out of it, or a second revert would try to
+ * delete rows that no longer exist and restore rows already restored.
+ */
+export function subtractJournal(journal: MigrationJournal, done: MigrationJournal): MigrationJournal {
+  const out: MigrationJournal = { inserted: {}, updated: {} };
+  for (const [sobject, recs] of Object.entries(journal?.inserted ?? {})) {
+    const gone = new Set((done?.inserted?.[sobject] ?? []).map((r) => r.id));
+    const left = recs.filter((r) => !gone.has(r.id));
+    if (left.length) out.inserted[sobject] = left;
+  }
+  for (const [sobject, entries] of Object.entries(journal?.updated ?? {})) {
+    const gone = new Set((done?.updated?.[sobject] ?? []).map((e) => e.id));
+    const left = entries.filter((e) => !gone.has(e.id));
+    if (left.length) out.updated[sobject] = left;
+  }
+  return out;
+}
+
 /** What a revert of this journal would actually do, in plain numbers. */
 export function countJournal(journal: MigrationJournal): {
   inserted: number;

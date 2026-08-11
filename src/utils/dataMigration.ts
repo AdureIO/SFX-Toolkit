@@ -3,13 +3,16 @@ import * as http from "http";
 import * as fs from "fs";
 import * as path from "path";
 import { Logger } from "./outputChannel";
-export { findUnmappedLookups, ORG_ASSIGNED_LOOKUPS, type UnmappedLookup } from "./migrationValidate";
+export { findUnmappedLookups, ORG_ASSIGNED_LOOKUPS, orgAssignedReason, type UnmappedLookup } from "./migrationValidate";
 import { ORG_ASSIGNED_LOOKUPS, orgAssignedReason } from "./migrationValidate";
 export {
   countJournal,
   buildRevertPlan,
+  filterJournal,
+  subtractJournal,
   type MigrationJournal,
   type RevertUpdateEntry,
+  type RevertSelection,
   type RevertSummary
 } from "./migrationRevert";
 import { buildRevertPlan, type MigrationJournal, type RevertUpdateEntry, type RevertSummary } from "./migrationRevert";
@@ -669,11 +672,17 @@ export async function runMigration(
   // The external Id is the upsert's match key: it has to be queried from the source and sent to
   // the target, otherwise the write has nothing to match on and the revert snapshot can't be
   // keyed back to a row. Add it if the profile left it out.
-  const withKeys = profile.nodes.map((n) =>
-    n.externalIdField && !n.includeFields.includes(n.externalIdField)
-      ? { ...n, includeFields: [...n.includeFields, n.externalIdField] }
-      : n
-  );
+  //
+  // Owner / Record Type / audit lookups are dropped here rather than queried and then discarded:
+  // they are not migratable data, and a saved profile written before this rule could still name
+  // them.
+  const withKeys = profile.nodes.map((n) => {
+    let includeFields = n.includeFields.filter((f) => !ORG_ASSIGNED_LOOKUPS.has(f.toLowerCase()));
+    if (n.externalIdField && !includeFields.includes(n.externalIdField)) {
+      includeFields = [...includeFields, n.externalIdField];
+    }
+    return includeFields.length === n.includeFields.length ? n : { ...n, includeFields };
+  });
   const orderedNodes = topoSortNodes(withKeys, refMeta, includedSObjects);
 
   for (const node of orderedNodes) {

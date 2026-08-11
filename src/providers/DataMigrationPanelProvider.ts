@@ -13,8 +13,12 @@ import {
   runMigration,
   describeObject,
   findUnmappedLookups,
+  ORG_ASSIGNED_LOOKUPS,
+  orgAssignedReason,
   revertMigration,
   countJournal,
+  filterJournal,
+  subtractJournal,
   resolveOrgToInfo,
   saveProfile,
   loadProfileFromFile,
@@ -23,6 +27,7 @@ import {
   type FieldDescribe,
   type MigrationProgress,
   type MigrationJournal,
+  type RevertSelection,
   type OrgInfo
 } from "../utils/dataMigration";
 import { Telemetry } from "../utils/telemetry";
@@ -42,12 +47,20 @@ function partitionFieldsByTarget(
   sourceFields: FieldDescribe[],
   targetDescribe: SObjectDescribe | null
 ): { available: FieldDescribe[]; excluded: ExcludedField[] } {
-  if (!targetDescribe) return { available: sourceFields, excluded: [] };
-  const targetByName = new Map<string, FieldDescribe>();
-  for (const f of targetDescribe.fields) targetByName.set(f.name.toLowerCase(), f);
   const available: FieldDescribe[] = [];
   const excluded: ExcludedField[] = [];
+  const targetByName = new Map<string, FieldDescribe>();
+  if (targetDescribe) for (const f of targetDescribe.fields) targetByName.set(f.name.toLowerCase(), f);
+
   for (const f of sourceFields) {
+    // Owner, Record Type and audit lookups are not migratable data — the target org assigns
+    // them. They are listed as excluded (with the reason) rather than offered as a choice that
+    // can only ever be wrong.
+    if (ORG_ASSIGNED_LOOKUPS.has(f.name.toLowerCase())) {
+      excluded.push({ name: f.name, label: f.label, type: f.type, reason: orgAssignedReason(f.name) });
+      continue;
+    }
+    if (!targetDescribe) { available.push(f); continue; }
     const t = targetByName.get(f.name.toLowerCase());
     if (!t) { excluded.push({ name: f.name, label: f.label, type: f.type, reason: "Not present in target org" }); continue; }
     if (!t.createable) { excluded.push({ name: f.name, label: f.label, type: f.type, reason: "Not writable in target (formula / system / no permission)" }); continue; }
@@ -91,14 +104,16 @@ async function performRevert(
   orgInfo: OrgInfo,
   order: string[],
   journal: MigrationJournal,
-  orgLabel: string
+  orgLabel: string,
+  /** What is still undoable afterwards — everything the user did not select. */
+  remaining?: MigrationJournal | null
 ): Promise<void> {
   panel.webview.postMessage({ command: "revertStarted" });
   try {
     const r = await revertMigration(orgInfo, order, journal, (sobject, step, done, failed) =>
       panel.webview.postMessage({ command: "revertProgress", sobject, step, done, failed })
     );
-    panel.webview.postMessage({ command: "revertComplete", ...r });
+    panel.webview.postMessage({ command: "revertComplete", ...r, remaining: remaining ?? null });
     const msg =
       `Reverted ${orgLabel}: deleted ${r.deleted}, restored ${r.restored}` +
       (r.failed ? `, ${r.failed} could not be undone` : "") + ".";
@@ -148,6 +163,7 @@ export class DataMigrationPanelProvider {
       text?: string;
       retry?: { retryOnly?: Record<string, string[]>; priorIdMaps?: Record<string, Record<string, string>> };
       revertOnFail?: boolean;
+      selection?: RevertSelection;
     }) => {
 
       // ── Init ─────────────────────────────────────────────────────────────
@@ -268,6 +284,36 @@ export class DataMigrationPanelProvider {
         return;
       }
 
+      // ── Validate the profile (runs when the overview screen opens) ────────
+      // Findings belong on screen, where they can be read and acted on, not in a modal thrown
+      // up after the user has already committed to starting.
+      if (msg.command === "validate") {
+        const { sourceOrg = "", profile } = msg;
+        if (!profile) return;
+        try {
+          const srcOrg = await resolveOrgToInfo(sourceOrg || null);
+          const refMeta = new Map<string, Map<string, string[]>>();
+          for (const node of profile.nodes) {
+            if (refMeta.has(node.sobject)) continue;
+            try {
+              const desc = await describeObject(srcOrg, node.sobject);
+              const m = new Map<string, string[]>();
+              for (const f of desc.fields) if (f.referenceTo?.length) m.set(f.name, f.referenceTo);
+              refMeta.set(node.sobject, m);
+            } catch { /* the engine describes again — a describe failure must not block the screen */ }
+          }
+          const unmapped = findUnmappedLookups(profile.nodes, refMeta);
+          panel.webview.postMessage({
+            command: "validated",
+            unmapped,
+            missingObjects: [...new Set(unmapped.flatMap((u) => u.referenceTo))].sort()
+          });
+        } catch (e) {
+          panel.webview.postMessage({ command: "validated", unmapped: [], missingObjects: [], error: e instanceof Error ? e.message : String(e) });
+        }
+        return;
+      }
+
       // ── Run migration ─────────────────────────────────────────────────────
       if (msg.command === "runMigration") {
         const { sourceOrg = "", targetOrg = "", profile } = msg;
@@ -293,38 +339,9 @@ export class DataMigrationPanelProvider {
             resolveOrgToInfo(targetOrg || null)
           ]);
 
-          // Validate BEFORE writing: a lookup pointing at an object that isn't in the migration
-          // will land empty, and the only fix is to include that object — so ask now, not after.
-          const refMeta = new Map<string, Map<string, string[]>>();
-          for (const node of profile.nodes) {
-            if (refMeta.has(node.sobject)) continue;
-            try {
-              const desc = await describeObject(srcOrg, node.sobject);
-              const m = new Map<string, string[]>();
-              for (const f of desc.fields) if (f.referenceTo?.length) m.set(f.name, f.referenceTo);
-              refMeta.set(node.sobject, m);
-            } catch { /* described again by the engine — don't block on a describe failure */ }
-          }
-          const unmapped = findUnmappedLookups(profile.nodes, refMeta);
-          if (unmapped.length) {
-            const missing = [...new Set(unmapped.flatMap((u) => u.referenceTo))].sort();
-            const detail = unmapped
-              .slice(0, 12)
-              .map((u) => `• ${u.sobject}.${u.field} → ${u.referenceTo.join("/")}`)
-              .join("\n");
-            const choice = await vscode.window.showWarningMessage(
-              `${unmapped.length} lookup field(s) can't be preserved — the object they point at isn't in this migration, so they will be left empty.`,
-              {
-                modal: true,
-                detail: `${detail}${unmapped.length > 12 ? `\n… and ${unmapped.length - 12} more` : ""}\n\nAdd to the migration to keep these links: ${missing.join(", ")}`
-              },
-              "Migrate anyway (links left empty)"
-            );
-            if (choice !== "Migrate anyway (links left empty)") {
-              panel.webview.postMessage({ command: "migrationError", error: "Migration cancelled — add the missing objects to preserve the lookups." });
-              return;
-            }
-          }
+          // Validation already ran on the overview screen (the `validate` command) and its
+          // findings are on display there — re-asking in a modal at this point would be telling
+          // the user something they just read and acted on by pressing Start.
           const retryOpts = msg.retry
             ? { retryOnly: msg.retry.retryOnly, priorIdMaps: msg.retry.priorIdMaps }
             : undefined;
@@ -346,18 +363,15 @@ export class DataMigrationPanelProvider {
             targetInstanceUrl: tgtOrg.instanceUrl
           });
 
-          // Revert on failure — opt-in, and always confirmed: this DELETES and OVERWRITES
-          // records in the target org. Only rows this run created or changed are ever touched.
+          // Revert on failure. Ticking the box IS the decision — asking again at the moment it
+          // fires would make the setting mean nothing.
           if (msg.revertOnFail && failedTotal > 0 && counts.inserted + counts.restorable > 0) {
-            const choice = await vscode.window.showWarningMessage(
-              `Migration had ${failedTotal} failed record(s). Undo this run in ${targetOrg}?`,
-              { modal: true, detail: revertDetail(counts) },
-              "Revert this run"
+            Logger.info(
+              `Revert on failure: ${failedTotal} record(s) failed — undoing the run ` +
+              `(${counts.inserted} to delete, ${counts.restorable} to restore).`
             );
-            if (choice === "Revert this run") {
-              lastRun = null; // consumed — the journal describes a state that no longer exists
-              await performRevert(panel, tgtOrg, order, journal, targetOrg);
-            }
+            lastRun = null; // consumed — the journal describes a state that no longer exists
+            await performRevert(panel, tgtOrg, order, journal, targetOrg);
           }
         } catch (e) {
           const err = e instanceof Error ? e.message : String(e);
@@ -373,20 +387,31 @@ export class DataMigrationPanelProvider {
           panel.webview.postMessage({ command: "revertError", error: "Nothing to revert — no migration has run in this panel." });
           return;
         }
-        const counts = countJournal(lastRun.journal);
+        // A selection narrows the journal to the records the user ticked; no selection means the
+        // whole run. Filtering the journal (rather than passing Ids through) keeps the guarantee
+        // that a revert can only touch rows this run actually wrote.
+        const picked = filterJournal(lastRun.journal, msg.selection ?? null);
+        const counts = countJournal(picked);
         if (counts.inserted + counts.restorable === 0) {
-          panel.webview.postMessage({ command: "revertError", error: "Nothing to revert — this run changed no records." });
+          panel.webview.postMessage({ command: "revertError", error: "Nothing selected to revert." });
           return;
         }
+        const partial = msg.selection ? countJournal(lastRun.journal) : null;
+        const isPartial = !!partial && (partial.inserted !== counts.inserted || partial.restorable !== counts.restorable);
         const choice = await vscode.window.showWarningMessage(
-          `Undo the last migration into ${lastRun.org}?`,
+          isPartial
+            ? `Undo the selected records from the last migration into ${lastRun.org}?`
+            : `Undo the last migration into ${lastRun.org}?`,
           { modal: true, detail: revertDetail(counts) },
-          "Revert this run"
+          isPartial ? "Revert selected" : "Revert this run"
         );
-        if (choice !== "Revert this run") return;
+        if (!choice) return;
         const run = lastRun;
-        lastRun = null; // a revert is not repeatable — the journal describes a state that's now gone
-        await performRevert(panel, run.orgInfo, run.order, run.journal, run.org);
+        // A partial revert leaves the rest of the run in place, so the journal is still valid for
+        // it — drop only what was just undone. A full revert consumes the journal entirely.
+        const remaining = isPartial ? subtractJournal(run.journal, picked) : null;
+        lastRun = remaining ? { ...run, journal: remaining } : null;
+        await performRevert(panel, run.orgInfo, run.order, picked, run.org, remaining);
         return;
       }
 
@@ -626,10 +651,26 @@ body { font-family: var(--vscode-font-family); font-size: 13px; color: var(--vsc
 .global-error { padding: 10px 12px; border-radius: 3px; border-left: 3px solid var(--vscode-errorForeground); background: color-mix(in srgb, var(--vscode-errorForeground) 10%, transparent); font-size: 12px; color: var(--vscode-errorForeground); display: none; }
 .global-error.visible { display: block; }
 
+/* ── Pre-run validation, shown on the overview screen ── */
+.valid-card { margin-top: 12px; border-radius: 8px; padding: 10px 14px; font-size: 12px; border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border)); }
+.valid-card.checking { color: var(--vscode-descriptionForeground); display: flex; align-items: center; gap: 8px; }
+.valid-card.ok { color: var(--vscode-charts-green, #3fb950); border-left: 3px solid var(--vscode-charts-green, #3fb950); }
+.valid-card.warn { border-left: 3px solid var(--vscode-editorWarning-foreground, #cca700); background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 8%, transparent); }
+.valid-title { font-weight: 700; color: var(--vscode-editorWarning-foreground, #cca700); }
+.valid-sub { color: var(--vscode-descriptionForeground); margin-top: 2px; line-height: 1.5; }
+.valid-list { margin: 6px 0 0; padding-left: 18px; line-height: 1.7; }
+.valid-list code { font-family: var(--vscode-editor-font-family, monospace); }
+.valid-fix { margin-top: 6px; color: var(--vscode-descriptionForeground); }
+
 /* ── Overwritten-records table (what a revert would put back) ── */
 .changes-card { margin-top: 14px; border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border)); border-radius: 8px; background: var(--vscode-editorWidget-background, var(--vscode-input-background)); overflow: hidden; }
 .changes-head { display: flex; align-items: center; gap: 8px; padding: 10px 14px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
 .changes-head .sub { flex: 1; font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--vscode-descriptionForeground); }
+table.changes th.pick, table.changes td.pick { width: 28px; text-align: center; padding-left: 8px; padding-right: 0; }
+table.changes .pick input { margin: 0; cursor: pointer; }
+.diff-line { padding: 1px 0; white-space: nowrap; }
+.diff-field { color: var(--vscode-descriptionForeground); }
+.diff-none { color: var(--vscode-descriptionForeground); font-style: italic; }
 .changes-scroll { max-height: 380px; overflow: auto; }
 table.changes { width: 100%; border-collapse: collapse; font-size: 11px; }
 table.changes th { position: sticky; top: 0; text-align: left; font-weight: 600; padding: 6px 10px; background: var(--vscode-editorWidget-background, var(--vscode-input-background)); border-bottom: 1px solid var(--vscode-widget-border, var(--vscode-panel-border)); white-space: nowrap; }
@@ -841,6 +882,7 @@ table.changes .st-failed { color: var(--vscode-errorForeground); }
   </div>
   <div class="run-area" id="run-area">
     <div id="run-overview" class="run-overview"></div>
+    <div id="validation-panel"></div>
     <div class="global-error" id="global-error"></div>
     <div id="progress-list"></div>
     <div id="changes-table"></div>
@@ -920,6 +962,51 @@ function goToRun()   {
   if (!rootSObject) return;
   prepareRunPage();
   showPage(3);
+  requestValidation();
+}
+
+/**
+ * Validate on arrival at the overview, so problems are visible while there is still time to go
+ * back and fix them — not raised in a modal once the user has already pressed Start.
+ */
+function requestValidation() {
+  var host = safeGet('validation-panel');
+  var profile = buildProfile();
+  var srcOrg = safeGet('src-org') && safeGet('src-org').value;
+  if (!host || !profile || !srcOrg) return;
+  host.innerHTML = '<div class="valid-card checking"><span class="spinner"></span> Checking lookups…</div>';
+  post({ command: 'validate', sourceOrg: srcOrg, profile: profile });
+}
+
+function renderValidation(d) {
+  var host = safeGet('validation-panel');
+  if (!host) return;
+  if (d.error) {
+    host.innerHTML = '<div class="valid-card warn">⚠ Could not validate: ' + escHtml(d.error) +
+                     ' — the migration can still run.</div>';
+    return;
+  }
+  var unmapped = d.unmapped || [];
+  if (!unmapped.length) {
+    host.innerHTML = '<div class="valid-card ok">✅ Validation passed — every lookup in this selection can be re-linked.</div>';
+    return;
+  }
+  var html = '<div class="valid-card warn">';
+  html += '<div class="valid-title">⚠ ' + unmapped.length + ' lookup field(s) will be left empty</div>';
+  html += '<div class="valid-sub">The object each one points at is not part of this migration, and a source Id never resolves in the target org.</div>';
+  html += '<ul class="valid-list">';
+  unmapped.forEach(function(u) {
+    html += '<li><code>' + escHtml(u.sobject) + '.' + escHtml(u.field) + '</code> → ' +
+            escHtml((u.referenceTo || []).join(' / ')) + '</li>';
+  });
+  html += '</ul>';
+  if ((d.missingObjects || []).length) {
+    html += '<div class="valid-fix">↳ Add ' + d.missingObjects.map(escHtml).join(', ') +
+            ' on the Object Tree screen to keep ' + (unmapped.length > 1 ? 'these links' : 'this link') +
+            ', or start the migration to accept them as empty.</div>';
+  }
+  html += '</div>';
+  host.innerHTML = html;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -1769,13 +1856,27 @@ function recordCell(id) {
   return '<a href="' + escHtml(targetInstanceUrl) + '/' + escHtml(id) + '" title="Open in the target org">' + escHtml(id) + '</a>';
 }
 
+/** The field-by-field diff for one overwritten record, one "field was → now" line each. */
+function diffCell(entry) {
+  var out = '';
+  Object.keys(entry.after || {}).forEach(function(f) {
+    var before = (entry.before || {})[f];
+    var after = (entry.after || {})[f];
+    if (fmtVal(before) === fmtVal(after)) return;   // the write did not change this one
+    out += '<div class="diff-line"><span class="diff-field">' + escHtml(f) + '</span> ' +
+           '<span class="was">' + escHtml(fmtVal(before)) + '</span> → ' +
+           escHtml(fmtVal(after)) + '</div>';
+  });
+  return out || '<span class="diff-none">no field changed</span>';
+}
+
 /**
  * The record-level result of the run: every record created, and every record overwritten with
- * its old value beside the new one.
+ * its old value beside the new one, each with a checkbox.
  *
- * The per-object counters say how many; this says which. It is also the review surface when
- * "Revert on failure" is off — nothing was undone automatically, so the run has to be
- * inspectable in full before it is accepted.
+ * The per-object counters say how many; this says which — and which of them to undo. It is also
+ * the review surface when "Revert on failure" is off: nothing was undone automatically, so the
+ * run has to be inspectable in full before it is accepted.
  */
 function renderChangesTable(journal) {
   var host = safeGet('changes-table');
@@ -1796,12 +1897,18 @@ function renderChangesTable(journal) {
     html += '<div class="changes-card">' +
       '<div class="changes-head">Records created' +
       '<span class="sub">' + created.length + ' new record(s) in the target org. ' +
-      '"Revert this run" deletes exactly these.</span></div>' +
+      'Ticked records are the ones a revert deletes.</span>' +
+      '<span class="btn-tiny" onclick="setRevertAll(\\'ins\\', true)">All</span>' +
+      '<span class="btn-tiny" onclick="setRevertAll(\\'ins\\', false)">None</span></div>' +
       '<div class="changes-scroll"><table class="changes"><thead><tr>' +
+      '<th class="pick"><input type="checkbox" checked title="Select every created record" ' +
+      'onchange="setRevertAll(\\'ins\\', this.checked)"></th>' +
       '<th>Object</th><th>Source Id</th><th>New record</th><th>Status</th>' +
       '</tr></thead><tbody>';
     created.slice(0, CHANGES_ROW_LIMIT).forEach(function(r) {
       html += '<tr>' +
+        '<td class="pick"><input type="checkbox" class="rv rv-ins" checked ' +
+          'data-obj="' + escHtml(r.sobject) + '" data-id="' + escHtml(r.id) + '" onchange="updateRevertBtn()"></td>' +
         '<td>' + escHtml(r.sobject) + '</td>' +
         '<td>' + escHtml(r.srcId || '—') + '</td>' +
         '<td>' + recordCell(r.id) + '</td>' +
@@ -1811,61 +1918,103 @@ function renderChangesTable(journal) {
     html += '</tbody></table></div>';
     if (created.length > CHANGES_ROW_LIMIT) {
       html += '<div class="changes-more">Showing the first ' + CHANGES_ROW_LIMIT + ' of ' +
-              created.length + ' records. A revert still covers all of them.</div>';
+              created.length + ' records — the rest are reverted with them unless you deselect here.</div>';
     }
     html += '</div>';
   }
 
   // ── Overwritten records (upsert only — an insert overwrites nothing) ──────
-  var rows = [];
-  var recordCount = 0;
+  // One row per RECORD, not per field: a record is the unit a revert acts on, so it has to be
+  // the unit you can tick.
+  var updated = [];
   Object.keys(journal.updated || {}).forEach(function(sobject) {
-    (journal.updated[sobject] || []).forEach(function(e) {
-      recordCount++;
-      // A field is only worth a row if the write actually changed it.
-      Object.keys(e.after || {}).forEach(function(f) {
-        var before = (e.before || {})[f];
-        var after = (e.after || {})[f];
-        if (fmtVal(before) === fmtVal(after)) return;
-        rows.push({ sobject: sobject, id: e.id, srcId: e.srcId, field: f,
-                    before: before, after: after, status: e.status, message: e.message });
-      });
-    });
+    (journal.updated[sobject] || []).forEach(function(e) { updated.push({ sobject: sobject, e: e }); });
   });
-  if (rows.length) {
+  if (updated.length) {
+    var restorable = updated.filter(function(u) { return u.e.status === 'updated'; }).length;
     html += '<div class="changes-card">' +
       '<div class="changes-head">Records overwritten' +
-      '<span class="sub">' + recordCount + ' existing record(s) updated — ' + rows.length +
-      ' field change(s). "Revert this run" restores the previous values.</span></div>' +
+      '<span class="sub">' + updated.length + ' existing record(s) written to, ' + restorable +
+      ' restorable. Ticked records are put back to their previous values.</span>' +
+      '<span class="btn-tiny" onclick="setRevertAll(\\'upd\\', true)">All</span>' +
+      '<span class="btn-tiny" onclick="setRevertAll(\\'upd\\', false)">None</span></div>' +
       '<div class="changes-scroll"><table class="changes"><thead><tr>' +
-      '<th>Object</th><th>Record</th><th>Field</th><th>Was</th><th>Now</th><th>Status</th>' +
+      '<th class="pick"><input type="checkbox" checked title="Select every restorable record" ' +
+      'onchange="setRevertAll(\\'upd\\', this.checked)"></th>' +
+      '<th>Object</th><th>Record</th><th>Changes (was → now)</th><th>Status</th>' +
       '</tr></thead><tbody>';
-    rows.slice(0, CHANGES_ROW_LIMIT).forEach(function(r) {
+    updated.slice(0, CHANGES_ROW_LIMIT).forEach(function(u) {
+      var failed = u.e.status === 'failed';
       html += '<tr>' +
-        '<td>' + escHtml(r.sobject) + '</td>' +
-        '<td>' + recordCell(r.id) + '</td>' +
-        '<td>' + escHtml(r.field) + '</td>' +
-        '<td class="was">' + escHtml(fmtVal(r.before)) + '</td>' +
-        '<td>' + escHtml(fmtVal(r.after)) + '</td>' +
-        '<td class="' + (r.status === 'failed' ? 'st-failed' : 'st-updated') + '">' +
-          escHtml(r.status === 'failed' ? ('failed — ' + (r.message || '')) : 'updated') + '</td>' +
+        '<td class="pick">' + (failed ? '' :
+          '<input type="checkbox" class="rv rv-upd" checked data-obj="' + escHtml(u.sobject) +
+          '" data-id="' + escHtml(u.e.id) + '" onchange="updateRevertBtn()">') + '</td>' +
+        '<td>' + escHtml(u.sobject) + '</td>' +
+        '<td>' + recordCell(u.e.id) + '</td>' +
+        '<td>' + diffCell(u.e) + '</td>' +
+        '<td class="' + (failed ? 'st-failed' : 'st-updated') + '">' +
+          escHtml(failed ? ('failed — ' + (u.e.message || '')) : 'updated') + '</td>' +
         '</tr>';
     });
     html += '</tbody></table></div>';
-    if (rows.length > CHANGES_ROW_LIMIT) {
-      html += '<div class="changes-more">Showing the first ' + CHANGES_ROW_LIMIT + ' of ' + rows.length +
-              ' field changes. A revert still covers all of them.</div>';
+    if (updated.length > CHANGES_ROW_LIMIT) {
+      html += '<div class="changes-more">Showing the first ' + CHANGES_ROW_LIMIT + ' of ' +
+              updated.length + ' records — the rest are reverted with them unless you deselect here.</div>';
     }
     html += '</div>';
   }
 
   host.innerHTML = html;
+  updateRevertBtn();
+}
+
+/** Tick or untick every row in one of the two tables. */
+function setRevertAll(kind, checked) {
+  var boxes = document.querySelectorAll('.rv-' + kind);
+  for (var i = 0; i < boxes.length; i++) boxes[i].checked = checked;
+  updateRevertBtn();
+}
+
+/** The records currently ticked, grouped the way the revert wants them. */
+function revertSelection() {
+  var sel = { inserted: {}, updated: {} };
+  var boxes = document.querySelectorAll('.rv');
+  for (var i = 0; i < boxes.length; i++) {
+    var b = boxes[i];
+    if (!b.checked) continue;
+    var bucket = b.classList.contains('rv-ins') ? sel.inserted : sel.updated;
+    var obj = b.getAttribute('data-obj');
+    (bucket[obj] = bucket[obj] || []).push(b.getAttribute('data-id'));
+  }
+  return sel;
+}
+
+function selectionCount(sel) {
+  var n = 0;
+  ['inserted', 'updated'].forEach(function(k) {
+    Object.keys(sel[k]).forEach(function(o) { n += sel[k][o].length; });
+  });
+  return n;
+}
+
+/** Keep the button honest about how many records it would actually touch. */
+function updateRevertBtn() {
+  var btn = safeGet('revert-run-btn');
+  if (!btn || btn.style.display === 'none') return;
+  var total = document.querySelectorAll('.rv').length;
+  var n = selectionCount(revertSelection());
+  btn.disabled = n === 0;
+  btn.textContent = (n && n === total) ? '↩ Revert this run' : '↩ Revert ' + n + ' selected';
 }
 
 function revertRun() {
+  var sel = revertSelection();
+  if (!selectionCount(sel)) return;
   var btn = safeGet('revert-run-btn');
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Reverting…'; }
-  post({ command: 'revertRun' });
+  // Always send the selection — the host filters the journal by it, so a partial revert leaves
+  // the rest of the run untouched and still undoable.
+  post({ command: 'revertRun', selection: sel });
 }
 
 function retryFailed() {
@@ -2002,6 +2151,11 @@ window.addEventListener('message', function(ev) {
     return;
   }
 
+  if (d.command === 'validated') {
+    renderValidation(d);
+    return;
+  }
+
   if (d.command === 'migrationStarted') {
     safeGet('run-status-label') && (safeGet('run-status-label').textContent = 'Migration running…');
     return;
@@ -2025,7 +2179,8 @@ window.addEventListener('message', function(ev) {
       rbtn.disabled = false;
       rbtn.textContent = '↩ Revert this run';
       rbtn.title = 'Delete ' + c.inserted + ' created record(s) and restore ' + c.restorable +
-                   ' overwritten record(s) to their previous values. Nothing else is touched.';
+                   ' overwritten record(s) to their previous values. Untick rows below to revert only some.';
+      updateRevertBtn(); // the button was hidden while the tables rendered
     }
     return;
   }
@@ -2046,9 +2201,16 @@ window.addEventListener('message', function(ev) {
 
   if (d.command === 'revertComplete') {
     var rb = safeGet('revert-run-btn');
-    if (rb) { rb.style.display = 'none'; rb.disabled = false; }
-    lastJournal = null;
-    safeGet('changes-table') && (safeGet('changes-table').innerHTML = '');
+    // A partial revert leaves the unselected records in the org — they stay listed and undoable.
+    lastJournal = d.remaining || null;
+    if (lastJournal) {
+      renderChangesTable(lastJournal);
+      if (rb) { rb.disabled = false; }
+      updateRevertBtn();
+    } else {
+      if (rb) { rb.style.display = 'none'; rb.disabled = false; }
+      safeGet('changes-table') && (safeGet('changes-table').innerHTML = '');
+    }
     safeGet('run-status-label') && (safeGet('run-status-label').textContent =
       (d.failed ? '⚠' : '↩') + ' Reverted — deleted ' + (d.deleted || 0) + ', restored ' + (d.restored || 0) +
       (d.failed ? ', ' + d.failed + ' could not be undone' : ''));
