@@ -45,7 +45,9 @@ export class ErrorPanelProvider {
             });
         }
         const panel = ErrorPanelProvider._panel;
-        panel.title = report.counts.errors > 1 ? `Errors (${report.counts.errors})` : "Error";
+        // Name the tab after what failed. "Error" says nothing once there are other tabs open,
+        // and the panel is reused for every operation — "Push failed" is what you look for.
+        panel.title = report.title || "Error";
         panel.webview.html = ErrorPanelProvider.getHtml(panel.webview, report, org, !!onRetry);
         panel.reveal(column, false);
     }

@@ -42,16 +42,20 @@ export function reportError(opts: ReportErrorOptions): void {
     Logger.error(`${opts.operation} failed`, opts.error);
     DeployLog.line(`${opts.operation} failed:\n${raw}`);
 
+    // The notification leads to the interpreted panel, never to the log. The log still has the
+    // full payload and the panel shows the original alongside the interpretation, so sending
+    // someone to raw output was offering the worse of the two views.
     if (opts.openPanel === false) {
-        vscode.window.showErrorMessage(`${opts.operation} failed.`, "Show details", "View Log").then((pick) => {
+        vscode.window.showErrorMessage(`${opts.operation} failed.`, "Show details").then((pick) => {
             if (pick === "Show details") ErrorPanelProvider.show(report, opts.org, opts.retry);
-            else if (pick === "View Log") DeployLog.show();
         });
         return;
     }
 
     ErrorPanelProvider.show(report, opts.org, opts.retry);
-    vscode.window.showErrorMessage(`${opts.operation} failed — opened the Error panel.`, "View Raw Log").then((pick) => {
-        if (pick === "View Raw Log") DeployLog.show();
+    // The panel is already open; the action brings it back if it was dismissed or is behind
+    // other tabs.
+    vscode.window.showErrorMessage(`${opts.operation} failed.`, "Show details").then((pick) => {
+        if (pick === "Show details") ErrorPanelProvider.show(report, opts.org, opts.retry);
     });
 }
