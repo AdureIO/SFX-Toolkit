@@ -32,6 +32,7 @@ import {
   type OrgInfo
 } from "../utils/dataMigration";
 import { toApexParts, toCsvExports, toJsonExport, APEX_CONSOLE_MAX_CHARS, type ExportFieldMeta } from "../utils/migrationExport";
+import { listPresets, presetDirs, presetPath, type PresetScope } from "../utils/migrationPresets";
 import { Telemetry } from "../utils/telemetry";
 import { confirmProductionOrgOperation } from "../utils/orgSafety";
 
@@ -569,42 +570,93 @@ export class DataMigrationPanelProvider {
         return;
       }
 
-      // ── Save profile ──────────────────────────────────────────────────────
+      // ── Save preset ───────────────────────────────────────────────────────
       if (msg.command === "saveProfile") {
         const { profile, name = "migration" } = msg;
         if (!profile) return;
-        const safeName = (name || "migration").replace(/[^a-zA-Z0-9_-]/g, "_");
-        const defaultPath = path.join(workspaceRoot, ".sfdx", "asfx", `${safeName}.migration.json`);
-        const uri = await vscode.window.showSaveDialog({
-          defaultUri: vscode.Uri.file(defaultPath),
-          filters: { "Migration profile": ["json"] },
-          title: "Save Migration Profile"
+        const dirs = presetDirs(workspaceRoot);
+
+        const presetName = await vscode.window.showInputBox({
+          title: "Save migration preset",
+          prompt: "Name for this preset",
+          value: name || profile.rootSObject || "migration",
+          validateInput: (v) => (v && v.trim() ? null : "A name is required")
         });
-        if (!uri) return;
+        if (!presetName) return;
+
+        // Project vs global is a real choice, not a default: a preset naming this project's
+        // objects and fields belongs with its source; a way of working belongs to the user.
+        const scopePick = await vscode.window.showQuickPick(
+          [
+            { label: "$(root-folder) This project", detail: dirs.project, scope: "project" as PresetScope },
+            { label: "$(globe) Global", detail: `${dirs.global} — available in every project on this machine`, scope: "global" as PresetScope }
+          ],
+          { title: `Where should "${presetName.trim()}" be saved?`, placeHolder: "Preset location" }
+        );
+        if (!scopePick) return;
+
+        const target = presetPath(scopePick.scope === "project" ? dirs.project : dirs.global, presetName.trim());
         try {
-          saveProfile(profile, uri.fsPath);
-          panel.webview.postMessage({ command: "profileSaved", filePath: uri.fsPath, fileName: path.basename(uri.fsPath) });
-          vscode.window.showInformationMessage(`Migration profile saved: ${path.basename(uri.fsPath)}`);
+          if (fs.existsSync(target)) {
+            const overwrite = await vscode.window.showWarningMessage(
+              `"${path.basename(target)}" already exists in ${scopePick.scope === "project" ? "this project" : "your global presets"}.`,
+              { modal: true }, "Overwrite"
+            );
+            if (overwrite !== "Overwrite") return;
+          }
+          saveProfile({ ...profile, name: presetName.trim() }, target);
+          panel.webview.postMessage({
+            command: "profileSaved", filePath: target, fileName: presetName.trim(), scope: scopePick.scope
+          });
+          vscode.window.showInformationMessage(
+            `Preset "${presetName.trim()}" saved ${scopePick.scope === "project" ? "in this project" : "globally"}.`
+          );
         } catch (e) {
-          vscode.window.showErrorMessage(`Could not save profile: ${e instanceof Error ? e.message : String(e)}`);
+          vscode.window.showErrorMessage(`Could not save preset: ${e instanceof Error ? e.message : String(e)}`);
         }
         return;
       }
 
-      // ── Load profile ──────────────────────────────────────────────────────
+      // ── Load preset ───────────────────────────────────────────────────────
       if (msg.command === "loadProfile") {
-        const uris = await vscode.window.showOpenDialog({
-          canSelectMany: false,
-          filters: { "Migration profile": ["json"] },
-          title: "Load Migration Profile",
-          defaultUri: vscode.Uri.file(path.join(workspaceRoot, ".sfdx", "asfx"))
+        const dirs = presetDirs(workspaceRoot);
+        const legacyDir = path.join(workspaceRoot, ".sfdx", "asfx");
+        const presets = listPresets(dirs, legacyDir);
+
+        const BROWSE = "$(folder-opened) Browse for a file…";
+        const picks: Array<vscode.QuickPickItem & { filePath?: string }> = presets.map((p) => ({
+          label: p.name,
+          description: p.scope === "project" ? "$(root-folder) project" : "$(globe) global",
+          detail: p.filePath,
+          filePath: p.filePath
+        }));
+        picks.push({ label: BROWSE, alwaysShow: true });
+
+        const chosen = await vscode.window.showQuickPick(picks, {
+          title: presets.length ? "Load migration preset" : "No saved presets yet",
+          placeHolder: presets.length ? "Pick a preset" : "Browse for a migration file"
         });
-        if (!uris?.length) return;
+        if (!chosen) return;
+
+        let filePath = chosen.filePath;
+        if (!filePath) {
+          const uris = await vscode.window.showOpenDialog({
+            canSelectMany: false,
+            filters: { "Migration preset": ["json"] },
+            title: "Load Migration Preset",
+            defaultUri: vscode.Uri.file(dirs.project)
+          });
+          if (!uris?.length) return;
+          filePath = uris[0].fsPath;
+        }
+
         try {
-          const profile = loadProfileFromFile(uris[0].fsPath);
-          panel.webview.postMessage({ command: "profileLoaded", profile, fileName: path.basename(uris[0].fsPath) });
+          const profile = loadProfileFromFile(filePath);
+          panel.webview.postMessage({
+            command: "profileLoaded", profile, fileName: profile.name || path.basename(filePath)
+          });
         } catch (e) {
-          vscode.window.showErrorMessage(`Could not load profile: ${e instanceof Error ? e.message : String(e)}`);
+          vscode.window.showErrorMessage(`Could not load preset: ${e instanceof Error ? e.message : String(e)}`);
         }
         return;
       }
@@ -801,6 +853,8 @@ body { font-family: var(--vscode-font-family); font-size: 13px; color: var(--vsc
 .global-error { padding: 10px 12px; border-radius: 3px; border-left: 3px solid var(--vscode-errorForeground); background: color-mix(in srgb, var(--vscode-errorForeground) 10%, transparent); font-size: 12px; color: var(--vscode-errorForeground); display: none; }
 .global-error.visible { display: block; }
 
+.tree-status { padding: 7px 12px; font-size: 11px; color: var(--vscode-descriptionForeground); border-bottom: 1px solid var(--vscode-panel-border); }
+.tree-status.warn { color: var(--vscode-editorWarning-foreground, #cca700); background: color-mix(in srgb, var(--vscode-editorWarning-foreground, #cca700) 8%, transparent); }
 .no-target { padding: 5px 0; font-size: 12px; color: var(--vscode-descriptionForeground); font-style: italic; }
 .run-type { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; padding: 3px 8px; border-radius: 999px; background: color-mix(in srgb, var(--vscode-foreground) 10%, transparent); color: var(--vscode-descriptionForeground); }
 
@@ -1016,7 +1070,7 @@ table.changes .st-failed { color: var(--vscode-errorForeground); }
 
       <div class="btn-row">
         <button class="btn-primary" id="configure-btn" onclick="goToTree()" disabled>Configure objects &amp; fields →</button>
-        <button class="btn-secondary" onclick="loadProfile()">📂 Load Profile</button>
+        <button class="btn-secondary" onclick="loadProfile()">📂 Load preset</button>
       </div>
 
       <div id="loaded-profile-bar" style="display:none; font-size:11px; color:var(--vscode-descriptionForeground);">
@@ -1033,9 +1087,10 @@ table.changes .st-failed { color: var(--vscode-errorForeground); }
   <div class="tree-toolbar">
     <button class="btn-secondary" onclick="goToSetup()">← Setup</button>
     <span class="profile-name" id="tree-title">Object tree</span>
-    <button class="btn-secondary" onclick="saveProfile()">💾 Save Profile</button>
+    <button class="btn-secondary" onclick="saveProfile()">💾 Save preset</button>
     <button class="btn-primary" id="run-btn" onclick="goToRun()">Overview →</button>
   </div>
+  <div class="tree-status" id="tree-status" style="display:none;"></div>
   <div class="tree-area" id="tree-area">
     <div style="padding:20px; color:var(--vscode-descriptionForeground); font-size:12px;">Discovering relationships…</div>
   </div>
@@ -1102,6 +1157,8 @@ var targetInstanceUrl = '';       // target org base URL, so a new record Id lin
 var sourceInstanceUrl = '';       // source org base URL, for the source Ids in the result table
 var lastFailed = {};              // sobject -> [srcId, …] that failed in the last run
 var lastResults = [];             // the last run's per-object results, so a revert can amend them
+var presetPending = 0;            // objects still being described after loading a preset
+var presetGaps = [];              // what the preset asked for that the org no longer has
 
 /*
   NodeState {
@@ -1741,6 +1798,38 @@ function redescribeSelected() {
   var names = Object.keys(nodes || {});
   if (!names.length) return;
   names.forEach(function(sobject) { requestDescribeChild(sobject); });
+}
+
+/** A short line above the tree while a preset is being reconciled with the org. */
+function setStatus2(text) {
+  var el = safeGet('tree-status');
+  if (!el) return;
+  el.textContent = text || '';
+  el.style.display = text ? '' : 'none';
+  el.className = 'tree-status';
+}
+
+/**
+ * Every object of a loaded preset has been described.
+ *
+ * A preset is a set of names; the org is the authority on what those names still mean. Anything
+ * the preset asked for that is no longer there is reported rather than quietly dropped — a
+ * migration that silently runs with fewer fields than it was saved with is the failure mode
+ * worth avoiding.
+ */
+function finishPresetLoad() {
+  presetPending = 0;
+  renderTree();
+  if (!presetGaps.length) {
+    setStatus2('');
+    return;
+  }
+  var el = safeGet('tree-status');
+  if (el) {
+    el.textContent = '⚠ Not everything in this preset is still available — ' + presetGaps.join(' · ');
+    el.style.display = '';
+    el.className = 'tree-status warn';
+  }
 }
 
 function requestDescribeChild(sobject) {
@@ -2465,11 +2554,35 @@ window.addEventListener('message', function(ev) {
       node.described = true;
       node.describeLoading = false;
       node.label = d.label || d.sobject;
-      node.fields = (d.fields || []).map(function(f) { return Object.assign({}, f, {included: true}); });
+      // A preset carries only field NAMES. The real definitions — types, external Id flags,
+      // what the target org will accept — come from the describe, so the saved selection is
+      // applied on top of it rather than standing in for it.
+      var wanted = node.pendingIncludeFields
+        ? node.pendingIncludeFields.reduce(function(m, n) { m[String(n).toLowerCase()] = true; return m; }, {})
+        : null;
+      node.fields = (d.fields || []).map(function(f) {
+        return Object.assign({}, f, { included: wanted ? !!wanted[f.name.toLowerCase()] : true });
+      });
       node.excludedFields = d.excludedFields || [];
       node.externalIdFields = d.externalIdFields || [];
       node.childRelationships = d.childRelationships || [];
       node.expanded = true;
+      if (wanted) {
+        // A field the preset asked for that the describe does not offer is worth saying out loud:
+        // it was deleted, renamed, or the target org cannot accept it.
+        var missing = node.pendingIncludeFields.filter(function(n) {
+          return !(d.fields || []).some(function(f) { return f.name.toLowerCase() === String(n).toLowerCase(); });
+        });
+        if (missing.length) presetGaps.push(d.sobject + ': ' + missing.join(', '));
+        node.pendingIncludeFields = null;
+        // The external Id is only valid if the org still has it.
+        if (node.externalIdField && !(node.externalIdFields || []).some(function(f) { return f.name === node.externalIdField; })) {
+          presetGaps.push(d.sobject + ': upsert key ' + node.externalIdField + ' is not available');
+          node.externalIdField = null;
+        }
+        presetPending--;
+        if (presetPending <= 0) finishPresetLoad();
+      }
     }
     renderTree();
     return;
@@ -2477,7 +2590,20 @@ window.addEventListener('message', function(ev) {
 
   if (d.command === 'describeChildError') {
     var node2 = nodes[d.sobject];
-    if (node2) { node2.describeLoading = false; }
+    if (node2) {
+      node2.describeLoading = false;
+      if (node2.pendingIncludeFields) {
+        // The describe failed, so the preset's field names are all we have for this object.
+        node2.fields = node2.pendingIncludeFields.map(function(fn) {
+          return { name: fn, label: fn, type: '', included: true, externalId: false };
+        });
+        node2.described = true;
+        node2.pendingIncludeFields = null;
+        presetGaps.push(d.sobject + ': could not be described — its fields are unverified');
+        presetPending--;
+        if (presetPending <= 0) finishPresetLoad();
+      }
+    }
     renderTree();
     return;
   }
@@ -2587,9 +2713,10 @@ window.addEventListener('message', function(ev) {
   if (d.command === 'profileLoaded') {
     var profile = d.profile;
     if (!profile || !profile.rootSObject || !profile.nodes) return;
-    // Rebuild nodes from profile
     rootSObject = profile.rootSObject;
     nodes = {};
+    presetGaps = [];
+    presetPending = profile.nodes.length;
     profile.nodes.forEach(function(nodeConfig) {
       nodes[nodeConfig.sobject] = {
         sobject: nodeConfig.sobject,
@@ -2597,15 +2724,14 @@ window.addEventListener('message', function(ev) {
         parentSObject: nodeConfig.parentSObject,
         lookupField: nodeConfig.lookupField,
         count: -1, included: true, expanded: true,
-        described: nodeConfig.includeFields && nodeConfig.includeFields.length > 0,
-        describeLoading: false,
-        fields: (nodeConfig.includeFields || []).map(function(fn) {
-          return { name: fn, label: fn, type: '', included: true, externalId: false };
-        }),
-        externalIdFields: nodeConfig.externalIdField
-          ? [{ name: nodeConfig.externalIdField, type: 'string' }]
-          : [],
+        // Not described yet — the preset stores field NAMES, and everything the tree needs to be
+        // usable (types, external Ids, child relationships) has to come from the org.
+        described: false, describeLoading: true,
+        fields: [],
+        excludedFields: [],
+        externalIdFields: [],
         externalIdField: nodeConfig.externalIdField || null,
+        pendingIncludeFields: (nodeConfig.includeFields || []).slice(),
         childRelationships: [],
         children: []
       };
@@ -2618,8 +2744,7 @@ window.addEventListener('message', function(ev) {
         if (parent.children.indexOf(nc.sobject) < 0) parent.children.push(nc.sobject);
       }
     });
-    // Update UI — a loaded profile carries a real query, so switch to Advanced
-    // and lock the SOQL so the builder doesn't clobber it.
+    // A loaded preset carries a real query, so switch to Advanced and leave the SOQL alone.
     pendingRoot = profile.rootSObject;
     soqlManuallyEdited = true;
     if (safeGet('src-soql')) safeGet('src-soql').value = profile.sourceQuery || '';
@@ -2631,6 +2756,9 @@ window.addEventListener('message', function(ev) {
     if (loadedBar) loadedBar.style.display = '';
     var cfgL = safeGet('configure-btn'); if (cfgL) cfgL.disabled = false;
     goToTree();
+    setStatus2('Loading ' + presetPending + ' object' + (presetPending !== 1 ? 's' : '') + ' from the org…');
+    // Describe every object the preset names, against the orgs selected right now.
+    Object.keys(nodes).forEach(function(sobject) { requestDescribeChild(sobject); });
     return;
   }
 });
