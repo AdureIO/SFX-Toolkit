@@ -1101,6 +1101,7 @@ var lastJournal = null;           // what the last run changed: { inserted: {...
 var targetInstanceUrl = '';       // target org base URL, so a new record Id links straight to it
 var sourceInstanceUrl = '';       // source org base URL, for the source Ids in the result table
 var lastFailed = {};              // sobject -> [srcId, …] that failed in the last run
+var lastResults = [];             // the last run's per-object results, so a revert can amend them
 
 /*
   NodeState {
@@ -2027,6 +2028,7 @@ function updateProgressRow(progress) {
 function showMigrationResults(results) {
   var totalIns = 0, totalUpd = 0, totalFail = 0;
   lastFailed = {};
+  lastResults = results || [];
   results.forEach(function(r) {
     totalIns += r.inserted; totalUpd += r.updated; totalFail += r.failed;
     updateProgressRow({ sobject: r.sobject, phase: 'done', done: r.queried, total: r.queried, inserted: r.inserted, updated: r.updated, failed: r.failed });
@@ -2300,6 +2302,41 @@ function updateRevertBtn() {
   btn.textContent = (n && n === total) ? '↩ Revert this run' : '↩ Revert ' + n + ' selected';
 }
 
+/**
+ * Bring the per-object rows back in line with the org after a revert.
+ *
+ * The counts were written when the records existed. Leaving them saying "+12 inserted" after
+ * those twelve have been deleted is the run reporting something that is no longer true — so they
+ * are recomputed from what the revert left behind. Failures are untouched: nothing was written
+ * for them, so nothing was undone either.
+ */
+function applyRevertToResults(remaining) {
+  var totalIns = 0, totalUpd = 0, totalFail = 0, revertedObjects = 0;
+  lastResults.forEach(function(r) {
+    var stillIn = ((remaining && remaining.inserted && remaining.inserted[r.sobject]) || []).length;
+    var stillUp = ((remaining && remaining.updated && remaining.updated[r.sobject]) || [])
+      .filter(function(e) { return e.status === 'updated'; }).length;
+    var undone = (r.inserted + r.updated) > 0 && (stillIn + stillUp) === 0;
+    r.inserted = stillIn;
+    r.updated = stillUp;
+    totalIns += stillIn;
+    totalUpd += stillUp;
+    totalFail += r.failed;
+    if (undone) revertedObjects++;
+
+    var insEl = safeGet('ins-'+r.sobject); if (insEl) insEl.textContent = '+'+stillIn;
+    var updEl = safeGet('upd-'+r.sobject); if (updEl) updEl.textContent = '~'+stillUp;
+    var phEl = safeGet('ph-'+r.sobject);
+    if (phEl && undone) phEl.textContent = 'reverted';
+    var row = safeGet('pr-'+r.sobject);
+    if (row && undone) {
+      var icon = row.querySelector('.obj-progress-icon');
+      if (icon) icon.textContent = '↩';
+    }
+  });
+  return { inserted: totalIns, updated: totalUpd, failed: totalFail, revertedObjects: revertedObjects };
+}
+
 function revertRun() {
   var sel = revertSelection();
   if (!selectionCount(sel)) return;
@@ -2500,9 +2537,17 @@ window.addEventListener('message', function(ev) {
     lastJournal = d.remaining || null;
     if (lastJournal) renderChangesTable(lastJournal);
     else safeGet('changes-table') && (safeGet('changes-table').innerHTML = '');
+    var left = applyRevertToResults(lastJournal);
+    // Retry re-attempts the failed rows and links them to the parents this run created, using the
+    // Ids it recorded. A revert deleted some of those parents, so retrying now would hang records
+    // off Ids that no longer exist. Run Again is the honest next step.
+    var retryEl = safeGet('retry-failed-btn');
+    if (retryEl) retryEl.style.display = 'none';
+    lastIdMaps = {};
     safeGet('run-status-label') && (safeGet('run-status-label').textContent =
       (d.failed ? '⚠' : '↩') + ' Reverted — deleted ' + (d.deleted || 0) + ', restored ' + (d.restored || 0) +
-      (d.failed ? ', ' + d.failed + ' could not be undone' : ''));
+      (d.failed ? ', ' + d.failed + ' could not be undone' : '') +
+      ' · now +' + left.inserted + ' inserted, ~' + left.updated + ' updated, ✗' + left.failed + ' failed');
     if (d.errors && d.errors.length) {
       var geR = safeGet('global-error');
       if (geR) {
