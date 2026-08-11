@@ -1,5 +1,4 @@
 import * as vscode from "vscode";
-import { logTreeProvider } from "../providers/LogTreeProvider";
 import { outputChannel } from "../utils/outputChannel";
 import { deleteAllApexLogs } from "../utils/apexLogApi";
 
@@ -27,8 +26,6 @@ export async function deleteAllLogs() {
         const msg = e?.message ?? "Unknown error";
         outputChannel.appendLine(`deleteAllLogs: ${msg}`);
         vscode.window.showErrorMessage(`Failed to delete logs: ${msg}`);
-      } finally {
-        logTreeProvider.refresh();
       }
     }
   );

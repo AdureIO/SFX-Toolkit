@@ -18,7 +18,6 @@ import { resultsTableCss, resultsTableScript } from '../webview/resultsTableComp
 import { refreshLanguageServerSchema, setEphemeralBuffers } from '../languageClient';
 import { ApexBufferBridge } from './apexBufferBridge';
 import { Telemetry } from '../utils/telemetry';
-import { logTreeProvider } from './LogTreeProvider';
 import { onDidChangeDefaultOrg } from '../utils/defaultOrgEvents';
 
 const WORKBENCH_BUFFER = '.vscode/anon-workbench-buffer.apex';
@@ -34,7 +33,7 @@ const HISTORY_MAX = 10;
  *     configurable highlighting) and an active-traces strip.
  *   • Execute tab: a Monaco editor with org-aware completion/hover/go-to-def and
  *     a results pane, running anonymous Apex against the selected org.
- * Coexists with the sidebar Logs/Traces views and the standalone Execute panel.
+ * This is the single home for Apex logs; the sidebar keeps only the Traces view.
  */
 export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	private _view?: vscode.WebviewView;
@@ -214,7 +213,6 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 					this._post('execResult', { success: result.success, error: result.errorMessage || '', log: result.log || '', hasLog: !!(result.log && result.log.trim()) });
 					if (result.success) {
 						this._post('historyUpdated', { history: this._saveHistory(data.code || '') });
-						logTreeProvider.refresh(); // sidebar Logs list picks up the new log
 					}
 					break;
 				}

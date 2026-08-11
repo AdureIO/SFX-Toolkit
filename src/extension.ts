@@ -5,7 +5,6 @@ import { addDebugTrace } from "./commands/addDebugTrace";
 import { DeployMetadataPanelProvider } from "./providers/DeployMetadataPanelProvider";
 import { executeAnonymous, rerunLastApex } from "./commands/executeAnonymous";
 import { executeSOQL } from "./commands/executeSOQL";
-import { logTreeProvider } from "./providers/LogTreeProvider";
 import { openLogById } from "./commands/listLogs";
 import { deleteAllLogs } from "./commands/deleteAllLogs";
 import { TraceTreeProvider } from "./providers/TraceTreeProvider";
@@ -278,34 +277,7 @@ export function activate(context: vscode.ExtensionContext) {
     // 6. Execute SOQL
     const executeSOQLCmd = register("adure-sfx-toolkit.executeSOQL", executeSOQL);
 
-    // 7. Side Bar Log Provider (lists the org's Apex logs over REST via apexLogApi —
-    //    same path as the ASFX Workbench; no local files or CLI download).
-    //    Discovery is event-driven (no fixed-interval polling): the list re-fetches
-    //    the moment the view becomes visible, when the window regains focus, and right
-    //    after Apex runs — so new logs surface immediately instead of up to N seconds later.
-    const logsView = vscode.window.createTreeView("adure-sfx-toolkit.logs", { treeDataProvider: logTreeProvider });
-    context.subscriptions.push(logsView);
-    // Only discover (and live-poll while a trace is active) while the view is shown.
-    logTreeProvider.setActive(logsView.visible);
-
-    const refreshLogsCmd = register("adure-sfx-toolkit.refreshLogs", () => logTreeProvider.refresh());
-
-    context.subscriptions.push(
-      logsView.onDidChangeVisibility((e) => logTreeProvider.setActive(e.visible)),
-      vscode.window.onDidChangeWindowState((s) => { if (s.focused && logsView.visible) logTreeProvider.refresh(); })
-    );
-
-    // A new log file written by the Salesforce extensions is a cheap extra signal that
-    // the org has fresh logs — trigger a re-list (the tree itself reads from REST).
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-    if (workspaceFolder) {
-      const logWatcher = vscode.workspace.createFileSystemWatcher(
-        new vscode.RelativePattern(workspaceFolder, ".sfdx/tools/debug/logs/*.log")
-      );
-      logWatcher.onDidCreate(() => { if (logsView.visible) logTreeProvider.refresh(); });
-      context.subscriptions.push(logWatcher);
-    }
-
+    // 7. Apex logs live in the ASFX Workbench's Logs tab — there is no sidebar Logs view.
     const openLogCmd = register("adure-sfx-toolkit.openLog", async (logId: string) => {
       if (logId) {
         await openLogById(logId);
@@ -644,7 +616,6 @@ export function activate(context: vscode.ExtensionContext) {
       executeAnonCmd,
       rerunAnonCmd,
       executeSOQLCmd,
-      refreshLogsCmd,
       openLogCmd,
       deleteAllLogsCmd,
       refreshTracesCmd,

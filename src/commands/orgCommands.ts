@@ -42,7 +42,6 @@ export async function setAsDefault(item: OrgItem) {
         await notifyDefaultOrgChanged(item.orgData.username);
         vscode.window.showInformationMessage(`Set ${item.label} as default org.`);
         orgTreeProvider.refresh();
-        vscode.commands.executeCommand("adure-sfx-toolkit.refreshLogs");
         vscode.commands.executeCommand("adure-sfx-toolkit.refreshTraces");
       } catch (e: any) {
         if (e.cancelled) return;
@@ -111,7 +110,6 @@ export async function deleteOrg(item: OrgItem) {
         AuthInfo.clearCache();
         vscode.window.showInformationMessage(`${action} successful.`);
         orgTreeProvider.refresh();
-        vscode.commands.executeCommand("adure-sfx-toolkit.refreshLogs");
       } catch (e: any) {
         if (e.cancelled) return;
         vscode.window.showErrorMessage(`Failed: ${e.message}`);
@@ -241,7 +239,6 @@ export async function connectOrg() {
         AuthInfo.clearCache();
         vscode.window.showInformationMessage(`Successfully connected to ${alias}.`);
         orgTreeProvider.refresh();
-        vscode.commands.executeCommand("adure-sfx-toolkit.refreshLogs");
       } catch (e: any) {
         if (e.cancelled) return;
         vscode.window.showErrorMessage(`Connection failed: ${e.message}`);

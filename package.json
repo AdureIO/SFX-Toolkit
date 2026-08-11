@@ -82,11 +82,6 @@
         }
       },
       {
-        "command": "adure-sfx-toolkit.refreshLogs",
-        "title": "ASFXT: Refresh Logs",
-        "icon": "$(refresh)"
-      },
-      {
         "command": "adure-sfx-toolkit.openLog",
         "title": "ASFXT: Open Log"
       },
@@ -462,12 +457,6 @@
     "views": {
       "adure-sfx-toolkit-activitybar": [
         {
-          "id": "adure-sfx-toolkit.logs",
-          "name": "Logs",
-          "when": "adure-sfx-toolkit:isSalesforceProject",
-          "visibility": "collapsed"
-        },
-        {
           "id": "adure-sfx-toolkit.traces",
           "name": "Debug Traces",
           "when": "adure-sfx-toolkit:isSalesforceProject",
@@ -546,16 +535,6 @@
     ],
     "menus": {
       "view/title": [
-        {
-          "command": "adure-sfx-toolkit.refreshLogs",
-          "when": "view == adure-sfx-toolkit.logs",
-          "group": "navigation"
-        },
-        {
-          "command": "adure-sfx-toolkit.deleteAllLogs",
-          "when": "view == adure-sfx-toolkit.logs",
-          "group": "navigation"
-        },
         {
           "command": "adure-sfx-toolkit.refreshTraces",
           "when": "view == adure-sfx-toolkit.traces",
