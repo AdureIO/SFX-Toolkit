@@ -1,6 +1,7 @@
 import cytoscape = require("cytoscape");
 import dagre = require("cytoscape-dagre");
 import svg = require("cytoscape-svg");
+import { ObjectSelection } from "./objectSelection";
 
 cytoscape.use(dagre);
 cytoscape.use(svg);
@@ -28,6 +29,46 @@ const esc = (t: unknown) => String(t ?? "").replace(/&/g, "&amp;").replace(/</g,
 const orgSelect = $("org") as HTMLSelectElement;
 const searchInput = $("search") as HTMLInputElement;
 const activeOnly = $("activeOnly") as HTMLInputElement;
+const pickBtn = $("pick");
+const pickModal = $("pickModal");
+const pickSearch = $("pickSearch") as HTMLInputElement;
+const pickList = $("pickList");
+const pickCount = $("pickCount");
+
+// Object selection (seeds) — like the Object Visualizer, you choose objects, then build.
+const selection = new ObjectSelection();
+
+function updatePickLabel(): void {
+  const n = selection.size;
+  pickBtn.textContent = n ? `◈ Objects: ${n}` : "◈ Objects: none";
+}
+function renderPickList(): void {
+  const { shown, hidden } = selection.visible(pickSearch.value);
+  pickList.innerHTML = shown
+    .map(
+      (o) =>
+        `<label class="pick-item"><input type="checkbox" value="${esc(o.name)}"${selection.has(o.name) ? " checked" : ""}/> ${esc(o.name)}${o.custom ? '<span class="cust">custom</span>' : ""}</label>`
+    )
+    .join("");
+  updatePickCount(hidden);
+}
+function updatePickCount(hidden = 0): void {
+  pickCount.textContent = `${selection.size} selected` + (hidden ? ` · ${hidden} more — refine search` : "");
+}
+// One delegated listener (not one per checkbox per keystroke) for the whole picker list.
+pickList.addEventListener("change", (e) => {
+  const t = e.target as HTMLInputElement;
+  if (t.type !== "checkbox") return;
+  selection.set(t.value, t.checked);
+  updatePickCount();
+});
+function openPicker(): void {
+  selection.beginEdit();
+  pickModal.classList.add("open");
+  renderPickList();
+  pickSearch.focus();
+}
+function closePicker(): void { pickModal.classList.remove("open"); }
 const statusEl = $("status");
 const legendEl = $("legend");
 const emptyEl = $("empty");
@@ -128,7 +169,12 @@ $("cy").addEventListener("contextmenu", (e: MouseEvent) => {
 });
 // Dismiss the menu on any outside interaction.
 document.addEventListener("mousedown", (e: MouseEvent) => { if (!ctxEl.contains(e.target as Node)) hideContextMenu(); });
-window.addEventListener("keydown", (e: KeyboardEvent) => { if (e.key === "Escape") hideContextMenu(); });
+window.addEventListener("keydown", (e: KeyboardEvent) => {
+  if (e.key === "Escape") {
+    hideContextMenu();
+    if (pickModal.classList.contains("open")) closePicker();
+  }
+});
 
 // Trackpad-modern input (matches the object visualizer): two-finger scroll pans,
 // pinch / ⌘|ctrl + wheel zooms toward the cursor. Attached once to the persistent container.
@@ -273,10 +319,15 @@ function render(graph: ProcessGraph): void {
       { selector: 'edge[kind="triggers"]', style: { width: 2.6, "line-color": "#ec4899", "target-arrow-color": "#ec4899", "line-style": "dashed", "arrow-scale": 1.1 } as cytoscape.Css.Edge },
       { selector: 'edge[kind="schedules"]', style: { "line-color": "#ec4899", "target-arrow-color": "#ec4899" } as cytoscape.Css.Edge },
       { selector: 'edge[kind="invokes"]', style: { "line-style": "dashed", "line-color": "#8b5cf6", "target-arrow-color": "#8b5cf6" } as cytoscape.Css.Edge },
+      // Apex call chain: trigger/class → class. Solid purple with an arrow so the chain reads clearly.
+      { selector: 'edge[kind="calls"]', style: { "line-color": "#a78bfa", "target-arrow-color": "#a78bfa", width: 1.8, "arrow-scale": 1, "curve-style": "bezier" } as cytoscape.Css.Edge },
       { selector: 'edge[kind="updates"]', style: { "line-color": "#10b981", "target-arrow-color": "#10b981", width: 1.6, "line-style": "dotted" } as cytoscape.Css.Edge },
-      { selector: 'edge[kind="fieldOf"]', style: { "line-color": "rgba(120,120,130,0.22)", "target-arrow-shape": "none", "line-style": "dotted" } as cytoscape.Css.Edge },
+      // Apex references a field (read/write unknown) — faint grey.
+      { selector: 'edge[kind="references"]', style: { "line-color": "rgba(120,120,130,0.3)", "target-arrow-color": "rgba(120,120,130,0.35)", width: 1, "line-style": "dashed", "arrow-scale": 0.7 } as cytoscape.Css.Edge },
       // Scheduled / autolaunched flow ↔ the object it reads/writes: a dotted teal association line.
       { selector: 'edge[kind="operatesOn"]', style: { "line-color": "rgba(13,148,136,0.55)", "target-arrow-color": "rgba(13,148,136,0.65)", "line-style": "dotted", width: 1.8, "arrow-scale": 0.85 } as cytoscape.Css.Edge },
+      // Object → an Apex class that writes it but isn't reached by a call (anchors it to the right).
+      { selector: 'edge[kind="processedBy"]', style: { "line-color": "rgba(167,139,250,0.5)", "target-arrow-color": "rgba(167,139,250,0.6)", "line-style": "dotted", width: 1.4, "arrow-scale": 0.8 } as cytoscape.Css.Edge },
       { selector: ".hidden", style: { display: "none" } as cytoscape.Css.Node },
       { selector: ".faded", style: { opacity: 0.1 } as cytoscape.Css.Node },
       { selector: "edge.hl", style: { width: 2.6, "line-color": themeFg, "target-arrow-color": themeFg, opacity: 1 } as cytoscape.Css.Edge }
@@ -289,28 +340,32 @@ function render(graph: ProcessGraph): void {
   // Any pan/zoom/tap dismisses an open context menu.
   cy.on("tap pan zoom", hideContextMenu);
 
+  applyVisibility(); // apply default filters (fields hidden) BEFORE layout so hidden nodes reserve no space
   runLayout();
-  applyVisibility();
   buildLegend();
   updateStatus();
+}
+
+/** A filter changed (legend toggle / active-only) → re-hide, then reflow the visible nodes. */
+function filterAndRelayout(): void {
+  applyVisibility();
+  runLayout();
 }
 
 // ── Layout ────────────────────────────────────────────────────────────────────
 function runLayout(): void {
   if (!cy) return;
-  let opts: cytoscape.LayoutOptions;
-  if (layoutName === "cose") {
-    opts = { name: "cose", animate: true, animationDuration: 500, nodeRepulsion: () => 12000, idealEdgeLength: () => 90, padding: 40 } as unknown as cytoscape.LayoutOptions;
-  } else if (layoutName === "order") {
-    const positions = computeOrderPositions(currentGraph);
-    opts = { name: "preset", positions: (n: cytoscape.NodeSingular) => positions[n.id()] ?? { x: 0, y: 0 }, fit: true, padding: 50, animate: true, animationDuration: 450 } as unknown as cytoscape.LayoutOptions;
-  } else {
-    opts = { name: "dagre", rankDir: "LR", nodeSep: 28, rankSep: 120, animate: true, animationDuration: 450, padding: 40 } as unknown as cytoscape.LayoutOptions;
-  }
+  // Lay out only the VISIBLE elements so filtered-out nodes leave no gaps — the space reflows.
+  const vis = cy.elements(":visible");
+  const opts: cytoscape.LayoutOptions =
+    layoutName === "cose"
+      ? ({ name: "cose", eles: vis, animate: true, animationDuration: 500, nodeRepulsion: () => 12000, idealEdgeLength: () => 90, padding: 40 } as unknown as cytoscape.LayoutOptions)
+      : ({ name: "dagre", eles: vis, rankDir: "LR", nodeSep: 28, rankSep: 120, animate: true, animationDuration: 450, padding: 40 } as unknown as cytoscape.LayoutOptions);
   const l = cy.layout(opts);
   // Guarantee no overlapping nodes regardless of layout, then re-fit.
   l.one("layoutstop", () => {
     assignPhaseBoxes();
+    hideEmptyBoxes(); // fields are hidden by default → hide their (now-parented) boxes too
     resolveCollisions();
     packDisconnected();
     cy?.fit(undefined, 40);
@@ -329,8 +384,9 @@ function assignPhaseBoxes(): void {
     if (boxId) (byBox.get(boxId) ?? byBox.set(boxId, []).get(boxId)!).push(n.id);
   }
   byBox.forEach((ids, boxId) => {
-    const port = cy!.getElementById(boxId.replace("phase:", "port:"));
-    const center = port.nonempty() ? port.position() : cy!.getElementById(boxId).position();
+    const box = cy!.getElementById(boxId);
+    const port = box.children('[kind="phasePort"]').first(); // read the structural child, not a re-derived id
+    const center = port.nonempty() ? port.position() : box.position();
     const items = ids.map((id) => cy!.getElementById(id)).filter((el) => el.nonempty());
     const n = items.length;
     const cols = Math.max(1, Math.round(Math.sqrt(n)));
@@ -415,41 +471,6 @@ function resolveCollisions(): void {
   }
 }
 
-/** Swimlane positions: one lane per object, phases left→right by order-of-execution. */
-function computeOrderPositions(graph: ProcessGraph): Record<string, { x: number; y: number }> {
-  const pos: Record<string, { x: number; y: number }> = {};
-  const objects = graph.nodes.filter((n) => n.kind === "object").map((n) => n.id);
-  const objIndex = new Map(objects.map((id, i) => [id, i]));
-  const laneH = 200, baseX = 560, colW = 190;
-  const offsetFor = (n: ProcessNode): number | null => {
-    if (n.kind === "object") return 0;
-    if (n.kind === "field") return 4;
-    const o = n.meta && typeof n.meta.order === "string" ? Number(n.meta.order) : null;
-    if (o === 1) return -3;
-    if (o === 2) return -2;
-    if (o === 3) return -1;
-    if (o === 5) return 1;
-    if (o === 6) return 2;
-    return null;
-  };
-  const cellCount = new Map<string, number>();
-  const standalone: ProcessNode[] = [];
-  for (const n of graph.nodes) {
-    if (n.kind === "object") { pos[n.id] = { x: baseX, y: (objIndex.get(n.id) ?? 0) * laneH }; continue; }
-    const off = offsetFor(n);
-    const objId = n.object ? `object:${n.object}` : null;
-    if (off === null || !objId || !objIndex.has(objId)) { standalone.push(n); continue; }
-    const laneY = (objIndex.get(objId) ?? 0) * laneH;
-    const key = `${objId}:${off}`;
-    const c = cellCount.get(key) ?? 0;
-    cellCount.set(key, c + 1);
-    pos[n.id] = { x: baseX + off * colW, y: laneY + (c - 0.5) * 48 };
-  }
-  const bandY = objects.length * laneH + 140;
-  standalone.forEach((n, i) => { pos[n.id] = { x: 160 + (i % 8) * 200, y: bandY + Math.floor(i / 8) * 96 }; });
-  return pos;
-}
-
 // ── Visibility (legend toggles + active-only). Search is handled separately so matches stay
 //    visible and readable instead of everything else disappearing. ────────────────────────────
 function applyVisibility(): void {
@@ -458,6 +479,7 @@ function applyVisibility(): void {
   cy.batch(() => {
     cy!.nodes().forEach((n: cytoscape.NodeSingular) => {
       const kind = String(n.data("kind"));
+      if (kind === "phaseHub" || kind === "phasePort") return; // phase boxes handled by hideEmptyBoxes
       let show = !hiddenKinds.has(kind);
       if (show && kind !== "object" && onlyActive && n.data("active") === 0) show = false;
       n.toggleClass("hidden", !show);
@@ -469,8 +491,22 @@ function applyVisibility(): void {
       });
       o.toggleClass("hidden", !anyVisible);
     });
+    hideEmptyBoxes(); // hide emptied boxes BEFORE layout so :visible excludes them (no reserved gap)
   });
   applySearch(); // re-evaluate matches against the now-visible set
+}
+
+/** A phase box is hidden when all its member items are hidden. Skips field boxes (toggle-driven)
+ *  and boxes whose children aren't parented yet (pre-layout) so the spine isn't broken. */
+function hideEmptyBoxes(): void {
+  if (!cy) return;
+  cy.nodes('[kind="phaseHub"]').forEach((box: cytoscape.NodeSingular) => {
+    const items = box.children().filter((c: cytoscape.NodeSingular) => c.data("kind") !== "phasePort");
+    if (items.length === 0) return; // not parented yet → leave it in the layout
+    let anyChild = false;
+    items.forEach((c: cytoscape.NodeSingular) => { if (!c.hasClass("hidden")) anyChild = true; });
+    box.toggleClass("hidden", !anyChild);
+  });
 }
 
 // ── Search: highlight matches, fade the rest (keep context), and fly the viewport to the
@@ -576,6 +612,11 @@ function connRow(id: string): string {
   return `<div class="conn" data-goto="${esc(id)}"><span class="sw" style="background:${k.color}"></span><span class="label">${k.icon} ${esc(n.label)}</span><span class="open" data-open="${esc(id)}" title="Open in org">↗</span></div>`;
 }
 
+/** One inspector section — "Title (count)" + a connection row per id. Empty string when there are none. */
+function sec(title: string, ids: string[], suffix = ""): string {
+  return ids.length ? `<div class="insp-sec"><h4>${esc(title)} (${ids.length})${esc(suffix)}</h4>${ids.map(connRow).join("")}</div>` : "";
+}
+
 // Human-readable order-of-execution phase names (keyed by the numeric order in node.meta.order).
 const PHASE: Record<string, string> = {
   "1": "Before-save flow",
@@ -630,31 +671,29 @@ function openInspector(id: string): void {
   const sections: string[] = [];
   if (n.kind === "phaseHub") {
     const members = currentGraph.nodes.filter((x) => x.meta?.box === id).map((x) => x.id);
-    sections.push(`<div class="insp-sec"><h4>Runs in parallel (${members.length})</h4>${members.map(connRow).join("")}</div>`);
+    sections.push(sec("Runs in parallel", members));
   } else if (n.kind === "object") {
     const seq = execOrderSection(id);
     if (seq) sections.push(seq);
-    const fields = incoming.filter((e) => e.kind === "fieldOf").map((e) => e.source);
-    if (fields.length) sections.push(`<div class="insp-sec"><h4>Fields written (${fields.length})</h4>${fields.map(connRow).join("")}</div>`);
+    sections.push(sec("Fields changed", currentGraph.nodes.filter((f) => f.kind === "field" && f.object === n.label).map((f) => f.id)));
+    sections.push(sec("Processed by (Apex)", outgoing.filter((e) => e.kind === "processedBy").map((e) => e.target)));
   } else if (n.kind === "field") {
     const setters = incoming.filter((e) => e.kind === "updates").map((e) => e.source);
     sections.push(`<div class="insp-sec"><h4>Set by (${setters.length})</h4>${setters.length ? setters.map(connRow).join("") : '<div class="conn">No automation writes this field</div>'}</div>`);
+    sections.push(sec("Referenced by", incoming.filter((e) => e.kind === "references").map((e) => e.source), " — read/write unknown"));
   } else {
-    const runsOn = outgoing.filter((e) => e.kind === "runsOn" || e.kind === "validates").map((e) => e.target);
-    const prevSeq = incoming.filter((e) => e.kind === "then").map((e) => e.source);
-    const nextSeq = outgoing.filter((e) => e.kind === "then").map((e) => e.target);
-    const hops = outgoing.filter((e) => e.kind === "triggers").map((e) => e.target);
-    const operates = outgoing.filter((e) => e.kind === "operatesOn").map((e) => e.target);
-    const writes = outgoing.filter((e) => e.kind === "updates").map((e) => e.target);
-    const invokes = outgoing.filter((e) => e.kind === "invokes" || e.kind === "schedules").map((e) => e.target);
+    const out = (kind: string) => outgoing.filter((e) => e.kind === kind).map((e) => e.target);
+    const inc = (kind: string) => incoming.filter((e) => e.kind === kind).map((e) => e.source);
     if (m.order) sections.push(`<div class="insp-sec"><h4>Runs at</h4><div class="conn"><span class="badge" style="background:${k.color};color:#fff">${esc(PHASE[String(m.order)] ?? "step")}</span></div></div>`);
-    if (runsOn.length) sections.push(`<div class="insp-sec"><h4>Runs on</h4>${runsOn.map(connRow).join("")}</div>`);
-    if (operates.length) sections.push(`<div class="insp-sec"><h4>Operates on</h4>${operates.map(connRow).join("")}</div>`);
-    if (prevSeq.length) sections.push(`<div class="insp-sec"><h4>Runs after</h4>${prevSeq.map(connRow).join("")}</div>`);
-    if (nextSeq.length) sections.push(`<div class="insp-sec"><h4>Then runs</h4>${nextSeq.map(connRow).join("")}</div>`);
-    if (writes.length) sections.push(`<div class="insp-sec"><h4>Writes fields (${writes.length})</h4>${writes.map(connRow).join("")}</div>`);
-    if (hops.length) sections.push(`<div class="insp-sec"><h4>Continues into (other objects)</h4>${hops.map(connRow).join("")}</div>`);
-    if (invokes.length) sections.push(`<div class="insp-sec"><h4>Calls</h4>${invokes.map(connRow).join("")}</div>`);
+    sections.push(sec("Runs on", outgoing.filter((e) => e.kind === "runsOn" || e.kind === "validates").map((e) => e.target)));
+    sections.push(sec("Operates on", out("operatesOn")));
+    sections.push(sec("Called by", inc("calls")));
+    sections.push(sec("Runs after", inc("then")));
+    sections.push(sec("Then runs", out("then")));
+    sections.push(sec("Calls Apex", out("calls")));
+    sections.push(sec("Sets fields", out("updates")));
+    sections.push(sec("Continues into (other objects)", out("triggers")));
+    sections.push(sec("Invokes / schedules", outgoing.filter((e) => e.kind === "invokes" || e.kind === "schedules").map((e) => e.target)));
   }
 
   inspInner.innerHTML =
@@ -693,7 +732,7 @@ function buildLegend(): void {
       if (hiddenKinds.has(kind)) hiddenKinds.delete(kind);
       else hiddenKinds.add(kind);
       el.classList.toggle("off");
-      applyVisibility();
+      filterAndRelayout(); // reflow so hidden kinds leave no gaps
     })
   );
 }
@@ -713,7 +752,26 @@ function updateStatus(): void {
 }
 
 // ── Toolbar ─────────────────────────────────────────────────────────────────────
-$("build").addEventListener("click", () => { showLoading(true); post({ command: "build", org: orgSelect.value }); });
+$("build").addEventListener("click", () => {
+  const seeds = selection.values();
+  if (!seeds.length) { statusEl.textContent = "Pick at least one object first (use the “Objects” button)."; return; }
+  showLoading(true);
+  post({ command: "build", org: orgSelect.value, scanApex: ($("scanApex") as HTMLInputElement).checked, seeds });
+});
+// Object picker
+pickBtn.addEventListener("click", openPicker);
+pickSearch.addEventListener("input", renderPickList);
+$("pickApply").addEventListener("click", () => { closePicker(); updatePickLabel(); });
+$("pickClear").addEventListener("click", () => { selection.clear(); renderPickList(); });
+const cancelPick = () => { selection.cancelEdit(); closePicker(); updatePickLabel(); };
+$("pickCancel").addEventListener("click", cancelPick);
+pickModal.addEventListener("click", (e: MouseEvent) => { if (e.target === pickModal) cancelPick(); });
+orgSelect.addEventListener("change", () => {
+  selection.clear();
+  selection.setItems([]);
+  updatePickLabel();
+  post({ command: "objectList", org: orgSelect.value });
+});
 searchInput.addEventListener("input", applySearch);
 searchInput.addEventListener("focus", () => { if (searchInput.value.trim()) applySearch(); });
 searchInput.addEventListener("keydown", (e: KeyboardEvent) => {
@@ -727,7 +785,7 @@ searchInput.addEventListener("keydown", (e: KeyboardEvent) => {
     if (first) { searchInput.value = ""; cy?.elements().removeClass("faded match"); closeResults(); select(first.id()); centerOn(first.id()); }
   }
 });
-activeOnly.addEventListener("change", applyVisibility);
+activeOnly.addEventListener("change", filterAndRelayout);
 $("fit").addEventListener("click", () => cy?.fit(undefined, 40));
 $("layout").querySelectorAll("button").forEach((b) =>
   b.addEventListener("click", () => {
@@ -746,10 +804,14 @@ $("exportPng").addEventListener("click", () => {
 window.addEventListener("message", (ev: MessageEvent) => {
   const d = ev.data as {
     command: string; orgs?: OrgOption[]; graph?: ProcessGraph; value?: boolean; text?: string;
-    label?: string; completed?: number; total?: number;
+    label?: string; completed?: number; total?: number; objects?: string[];
   };
   if (d.command === "orgList") {
     orgSelect.innerHTML = (d.orgs ?? []).map((o) => `<option value="${esc(o.username)}">${esc(o.label)}</option>`).join("");
+    post({ command: "objectList", org: orgSelect.value }); // preload objects for the picker
+  } else if (d.command === "objectList") {
+    selection.setItems(d.objects ?? []);
+    if (pickModal.classList.contains("open")) renderPickList();
   } else if (d.command === "graph" && d.graph) {
     showLoading(false);
     render(d.graph);

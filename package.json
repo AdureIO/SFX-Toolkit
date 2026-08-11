@@ -252,7 +252,7 @@
       },
       {
         "command": "adure-sfx-toolkit.processMap",
-        "title": "ASFXT: Process Map (Automation)",
+        "title": "ASFXT: Process Visualizer",
         "icon": "$(circuit-board)"
       },
       {

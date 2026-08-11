@@ -3,15 +3,10 @@ import * as fs from "fs";
 import * as path from "path";
 import { getCachedOrgList, refreshOrgListCache, OrgOption } from "../utils/orgListCache";
 import { fetchProcessMetadata } from "../utils/processMetadata";
-import { buildProcessGraph, ProcessGraph, ProcessNode } from "../utils/processGraph";
+import { buildProcessGraph, scopeMetadataToObjects, ProcessGraph, ProcessNode } from "../utils/processGraph";
+import { OrgMetadataCache } from "../utils/orgMetadataCache";
 import { runCommandArgs } from "../utils/commandRunner";
-
-function getNonce(): string {
-    let text = "";
-    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    for (let i = 0; i < 32; i++) text += chars.charAt(Math.floor(Math.random() * chars.length));
-    return text;
-}
+import { getNonce } from "../utils/htmlUtils";
 
 
 export class ProcessMapPanelProvider {
@@ -26,7 +21,7 @@ export class ProcessMapPanelProvider {
             ProcessMapPanelProvider._panel.reveal(column);
             return;
         }
-        const panel = vscode.window.createWebviewPanel(ProcessMapPanelProvider.viewType, "Process Map", column, {
+        const panel = vscode.window.createWebviewPanel(ProcessMapPanelProvider.viewType, "Process Visualizer", column, {
             enableScripts: true,
             retainContextWhenHidden: true,
             localResourceRoots: [vscode.Uri.joinPath(extensionUri, "resources")]
@@ -42,8 +37,13 @@ export class ProcessMapPanelProvider {
                     panel.webview.postMessage({ command: "orgList", orgs });
                     break;
                 }
+                case "objectList": {
+                    const objects = await OrgMetadataCache.getObjectList(s("org") ?? null).catch(() => [] as string[]);
+                    panel.webview.postMessage({ command: "objectList", objects });
+                    break;
+                }
                 case "build":
-                    await this.build(panel, s("org"));
+                    await this.build(panel, s("org"), msg.scanApex === true, Array.isArray(msg.seeds) ? (msg.seeds as string[]) : []);
                     break;
                 case "export":
                     await this.export(s("filename"), s("content"), msg.base64 === true);
@@ -68,15 +68,18 @@ export class ProcessMapPanelProvider {
         });
     }
 
-    private static async build(panel: vscode.WebviewPanel, org?: string): Promise<void> {
+    private static async build(panel: vscode.WebviewPanel, org?: string, scanApex = false, seeds: string[] = []): Promise<void> {
         ProcessMapPanelProvider._org = org;
         panel.webview.postMessage({ command: "loading", value: true });
         try {
-            const metadata = await fetchProcessMetadata(org, (p) =>
-                panel.webview.postMessage({ command: "progress", label: p.label, completed: p.completed, total: p.total })
+            const metadata = await fetchProcessMetadata(
+                org,
+                (p) => panel.webview.postMessage({ command: "progress", label: p.label, completed: p.completed, total: p.total }),
+                { scanApex }
             );
             panel.webview.postMessage({ command: "progress", label: "Building graph", completed: 1, total: 1, phase: "build" });
-            const graph = buildProcessGraph(metadata);
+            const scoped = seeds.length ? scopeMetadataToObjects(metadata, seeds) : metadata;
+            const graph = buildProcessGraph(scoped);
             ProcessMapPanelProvider._graph = graph;
             panel.webview.postMessage({ command: "graph", graph });
         } catch (error) {
@@ -161,7 +164,7 @@ export class ProcessMapPanelProvider {
 <head>
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="${csp}">
-<title>Process Map</title>
+<title>Process Visualizer</title>
 <style>
   *,*::before,*::after { box-sizing: border-box; }
   :root {
@@ -287,6 +290,22 @@ export class ProcessMapPanelProvider {
   .execorder .et .nm { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .execorder .et .ph { font-size: 10px; color: var(--vscode-descriptionForeground); }
 
+  /* Object picker modal */
+  .pickmodal { position: fixed; inset: 0; z-index: 80; display: none; align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.45); }
+  .pickmodal.open { display: flex; }
+  .pick-box { width: min(560px, 92vw); max-height: 80vh; display: flex; flex-direction: column;
+    background: var(--pm-surface); border: 1px solid var(--pm-border-strong); border-radius: var(--pm-radius); box-shadow: var(--pm-shadow); overflow: hidden; }
+  .pick-head { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--pm-border); }
+  .pick-title { font-weight: 600; }
+  .pick-head input { flex: 1; }
+  .pick-count { font-size: 11px; color: var(--vscode-descriptionForeground); white-space: nowrap; }
+  .pick-list { overflow-y: auto; padding: 6px; flex: 1; }
+  .pick-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 7px; cursor: pointer; font-size: 12.5px; }
+  .pick-item:hover { background: var(--pm-surface-2); }
+  .pick-item .cust { margin-left: auto; font-size: 10px; color: var(--vscode-descriptionForeground); }
+  .pick-foot { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--pm-border); }
+
   /* Right-click context menu */
   .ctxmenu { position: fixed; z-index: 60; min-width: 180px; display: none; padding: 5px;
     background: var(--pm-surface); border: 1px solid var(--pm-border-strong); border-radius: var(--pm-radius); box-shadow: var(--pm-shadow); }
@@ -304,11 +323,13 @@ export class ProcessMapPanelProvider {
 </head>
 <body>
   <div class="toolbar">
-    <span class="brand"><span class="dotgrid"></span>Process Map</span>
+    <span class="brand"><span class="dotgrid"></span>Process Visualizer</span>
     <span class="sep"></span>
     <span class="lbl">Org</span>
     <select id="org"></select>
+    <button class="ghost" id="pick" title="Choose which objects to include">◈ Objects: none</button>
     <button id="build">⚡ Build map</button>
+    <label class="chk" title="Scan Apex class/trigger bodies from the org to find which set each field (slower)"><input type="checkbox" id="scanApex" /> Scan Apex</label>
     <span class="sep"></span>
     <span class="lbl">Layout</span>
     <span class="seg" id="layout">
@@ -327,7 +348,7 @@ export class ProcessMapPanelProvider {
     <div class="legend" id="legend"></div>
     <div class="empty" id="empty">
       <div class="ring"></div>
-      <div class="idle"><div class="big">Map your org's process</div><div>Pick an org and press <b>Build map</b>.<br>Follow the blue arrows to read execution order · right-click a node to open it in the org.</div></div>
+      <div class="idle"><div class="big">Map your org's process</div><div>Pick an org, choose <b>Objects</b>, then press <b>Build map</b>.<br>Follow the blue arrows to read execution order · right-click a node to open it in the org.</div></div>
       <div class="load">
         <div class="big">Mapping your org…</div>
         <div class="loadstep" id="loadStep">Starting…</div>
@@ -338,6 +359,22 @@ export class ProcessMapPanelProvider {
     <aside class="inspector" id="inspector"><div class="insp-inner" id="inspInner"></div></aside>
   </div>
   <div class="ctxmenu" id="ctxmenu"></div>
+  <div class="pickmodal" id="pickModal">
+    <div class="pick-box">
+      <div class="pick-head">
+        <span class="pick-title">Choose objects</span>
+        <input type="search" id="pickSearch" placeholder="Search objects…" autocomplete="off" />
+        <span class="pick-count" id="pickCount">0 selected</span>
+      </div>
+      <div class="pick-list" id="pickList"></div>
+      <div class="pick-foot">
+        <button class="ghost" id="pickClear">Clear</button>
+        <span class="spacer"></span>
+        <button class="ghost" id="pickCancel">Cancel</button>
+        <button id="pickApply">Apply</button>
+      </div>
+    </div>
+  </div>
   <div class="status" id="status">Ready.</div>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
