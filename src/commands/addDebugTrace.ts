@@ -97,6 +97,6 @@ export async function addDebugTrace() {
 
     } catch (e: any) {
         if (e.cancelled) return;
-        vscode.window.showErrorMessage(`Failed to start flow: ${e.message || e}`);
+        reportError({ operation: "New debug trace", error: e });
     }
 }

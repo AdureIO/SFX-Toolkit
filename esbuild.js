@@ -27,6 +27,22 @@ async function main() {
     external: ["vscode"], // provided by the VS Code runtime
   });
 
+  // Webview bundles: the Object Visualizer and Process Map graph scripts (Cytoscape +
+  // dagre + svg) are bundled to self-contained IIFEs loaded via webview.asWebviewUri.
+  // These are NOT externalized — the browser context has no module loader. The
+  // extension bundle never imports cytoscape, so out/extension.js stays small.
+  const webviewCtx = await esbuild.context({
+    entryPoints: ["src/webview/objectVisualizer.ts", "src/webview/processMap.ts"],
+    bundle: true,
+    format: "iife",
+    platform: "browser",
+    target: "es2020",
+    outdir: "resources/webview",
+    sourcemap: !production,
+    minify: production,
+    logLevel: "info"
+  });
+
   // Language server: a standalone Node process spawned by the extension. Bundles
   // @salesforce/soql-language-server + @apexdevtools/apex-parser + vscode-languageserver
   // into one file. apex-parser's antlr4 dependency uses `import.meta.url` +
@@ -44,10 +60,10 @@ async function main() {
   });
 
   if (watch) {
-    await Promise.all([extensionCtx.watch(), serverCtx.watch()]);
+    await Promise.all([extensionCtx.watch(), webviewCtx.watch(), serverCtx.watch()]);
   } else {
-    await Promise.all([extensionCtx.rebuild(), serverCtx.rebuild()]);
-    await Promise.all([extensionCtx.dispose(), serverCtx.dispose()]);
+    await Promise.all([extensionCtx.rebuild(), webviewCtx.rebuild(), serverCtx.rebuild()]);
+    await Promise.all([extensionCtx.dispose(), webviewCtx.dispose(), serverCtx.dispose()]);
   }
 }
 

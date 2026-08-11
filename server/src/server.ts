@@ -23,11 +23,21 @@ import {
     MarkupKind,
     Range,
     InsertTextFormat,
+    CodeAction,
+    CodeActionKind,
+    TextEdit,
+    Diagnostic,
+    DiagnosticSeverity,
+    CreateFile,
+    SymbolInformation,
+    SymbolKind,
 } from 'vscode-languageserver/node';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
+import * as fs from 'fs';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { completionsFor } from '@salesforce/soql-language-server/lib/completion';
-import { parseApex, enclosingClass, resolveVarType, ApexParseResult, ApexMember } from './apexSymbols';
+import { parseApex, enclosingClass, resolveVarType, ApexParseResult, ApexMember, ApexIndex } from './apexSymbols';
+import { symbolAt, findReferencesInText } from '../../src/utils/apexReferences';
 import { validateFieldAccesses } from './apexSemantics';
 import { WorkspaceIndex } from './workspaceIndex';
 import { getStub, setStubRoot, clearStubs, stubbedObjectNames, invalidateStubbedNames } from './sobjectStub';
@@ -137,15 +147,23 @@ connection.onInitialize((params): InitializeResult => {
                 save: { includeText: false },
             },
             completionProvider: {
-                // Trigger on the characters that begin a new SOQL token position.
-                triggerCharacters: ['.', ' ', ',', '(', '\n'],
+                // Trigger on the characters that begin a new SOQL token position, plus the quote
+                // that opens a value literal (picklist values in `WHERE Field = '|'`) and the
+                // at-sign that opens an annotation.
+                triggerCharacters: ['.', ' ', ',', '(', '\n', "'", '@'],
                 resolveProvider: false,
             },
             documentSymbolProvider: apexFeatures ? true : undefined,
             // Definition is always on: SObject/field click-through to schema stubs
             // needs no Apex gating; Apex-symbol resolution is gated in the handler.
             definitionProvider: true,
+            // References for Apex symbols (scope-aware for locals/params).
+            referencesProvider: apexFeatures ? true : undefined,
             signatureHelpProvider: apexFeatures ? { triggerCharacters: ['(', ','] } : undefined,
+            codeActionProvider: apexFeatures
+                ? { codeActionKinds: [CodeActionKind.RefactorRewrite, CodeActionKind.QuickFix] }
+                : undefined,
+            workspaceSymbolProvider: apexFeatures ? true : undefined,
             // Hover is always on: SOQL field/object info needs no Apex gating;
             // Apex hover content is gated inside the handler.
             hoverProvider: true,
@@ -340,7 +358,9 @@ function relItem(owner: string, f: HostField): CompletionItem {
         label: f.relationshipName as string,
         kind: CompletionItemKind.Class,
         detail: `${typeStr} ${owner}.${f.relationshipName}`,
-        labelDetails: { detail: ` : ${typeStr}`, description: owner },
+        // An arrow, not a colon: a relationship is a traversal to another object, not a value of
+        // that type. Child relationships and the doc popup already read that way.
+        labelDetails: { detail: ` → ${typeStr}`, description: owner },
         // Sort relationships just after their owning fields.
         sortText: '1_' + f.relationshipName,
     };
@@ -599,6 +619,90 @@ connection.onNotification(NOTE_EPHEMERAL, (params: { uris?: string[] }) => {
     for (const u of params?.uris ?? []) ephemeralDocs.add(u);
 });
 
+// SOQL date literals for WHERE value positions; the `:n` ones insert a tabstop.
+const SOQL_DATE_LITERALS: { label: string; snippet?: string }[] = [
+    { label: 'TODAY' }, { label: 'YESTERDAY' }, { label: 'TOMORROW' },
+    { label: 'THIS_WEEK' }, { label: 'LAST_WEEK' }, { label: 'NEXT_WEEK' },
+    { label: 'THIS_MONTH' }, { label: 'LAST_MONTH' }, { label: 'NEXT_MONTH' },
+    { label: 'THIS_QUARTER' }, { label: 'LAST_QUARTER' }, { label: 'NEXT_QUARTER' },
+    { label: 'THIS_YEAR' }, { label: 'LAST_YEAR' }, { label: 'NEXT_YEAR' },
+    { label: 'THIS_FISCAL_QUARTER' }, { label: 'LAST_FISCAL_QUARTER' }, { label: 'NEXT_FISCAL_QUARTER' },
+    { label: 'THIS_FISCAL_YEAR' }, { label: 'LAST_FISCAL_YEAR' }, { label: 'NEXT_FISCAL_YEAR' },
+    { label: 'LAST_90_DAYS' }, { label: 'NEXT_90_DAYS' },
+    { label: 'LAST_N_DAYS:n', snippet: 'LAST_N_DAYS:${1:n}' },
+    { label: 'NEXT_N_DAYS:n', snippet: 'NEXT_N_DAYS:${1:n}' },
+    { label: 'N_DAYS_AGO:n', snippet: 'N_DAYS_AGO:${1:n}' },
+    { label: 'LAST_N_WEEKS:n', snippet: 'LAST_N_WEEKS:${1:n}' },
+    { label: 'NEXT_N_WEEKS:n', snippet: 'NEXT_N_WEEKS:${1:n}' },
+    { label: 'LAST_N_MONTHS:n', snippet: 'LAST_N_MONTHS:${1:n}' },
+    { label: 'NEXT_N_MONTHS:n', snippet: 'NEXT_N_MONTHS:${1:n}' },
+    { label: 'LAST_N_QUARTERS:n', snippet: 'LAST_N_QUARTERS:${1:n}' },
+    { label: 'LAST_N_YEARS:n', snippet: 'LAST_N_YEARS:${1:n}' },
+    { label: 'LAST_N_FISCAL_QUARTERS:n', snippet: 'LAST_N_FISCAL_QUARTERS:${1:n}' },
+    { label: 'LAST_N_FISCAL_YEARS:n', snippet: 'LAST_N_FISCAL_YEARS:${1:n}' },
+];
+const SOQL_AGG_FUNCS = ['COUNT_DISTINCT', 'SUM', 'AVG', 'MIN', 'MAX'];
+
+/** Context-aware SOQL extras: date literals in WHERE values; aggregates + FIELDS() in the SELECT list. */
+function soqlExtraCompletions(text: string, line: number, column: number): CompletionItem[] {
+    const lines = text.split('\n');
+    let off = 0;
+    for (let i = 0; i < line - 1 && i < lines.length; i++) off += lines[i].length + 1;
+    off += column - 1;
+    const upto = text.slice(0, Math.max(0, off));
+
+    // WHERE value position → date literals.
+    if (/\bwhere\b/i.test(upto) && /[<>!=]=?\s*\w*$/.test(upto)) {
+        return sfxTag(
+            SOQL_DATE_LITERALS.map((d) => {
+                const item: CompletionItem = { label: d.label, kind: CompletionItemKind.Value, sortText: '0_' + d.label };
+                if (d.snippet) {
+                    item.insertText = d.snippet;
+                    item.insertTextFormat = InsertTextFormat.Snippet;
+                }
+                return withSchemaDoc(item, ['`' + d.label + '` — SOQL date literal']);
+            }),
+        );
+    }
+
+    // SELECT-list position (after SELECT, before its FROM) → aggregates + FIELDS().
+    const selIdx = upto.toLowerCase().lastIndexOf('select');
+    if (selIdx >= 0 && !/\bfrom\b/i.test(upto.slice(selIdx))) {
+        const items: CompletionItem[] = [];
+        items.push(
+            withSchemaDoc(
+                { label: 'COUNT()', kind: CompletionItemKind.Function, insertText: 'COUNT()', sortText: '0_COUNT' },
+                ['`COUNT()` — row count aggregate'],
+            ),
+        );
+        for (const fn of SOQL_AGG_FUNCS) {
+            items.push(
+                withSchemaDoc(
+                    {
+                        label: `${fn}(field)`,
+                        kind: CompletionItemKind.Function,
+                        insertText: `${fn}(\${1:field})`,
+                        insertTextFormat: InsertTextFormat.Snippet,
+                        filterText: fn,
+                        sortText: '0_' + fn,
+                    },
+                    ['`' + fn + '(field)` — SOQL aggregate'],
+                ),
+            );
+        }
+        for (const ff of ['ALL', 'STANDARD', 'CUSTOM']) {
+            items.push(
+                withSchemaDoc(
+                    { label: `FIELDS(${ff})`, kind: CompletionItemKind.Keyword, insertText: `FIELDS(${ff})`, sortText: '1_FIELDS' + ff },
+                    ['`FIELDS(' + ff + ')` — field selection'],
+                ),
+            );
+        }
+        return sfxTag(items);
+    }
+    return [];
+}
+
 connection.onCompletion(async (params) => {
     const doc = documents.get(params.textDocument.uri);
     if (!doc) return [];
@@ -621,11 +725,37 @@ connection.onCompletion(async (params) => {
         const offset = doc.offsetAt(params.position);
         const region = soqlRegionAt(doc.getText(), offset);
         if (region) {
+            // Apex bind variable inside inline SOQL: `:partial` → in-scope variables.
+            const bindLine = doc.getText().slice(doc.getText().lastIndexOf('\n', offset - 1) + 1, offset);
+            const bindM = /:\s*(\w*)$/.exec(bindLine);
+            if (bindM) {
+                const { index } = getApexParse(doc);
+                const p = bindM[1].toLowerCase();
+                const vars = inScopeVars(index, params.position.line, params.position.character).filter(
+                    (v) => !p || v.name.toLowerCase().startsWith(p),
+                );
+                return sfxTag(
+                    vars.map((v) =>
+                        withSchemaDoc(
+                            { label: v.name, kind: CompletionItemKind.Variable, labelDetails: { detail: ` : ${v.type}` }, sortText: '0_' + v.name },
+                            ['`' + v.name + ' : ' + v.type + '` — bind variable'],
+                        ),
+                    ),
+                );
+            }
             text = region.snippet;
             line = region.line;
             column = region.column;
         } else {
             if (!apexCompletion) return [];
+            const pick = await apexPicklistValueCompletion(doc, offset);
+            if (pick.length) return pick;
+            const ann = apexAnnotationCompletion(doc, offset);
+            if (ann.length) return ann;
+            const cat = apexCatchCompletion(doc, offset);
+            if (cat.length) return cat;
+            const ctorArgs = await apexConstructorArgCompletion(doc, offset);
+            if (ctorArgs.length) return ctorArgs;
             const ctor = await apexNewCompletion(doc, offset);
             if (ctor.length) return ctor;
             const member = await apexMemberCompletion(doc, offset, params.position);
@@ -683,6 +813,7 @@ connection.onCompletion(async (params) => {
             out.push(item);
         }
     }
+    out.push(...soqlExtraCompletions(text, line, column));
     return sfxTag(applyNamespace(out, ns));
 });
 
@@ -894,16 +1025,82 @@ async function apexNewCompletion(doc: TextDocument, offset: number): Promise<Com
 
     if (!afterNew) return [];
 
-    // After `new `: the assigned type first, then constructable SObjects.
+    // After `new `: the assigned type first, then collection snippets, then SObjects.
     const expected = expectedAssignType(doc, lineUpToCursor, true);
     const items: CompletionItem[] = [];
     if (expected) items.push(newTypeItem(expected, '0'));
+
+    // Generic collection constructors as snippets (`new List<Account>()`, Map, Set).
+    const collections: { label: string; insert: string; key: string }[] = [
+        { label: 'List<…>()', insert: 'List<${1:SObject}>()', key: 'List' },
+        { label: 'Map<…, …>()', insert: 'Map<${1:Id}, ${2:SObject}>()', key: 'Map' },
+        { label: 'Set<…>()', insert: 'Set<${1:Id}>()', key: 'Set' },
+    ];
+    for (const c of collections) {
+        items.push(
+            withSchemaDoc(
+                {
+                    label: c.label,
+                    kind: CompletionItemKind.Snippet,
+                    insertText: c.insert,
+                    insertTextFormat: InsertTextFormat.Snippet,
+                    filterText: c.key,
+                    detail: 'collection',
+                    sortText: '0a_' + c.key,
+                },
+                ['`new ' + c.label + '`'],
+            ),
+        );
+    }
 
     const expectedBase = expected ? baseTypeName(expected) : '';
     for (const name of await objectList(doc.uri)) {
         if (name === expectedBase) continue;
         items.push(newTypeItem(name, objectSortTier(name) === '0' ? '1' : '2'));
     }
+    return sfxTag(applyNamespace(items, await projectNamespace(doc.uri)));
+}
+
+/**
+ * Org-aware named-argument completion inside an SObject constructor —
+ * `new Account(|)` / `new Account(Name = 'x', |)` — offers the object's fields as
+ * `Field = ` from live schema (fields already supplied are filtered out). Only fires
+ * for SObject types; user-class constructors fall through to other completion.
+ */
+async function apexConstructorArgCompletion(doc: TextDocument, offset: number): Promise<CompletionItem[]> {
+    const full = doc.getText();
+    const lineStart = full.lastIndexOf('\n', offset - 1) + 1;
+    const lineUpToCursor = full.slice(lineStart, offset);
+    // `new Type(` with the cursor still inside the (unclosed) parens, no intervening generics.
+    const m = /\bnew\s+([A-Za-z_]\w*)\s*\(([^()]*)$/.exec(lineUpToCursor);
+    if (!m) return [];
+    const typeName = m[1];
+    const argsSoFar = m[2];
+    const lastSeg = argsSoFar.split(',').pop() ?? '';
+    if (lastSeg.includes('=')) return []; // typing a value, not a field name
+    const partial = (/([A-Za-z_]\w*)?$/.exec(lastSeg)?.[1] ?? '').toLowerCase();
+
+    const d = await describe(doc.uri, baseTypeName(typeName));
+    if (!d) return [];
+    const used = new Set(
+        argsSoFar
+            .split(',')
+            .map((s) => s.split('=')[0].trim().toLowerCase())
+            .filter(Boolean),
+    );
+    const items = d.fields
+        .filter((f) => !used.has(f.name.toLowerCase()))
+        .filter((f) => !partial || matchesMemberPrefix(f.name.toLowerCase(), partial))
+        .map((f) => {
+            const item: CompletionItem = {
+                label: f.name,
+                kind: CompletionItemKind.Field,
+                insertText: `${f.name} = `,
+                labelDetails: { detail: ` : ${f.type}`, description: typeName },
+                sortText: fieldSortTier(f.name) + '_' + f.name,
+            };
+            return withSchemaDoc(item, ['```apex\n' + `${typeName}.${f.name} : ${f.type}` + '\n```', '_constructor argument_']);
+        });
     return sfxTag(applyNamespace(items, await projectNamespace(doc.uri)));
 }
 
@@ -924,6 +1121,9 @@ async function apexMemberCompletion(
     if (!m) return [];
     const receiver = m[1];
     const partial = m[2].toLowerCase();
+
+    // Trigger context variables (`Trigger.new`, `Trigger.isInsert`, …), typed to the object.
+    if (receiver === 'Trigger') return triggerMembers(full, partial);
 
     const { index } = getApexParse(doc);
 
@@ -1032,6 +1232,213 @@ function stdMemberItem(owner: string, m: StdMember): CompletionItem {
  * (`System`, `Database`, `Math`, …). Skipped after a `.` (member access) and after
  * `new ` (handled by the constructor path). Deprioritized below locals/keywords.
  */
+// Apex annotations offered after `@`. `snippet` (when present) fills in the common
+// arguments as tabstops; otherwise the bare annotation is inserted.
+interface AnnotationDef {
+    name: string;
+    snippet?: string;
+    detail: string;
+    doc: string;
+}
+const APEX_ANNOTATIONS: AnnotationDef[] = [
+    { name: 'IsTest', detail: 'Test class / method', doc: 'Marks a class or method as a test.' },
+    { name: "IsTest(SeeAllData=true)", snippet: 'IsTest(SeeAllData=true)', detail: 'Test with org data', doc: 'Test that can see existing org data.' },
+    { name: 'TestSetup', detail: 'Test setup', doc: 'Creates records once for every test in the class.' },
+    { name: 'TestVisible', detail: 'Expose to tests', doc: 'Makes a private/protected member visible to test methods.' },
+    { name: 'AuraEnabled', detail: 'Expose to LWC / Aura', doc: 'Exposes a method or property to Lightning components.' },
+    { name: 'AuraEnabled(cacheable=true)', snippet: 'AuraEnabled(cacheable=true)', detail: 'Cacheable (@wire)', doc: 'Read-only, cacheable method usable with @wire.' },
+    { name: 'Future', detail: 'Async method', doc: 'Runs the static method asynchronously.' },
+    { name: 'Future(callout=true)', snippet: 'Future(callout=true)', detail: 'Async + callouts', doc: 'Async method allowed to make callouts.' },
+    { name: 'InvocableMethod', snippet: "InvocableMethod(label='${1:Label}' description='${2:Description}')", detail: 'Flow / REST action', doc: 'Exposes the method as an invocable action for Flow/REST.' },
+    { name: 'InvocableVariable', snippet: "InvocableVariable(label='${1:Label}' description='${2:Description}' required=${3:false})", detail: 'Invocable variable', doc: 'Marks a field as input/output of an invocable method.' },
+    { name: 'RemoteAction', detail: 'Visualforce remoting', doc: 'Exposes a static method to Visualforce JS remoting.' },
+    { name: 'ReadOnly', detail: 'Read-only context', doc: 'Relaxes query row limits for read-only requests.' },
+    { name: 'Deprecated', detail: 'Deprecated', doc: 'Marks the member deprecated for subscribers of a managed package.' },
+    { name: 'SuppressWarnings', snippet: "SuppressWarnings('${1:PMD}')", detail: 'Suppress warnings', doc: 'Suppresses analyzer warnings on the element.' },
+    { name: 'NamespaceAccessible', detail: 'Cross-package access', doc: 'Makes the member accessible to other packages that extend your namespace.' },
+    { name: 'JsonAccess', snippet: "JsonAccess(serializable='${1:always}' deserializable='${2:always}')", detail: 'JSON (de)serialization', doc: 'Controls serialization/deserialization of the class across namespaces.' },
+    { name: 'RestResource', snippet: "RestResource(urlMapping='/${1:resource}')", detail: 'REST resource', doc: 'Exposes an Apex class as a REST resource at a URL.' },
+    { name: 'HttpGet', detail: 'REST GET', doc: 'Handles REST GET on the enclosing @RestResource.' },
+    { name: 'HttpPost', detail: 'REST POST', doc: 'Handles REST POST on the enclosing @RestResource.' },
+    { name: 'HttpPut', detail: 'REST PUT', doc: 'Handles REST PUT on the enclosing @RestResource.' },
+    { name: 'HttpPatch', detail: 'REST PATCH', doc: 'Handles REST PATCH on the enclosing @RestResource.' },
+    { name: 'HttpDelete', detail: 'REST DELETE', doc: 'Handles REST DELETE on the enclosing @RestResource.' },
+];
+
+/** Completion after `@` — Apex annotations, with argument snippets where useful. */
+function apexAnnotationCompletion(doc: TextDocument, offset: number): CompletionItem[] {
+    const full = doc.getText();
+    const lineStart = full.lastIndexOf('\n', offset - 1) + 1;
+    const lineUpToCursor = full.slice(lineStart, offset);
+    const m = /@(\w*)$/.exec(lineUpToCursor);
+    if (!m) return [];
+    const partial = m[1].toLowerCase();
+    const items = APEX_ANNOTATIONS.filter((a) => !partial || a.name.toLowerCase().startsWith(partial)).map((a) => {
+        const snippet = a.snippet !== undefined;
+        // `@` is already typed and isn't a word char, so insert without it.
+        const item: CompletionItem = {
+            label: '@' + a.name,
+            kind: CompletionItemKind.Keyword,
+            insertText: a.snippet ?? a.name,
+            insertTextFormat: snippet ? InsertTextFormat.Snippet : InsertTextFormat.PlainText,
+            filterText: a.name.replace(/[^\w].*$/, ''), // match the typed word after `@`
+            detail: a.detail,
+            sortText: '0_' + a.name,
+        };
+        return withSchemaDoc(item, [a.doc]);
+    });
+    return sfxTag(items);
+}
+
+// Common Apex statement snippets, triggered by typing their prefix (label).
+const APEX_SNIPPETS: { label: string; insert: string; detail: string }[] = [
+    { label: 'sysdebug', insert: 'System.debug(${1:msg});', detail: 'System.debug(…)' },
+    { label: 'soqlfor', insert: 'for (${1:SObject} ${2:record} : [SELECT ${3:Id} FROM ${1:SObject}${4: WHERE }]) {\n\t$0\n}', detail: 'SOQL for-loop' },
+    { label: 'forlist', insert: 'for (${1:Type} ${2:item} : ${3:items}) {\n\t$0\n}', detail: 'for-each loop' },
+    { label: 'ifelse', insert: 'if (${1:condition}) {\n\t$2\n} else {\n\t$0\n}', detail: 'if / else' },
+    { label: 'trycatch', insert: 'try {\n\t$1\n} catch (${2:Exception} e) {\n\t$0\n}', detail: 'try / catch' },
+    { label: 'testmethod', insert: '@IsTest\nstatic void ${1:testName}() {\n\t$0\n}', detail: 'test method' },
+    { label: 'auramethod', insert: "@AuraEnabled(cacheable=true)\npublic static ${1:Object} ${2:name}(${3}) {\n\t$0\n}", detail: 'cacheable AuraEnabled method' },
+    { label: 'assertequals', insert: "Assert.areEqual(${1:expected}, ${2:actual}, '${3:message}');", detail: 'Assert.areEqual(…)' },
+    { label: 'systemassert', insert: 'System.assertEquals(${1:expected}, ${2:actual});', detail: 'System.assertEquals(…)' },
+    { label: 'insertdml', insert: 'insert ${1:records};', detail: 'insert DML' },
+    { label: 'dbinsert', insert: 'Database.insert(${1:records}, ${2:false});', detail: 'Database.insert(…)' },
+    { label: 'batchable', insert: 'global Database.QueryLocator start(Database.BatchableContext bc) {\n\treturn Database.getQueryLocator([SELECT Id FROM ${1:SObject}]);\n}\n\nglobal void execute(Database.BatchableContext bc, List<${1:SObject}> scope) {\n\t$0\n}\n\nglobal void finish(Database.BatchableContext bc) {\n}', detail: 'Batchable methods — add: implements Database.Batchable<SObject>' },
+    { label: 'queueable', insert: 'public void execute(QueueableContext context) {\n\t$0\n}', detail: 'Queueable execute — add: implements Queueable' },
+    { label: 'schedulable', insert: 'global void execute(SchedulableContext sc) {\n\t$0\n}', detail: 'Schedulable execute — add: implements Schedulable' },
+    { label: 'trigger', insert: 'trigger ${1:Name} on ${2:SObject} (${3:before insert, after insert}) {\n\t$0\n}', detail: 'trigger declaration' },
+    { label: 'triggerhandler', insert: 'switch on Trigger.operationType {\n\twhen BEFORE_INSERT {\n\t\t$1\n\t}\n\twhen AFTER_INSERT {\n\t\t$2\n\t}\n\twhen BEFORE_UPDATE {\n\t\t$3\n\t}\n\twhen AFTER_UPDATE {\n\t\t$0\n\t}\n}', detail: 'trigger context routing' },
+];
+
+// Standard Apex exception types, offered inside `catch (…)`.
+const APEX_EXCEPTIONS = [
+    'Exception', 'DmlException', 'QueryException', 'CalloutException', 'NullPointerException',
+    'ListException', 'SObjectException', 'StringException', 'TypeException', 'MathException',
+    'JSONException', 'NoAccessException', 'NoDataFoundException', 'LimitException', 'AsyncException',
+    'SecurityException', 'InvalidParameterValueException', 'EmailException', 'SearchException', 'HandledException',
+];
+
+/** Completion inside `catch (…)` — standard Apex exception types. */
+function apexCatchCompletion(doc: TextDocument, offset: number): CompletionItem[] {
+    const full = doc.getText();
+    const lineStart = full.lastIndexOf('\n', offset - 1) + 1;
+    const lineUpToCursor = full.slice(lineStart, offset);
+    const m = /\bcatch\s*\(\s*([A-Za-z_]\w*)?$/.exec(lineUpToCursor);
+    if (!m) return [];
+    const partial = (m[1] ?? '').toLowerCase();
+    return sfxTag(
+        APEX_EXCEPTIONS.filter((e) => !partial || e.toLowerCase().startsWith(partial)).map((e) =>
+            withSchemaDoc(
+                { label: e, kind: CompletionItemKind.Class, labelDetails: { description: 'exception' }, sortText: '0_' + e },
+                ['`' + e + '` — Apex exception type'],
+            ),
+        ),
+    );
+}
+
+/** Statement-snippet items for the bare-identifier position (filtered by the typed prefix). */
+function apexSnippetCompletion(partial: string): CompletionItem[] {
+    return APEX_SNIPPETS.filter((s) => !partial || s.label.startsWith(partial)).map((s) =>
+        withSchemaDoc(
+            {
+                label: s.label,
+                kind: CompletionItemKind.Snippet,
+                insertText: s.insert,
+                insertTextFormat: InsertTextFormat.Snippet,
+                detail: s.detail,
+                sortText: '5_' + s.label,
+            },
+            ['`' + s.detail + '` — snippet'],
+        ),
+    );
+}
+
+/** In-scope Apex variables/params/fields visible at a position (for SOQL bind completion). */
+function inScopeVars(index: ApexIndex, line: number, character: number): { name: string; type: string }[] {
+    const out: { name: string; type: string }[] = [];
+    const seen = new Set<string>();
+    for (const d of index.varDecls) {
+        const s = d.scope;
+        const within =
+            (line > s.start.line || (line === s.start.line && character >= s.start.character)) &&
+            (line < s.end.line || (line === s.end.line && character <= s.end.character));
+        if (!within || d.line > line) continue;
+        if (seen.has(d.name)) continue;
+        seen.add(d.name);
+        out.push({ name: d.name, type: d.type });
+    }
+    return out;
+}
+
+/** The SObject a trigger fires on, from `trigger X on Object (...)`. */
+function triggerObjectName(full: string): string {
+    return /\btrigger\s+\w+\s+on\s+([A-Za-z_]\w*)/i.exec(full)?.[1] ?? 'SObject';
+}
+
+/** `Trigger.` context members, typed to the trigger's SObject. */
+function triggerMembers(full: string, partial: string): CompletionItem[] {
+    const obj = triggerObjectName(full);
+    const members: { name: string; type: string }[] = [
+        { name: 'new', type: `List<${obj}>` },
+        { name: 'old', type: `List<${obj}>` },
+        { name: 'newMap', type: `Map<Id, ${obj}>` },
+        { name: 'oldMap', type: `Map<Id, ${obj}>` },
+        { name: 'size', type: 'Integer' },
+        { name: 'operationType', type: 'System.TriggerOperation' },
+        { name: 'isExecuting', type: 'Boolean' },
+        { name: 'isBefore', type: 'Boolean' },
+        { name: 'isAfter', type: 'Boolean' },
+        { name: 'isInsert', type: 'Boolean' },
+        { name: 'isUpdate', type: 'Boolean' },
+        { name: 'isDelete', type: 'Boolean' },
+        { name: 'isUndelete', type: 'Boolean' },
+    ];
+    return sfxTag(
+        members
+            .filter((mm) => !partial || mm.name.toLowerCase().startsWith(partial))
+            .map((mm) =>
+                withSchemaDoc(
+                    {
+                        label: mm.name,
+                        kind: CompletionItemKind.Field,
+                        labelDetails: { detail: ` : ${mm.type}`, description: 'Trigger' },
+                        sortText: '0_' + mm.name,
+                    },
+                    ['```apex\n' + `Trigger.${mm.name} : ${mm.type}` + '\n```'],
+                ),
+            ),
+    );
+}
+
+/** Picklist value completion inside a string literal RHS: `acc.Industry = '|'`. */
+async function apexPicklistValueCompletion(doc: TextDocument, offset: number): Promise<CompletionItem[]> {
+    const full = doc.getText();
+    const lineStart = full.lastIndexOf('\n', offset - 1) + 1;
+    const luc = full.slice(lineStart, offset);
+    const m = /([A-Za-z_]\w*)\s*\.\s*([A-Za-z_]\w*(?:__c)?)\s*(?:=|==|!=|<>)\s*'([^']*)$/.exec(luc);
+    if (!m) return [];
+    const receiver = m[1];
+    const field = m[2];
+    const partial = m[3].toLowerCase();
+    const { index } = getApexParse(doc);
+    const pos = doc.positionAt(offset);
+    const typeName = resolveVarType(index, receiver, pos.line, pos.character) ?? regexReceiverType(full, receiver) ?? receiver;
+    const d = await describe(doc.uri, baseTypeName(typeName));
+    if (!d) return [];
+    const f = d.fields.find((x) => x.name.toLowerCase() === field.toLowerCase() || nameMatchesNsOptional(x.name, field));
+    if (!f || !f.picklistValues || !f.picklistValues.length) return [];
+    return sfxTag(
+        f.picklistValues
+            .filter((v) => !partial || v.toLowerCase().startsWith(partial))
+            .map((v) =>
+                withSchemaDoc(
+                    { label: v, kind: CompletionItemKind.EnumMember, insertText: v, detail: `${baseTypeName(typeName)}.${f.name}`, sortText: '0_' + v },
+                    ['`' + v + '` — picklist value'],
+                ),
+            ),
+    );
+}
+
 function apexGlobalCompletion(doc: TextDocument, offset: number): CompletionItem[] {
     const full = doc.getText();
     const lineStart = full.lastIndexOf('\n', offset - 1) + 1;
@@ -1076,6 +1483,9 @@ function apexGlobalCompletion(doc: TextDocument, offset: number): CompletionItem
         );
     }
 
+    // Common Apex statement snippets (sysdebug, soqlfor, testmethod, …).
+    items.push(...apexSnippetCompletion(partial));
+
     return sfxTag(items);
 }
 
@@ -1090,10 +1500,96 @@ function isApex(uri: string): boolean {
 // on push/pull/org change (via NOTE_REFRESH). Syntax diagnostics go out immediately;
 // the org-aware schema pass (async describe calls) runs debounced and re-publishes
 // the merged set. Completion/hover/definition still parse on demand (version-cached).
+/** Body spans `{…}` of every `for`/`while`/`do` loop, for the SOQL/DML-in-loop lint. */
+function loopBodies(text: string): { start: number; end: number }[] {
+    const bodies: { start: number; end: number }[] = [];
+    const re = /\b(for|while)\s*\(|\bdo\b/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text))) {
+        let i = re.lastIndex;
+        if (m[1]) {
+            let depth = 1; // skip the (…) condition
+            while (i < text.length && depth > 0) {
+                const ch = text[i++];
+                if (ch === '(') depth++;
+                else if (ch === ')') depth--;
+            }
+        }
+        while (i < text.length && /\s/.test(text[i])) i++;
+        if (text[i] === '{') {
+            let depth = 1;
+            const start = ++i;
+            while (i < text.length && depth > 0) {
+                const ch = text[i++];
+                if (ch === '{') depth++;
+                else if (ch === '}') depth--;
+            }
+            bodies.push({ start, end: i - 1 });
+        }
+    }
+    return bodies;
+}
+
+/** Brace nesting depth at an offset (0 = top level), used to limit lints to top-level classes. */
+function braceDepthAt(text: string, off: number): number {
+    let d = 0;
+    for (let i = 0; i < off && i < text.length; i++) {
+        const c = text[i];
+        if (c === '{') d++;
+        else if (c === '}') d--;
+    }
+    return d;
+}
+
+/**
+ * Lightweight, heuristic Apex lints published alongside syntax/schema diagnostics:
+ * SOQL/DML in loops, hardcoded IDs, leftover System.debug, and classes missing a
+ * sharing declaration. Text-based (no parse) so it stays cheap; source `asfx-apex-lint`.
+ */
+function lintApex(doc: TextDocument): Diagnostic[] {
+    const text = doc.getText();
+    const diags: Diagnostic[] = [];
+    const add = (off: number, len: number, message: string, severity: DiagnosticSeverity) =>
+        diags.push({
+            range: { start: doc.positionAt(off), end: doc.positionAt(off + len) },
+            message,
+            severity,
+            source: 'asfx-apex-lint',
+        });
+
+    for (const m of text.matchAll(/\bSystem\.debug\s*\(/g)) {
+        add(m.index ?? 0, 12, 'Leftover System.debug() — remove before deploying.', DiagnosticSeverity.Information);
+    }
+    for (const m of text.matchAll(/'(?:[A-Za-z0-9]{18}|[A-Za-z0-9]{15})'/g)) {
+        add(m.index ?? 0, m[0].length, 'Possible hardcoded Salesforce ID — avoid hardcoding record IDs.', DiagnosticSeverity.Warning);
+    }
+
+    const bodies = loopBodies(text);
+    if (bodies.length) {
+        const inLoop = (off: number) => bodies.some((b) => off >= b.start && off < b.end);
+        for (const m of text.matchAll(/\[\s*SELECT\b/gi)) {
+            if (inLoop(m.index ?? 0)) add(m.index ?? 0, m[0].length, 'SOQL query inside a loop — move it out to avoid governor limits.', DiagnosticSeverity.Warning);
+        }
+        for (const m of text.matchAll(/\b(?:insert|update|upsert|delete|undelete)\b\s+[A-Za-z_([]/gi)) {
+            if (inLoop(m.index ?? 0)) add(m.index ?? 0, m[0].trimEnd().length, 'DML inside a loop — bulkify (collect records, DML once).', DiagnosticSeverity.Warning);
+        }
+        for (const m of text.matchAll(/\bDatabase\.(?:insert|update|upsert|delete|undelete)\s*\(/gi)) {
+            if (inLoop(m.index ?? 0)) add(m.index ?? 0, m[0].length, 'DML inside a loop — bulkify (collect records, DML once).', DiagnosticSeverity.Warning);
+        }
+    }
+
+    for (const m of text.matchAll(/\b(?:public|global)\s+((?:(?:virtual|abstract|with|without|inherited|sharing)\s+)*)class\s+(\w+)/gi)) {
+        if (/sharing/i.test(m[1]) || braceDepthAt(text, m.index ?? 0) !== 0) continue;
+        add(m.index ?? 0, m[0].length, `Class ${m[2]} declares no sharing (with / without / inherited sharing).`, DiagnosticSeverity.Information);
+    }
+
+    return diags;
+}
+
 function publishApexDiagnostics(doc: TextDocument): void {
     if (!apexFeatures || doc.languageId === 'soql' || !isApex(doc.uri)) return;
     const parse = getApexParse(doc);
-    connection.sendDiagnostics({ uri: doc.uri, diagnostics: parse.diagnostics });
+    connection.sendDiagnostics({ uri: doc.uri, diagnostics: [...parse.diagnostics, ...lintApex(doc)] });
     if (apexValidateSchema) scheduleSchemaValidation(doc.uri);
 }
 
@@ -1168,7 +1664,7 @@ async function runSchemaValidation(uri: string): Promise<void> {
         // a newer edit will have scheduled its own run.
         const live = documents.get(uri);
         if (!live || live.version !== atStart) return;
-        connection.sendDiagnostics({ uri, diagnostics: [...getApexParse(live).diagnostics, ...schema] });
+        connection.sendDiagnostics({ uri, diagnostics: [...getApexParse(live).diagnostics, ...lintApex(live), ...schema] });
     } catch {
         // Keep the already-published syntax diagnostics; schema pass is best-effort.
     }
@@ -1248,6 +1744,45 @@ async function apexDefinition(doc: TextDocument, offset: number, pos: { line: nu
     if (await describe(doc.uri, word)) return stubLocation(doc.uri, word, null);
     return null;
 }
+
+/**
+ * References for Apex symbols. Locals/params stay inside their declaring method (scope-aware);
+ * fields, methods and types also search the other Apex files in the project.
+ */
+connection.onReferences(async (params): Promise<Location[]> => {
+    const doc = documents.get(params.textDocument.uri);
+    if (!doc || !apexFeatures || !isApex(doc.uri)) return [];
+    const text = doc.getText();
+    const ref = symbolAt(text, getApexParse(doc).index, params.position);
+    if (!ref) return [];
+
+    const out: Location[] = findReferencesInText(text, ref.name, ref.scope).map((range) =>
+        Location.create(doc.uri, range)
+    );
+
+    // A local/param can't be referenced from another file — stop here.
+    if (ref.localOnly) return out;
+
+    // Otherwise scan the rest of the project's Apex. Cap the work so a huge org can't hang the
+    // editor; the current file's results are already included above.
+    const MAX_FILES = 2000;
+    const thisPath = fileURLToPath(doc.uri);
+    let scanned = 0;
+    for (const file of WorkspaceIndex.allFiles()) {
+        if (scanned++ >= MAX_FILES) break;
+        if (file === thisPath) continue;
+        let body: string;
+        try {
+            body = fs.readFileSync(file, 'utf8');
+        } catch {
+            continue;
+        }
+        if (!body.includes(ref.name)) continue; // cheap reject before the regex pass
+        const uri = pathToFileURL(file).toString();
+        for (const range of findReferencesInText(body, ref.name)) out.push(Location.create(uri, range));
+    }
+    return out;
+});
 
 connection.onDefinition(async (params): Promise<Location | null> => {
     const doc = documents.get(params.textDocument.uri);
@@ -1465,6 +2000,165 @@ connection.onHover(async (params): Promise<Hover | null> => {
         return soqlHover(doc.uri, region.snippet, region.line, region.column, span[2]);
     }
     return apexHover(doc, offset, params.position);
+});
+
+// Standard interfaces whose method stubs can be generated when a class declares them.
+const IFACE_STUBS: { match: RegExp; key: string; title: string; body: string }[] = [
+    {
+        match: /Database\.Batchable/i,
+        key: 'execute',
+        title: 'Database.Batchable',
+        body:
+            '\tglobal Database.QueryLocator start(Database.BatchableContext bc) {\n' +
+            '\t\treturn Database.getQueryLocator([SELECT Id FROM SObject]);\n\t}\n\n' +
+            '\tglobal void execute(Database.BatchableContext bc, List<SObject> scope) {\n\t\t\n\t}\n\n' +
+            '\tglobal void finish(Database.BatchableContext bc) {\n\t}\n',
+    },
+    { match: /(?:^|[\s,])Queueable\b/, key: 'execute', title: 'Queueable', body: '\tpublic void execute(QueueableContext context) {\n\t\t\n\t}\n' },
+    { match: /(?:^|[\s,])Schedulable\b/, key: 'execute', title: 'Schedulable', body: '\tglobal void execute(SchedulableContext sc) {\n\t\t\n\t}\n' },
+    { match: /(?:^|[\s,])Comparable\b/, key: 'compareto', title: 'Comparable', body: '\tpublic Integer compareTo(Object other) {\n\t\treturn 0;\n\t}\n' },
+];
+
+// Apex code actions: surround a selection with try/catch, and modernize legacy asserts.
+connection.onCodeAction((params): CodeAction[] => {
+    if (!apexCompletion) return [];
+    const doc = documents.get(params.textDocument.uri);
+    if (!doc || doc.languageId === 'soql') return [];
+    const uri = params.textDocument.uri;
+    const range = params.range;
+    const actions: CodeAction[] = [];
+
+    // 1. Surround selection with try/catch.
+    const selected = doc.getText(range);
+    if (selected.trim().length > 0) {
+        const inner = selected
+            .split('\n')
+            .map((l) => '\t' + l)
+            .join('\n');
+        const wrapped = 'try {\n' + inner + '\n} catch (Exception e) {\n\t\n}';
+        actions.push({
+            title: 'Surround with try/catch',
+            kind: CodeActionKind.RefactorRewrite,
+            edit: { changes: { [uri]: [TextEdit.replace(range, wrapped)] } },
+        });
+    }
+
+    // 2. Convert legacy System.assert* → Assert.* on the touched lines.
+    const full = doc.getText();
+    const lines = full.split('\n');
+    const conversions: { re: RegExp; to: string }[] = [
+        { re: /System\.assertEquals\(/g, to: 'Assert.areEqual(' },
+        { re: /System\.assertNotEquals\(/g, to: 'Assert.areNotEqual(' },
+        { re: /System\.assert\(/g, to: 'Assert.isTrue(' },
+    ];
+    const edits: TextEdit[] = [];
+    for (let ln = range.start.line; ln <= range.end.line && ln < lines.length; ln++) {
+        const lineText = lines[ln];
+        for (const { re, to } of conversions) {
+            re.lastIndex = 0;
+            let mm: RegExpExecArray | null;
+            while ((mm = re.exec(lineText))) {
+                edits.push(TextEdit.replace(Range.create(ln, mm.index, ln, mm.index + mm[0].length), to));
+            }
+        }
+    }
+    if (edits.length) {
+        actions.push({
+            title: 'Convert System.assert* → Assert.*',
+            kind: CodeActionKind.QuickFix,
+            edit: { changes: { [uri]: edits } },
+        });
+    }
+
+    // 3. Class-level: generate a constructor and implement declared standard interfaces.
+    const index = getApexParse(doc).index;
+    let cls: { name: string; range: Range } | undefined;
+    let best = Infinity;
+    for (const c of index.classRanges) {
+        const r = c.range;
+        const inside =
+            (range.start.line > r.start.line || (range.start.line === r.start.line && range.start.character >= r.start.character)) &&
+            (range.start.line < r.end.line || (range.start.line === r.end.line && range.start.character <= r.end.character));
+        if (!inside) continue;
+        const size = r.end.line - r.start.line;
+        if (size < best) {
+            best = size;
+            cls = c;
+        }
+    }
+    if (cls) {
+        const members = index.types.get(cls.name) ?? [];
+        const at = { line: range.start.line, character: 0 };
+
+        const fields = members.filter((m) => m.kind === 'field' || m.kind === 'property');
+        if (fields.length) {
+            const paramList = fields.map((f) => `${f.detail ?? 'Object'} ${f.name}`).join(', ');
+            const assigns = fields.map((f) => `\t\tthis.${f.name} = ${f.name};`).join('\n');
+            const ctor = `\tpublic ${cls.name}(${paramList}) {\n${assigns}\n\t}\n\n`;
+            actions.push({
+                title: `Generate constructor (${fields.length} field${fields.length === 1 ? '' : 's'})`,
+                kind: CodeActionKind.RefactorRewrite,
+                edit: { changes: { [uri]: [TextEdit.insert(at, ctor)] } },
+            });
+        }
+
+        const headerStart = doc.offsetAt(cls.range.start);
+        const braceIdx = full.indexOf('{', headerStart);
+        const header = full.slice(headerStart, braceIdx >= 0 ? braceIdx : headerStart + 200);
+        const memberNames = new Set(members.map((m) => m.name.toLowerCase()));
+        for (const s of IFACE_STUBS) {
+            if (!s.match.test(header) || memberNames.has(s.key)) continue;
+            actions.push({
+                title: `Implement ${s.title} methods`,
+                kind: CodeActionKind.QuickFix,
+                edit: { changes: { [uri]: [TextEdit.insert(at, s.body + '\n')] } },
+            });
+        }
+
+        // Generate a sibling test class (new file + meta.xml) for a non-test top-level class.
+        if (!/@IsTest/i.test(header) && braceDepthAt(full, headerStart) === 0) {
+            const dir = uri.slice(0, uri.lastIndexOf('/'));
+            const testUri = `${dir}/${cls.name}Test.cls`;
+            const metaUri = `${testUri}-meta.xml`;
+            const testBody =
+                `@IsTest\nprivate class ${cls.name}Test {\n` +
+                `\t@IsTest\n\tstatic void test${cls.name}() {\n` +
+                `\t\t// TODO: arrange, act, assert\n\t\tAssert.isTrue(true);\n\t}\n}\n`;
+            const metaBody =
+                '<?xml version="1.0" encoding="UTF-8"?>\n' +
+                '<ApexClass xmlns="http://soap.sforce.com/2006/04/metadata">\n' +
+                '\t<apiVersion>61.0</apiVersion>\n\t<status>Active</status>\n</ApexClass>\n';
+            actions.push({
+                title: `Generate test class ${cls.name}Test`,
+                kind: CodeActionKind.RefactorRewrite,
+                edit: {
+                    documentChanges: [
+                        CreateFile.create(testUri, { ignoreIfExists: true }),
+                        { textDocument: { uri: testUri, version: null }, edits: [TextEdit.insert({ line: 0, character: 0 }, testBody)] },
+                        CreateFile.create(metaUri, { ignoreIfExists: true }),
+                        { textDocument: { uri: metaUri, version: null }, edits: [TextEdit.insert({ line: 0, character: 0 }, metaBody)] },
+                    ],
+                },
+            });
+        }
+    }
+
+    return actions;
+});
+
+// Apex workspace symbols — jump to any class/trigger in the project.
+connection.onWorkspaceSymbol((params): SymbolInformation[] => {
+    if (!apexFeatures) return [];
+    const q = (params.query ?? '').toLowerCase();
+    const out: SymbolInformation[] = [];
+    for (const name of WorkspaceIndex.allTypeNames()) {
+        if (q && !name.toLowerCase().includes(q)) continue;
+        const location = WorkspaceIndex.findType(name);
+        if (!location) continue;
+        out.push({ name, kind: SymbolKind.Class, location });
+        if (out.length >= 200) break;
+    }
+    return out;
 });
 
 documents.listen(connection);

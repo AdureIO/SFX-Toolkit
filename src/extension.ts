@@ -5,7 +5,6 @@ import { addDebugTrace } from "./commands/addDebugTrace";
 import { DeployMetadataPanelProvider } from "./providers/DeployMetadataPanelProvider";
 import { executeAnonymous, rerunLastApex } from "./commands/executeAnonymous";
 import { executeSOQL } from "./commands/executeSOQL";
-import { logTreeProvider } from "./providers/LogTreeProvider";
 import { openLogById } from "./commands/listLogs";
 import { deleteAllLogs } from "./commands/deleteAllLogs";
 import { TraceTreeProvider } from "./providers/TraceTreeProvider";
@@ -42,6 +41,8 @@ import { validateApexFile, registerValidateOnSave } from "./commands/validateApe
 import { PermissionSetEditorProvider } from "./editors/PermissionSetEditorProvider";
 import { ScratchOrgDefEditorProvider } from "./editors/ScratchOrgDefEditorProvider";
 import { SOQLEditorProvider } from "./providers/SOQLEditorProvider";
+import { ObjectVisualizerPanelProvider } from "./providers/ObjectVisualizerPanelProvider";
+import { ProcessMapPanelProvider } from "./providers/ProcessMapPanelProvider";
 import { registerApexLogDecorator } from "./providers/ApexLogDecorator";
 import { ApexWorkbenchViewProvider } from "./providers/ApexWorkbenchViewProvider";
 import { Logger, outputChannel } from "./utils/outputChannel";
@@ -51,6 +52,9 @@ import { OrgHealthProvider } from "./commands/orgHealth";
 import { quickSoqlFromSelection } from "./commands/quickSoql";
 import { DeployHistoryProvider, initDeployHistory, setOpenDeployPanelCallback } from "./commands/deployHistory";
 import { lwcNavigate, lwcGoToJs, lwcGoToHtml, lwcGoToMeta, lwcGoToCss } from "./commands/lwcNavigator";
+import { registerLwcApexProviders } from "./providers/LwcApexProvider";
+import { generateLwcApexTypings, registerLwcApexTypingsSync } from "./commands/lwcApexTypings";
+import { repairLwcJsconfigCommand } from "./commands/lwcJsconfigRepair";
 import {
   showSnippets,
   runSnippet,
@@ -68,6 +72,9 @@ import { CoveragePanelProvider } from "./providers/CoveragePanelProvider";
 import { ApexCoverageDecorationProvider } from "./providers/ApexCoverageDecorationProvider";
 import { CoverageLineDecorator } from "./providers/CoverageLineDecorator";
 import { toggleHideMetaXml } from "./commands/toggleHideMeta";
+import { registerLwcApexBridge } from "./providers/LwcApexBridge";
+import { registerLwcProviders } from "./providers/LwcProviders";
+import { registerRestResourceCodeLens } from "./providers/RestResourceCodeLens";
 import { apexCoverage, registerCoverageWatchers, clearApexTestResults } from "./utils/apexCoverageService";
 import { SnippetTreeProvider } from "./providers/SnippetTreeProvider";
 import { addToGitignore, addToForceignore, addToIgnore } from "./commands/addToIgnore";
@@ -267,41 +274,16 @@ export function activate(context: vscode.ExtensionContext) {
           { pattern: "**/*.trigger", scheme: "file" }
         ],
         new ApexCompletionProvider(),
-        "." // also fires on dot for member completion
+        ".", // member completion
+        "@", // Apex annotations (@IsTest, @AuraEnabled, …)
+        "'" // picklist values in obj.Field = '…'
       )
     );
 
     // 6. Execute SOQL
     const executeSOQLCmd = register("adure-sfx-toolkit.executeSOQL", executeSOQL);
 
-    // 7. Side Bar Log Provider (lists the org's Apex logs over REST via apexLogApi —
-    //    same path as the ASFX Workbench; no local files or CLI download).
-    //    Discovery is event-driven (no fixed-interval polling): the list re-fetches
-    //    the moment the view becomes visible, when the window regains focus, and right
-    //    after Apex runs — so new logs surface immediately instead of up to N seconds later.
-    const logsView = vscode.window.createTreeView("adure-sfx-toolkit.logs", { treeDataProvider: logTreeProvider });
-    context.subscriptions.push(logsView);
-    // Only discover (and live-poll while a trace is active) while the view is shown.
-    logTreeProvider.setActive(logsView.visible);
-
-    const refreshLogsCmd = register("adure-sfx-toolkit.refreshLogs", () => logTreeProvider.refresh());
-
-    context.subscriptions.push(
-      logsView.onDidChangeVisibility((e) => logTreeProvider.setActive(e.visible)),
-      vscode.window.onDidChangeWindowState((s) => { if (s.focused && logsView.visible) logTreeProvider.refresh(); })
-    );
-
-    // A new log file written by the Salesforce extensions is a cheap extra signal that
-    // the org has fresh logs — trigger a re-list (the tree itself reads from REST).
-    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-    if (workspaceFolder) {
-      const logWatcher = vscode.workspace.createFileSystemWatcher(
-        new vscode.RelativePattern(workspaceFolder, ".sfdx/tools/debug/logs/*.log")
-      );
-      logWatcher.onDidCreate(() => { if (logsView.visible) logTreeProvider.refresh(); });
-      context.subscriptions.push(logWatcher);
-    }
-
+    // 7. Apex logs live in the ASFX Workbench's Logs tab — there is no sidebar Logs view.
     const openLogCmd = register("adure-sfx-toolkit.openLog", async (logId: string) => {
       if (logId) {
         await openLogById(logId);
@@ -401,6 +383,14 @@ export function activate(context: vscode.ExtensionContext) {
     const resetTrackingCmd = register("adure-sfx-toolkit.resetSourceTracking", resetSourceTracking);
     const validateApexCmd = register("adure-sfx-toolkit.validateApexFile", () => validateApexFile());
     registerValidateOnSave(context);
+    // LWC → Apex: Cmd+click an `@salesforce/apex/...` import to land on the real method, and hover
+    // it for the true signature (Salesforce's generated .d.ts types everything as `any`).
+    registerLwcApexProviders(context);
+    const lwcApexTypingsCmd = register("adure-sfx-toolkit.generateLwcApexTypings", generateLwcApexTypings);
+    // Keep the typings in step with the Apex source automatically (initial sync + on save/change).
+    registerLwcApexTypingsSync(context);
+    // Repairs are opt-in (sidebar "Repair" section / command palette) — they edit the workspace.
+    const lwcJsconfigCmd = register("adure-sfx-toolkit.repairLwcJsconfig", repairLwcJsconfigCommand);
     const refreshMetadataCmd = register("adure-sfx-toolkit.refreshMetadata", async () => {
       await vscode.window.withProgress(
         {
@@ -459,6 +449,21 @@ export function activate(context: vscode.ExtensionContext) {
       vscode.window.registerWebviewPanelSerializer(SOQLEditorProvider.viewType, {
         async deserializeWebviewPanel(panel: vscode.WebviewPanel): Promise<void> {
           await SOQLEditorProvider.revive(panel, context.extensionUri);
+        }
+      })
+    );
+
+    // 13b. Object Visualizer
+    const objectVisualizerCmd = register("adure-sfx-toolkit.objectVisualizer", () => {
+      ObjectVisualizerPanelProvider.show(context.extensionUri);
+    });
+    const processMapCmd = register("adure-sfx-toolkit.processMap", () => {
+      ProcessMapPanelProvider.show(context.extensionUri);
+    });
+    context.subscriptions.push(
+      vscode.window.registerWebviewPanelSerializer(ObjectVisualizerPanelProvider.viewType, {
+        async deserializeWebviewPanel(panel: vscode.WebviewPanel): Promise<void> {
+          await ObjectVisualizerPanelProvider.revive(panel, context.extensionUri);
         }
       })
     );
@@ -563,7 +568,9 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     // 21. Data Migration Wizard
-    const dataMigrationCmd = register("adure-sfx-toolkit.dataMigration", () => DataMigrationPanelProvider.show());
+    const dataMigrationCmd = register("adure-sfx-toolkit.dataMigration", () =>
+      DataMigrationPanelProvider.show(context.globalStorageUri.fsPath)
+    );
 
     // 22. Package Explorer (Dev Hub 2GP)
     const packageExplorerCmd = register("adure-sfx-toolkit.openPackageExplorer", (arg?: { orgData?: { username?: string } }) =>
@@ -580,6 +587,13 @@ export function activate(context: vscode.ExtensionContext) {
         return PackageExplorerPanelProvider.showInstalled(username);
       }
     );
+
+    // 24. Apex ↔ LWC bridge — go-to-definition from LWC apex imports + @AuraEnabled CodeLens
+    registerLwcApexBridge(context);
+    // 25. LWC @salesforce/* import completion + go-to-def + component usage CodeLens
+    registerLwcProviders(context);
+    // 26. @RestResource → "Test in REST Explorer" CodeLens
+    registerRestResourceCodeLens(context);
 
     // 23. Apex coverage — Explorer badges + structured panel (shared store)
     const covDecorator = new ApexCoverageDecorationProvider(context);
@@ -625,7 +639,6 @@ export function activate(context: vscode.ExtensionContext) {
       executeAnonCmd,
       rerunAnonCmd,
       executeSOQLCmd,
-      refreshLogsCmd,
       openLogCmd,
       deleteAllLogsCmd,
       refreshTracesCmd,
@@ -650,8 +663,12 @@ export function activate(context: vscode.ExtensionContext) {
       retrieveFileCmd,
       resetTrackingCmd,
       validateApexCmd,
+      lwcApexTypingsCmd,
+      lwcJsconfigCmd,
       refreshMetadataCmd,
       openSOQLEditorCmd,
+      objectVisualizerCmd,
+      processMapCmd,
       showOutputCmd,
       metadataDiffCmd,
       orgHealthCmd,

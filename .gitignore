@@ -10,8 +10,21 @@ functions.md
 settings.md
 
 *.vsix
+# Webview bundles (built by esbuild)
+resources/webview/
+
+# Stray tsc output beside the language-server sources. The server is bundled from
+# server/src/server.ts to out/server.js — these are never loaded.
+server/src/*.js
+server/src/*.js.map
+
 # Project uses npm (package-lock.json)
 yarn.lock
+
+# Exported records from the Data Migration Wizard. Real data from a real org — it must
+# never be committed. Presets (.sfdx/asfx/migrations) are deliberately NOT ignored: they
+# describe a migration, carry no records, and are meant to be shared with the team.
+.sfdx/asfx/exports/
 
 # Claude Code (local only)
 .claude/

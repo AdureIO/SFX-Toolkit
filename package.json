@@ -4,7 +4,7 @@
   "publisher": "AdureIO",
   "description": "Utilities for Salesforce development: Log filtering, Debug Traces, Deployment, and more.",
   "icon": "resources/icon.png",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "license": "BSD-3-Clause",
   "engines": {
     "vscode": "^1.80.0"
@@ -39,6 +39,15 @@
   ],
   "main": "./out/extension.js",
   "contributes": {
+    "configurationDefaults": {
+      "[apex]": {
+        "editor.quickSuggestions": {
+          "other": "on",
+          "comments": "off",
+          "strings": "on"
+        }
+      }
+    },
     "commands": [
       {
         "command": "adure-sfx-toolkit.filterLogDebug",
@@ -71,11 +80,6 @@
           "light": "resources/light/soql-active.svg",
           "dark": "resources/dark/soql-active.svg"
         }
-      },
-      {
-        "command": "adure-sfx-toolkit.refreshLogs",
-        "title": "ASFXT: Refresh Logs",
-        "icon": "$(refresh)"
       },
       {
         "command": "adure-sfx-toolkit.openLog",
@@ -235,6 +239,26 @@
         "command": "adure-sfx-toolkit.openSOQLEditor",
         "title": "ASFXT: Open SOQL Builder & Editor",
         "icon": "$(database)"
+      },
+      {
+        "command": "adure-sfx-toolkit.repairLwcJsconfig",
+        "title": "ASFXT: Repair LWC jsconfig (IntelliSense)",
+        "icon": "$(tools)"
+      },
+      {
+        "command": "adure-sfx-toolkit.generateLwcApexTypings",
+        "title": "ASFXT: Generate LWC Apex Typings",
+        "icon": "$(symbol-interface)"
+      },
+      {
+        "command": "adure-sfx-toolkit.objectVisualizer",
+        "title": "ASFXT: Object Visualizer",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "adure-sfx-toolkit.processMap",
+        "title": "ASFXT: Process Visualizer",
+        "icon": "$(circuit-board)"
       },
       {
         "command": "adure-sfx-toolkit.metadataDiff",
@@ -443,12 +467,6 @@
     "views": {
       "adure-sfx-toolkit-activitybar": [
         {
-          "id": "adure-sfx-toolkit.logs",
-          "name": "Logs",
-          "when": "adure-sfx-toolkit:isSalesforceProject",
-          "visibility": "collapsed"
-        },
-        {
           "id": "adure-sfx-toolkit.traces",
           "name": "Debug Traces",
           "when": "adure-sfx-toolkit:isSalesforceProject",
@@ -527,16 +545,6 @@
     ],
     "menus": {
       "view/title": [
-        {
-          "command": "adure-sfx-toolkit.refreshLogs",
-          "when": "view == adure-sfx-toolkit.logs",
-          "group": "navigation"
-        },
-        {
-          "command": "adure-sfx-toolkit.deleteAllLogs",
-          "when": "view == adure-sfx-toolkit.logs",
-          "group": "navigation"
-        },
         {
           "command": "adure-sfx-toolkit.refreshTraces",
           "when": "view == adure-sfx-toolkit.traces",
@@ -837,6 +845,11 @@
     "configuration": {
       "title": "Adure SFX Toolkit",
       "properties": {
+      "adure-sfx-toolkit.lwcApexTypings.autoGenerate": {
+        "type": "boolean",
+        "default": true,
+        "description": "Automatically keep @salesforce/apex LWC typings in sync with your Apex @AuraEnabled methods (real parameter and return types instead of any)."
+      },
         "adure-sfx-toolkit.liveLogIntervalSeconds": {
           "type": "number",
           "default": 3,
@@ -1048,12 +1061,13 @@
     "lint": "eslint src --ext ts",
     "test": "npm run compile && node ./out/test/runTest.js",
     "package": "vsce package",
-    "test:unit": "npm run compile && mocha --reporter spec --timeout 15000 \"out/test/**/*.test.js\"",
-    "test:server": "npm run compile && mocha --reporter spec --timeout 15000 out/test/languageServer.test.js out/test/sobjectStubSync.test.js out/test/soqlValidate.test.js out/test/nameMatch.test.js out/test/apexLogParse.test.js out/test/soqlError.test.js out/test/soqlEdit.test.js",
+    "test:unit": "npm run compile && mocha --reporter spec --timeout 15000 \"out/test/**/*.test.js\" --ignore \"out/test/defaultOrg.test.js\" --ignore \"out/test/orgSafety.test.js\" --ignore \"out/test/shellEscape.test.js\"",
     "bundle": "node esbuild.js --production",
     "bundle:dev": "node esbuild.js"
   },
   "devDependencies": {
+    "@types/cytoscape": "^3.21.9",
+    "@types/dagre": "^0.7.54",
     "@types/glob": "^8.1.0",
     "@types/mocha": "^10.0.10",
     "@types/node": "^20.2.5",
@@ -1071,6 +1085,11 @@
     "@apexdevtools/apex-parser": "5.0.0",
     "@salesforce/soql-language-server": "1.1.0",
     "@vscode/extension-telemetry": "^1.5.2",
+    "cytoscape": "^3.34.0",
+    "cytoscape-dagre": "^4.0.0",
+    "cytoscape-node-html-label": "^1.2.2",
+    "cytoscape-svg": "^0.4.0",
+    "dagre": "^0.8.5",
     "fast-xml-parser": "^5.10.1",
     "glob": "^8.1.0",
     "minimatch": "^10.2.5",

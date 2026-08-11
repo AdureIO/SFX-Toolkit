@@ -18,7 +18,6 @@ import { resultsTableCss, resultsTableScript } from '../webview/resultsTableComp
 import { refreshLanguageServerSchema, setEphemeralBuffers } from '../languageClient';
 import { ApexBufferBridge } from './apexBufferBridge';
 import { Telemetry } from '../utils/telemetry';
-import { logTreeProvider } from './LogTreeProvider';
 import { onDidChangeDefaultOrg } from '../utils/defaultOrgEvents';
 
 const WORKBENCH_BUFFER = '.vscode/anon-workbench-buffer.apex';
@@ -34,7 +33,7 @@ const HISTORY_MAX = 10;
  *     configurable highlighting) and an active-traces strip.
  *   • Execute tab: a Monaco editor with org-aware completion/hover/go-to-def and
  *     a results pane, running anonymous Apex against the selected org.
- * Coexists with the sidebar Logs/Traces views and the standalone Execute panel.
+ * This is the single home for Apex logs; the sidebar keeps only the Traces view.
  */
 export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	private _view?: vscode.WebviewView;
@@ -214,7 +213,6 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 					this._post('execResult', { success: result.success, error: result.errorMessage || '', log: result.log || '', hasLog: !!(result.log && result.log.trim()) });
 					if (result.success) {
 						this._post('historyUpdated', { history: this._saveHistory(data.code || '') });
-						logTreeProvider.refresh(); // sidebar Logs list picks up the new log
 					}
 					break;
 				}
@@ -580,6 +578,10 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 		// addAction (not addCommand) scopes the keybinding to THIS editor instance; with two
 		// editors, addCommand's shared registry let the SOQL editor clobber Cmd+Enter here.
 		editor.addAction({ id:'asfx.execApex', label:'Execute Anonymous Apex', keybindings:[monaco.KeyMod.CtrlCmd|monaco.KeyCode.Enter, monaco.KeyMod.WinCtrl|monaco.KeyCode.Enter], run:function(){ doRun(); } });
+		// Cmd/Ctrl+/ line comment: bind editor-scoped so the webview doesn't swallow the default
+		// keybinding (same reason Cmd+Enter is bound explicitly above). Routes to Monaco's built-in
+		// comment action, with a manual toggle fallback if the build lacks it.
+		editor.addAction({ id:'asfx.toggleComment', label:'Toggle Line Comment', keybindings:[monaco.KeyMod.CtrlCmd|monaco.KeyCode.Slash], run:function(ed){ const a=ed.getAction&&ed.getAction('editor.action.commentLine'); if(a){ a.run(); return; } toggleLineComment(ed); } });
 
 		// ── SOQL editor ───────────────────────────────────────────────────────
 		monaco.languages.register({ id:'soql' });
@@ -597,6 +599,8 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	function flush(){ if(!editor) return; if(saveTimer){clearTimeout(saveTimer);saveTimer=null;} vscode.postMessage({type:'contentChanged',code:editor.getValue()}); }
 	window.addEventListener('blur', flush);
 	function doRun(){ vscode.postMessage({type:'execute', code:editor?editor.getValue():'', org:orgVal()||undefined}); }
+	// Manual line-comment toggle (fallback for Cmd/Ctrl+/ if Monaco's built-in action is unavailable).
+	function toggleLineComment(ed){ const model=ed.getModel(); const sel=ed.getSelection(); if(!model||!sel) return; const start=sel.startLineNumber,end=sel.endLineNumber; let allCommented=true; for(let ln=start;ln<=end;ln++){ const t=model.getLineContent(ln); if(t.trim()==='') continue; if(!/^\\s*\\/\\//.test(t)){ allCommented=false; break; } } const edits=[]; for(let ln=start;ln<=end;ln++){ const t=model.getLineContent(ln); if(t.trim()==='') continue; if(allCommented){ const m=t.match(/^(\\s*)\\/\\/ ?/); if(m) edits.push({ range:new monaco.Range(ln,1,ln,m[0].length+1), text:m[1] }); } else { const indent=(t.match(/^\\s*/)||[''])[0]; edits.push({ range:new monaco.Range(ln,indent.length+1,ln,indent.length+1), text:'// ' }); } } if(edits.length) ed.executeEdits('toggle-comment',edits); }
 	document.getElementById('run').onclick=doRun;
 	document.getElementById('clear').onclick=function(){ if(editor){editor.setValue('');editor.focus();} vscode.postMessage({type:'contentChanged',code:''}); };
 

@@ -55,11 +55,20 @@ export class DevActionsProvider implements vscode.TreeDataProvider<vscode.TreeIt
 			]),
 			new DevGroupItem("Tools", "tools", [
 				this.createItem("ASFX Workbench", "adure-sfx-toolkit.apexWorkbench.focus", "beaker", "Open the ASFX Workbench (org-aware logs, traces, execute & SOQL)"),
+				this.createItem("Object Visualizer", "adure-sfx-toolkit.objectVisualizer", "type-hierarchy", "Render an ERD of objects and their 1-hop relationships"),
+				this.createItem("Process Visualizer", "adure-sfx-toolkit.processMap", "circuit-board", "Map the org's automation — triggers, flows, rules, jobs — connected to their objects"),
 				this.createItem("Refresh Org Metadata", "adure-sfx-toolkit.refreshMetadata", "refresh", "Refresh sobject/field cache for SOQL and builders"),
 				this.createItem("Apex Snippets", "adure-sfx-toolkit.showSnippets", "play", "Run, add, edit or delete Apex snippets"),
 				this.createItem("Apex Snippets Overview", "adure-sfx-toolkit.openSnippetsPanel", "list-unordered", "Open panel with all snippets"),
+				this.createItem("Data Migration Wizard", "adure-sfx-toolkit.dataMigration", "arrow-swap", "Copy records between orgs, or export the same selection to Apex, CSV or JSON"),
 				this.createItem("Org Health", "adure-sfx-toolkit.orgHealth", "dashboard", "View org limits and health metrics"),
 				this.createItem("Hide/Show -meta.xml Files", "adure-sfx-toolkit.toggleHideMetaXml", "eye-closed", "Toggle hiding Apex .cls-meta.xml / .trigger-meta.xml files in the Explorer"),
+			]),
+			// Opt-in fixes for a broken local setup. Nothing here runs on its own — each item
+			// writes to the workspace only when you ask for it.
+			new DevGroupItem("Repair", "tools", [
+				this.createItem("Repair LWC jsconfig", "adure-sfx-toolkit.repairLwcJsconfig", "wrench", "Fix each lwc folder's jsconfig.json so c/* imports, component subdirectories and Salesforce typings resolve in IntelliSense (reload the window afterwards)"),
+				this.createItem("Regenerate LWC Apex Typings", "adure-sfx-toolkit.generateLwcApexTypings", "symbol-interface", "Rewrite the @salesforce/apex typings from your Apex @AuraEnabled signatures (real parameter and return types instead of any)"),
 			]),
 		];
 	}

@@ -4,6 +4,76 @@ All notable changes to the Adure SFX Toolkit extension are documented here.
 
 ---
 
+## [1.3.0] — Process Visualizer, Apex intelligence, migration overhaul
+
+### ✨ New features
+
+#### 🧭 Process Visualizer (`ASFXT: Process Visualizer`)
+
+Maps an org's automation as a process, not a list of components.
+
+- Pick the objects first, then build — the graph stays readable instead of rendering the whole org.
+- Execution-order spine: for a given change, see what runs in which phase (before triggers, validation rules, after triggers, flows, workflow rules) and in what order.
+- Full call chains: `Contact → before update → (trigger → ClassA → ClassB → field is set)`. Apex bodies are scanned for calls and field writes; test classes are excluded.
+- Automations in the same phase are grouped in a labelled box with one edge to the next phase, rather than a fan of crossing lines.
+- Scheduled and autolaunched flows connect to the objects they operate on with a dotted edge.
+- Labelled edges, collision-free layout, re-layout when a filter is applied, search that navigates to each match, and a right-click menu to open any component in the org.
+
+#### 🧠 Language server
+
+Annotation and snippet completion (`@IsTest`, `@AuraEnabled(cacheable=true)`, `sysdebug`, `soqlfor`, `testmethod`, batchable/queueable/schedulable, trigger, asserts, DML), standard exceptions in `catch (…)`, org-aware SOQL bind variables, picklist values and Trigger context typing, SOQL date literals, aggregate functions and `FIELDS()`, workspace symbols, and polymorphic-aware lookup typing.
+
+**Code actions** — surround with try/catch, `System.assert*` → `Assert.*`, generate constructor, implement a standard interface, generate a test class.
+
+**Inline lint** — SOQL/DML in loops, hardcoded record Ids, leftover `System.debug`, missing sharing declaration.
+
+#### 🔗 Apex ↔ LWC and REST
+
+- CodeLens on every `@AuraEnabled` method showing its LWC consumers; click to peek them.
+- Completion and go-to-definition for `@salesforce/label`, `resourceUrl` and `messageChannel`, and a usage CodeLens on `<c-…>` references.
+- **Test in REST Explorer** CodeLens on `@RestResource` methods, opening the panel prefilled with the apexrest URL and method.
+
+#### 🔍 Apex Find References
+
+Cmd+click a symbol to see every usage. Locals are confined to the method that declares them, so two methods using the same variable name never bleed into each other. Overrides the default Salesforce provider and is on by default.
+
+#### 💡 LWC → Apex IntelliSense
+
+- Cmd+click an imported Apex method lands on the class and method itself, not the generated stub.
+- Typings are generated from your `@AuraEnabled` signatures with real parameter and return types, and regenerate automatically rather than only on command.
+- Custom Apex types become TypeScript interfaces instead of `any`, including inner classes.
+- A **Repair** section in the sidebar fixes each `lwc` folder's `jsconfig.json` so `c/*` imports, component subdirectories and Salesforce modules resolve. Nothing under Repair runs on its own.
+
+#### 🧯 Interpreted error panel
+
+Every failed CLI or command operation now opens one panel: the exact Salesforce message, a plain-language cause and fix where recognised, a click-through to the offending file, and the original payload on demand. The full payload still goes to the log — the panel never replaces the record. Shared by push, pull, deploy, retrieve, test runs and scratch-org operations.
+
+### 🔄 Data Migration Wizard
+
+- **Revert.** An upsert now runs as query-then-write, so the records it overwrites are read first and can be put back. Reverting restores overwritten rows and deletes created ones, children before parents. Every changed record is listed with a checkbox — undo the whole run or just part of it.
+- **Results table.** Every record created and every record overwritten, old value beside new, with source and target Ids linking into their own orgs.
+- **Validation on screen.** Lookups that cannot be preserved are reported on the Overview before you start, not in a modal after you commit.
+- **Export instead of migrate.** The same selection and rules can produce an Apex script, CSV, or JSON. The Apex output resolves lookups through the parent's external Id, upserts where a key exists, and splits into parts that fit the Execute Anonymous window.
+- **Presets** save per project (`config/asfx/migrations`) or globally, and loading one re-describes against the org so fields, relationships and upsert keys are real — anything the org no longer has is reported.
+- Owner, Record Type and audit lookups are no longer offered as fields: the target org assigns them, so migrating them was never possible.
+- Writing into a production org is confirmed first.
+
+### 🐛 Fixes
+
+- SOQL completion showed `Account : Account` for a parent relationship; relationships now read `Account → Account`, matching child relationships and the doc popup.
+- Migrations no longer fail wholesale on a field the target org lacks (`No such column 'BillingCountryCode'`), and never drop a field silently — anything not written is reported with the reason.
+- `Account.ParentId` and other self-references survive a migration.
+- The Object Visualizer's "Project objects" button now matches objects in the SFDX project regardless of namespace or casing.
+
+### 🧹 Housekeeping
+
+- `npm run test:unit` runs the whole 322-test suite; CI runs it too, where it previously only compiled and linted.
+- Removed committed build output from `server/src`.
+- Exported records (`.sfdx/asfx/exports`) are git-ignored.
+- The sidebar's Logs section is gone — the Workbench already has it. Visualizers moved from Query & API to Tools.
+
+---
+
 ## [0.14.0] — Upcoming
 
 ### ✨ New features

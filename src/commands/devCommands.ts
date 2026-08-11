@@ -9,7 +9,8 @@ import { getAutoSaveBeforePush, getTestRunTimeout } from "../utils/constants";
 import { DEPLOY_TIMEOUT_MS } from "./deployMetadata";
 import { runJsonDeploy } from "../utils/deployEngine";
 import { formatStatus, formatElapsed, affectedSchemaObjects, componentSuccessList, parseRetrievedComponents, schemaObjectFromPath, toApiDeployResult, type DeployedComponent } from "../utils/deployStatusMap";
-import { clearDeployDiagnostics, setDeployDiagnosticsFromApiResult, setDeployDiagnosticsFromFailure, formatApiDeployResultForLog } from "../utils/deployDiagnostics";
+import { clearDeployDiagnostics, setDeployDiagnosticsFromApiResult, setDeployDiagnosticsFromFailure, formatApiDeployResultForLog, componentFailuresOf } from "../utils/deployDiagnostics";
+import { reportError } from "../utils/reportError";
 import { getDefaultOrg, getDefaultOrgSync } from "../utils/defaultOrg";
 import { confirmProductionOrgOperation } from "../utils/orgSafety";
 import { Telemetry } from "../utils/telemetry";
@@ -307,7 +308,9 @@ async function pushSourceHelper(force: boolean) {
             if (outcome.kind === "cancelled") { state.cancelled = true; return false; }
             if (outcome.kind === "nothing") return true; // no local changes
             if (outcome.kind === "failed") {
-              state.failure = outcome.result ? { apiResult: toApiDeployResult(outcome.result) } : { errorText: outcome.errorText };
+              // Keep the raw errorText even when a (possibly empty) result parsed — CLI-level
+              // failures (e.g. ExpectedSourceFilesError) carry the real message only in the text.
+              state.failure = { apiResult: outcome.result ? toApiDeployResult(outcome.result) : undefined, errorText: outcome.errorText };
               return false;
             }
             const dr = outcome.result;
@@ -364,16 +367,24 @@ async function pushSourceHelper(force: boolean) {
           }
           if (state.failure) {
             Telemetry.event("push", { force: String(force), status: "failed" }, { durationMs: Date.now() - pushStartTime });
-            DeployLog.line("Push failed.");
-            DeployLog.show();
-            if (state.failure.apiResult) {
-              // Structured Metadata API failures → Problems view (inline).
-              setDeployDiagnosticsFromApiResult(rootPath, state.failure.apiResult);
-            } else if (state.failure.errorText) {
-              await setDeployDiagnosticsFromFailure(rootPath, state.failure.errorText, null);
-            }
-            vscode.window.showErrorMessage("Push failed. See Problems / deploy log.", "View Log").then((sel) => {
-              if (sel === "View Log") DeployLog.show();
+            const apiResult = state.failure.apiResult;
+            const errorText = (state.failure.errorText ?? "").trim();
+            const failures = apiResult ? componentFailuresOf(apiResult) : [];
+
+            // Populate the Problems view from whichever source has detail.
+            if (failures.length) setDeployDiagnosticsFromApiResult(rootPath, apiResult!);
+            else if (errorText) await setDeployDiagnosticsFromFailure(rootPath, errorText, null);
+
+            // Prefer the raw CLI error text for the panel — it carries the exact message
+            // (e.g. ExpectedSourceFilesError) that a component-less apiResult drops.
+            const raw = errorText || (apiResult ? formatApiDeployResultForLog(apiResult, "Push failed:") : "Push failed.");
+            reportError({
+              operation: "Push",
+              error: raw,
+              failures,
+              topError: apiResult?.errorMessage ?? apiResult?.stateDetail,
+              org: getDefaultOrgSync()?.displayName,
+              retry: () => { void pushSourceHelper(force); }
             });
             return;
           }
@@ -423,15 +434,13 @@ async function pushSourceHelper(force: boolean) {
           }
           // e.message contains combined stdout/stderr from commandRunner
           const raw = e.message || e.stderr || "Unknown Error";
-          const cleanError = cleanDeployOutput(raw);
-
-          DeployLog.line("Push failed:\n" + cleanError);
-          DeployLog.show(); // Auto-open the deploy log on error
-
-          vscode.window.showErrorMessage(`Push failed. Check the deploy log for details.`, "View Log").then((selection) => {
-            if (selection === "View Log") {
-              DeployLog.show();
-            }
+          // Report the UNcleaned text — the CLI's JSON error (message/name/warnings) carries the
+          // exact cause; cleanDeployOutput strips it for the human-readable log.
+          reportError({
+            operation: "Push",
+            error: raw,
+            org: getDefaultOrgSync()?.displayName,
+            retry: () => { void pushSourceHelper(force); }
           });
         }
       }
@@ -495,16 +504,7 @@ async function pullSourceHelper(force: boolean) {
           return;
         }
         Telemetry.event("pull", { force: String(force), status: "failed" }, { durationMs: Date.now() - pullStartTime });
-        const msg = e?.message || e?.stderr || String(e);
-        Logger.error("Pull failed", msg);
-        outputChannel.show();
-        vscode.window
-          .showErrorMessage('Pull failed. Check "Adure SFX Toolkit" output for details.', "View Log")
-          .then((selection) => {
-            if (selection === "View Log") {
-              outputChannel.show();
-            }
-          });
+        reportError({ operation: "Pull", error: e, org: getDefaultOrgSync()?.displayName });
       }
     }
   );
@@ -573,16 +573,7 @@ export async function deployCurrentFile() {
           return;
         }
         Telemetry.event("deployFile", { status: "failed" });
-        const msg = e?.message || e?.stderr || String(e);
-        Logger.error("Deploy current file failed", msg);
-        outputChannel.show();
-        vscode.window
-          .showErrorMessage('Deploy failed. Check "Adure SFX Toolkit" output for details.', "View Log")
-          .then((selection) => {
-            if (selection === "View Log") {
-              outputChannel.show();
-            }
-          });
+        reportError({ operation: "Deploy", error: e, org: getDefaultOrgSync()?.displayName });
       }
     }
   );
@@ -629,16 +620,7 @@ export async function retrieveCurrentFile() {
           return;
         }
         Telemetry.event("retrieveFile", { status: "failed" });
-        const msg = e?.message || e?.stderr || String(e);
-        Logger.error("Retrieve current file failed", msg);
-        outputChannel.show();
-        vscode.window
-          .showErrorMessage('Retrieve failed. Check "Adure SFX Toolkit" output for details.', "View Log")
-          .then((selection) => {
-            if (selection === "View Log") {
-              outputChannel.show();
-            }
-          });
+        reportError({ operation: "Retrieve", error: e, org: getDefaultOrgSync()?.displayName });
       }
     }
   );
@@ -680,10 +662,7 @@ export async function runLocalTests() {
           return;
         }
         Telemetry.event("testRun", { outcome: "error" });
-        vscode.window.showErrorMessage(`Tests execution failed.`);
-        const channel = vscode.window.createOutputChannel("Salesforce Test Results");
-        channel.append(e.stderr || e.message);
-        channel.show();
+        reportError({ operation: "Run local tests", error: e, org: getDefaultOrgSync()?.displayName });
       }
     }
   );
@@ -719,9 +698,7 @@ export async function resetSourceTracking() {
           Logger.info("Reset tracking cancelled by user.");
           return;
         }
-        const msg = e.stderr || e.message;
-        Logger.error("Reset tracking failed:", msg);
-        vscode.window.showErrorMessage(`Reset tracking failed: ${msg}`);
+        reportError({ operation: "Reset source tracking", error: e, org: getDefaultOrgSync()?.displayName });
       }
     }
   );

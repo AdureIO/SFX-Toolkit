@@ -8,8 +8,10 @@ import {
     CompletionKind,
     RawCompletionItem,
     FieldOrRelation,
+    ASFX_FOOTER,
 } from '../utils/apexCompletions';
 import { OrgMetadataCache } from '../utils/orgMetadataCache';
+import { SoqlSchemaProvider } from '../utils/soqlSchemaProvider';
 import { Telemetry } from '../utils/telemetry';
 
 const KIND_MAP: Record<number, vscode.CompletionItemKind> = {
@@ -19,13 +21,15 @@ const KIND_MAP: Record<number, vscode.CompletionItemKind> = {
     [CompletionKind.Field]:    vscode.CompletionItemKind.Field,
     [CompletionKind.Variable]: vscode.CompletionItemKind.Variable,
     [CompletionKind.Text]:     vscode.CompletionItemKind.Text,
+    [CompletionKind.Snippet]:  vscode.CompletionItemKind.Snippet,
+    [CompletionKind.Value]:    vscode.CompletionItemKind.Value,
 };
 
 function toVsCodeItem(raw: RawCompletionItem): vscode.CompletionItem {
     const item = new vscode.CompletionItem(raw.label, KIND_MAP[raw.kind] ?? vscode.CompletionItemKind.Text);
     if (raw.detail) item.detail = raw.detail;
-    if (raw.documentation) item.documentation = raw.documentation;
-    if (raw.insertText) item.insertText = raw.insertText;
+    if (raw.documentation) item.documentation = raw.docIsMarkdown ? new vscode.MarkdownString(raw.documentation) : raw.documentation;
+    if (raw.insertText) item.insertText = raw.isSnippet ? new vscode.SnippetString(raw.insertText) : raw.insertText;
     if (raw.sortText) item.sortText = raw.sortText;
     return item;
 }
@@ -49,9 +53,10 @@ export class ApexCompletionProvider implements vscode.CompletionItemProvider {
         surroundingText: string,
         org: string | null,
         beforeCursor?: string,
-        fullText?: string
+        fullText?: string,
+        afterText?: string
     ): Promise<RawCompletionItem[]> {
-        const ctx = parseContext(textUpToCursor, surroundingText, beforeCursor);
+        const ctx = parseContext(textUpToCursor, surroundingText, beforeCursor, afterText);
         const staticItems = getStaticItems(ctx);
 
         if (ctx.type === 'soqlFrom' || (ctx.type === 'bare' && ctx.prefix.length >= 2)) {
@@ -70,6 +75,33 @@ export class ApexCompletionProvider implements vscode.CompletionItemProvider {
             }
             const entries = await OrgMetadataCache.getFieldsAndRelations(org, target);
             return [...staticItems, ...fieldAndRelationItems(entries, ctx.prefix)];
+        }
+
+        if (ctx.type === 'apexPicklist' && ctx.objectName && ctx.pickField) {
+            // Resolve the receiver to an SObject, walk any relationship hops, then offer the
+            // field's picklist values (the schema provider carries them; the lighter cache doesn't).
+            const root = await ApexCompletionProvider.resolveRootSObject(ctx.objectName, org, fullText);
+            if (!root) return [];
+            let sobject: string | null = root.sobject;
+            for (const rel of ctx.relPath ?? []) {
+                sobject = await OrgMetadataCache.getRelationshipTarget(org, sobject, rel);
+                if (!sobject) return [];
+            }
+            const describe = await SoqlSchemaProvider.getDescribe(org, sobject);
+            const field = describe?.fields?.find((f) => f.name?.toLowerCase() === ctx.pickField!.toLowerCase());
+            const values = field?.picklistValues ?? [];
+            const lp = ctx.prefix.toLowerCase();
+            return values
+                .filter((v) => v.toLowerCase().startsWith(lp))
+                .map((v) => ({
+                    label: v,
+                    detail: 'picklist value',
+                    documentation: `Picklist value of \`${sobject}.${ctx.pickField}\`\n\n${ASFX_FOOTER}`,
+                    docIsMarkdown: true,
+                    kind: CompletionKind.Value,
+                    insertText: v, // the editor auto-pairs the closing quote already
+                    sortText: v
+                }));
         }
 
         if (ctx.type === 'member' && ctx.objectName) {
@@ -159,9 +191,16 @@ export class ApexCompletionProvider implements vscode.CompletionItemProvider {
         beforeLines.push(textUpToCursor);
         const surroundingText = windowLines.join('\n');
         const beforeCursor = beforeLines.join('\n');
+        // Text from the cursor onward (rest of line + a few lines) — lets us tell whether an
+        // annotation being typed sits above a class or a method.
+        const afterParts: string[] = [lineText.substring(position.character)];
+        for (let i = position.line + 1; i <= Math.min(document.lineCount - 1, position.line + 4); i++) {
+            afterParts.push(document.lineAt(i).text);
+        }
+        const afterText = afterParts.join('\n');
 
         try {
-            const raw = await ApexCompletionProvider.getItems(textUpToCursor, surroundingText, null, beforeCursor, document.getText());
+            const raw = await ApexCompletionProvider.getItems(textUpToCursor, surroundingText, null, beforeCursor, document.getText(), afterText);
             // Fires on every keystroke → throttle to a coarse "completion is used" signal.
             if (raw.length) Telemetry.throttledEvent("completion", 5 * 60 * 1000, { surface: "apex" });
             return raw.map(toVsCodeItem);

@@ -19,7 +19,7 @@ async function appendToFile(filePath: string, entry: string): Promise<boolean> {
         return true;
     } catch (e: any) {
         Logger.error(`Failed to update ${filePath}`, e);
-        vscode.window.showErrorMessage(`Failed to update ${path.basename(filePath)}: ${e.message}`);
+        reportError({ operation: `Update ${path.basename(filePath)}`, error: e });
         return false;
     }
 }
