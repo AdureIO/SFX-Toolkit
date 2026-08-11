@@ -466,9 +466,20 @@ export class DataMigrationPanelProvider {
           const data = await collectMigrationData(srcOrg, exportProfile, (sobject, fetched) => {
             panel.webview.postMessage({
               command: "migrationProgress",
-              progress: { sobject, phase: "querying", done: fetched, total: 0, inserted: 0, updated: 0, failed: 0 }
+              progress: { sobject, phase: "querying", mode: "export", records: fetched, done: fetched, total: 0, inserted: 0, updated: 0, failed: 0 }
             });
           });
+          // Nothing is written for a file output, so no later phase would ever close these rows —
+          // without this they spin forever on a finished export.
+          for (const d of data) {
+            panel.webview.postMessage({
+              command: "migrationProgress",
+              progress: {
+                sobject: d.sobject, phase: "done", mode: "export", records: d.records.length,
+                done: d.records.length, total: d.records.length, inserted: 0, updated: 0, failed: 0
+              }
+            });
+          }
 
           const stamp = new Date().toISOString();
           const safeName = (profile.name || "migration").replace(/[^a-zA-Z0-9_-]/g, "_");
@@ -1773,7 +1784,11 @@ function prepareRunPage() {
   var ov = safeGet('run-overview');
   if (ov) {
     var srcLbl = (function(){ var s=safeGet('src-org'); return s && s.options[s.selectedIndex] ? s.options[s.selectedIndex].textContent : (s&&s.value)||'?'; })();
-    var tgtLbl = (function(){ var s=safeGet('tgt-org'); return s && s.options[s.selectedIndex] ? s.options[s.selectedIndex].textContent : (s&&s.value)||'?'; })();
+    // A file output has no target org, so the destination is the format itself.
+    var exporting = migrationType() !== 'org';
+    var tgtLbl = exporting
+      ? ({ apex: 'Apex script', csv: 'CSV files', json: 'JSON file' })[migrationType()]
+      : (function(){ var s=safeGet('tgt-org'); return s && s.options[s.selectedIndex] ? s.options[s.selectedIndex].textContent : (s&&s.value)||'?'; })();
     var knownTotal = 0;
     var rows = profile.nodes.map(function(n) {
       var node = nodes[n.sobject] || {};
@@ -1795,13 +1810,18 @@ function prepareRunPage() {
       '<div class="ov-head"><span class="ov-title">Migration overview</span>'
       + '<span class="ov-orgs">'+escHtml(srcLbl)+' &nbsp;→&nbsp; '+escHtml(tgtLbl)+'</span></div>'
       + '<div class="ov-summary">'+profile.nodes.length+' object type'+(profile.nodes.length!==1?'s':'')
-      + ' · '+knownTotal.toLocaleString()+'+ records to migrate</div>'
+      + ' · '+knownTotal.toLocaleString()+'+ records to '+(exporting ? 'export' : 'migrate')+'</div>'
       + '<div class="ov-list">'+rows+'</div>'
-      + '<div class="ov-note">References are re-linked automatically to the new records. Lookups to objects not in this migration (e.g. Owner, Record Type, Created By) are left empty — source Ids never exist in the target org. Child record counts are determined at run time from the migrated parents.</div>';
+      + '<div class="ov-note">'
+      + (exporting
+          ? 'Nothing is written to an org. Lookups between exported objects resolve through the parent&rsquo;s external Id where there is one; lookups to objects not in this selection are left empty. Child record counts are determined when the records are read.'
+          : 'References are re-linked automatically to the new records. Lookups to objects not in this migration (e.g. Owner, Record Type, Created By) are left empty — source Ids never exist in the target org. Child record counts are determined at run time from the migrated parents.')
+      + '</div>';
   }
 
   var area = safeGet('progress-list');
   if (!area) return;
+  var isExport = migrationType() !== 'org';
   area.innerHTML = '';
   profile.nodes.forEach(function(node) {
     var row = document.createElement('div');
@@ -1814,9 +1834,9 @@ function prepareRunPage() {
       + '<span class="obj-progress-phase" id="ph-'+escHtml(node.sobject)+'">queued</span>'
       + '</div>'
       + '<div class="obj-progress-counts" id="counts-'+escHtml(node.sobject)+'">'
-      + '<span class="ok" id="ins-'+escHtml(node.sobject)+'">+0</span>'
-      + '<span class="upd" id="upd-'+escHtml(node.sobject)+'">~0</span>'
-      + '<span class="err" id="fail-'+escHtml(node.sobject)+'">✗0</span>'
+      + '<span class="ok" id="ins-'+escHtml(node.sobject)+'">'+(isExport ? '0 records' : '+0')+'</span>'
+      + '<span class="upd" id="upd-'+escHtml(node.sobject)+'">'+(isExport ? '' : '~0')+'</span>'
+      + '<span class="err" id="fail-'+escHtml(node.sobject)+'">'+(isExport ? '' : '✗0')+'</span>'
       + '</div>'
       + '<div class="progress-track"><div class="progress-fill" id="fill-'+escHtml(node.sobject)+'" style="width:0%"></div></div>'
       + '<div class="errors-toggle" id="etog-'+escHtml(node.sobject)+'" onclick="toggleObjErrors(\\''+escHtml(node.sobject)+'\\')"></div>'
@@ -1968,12 +1988,33 @@ function finishExport(text, cls) {
   }
 }
 
+/** Leave no row spinning when a run ends early — a stuck spinner reads as "still working". */
+function stopProgressSpinners() {
+  var icons = document.querySelectorAll('.obj-progress-icon');
+  for (var i = 0; i < icons.length; i++) {
+    if (icons[i].querySelector('.spinner')) icons[i].textContent = '⚠';
+  }
+}
+
 function updateProgressRow(progress) {
   var sb = progress.sobject;
-  var phEl = safeGet('ph-'+sb); if (phEl) phEl.textContent = progress.phase;
-  var insEl = safeGet('ins-'+sb); if (insEl) insEl.textContent = '+'+progress.inserted;
-  var updEl = safeGet('upd-'+sb); if (updEl) updEl.textContent = '~'+progress.updated;
-  var failEl = safeGet('fail-'+sb); if (failEl) failEl.textContent = '✗'+progress.failed;
+  var isExport = progress.mode === 'export';
+  var phEl = safeGet('ph-'+sb);
+  if (phEl) phEl.textContent = isExport && progress.phase === 'querying' ? 'reading' : progress.phase;
+  var insEl = safeGet('ins-'+sb);
+  var updEl = safeGet('upd-'+sb);
+  var failEl = safeGet('fail-'+sb);
+  if (isExport) {
+    // Nothing is inserted, updated or failed by an export — the only number that means anything
+    // is how many records were read.
+    if (insEl) insEl.textContent = (progress.records || 0) + ' record' + (progress.records === 1 ? '' : 's');
+    if (updEl) updEl.textContent = '';
+    if (failEl) failEl.textContent = '';
+  } else {
+    if (insEl) insEl.textContent = '+'+progress.inserted;
+    if (updEl) updEl.textContent = '~'+progress.updated;
+    if (failEl) failEl.textContent = '✗'+progress.failed;
+  }
   var fill = safeGet('fill-'+sb);
   if (fill && progress.total > 0) fill.style.width = Math.round(progress.done/progress.total*100)+'%';
   var row = safeGet('pr-'+sb);
@@ -2486,6 +2527,7 @@ window.addEventListener('message', function(ev) {
   }
 
   if (d.command === 'migrationError') {
+    stopProgressSpinners();
     var ge = safeGet('global-error');
     if (ge) { ge.className = 'global-error visible'; ge.textContent = '❌ ' + (d.error || 'Migration failed'); }
     safeGet('start-run-btn') && (safeGet('start-run-btn').disabled = false);
