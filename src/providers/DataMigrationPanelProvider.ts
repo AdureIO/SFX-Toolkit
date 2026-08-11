@@ -11,6 +11,7 @@ import {
   extractSObjectFromQuery,
   countQuery,
   runMigration,
+  revertMigration,
   resolveOrgToInfo,
   saveProfile,
   loadProfileFromFile,
@@ -81,6 +82,7 @@ export class DataMigrationPanelProvider {
       name?: string;
       text?: string;
       retry?: { retryOnly?: Record<string, string[]>; priorIdMaps?: Record<string, Record<string, string>> };
+      revertOnFail?: boolean;
     }) => {
 
       // ── Init ─────────────────────────────────────────────────────────────
@@ -226,7 +228,29 @@ export class DataMigrationPanelProvider {
             panel.webview.postMessage({ command: "migrationProgress", progress });
           }, retryOpts);
           Logger.info(`Migration complete: ${results.map((r) => `${r.sobject}: +${r.inserted} ^${r.updated} x${r.failed}`).join(", ")}`);
-          panel.webview.postMessage({ command: "migrationComplete", results, idMaps });
+          const failedTotal = results.reduce((n, r) => n + r.failed, 0);
+          const insertedTotal = results.reduce((n, r) => n + r.inserted, 0);
+          panel.webview.postMessage({ command: "migrationComplete", results, idMaps, canRevert: insertedTotal > 0 });
+
+          // Revert on failure — opt-in, and always confirmed: this DELETES records from the
+          // target org. Only the Ids this run inserted are ever touched.
+          if (msg.revertOnFail && failedTotal > 0 && insertedTotal > 0) {
+            const choice = await vscode.window.showWarningMessage(
+              `Migration had ${failedTotal} failed record(s). Delete the ${insertedTotal} record(s) it inserted into ${targetOrg}?`,
+              { modal: true },
+              "Revert (delete inserted)"
+            );
+            if (choice === "Revert (delete inserted)") {
+              const order = profile.nodes.map((n: { sobject: string }) => n.sobject);
+              const r = await revertMigration(tgtOrg, order, idMaps, (sobject, deleted, failed) =>
+                panel.webview.postMessage({ command: "revertProgress", sobject, deleted, failed })
+              );
+              panel.webview.postMessage({ command: "revertComplete", ...r });
+              vscode.window.showInformationMessage(
+                `Reverted: deleted ${r.deleted} record(s)` + (r.failed ? `, ${r.failed} could not be deleted` : "") + "."
+              );
+            }
+          }
         } catch (e) {
           const err = e instanceof Error ? e.message : String(e);
           Logger.error("Migration failed", e);
@@ -658,6 +682,7 @@ body { font-family: var(--vscode-font-family); font-size: 13px; color: var(--vsc
   <div class="run-toolbar">
     <button class="btn-secondary" id="back-to-tree-btn" onclick="goToTree()">← Adjust settings</button>
     <span style="flex:1; font-size:12px; color:var(--vscode-descriptionForeground);" id="run-status-label">Ready to run</span>
+    <label class="inline" style="font-size:12px;" title="If any record fails, offer to delete the records this run inserted into the target org. Only Ids inserted by this run are deleted; you are asked to confirm first."><input type="checkbox" id="revert-on-fail"> Revert on failure</label>
     <button class="btn-secondary" id="retry-failed-btn" onclick="retryFailed()" style="display:none;">⟳ Retry failed rows</button>
     <button class="btn-primary" id="start-run-btn" onclick="startMigration()">⚡ Start Migration</button>
   </div>
@@ -1434,7 +1459,9 @@ function startMigration() {
   safeGet('start-run-btn') && (safeGet('start-run-btn').textContent = '⏳ Running…');
   safeGet('back-to-tree-btn') && (safeGet('back-to-tree-btn').disabled = true);
   safeGet('run-status-label') && (safeGet('run-status-label').textContent = 'Migration running…');
-  post({ command: 'runMigration', sourceOrg: srcOrg, targetOrg: tgtOrg, profile: profile });
+  var revertEl = safeGet('revert-on-fail');
+  post({ command: 'runMigration', sourceOrg: srcOrg, targetOrg: tgtOrg, profile: profile,
+    revertOnFail: !!(revertEl && revertEl.checked) });
 }
 
 function updateProgressRow(progress) {

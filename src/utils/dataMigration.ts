@@ -347,6 +347,57 @@ async function batchCollections(
   return results;
 }
 
+/**
+ * Delete records from the target org via the collections endpoint, newest object first.
+ *
+ * Only ever called with Ids this run inserted (tracked in idMaps), so a revert can never touch
+ * pre-existing data. `allOrNone=false` so one undeletable record doesn't strand the rest.
+ */
+async function deleteRecords(org: OrgInfo, ids: string[]): Promise<{ deleted: number; failed: number }> {
+  let deleted = 0;
+  let failed = 0;
+  for (let i = 0; i < ids.length; i += BATCH_SIZE) {
+    const chunk = ids.slice(i, i + BATCH_SIZE);
+    const urlPath =
+      `/services/data/v${org.apiVersion}/composite/sobjects?allOrNone=false&ids=${chunk.join(",")}`;
+    const resp = await sfRequest(org.instanceUrl, urlPath, "DELETE", org.accessToken);
+    if (resp.status >= 200 && resp.status < 300) {
+      try {
+        for (const r of JSON.parse(resp.body) as CollectionsItem[]) r.success ? deleted++ : failed++;
+      } catch {
+        failed += chunk.length;
+      }
+    } else {
+      failed += chunk.length;
+    }
+  }
+  return { deleted, failed };
+}
+
+/**
+ * Undo a run by deleting everything it inserted, children before parents (profile order reversed)
+ * so lookups never block the delete.
+ */
+export async function revertMigration(
+  org: OrgInfo,
+  order: string[],
+  idMaps: Record<string, Record<string, string>>,
+  onProgress?: (sobject: string, deleted: number, failed: number) => void
+): Promise<{ deleted: number; failed: number }> {
+  let deleted = 0;
+  let failed = 0;
+  for (const sobject of [...order].reverse()) {
+    const ids = Object.values(idMaps[sobject] ?? {}).filter(Boolean);
+    if (!ids.length) continue;
+    const r = await deleteRecords(org, ids);
+    deleted += r.deleted;
+    failed += r.failed;
+    Logger.info(`Data migration revert — ${sobject}: deleted ${r.deleted}, failed ${r.failed}`);
+    onProgress?.(sobject, r.deleted, r.failed);
+  }
+  return { deleted, failed };
+}
+
 // ─── Main migration runner ────────────────────────────────────────────────────
 
 /**
