@@ -52,6 +52,8 @@ import { OrgHealthProvider } from "./commands/orgHealth";
 import { quickSoqlFromSelection } from "./commands/quickSoql";
 import { DeployHistoryProvider, initDeployHistory, setOpenDeployPanelCallback } from "./commands/deployHistory";
 import { lwcNavigate, lwcGoToJs, lwcGoToHtml, lwcGoToMeta, lwcGoToCss } from "./commands/lwcNavigator";
+import { registerLwcApexProviders } from "./providers/LwcApexProvider";
+import { generateLwcApexTypings } from "./commands/lwcApexTypings";
 import {
   showSnippets,
   runSnippet,
@@ -377,6 +379,10 @@ export function activate(context: vscode.ExtensionContext) {
     const resetTrackingCmd = register("adure-sfx-toolkit.resetSourceTracking", resetSourceTracking);
     const validateApexCmd = register("adure-sfx-toolkit.validateApexFile", () => validateApexFile());
     registerValidateOnSave(context);
+    // LWC → Apex: Cmd+click an `@salesforce/apex/...` import to land on the real method, and hover
+    // it for the true signature (Salesforce's generated .d.ts types everything as `any`).
+    registerLwcApexProviders(context);
+    const lwcApexTypingsCmd = register("adure-sfx-toolkit.generateLwcApexTypings", generateLwcApexTypings);
     const refreshMetadataCmd = register("adure-sfx-toolkit.refreshMetadata", async () => {
       await vscode.window.withProgress(
         {
@@ -640,6 +646,7 @@ export function activate(context: vscode.ExtensionContext) {
       retrieveFileCmd,
       resetTrackingCmd,
       validateApexCmd,
+      lwcApexTypingsCmd,
       refreshMetadataCmd,
       openSOQLEditorCmd,
       objectVisualizerCmd,

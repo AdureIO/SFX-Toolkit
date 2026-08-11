@@ -241,6 +241,11 @@
         "icon": "$(database)"
       },
       {
+        "command": "adure-sfx-toolkit.generateLwcApexTypings",
+        "title": "ASFXT: Generate LWC Apex Typings",
+        "icon": "$(symbol-interface)"
+      },
+      {
         "command": "adure-sfx-toolkit.objectVisualizer",
         "title": "ASFXT: Object Visualizer",
         "icon": "$(type-hierarchy)"
