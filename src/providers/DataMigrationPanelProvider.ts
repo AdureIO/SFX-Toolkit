@@ -21,6 +21,7 @@ import {
   type MigrationProgress
 } from "../utils/dataMigration";
 import { Telemetry } from "../utils/telemetry";
+import { confirmProductionOrgOperation } from "../utils/orgSafety";
 
 // ─── Field availability comparison (source vs target org) ──────────────────────
 
@@ -212,6 +213,12 @@ export class DataMigrationPanelProvider {
         }
         if (sourceOrg === targetOrg) {
           panel.webview.postMessage({ command: "migrationError", error: "Source and target org must be different." });
+          return;
+        }
+        // Writing records into production (or a Dev Hub) is confirmed explicitly — the revert is
+        // best-effort, so the guard belongs before the first record is written, not after.
+        if (!(await confirmProductionOrgOperation("migrate records into", targetOrg))) {
+          panel.webview.postMessage({ command: "migrationError", error: "Migration cancelled — target org is production." });
           return;
         }
         try {
