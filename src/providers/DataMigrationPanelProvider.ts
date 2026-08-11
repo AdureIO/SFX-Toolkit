@@ -761,15 +761,6 @@ body { font-family: var(--vscode-font-family); font-size: 13px; color: var(--vsc
 .ov-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--vscode-descriptionForeground); }
 .ov-orgs { font-size: 12px; font-family: var(--vscode-editor-font-family, monospace); }
 .ov-summary { font-size: 12px; color: var(--vscode-foreground); margin-bottom: 8px; font-variant-numeric: tabular-nums; }
-.ov-list { display: flex; flex-direction: column; gap: 2px; }
-.ov-row { display: flex; align-items: baseline; gap: 12px; padding: 5px 0; border-bottom: 1px solid var(--vscode-panel-border); font-size: 12px; }
-.ov-row:last-child { border-bottom: none; }
-.ov-icon { flex-shrink: 0; }
-.ov-name { font-weight: 600; min-width: 180px; }
-.ov-api { font-weight: 400; font-family: var(--vscode-editor-font-family, monospace); font-size: 10px; color: var(--vscode-descriptionForeground); }
-.ov-count { min-width: 120px; font-variant-numeric: tabular-nums; color: var(--vscode-textLink-foreground); font-weight: 600; }
-.ov-meta { color: var(--vscode-descriptionForeground); font-size: 11px; min-width: 80px; }
-.ov-link { color: var(--vscode-descriptionForeground); font-size: 11px; font-style: italic; margin-left: auto; font-family: var(--vscode-editor-font-family, monospace); }
 .ov-note { margin-top: 10px; font-size: 11px; line-height: 1.5; color: var(--vscode-descriptionForeground); }
 .run-summary { display: flex; flex-wrap: wrap; gap: 16px; padding: 10px 12px; border-radius: 3px; background: var(--vscode-input-background); border: 1px solid var(--vscode-panel-border); font-size: 12px; }
 .run-stat { display: flex; flex-direction: column; gap: 2px; }
@@ -780,12 +771,17 @@ body { font-family: var(--vscode-font-family); font-size: 13px; color: var(--vsc
 .stat-fail { color: var(--vscode-errorForeground); }
 
 /* ── Per-object row ── */
-.obj-progress-row { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border-radius: 3px; background: var(--vscode-input-background); border: 1px solid var(--vscode-panel-border); }
-.obj-progress-header { display: flex; align-items: center; gap: 8px; }
-.obj-progress-icon { font-size: 14px; }
-.obj-progress-name { font-weight: 600; font-size: 12px; flex: 1; }
-.obj-progress-phase { font-size: 10px; color: var(--vscode-descriptionForeground); text-transform: uppercase; letter-spacing: .04em; }
-.obj-progress-counts { font-size: 11px; display: flex; gap: 10px; }
+/* One row per object: what is planned and what is happening, on the same line. */
+.obj-row { display: flex; flex-direction: column; gap: 3px; padding: 6px 10px; border-radius: 3px; background: var(--vscode-input-background); border: 1px solid var(--vscode-panel-border); }
+.obj-line { display: flex; align-items: baseline; gap: 12px; font-size: 12px; }
+.obj-progress-icon { font-size: 13px; flex-shrink: 0; align-self: center; }
+.obj-name { font-weight: 600; min-width: 170px; }
+.obj-api { font-weight: 400; font-family: var(--vscode-editor-font-family, monospace); font-size: 10px; color: var(--vscode-descriptionForeground); }
+.obj-count { min-width: 110px; font-variant-numeric: tabular-nums; color: var(--vscode-textLink-foreground); font-weight: 600; }
+.obj-meta { color: var(--vscode-descriptionForeground); font-size: 11px; }
+.obj-link { color: var(--vscode-descriptionForeground); font-size: 11px; font-style: italic; font-family: var(--vscode-editor-font-family, monospace); margin-left: auto; }
+.obj-progress-phase { font-size: 10px; color: var(--vscode-descriptionForeground); text-transform: uppercase; letter-spacing: .04em; min-width: 62px; text-align: right; }
+.obj-progress-counts { font-size: 11px; display: flex; gap: 8px; min-width: 92px; justify-content: flex-end; font-variant-numeric: tabular-nums; }
 .obj-progress-counts .ok { color: #4ec94e; }
 .obj-progress-counts .upd { color: var(--vscode-textLink-foreground); }
 .obj-progress-counts .err { color: var(--vscode-errorForeground); }
@@ -822,6 +818,10 @@ body { font-family: var(--vscode-font-family); font-size: 13px; color: var(--vsc
 /* ── Overwritten-records table (what a revert would put back) ── */
 .changes-card { margin-top: 14px; border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border)); border-radius: 8px; background: var(--vscode-editorWidget-background, var(--vscode-input-background)); overflow: hidden; }
 .changes-head { display: flex; align-items: center; gap: 8px; padding: 10px 14px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+.changes-bar { display: flex; align-items: center; gap: 12px; margin-top: 14px; padding: 8px 12px; border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border)); border-radius: 8px 8px 0 0; border-bottom: none; background: var(--vscode-editorWidget-background, var(--vscode-input-background)); }
+.changes-bar-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
+.changes-bar-sub { flex: 1; font-size: 11px; color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
+.changes-bar + .changes-card { margin-top: 0; border-radius: 0 0 8px 8px; }
 .changes-head .sub { flex: 1; font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--vscode-descriptionForeground); }
 table.changes th.pick, table.changes td.pick { width: 28px; text-align: center; padding-left: 8px; padding-right: 0; }
 table.changes .pick input { margin: 0; cursor: pointer; }
@@ -1049,7 +1049,6 @@ table.changes .st-failed { color: var(--vscode-errorForeground); }
     <span style="flex:1; font-size:12px; color:var(--vscode-descriptionForeground);" id="run-status-label">Ready to run</span>
     <label class="inline" style="font-size:12px;" title="If any record fails, offer to undo the whole run: delete the records it created and restore the records it overwrote to their previous values. Only rows this run touched are affected, and you are asked to confirm first."><input type="checkbox" id="revert-on-fail"> Revert on failure</label>
     <button class="btn-secondary" id="retry-failed-btn" onclick="retryFailed()" style="display:none;">⟳ Retry failed rows</button>
-    <button class="btn-secondary" id="revert-run-btn" onclick="revertRun()" style="display:none;" title="Delete the records this run created and put the records it overwrote back to their previous values. Nothing else is touched.">↩ Revert this run</button>
     <button class="btn-primary" id="start-run-btn" onclick="startMigration()">⚡ Start Migration</button>
   </div>
   <div class="run-area" id="run-area">
@@ -1790,28 +1789,15 @@ function prepareRunPage() {
       ? ({ apex: 'Apex script', csv: 'CSV files', json: 'JSON file' })[migrationType()]
       : (function(){ var s=safeGet('tgt-org'); return s && s.options[s.selectedIndex] ? s.options[s.selectedIndex].textContent : (s&&s.value)||'?'; })();
     var knownTotal = 0;
-    var rows = profile.nodes.map(function(n) {
+    profile.nodes.forEach(function(n) {
       var node = nodes[n.sobject] || {};
-      var mode = n.externalIdField ? ('Upsert on ' + escHtml(n.externalIdField)) : 'Insert';
-      var link = n.parentSObject ? ('↳ via ' + escHtml(n.lookupField || '?') + ' → ' + escHtml(n.parentSObject)) : 'root';
-      var hasCount = (node.count !== undefined && node.count !== null && node.count >= 0);
-      if (hasCount) knownTotal += node.count;
-      var cnt = hasCount ? (node.count.toLocaleString() + ' record' + (node.count !== 1 ? 's' : '')) : 'counted at run';
-      return '<div class="ov-row">'
-        + '<span class="ov-icon">'+(n.parentSObject ? '🔗' : '📦')+'</span>'
-        + '<span class="ov-name">'+escHtml(n.label || n.sobject)+' <span class="ov-api">'+escHtml(n.sobject)+'</span></span>'
-        + '<span class="ov-count">'+cnt+'</span>'
-        + '<span class="ov-meta">'+(n.includeFields ? n.includeFields.length : 0)+' fields</span>'
-        + '<span class="ov-meta">'+mode+'</span>'
-        + '<span class="ov-link">'+link+'</span>'
-        + '</div>';
-    }).join('');
+      if (node.count !== undefined && node.count !== null && node.count >= 0) knownTotal += node.count;
+    });
     ov.innerHTML =
-      '<div class="ov-head"><span class="ov-title">Migration overview</span>'
+      '<div class="ov-head"><span class="ov-title">' + (exporting ? 'Export' : 'Migration') + ' overview</span>'
       + '<span class="ov-orgs">'+escHtml(srcLbl)+' &nbsp;→&nbsp; '+escHtml(tgtLbl)+'</span></div>'
       + '<div class="ov-summary">'+profile.nodes.length+' object type'+(profile.nodes.length!==1?'s':'')
       + ' · '+knownTotal.toLocaleString()+'+ records to '+(exporting ? 'export' : 'migrate')+'</div>'
-      + '<div class="ov-list">'+rows+'</div>'
       + '<div class="ov-note">'
       + (exporting
           ? 'Nothing is written to an org. Lookups between exported objects resolve through the parent&rsquo;s external Id where there is one; lookups to objects not in this selection are left empty. Child record counts are determined when the records are read.'
@@ -1823,24 +1809,35 @@ function prepareRunPage() {
   if (!area) return;
   var isExport = migrationType() !== 'org';
   area.innerHTML = '';
-  profile.nodes.forEach(function(node) {
+  // One row per object carrying BOTH what is planned and what is happening. Two separate lists
+  // saying the same thing about the same objects was just something to scroll past.
+  profile.nodes.forEach(function(n) {
+    var node = nodes[n.sobject] || {};
+    var mode = n.externalIdField ? ('Upsert on ' + n.externalIdField) : 'Insert';
+    var link = n.parentSObject ? ('↳ ' + (n.lookupField || '?') + ' → ' + n.parentSObject) : 'root';
+    var hasCount = (node.count !== undefined && node.count !== null && node.count >= 0);
+    var cnt = hasCount ? (node.count.toLocaleString() + ' record' + (node.count !== 1 ? 's' : '')) : 'counted at run';
     var row = document.createElement('div');
-    row.className = 'obj-progress-row';
-    row.id = 'pr-' + node.sobject;
+    row.className = 'obj-row';
+    row.id = 'pr-' + n.sobject;
     row.innerHTML =
-      '<div class="obj-progress-header">'
-      + '<span class="obj-progress-icon">⏳</span>'
-      + '<span class="obj-progress-name">'+escHtml(node.label || node.sobject)+'</span>'
-      + '<span class="obj-progress-phase" id="ph-'+escHtml(node.sobject)+'">queued</span>'
+      '<div class="obj-line">'
+      + '<span class="obj-progress-icon">'+(n.parentSObject ? '🔗' : '📦')+'</span>'
+      + '<span class="obj-name">'+escHtml(n.label || n.sobject)+' <span class="obj-api">'+escHtml(n.sobject)+'</span></span>'
+      + '<span class="obj-count">'+escHtml(cnt)+'</span>'
+      + '<span class="obj-meta">'+(n.includeFields ? n.includeFields.length : 0)+' fields</span>'
+      + '<span class="obj-meta">'+escHtml(mode)+'</span>'
+      + '<span class="obj-link">'+escHtml(link)+'</span>'
+      + '<span class="obj-progress-phase" id="ph-'+escHtml(n.sobject)+'">queued</span>'
+      + '<span class="obj-progress-counts" id="counts-'+escHtml(n.sobject)+'">'
+      + '<span class="ok" id="ins-'+escHtml(n.sobject)+'">'+(isExport ? '' : '+0')+'</span>'
+      + '<span class="upd" id="upd-'+escHtml(n.sobject)+'">'+(isExport ? '' : '~0')+'</span>'
+      + '<span class="err" id="fail-'+escHtml(n.sobject)+'">'+(isExport ? '' : '✗0')+'</span>'
+      + '</span>'
       + '</div>'
-      + '<div class="obj-progress-counts" id="counts-'+escHtml(node.sobject)+'">'
-      + '<span class="ok" id="ins-'+escHtml(node.sobject)+'">'+(isExport ? '0 records' : '+0')+'</span>'
-      + '<span class="upd" id="upd-'+escHtml(node.sobject)+'">'+(isExport ? '' : '~0')+'</span>'
-      + '<span class="err" id="fail-'+escHtml(node.sobject)+'">'+(isExport ? '' : '✗0')+'</span>'
-      + '</div>'
-      + '<div class="progress-track"><div class="progress-fill" id="fill-'+escHtml(node.sobject)+'" style="width:0%"></div></div>'
-      + '<div class="errors-toggle" id="etog-'+escHtml(node.sobject)+'" onclick="toggleObjErrors(\\''+escHtml(node.sobject)+'\\')"></div>'
-      + '<div class="errors-detail" id="edet-'+escHtml(node.sobject)+'"></div>';
+      + '<div class="progress-track"><div class="progress-fill" id="fill-'+escHtml(n.sobject)+'" style="width:0%"></div></div>'
+      + '<div class="errors-toggle" id="etog-'+escHtml(n.sobject)+'" onclick="toggleObjErrors(\\''+escHtml(n.sobject)+'\\')"></div>'
+      + '<div class="errors-detail" id="edet-'+escHtml(n.sobject)+'"></div>';
     area.appendChild(row);
   });
   var statusLbl = safeGet('run-status-label');
@@ -1849,8 +1846,8 @@ function prepareRunPage() {
   safeGet('start-run-btn') && (safeGet('start-run-btn').disabled = false);
   safeGet('start-run-btn') && (safeGet('start-run-btn').textContent = '⚡ Start Migration');
   safeGet('retry-failed-btn') && (safeGet('retry-failed-btn').style.display = 'none');
-  // The previous run's undo no longer describes the org once a new run starts.
-  safeGet('revert-run-btn') && (safeGet('revert-run-btn').style.display = 'none');
+  // The previous run's undo no longer describes the org once a new run starts. Clearing the
+  // results block removes the revert control with it — it lives there now.
   safeGet('changes-table') && (safeGet('changes-table').innerHTML = '');
   lastJournal = null;
   onMigrationTypeChange(); // the button and the revert controls follow the chosen output
@@ -1932,8 +1929,7 @@ function onMigrationTypeChange() {
   if (btn) btn.textContent = TYPE_LABEL[t] || TYPE_LABEL.org;
   var rev = safeGet('revert-on-fail');
   if (rev && rev.parentElement) rev.parentElement.style.display = toOrg ? '' : 'none';
-  var rbtn = safeGet('revert-run-btn');
-  if (!toOrg && rbtn) rbtn.style.display = 'none';
+  if (!toOrg) safeGet('changes-table') && (safeGet('changes-table').innerHTML = '');
   var lbl = safeGet('run-status-label');
   if (lbl) {
     lbl.textContent = toOrg
@@ -2163,7 +2159,27 @@ function renderChangesTable(journal) {
   host.innerHTML = '';
   if (!journal) return;
 
-  var html = '';
+  // ── Header: what changed, and the control that undoes it ──────────────────
+  // The revert belongs beside the records it acts on, not in the toolbar where it sat next to
+  // Start with nothing on screen to tell you what it would touch.
+  var createdTotal = 0, updatedTotal = 0, restorable = 0;
+  Object.keys(journal.inserted || {}).forEach(function(s) { createdTotal += (journal.inserted[s] || []).length; });
+  Object.keys(journal.updated || {}).forEach(function(s) {
+    (journal.updated[s] || []).forEach(function(e) { updatedTotal++; if (e.status === 'updated') restorable++; });
+  });
+  if (!createdTotal && !updatedTotal) return;
+
+  var parts = [];
+  if (createdTotal) parts.push(createdTotal + ' created');
+  if (updatedTotal) parts.push(updatedTotal + ' overwritten');
+
+  var html = '<div class="changes-bar">'
+    + '<span class="changes-bar-title">What this run changed</span>'
+    + '<span class="changes-bar-sub">' + parts.join(' · ') + '</span>'
+    + (createdTotal + restorable > 0
+        ? '<button class="btn-secondary" id="revert-run-btn" onclick="revertRun()" title="Delete the records this run created and put the records it overwrote back to their previous values. Untick rows below to undo only some.">↩ Revert this run</button>'
+        : '')
+    + '</div>';
 
   // ── Created records ───────────────────────────────────────────────────────
   var created = [];
@@ -2174,9 +2190,8 @@ function renderChangesTable(journal) {
   });
   if (created.length) {
     html += '<div class="changes-card">' +
-      '<div class="changes-head">Records created' +
-      '<span class="sub">' + created.length + ' new record(s) in the target org. ' +
-      'Ticked records are the ones a revert deletes.</span>' +
+      '<div class="changes-head">Created' +
+      '<span class="sub">ticked records are the ones a revert deletes</span>' +
       '<span class="btn-tiny" onclick="setRevertAll(\\'ins\\', true)">All</span>' +
       '<span class="btn-tiny" onclick="setRevertAll(\\'ins\\', false)">None</span></div>' +
       '<div class="changes-scroll"><table class="changes"><thead><tr>' +
@@ -2210,11 +2225,9 @@ function renderChangesTable(journal) {
     (journal.updated[sobject] || []).forEach(function(e) { updated.push({ sobject: sobject, e: e }); });
   });
   if (updated.length) {
-    var restorable = updated.filter(function(u) { return u.e.status === 'updated'; }).length;
     html += '<div class="changes-card">' +
-      '<div class="changes-head">Records overwritten' +
-      '<span class="sub">' + updated.length + ' existing record(s) written to, ' + restorable +
-      ' restorable. Ticked records are put back to their previous values.</span>' +
+      '<div class="changes-head">Overwritten' +
+      '<span class="sub">' + restorable + ' restorable — ticked records go back to their previous values</span>' +
       '<span class="btn-tiny" onclick="setRevertAll(\\'upd\\', true)">All</span>' +
       '<span class="btn-tiny" onclick="setRevertAll(\\'upd\\', false)">None</span></div>' +
       '<div class="changes-scroll"><table class="changes"><thead><tr>' +
@@ -2280,7 +2293,7 @@ function selectionCount(sel) {
 /** Keep the button honest about how many records it would actually touch. */
 function updateRevertBtn() {
   var btn = safeGet('revert-run-btn');
-  if (!btn || btn.style.display === 'none') return;
+  if (!btn) return;
   var total = document.querySelectorAll('.rv').length;
   var n = selectionCount(revertSelection());
   btn.disabled = n === 0;
@@ -2464,16 +2477,6 @@ window.addEventListener('message', function(ev) {
     sourceInstanceUrl = (d.sourceInstanceUrl || '').replace(/\\/$/, '');
     showMigrationResults(d.results || []);
     renderChangesTable(lastJournal);
-    var rbtn = safeGet('revert-run-btn');
-    if (rbtn) {
-      var c = d.revertCounts || { inserted: 0, restorable: 0 };
-      rbtn.style.display = d.canRevert ? '' : 'none';
-      rbtn.disabled = false;
-      rbtn.textContent = '↩ Revert this run';
-      rbtn.title = 'Delete ' + c.inserted + ' created record(s) and restore ' + c.restorable +
-                   ' overwritten record(s) to their previous values. Untick rows below to revert only some.';
-      updateRevertBtn(); // the button was hidden while the tables rendered
-    }
     return;
   }
 
@@ -2492,17 +2495,11 @@ window.addEventListener('message', function(ev) {
   }
 
   if (d.command === 'revertComplete') {
-    var rb = safeGet('revert-run-btn');
     // A partial revert leaves the unselected records in the org — they stay listed and undoable.
+    // Re-rendering rebuilds the revert control, or drops it when nothing is left to undo.
     lastJournal = d.remaining || null;
-    if (lastJournal) {
-      renderChangesTable(lastJournal);
-      if (rb) { rb.disabled = false; }
-      updateRevertBtn();
-    } else {
-      if (rb) { rb.style.display = 'none'; rb.disabled = false; }
-      safeGet('changes-table') && (safeGet('changes-table').innerHTML = '');
-    }
+    if (lastJournal) renderChangesTable(lastJournal);
+    else safeGet('changes-table') && (safeGet('changes-table').innerHTML = '');
     safeGet('run-status-label') && (safeGet('run-status-label').textContent =
       (d.failed ? '⚠' : '↩') + ' Reverted — deleted ' + (d.deleted || 0) + ', restored ' + (d.restored || 0) +
       (d.failed ? ', ' + d.failed + ' could not be undone' : ''));
