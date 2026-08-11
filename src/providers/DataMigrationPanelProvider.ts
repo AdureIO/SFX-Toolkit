@@ -794,6 +794,9 @@ body { font-family: var(--vscode-font-family); font-size: 13px; color: var(--vsc
 .global-error { padding: 10px 12px; border-radius: 3px; border-left: 3px solid var(--vscode-errorForeground); background: color-mix(in srgb, var(--vscode-errorForeground) 10%, transparent); font-size: 12px; color: var(--vscode-errorForeground); display: none; }
 .global-error.visible { display: block; }
 
+.no-target { padding: 5px 0; font-size: 12px; color: var(--vscode-descriptionForeground); font-style: italic; }
+.run-type { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; padding: 3px 8px; border-radius: 999px; background: color-mix(in srgb, var(--vscode-foreground) 10%, transparent); color: var(--vscode-descriptionForeground); }
+
 /* ── Pre-run validation, shown on the overview screen ── */
 .valid-card { margin-top: 12px; border-radius: 8px; padding: 10px 14px; font-size: 12px; border: 1px solid var(--vscode-widget-border, var(--vscode-panel-border)); }
 .valid-card.checking { color: var(--vscode-descriptionForeground); display: flex; align-items: center; gap: 8px; }
@@ -911,12 +914,26 @@ table.changes .st-failed { color: var(--vscode-errorForeground); }
       </div>
       <div style="display:flex; gap:12px; flex-wrap:wrap;">
         <div class="field-block" style="flex:1; min-width:180px;">
+          <label class="field-label" for="migration-type">Migration type</label>
+          <select class="form-select" id="migration-type" onchange="onMigrationTypeChange()">
+            <option value="org">Org → Org</option>
+            <option value="apex">Org → Apex script</option>
+            <option value="csv">Org → CSV</option>
+            <option value="json">Org → JSON</option>
+          </select>
+        </div>
+        <div class="field-block" style="flex:1; min-width:180px;">
           <label class="field-label" for="src-org">Source org</label>
           <select class="form-select" id="src-org" onchange="onSourceOrgChange()"></select>
         </div>
-        <div class="field-block" style="flex:1; min-width:180px;">
+        <div class="field-block" id="tgt-org-block" style="flex:1; min-width:180px;">
           <label class="field-label" for="tgt-org">Target org</label>
           <select class="form-select" id="tgt-org"></select>
+        </div>
+        <!-- Replaces the target-org picker for a file output: there is no second org involved. -->
+        <div class="field-block" id="tgt-org-none" style="flex:1; min-width:180px; display:none;">
+          <label class="field-label">Target org</label>
+          <div class="no-target">Not needed — the records go to a file.</div>
         </div>
       </div>
     </div>
@@ -1017,14 +1034,7 @@ table.changes .st-failed { color: var(--vscode-errorForeground); }
 <div class="page" id="page3">
   <div class="run-toolbar">
     <button class="btn-secondary" id="back-to-tree-btn" onclick="goToTree()">← Adjust settings</button>
-    <label class="inline" style="font-size:12px;" title="Where the selected records go. The org option writes them into the target org; the others produce a file from the same selection and the same rules.">Output
-      <select id="migration-type" onchange="onMigrationTypeChange()">
-        <option value="org">Org → Org</option>
-        <option value="apex">Org → Apex script</option>
-        <option value="csv">Org → CSV</option>
-        <option value="json">Org → JSON</option>
-      </select>
-    </label>
+    <span class="run-type" id="run-type-label" title="Set on the Source &amp; Target step"></span>
     <span style="flex:1; font-size:12px; color:var(--vscode-descriptionForeground);" id="run-status-label">Ready to run</span>
     <label class="inline" style="font-size:12px;" title="If any record fails, offer to undo the whole run: delete the records it created and restore the records it overwrote to their previous values. Only rows this run touched are affected, and you are asked to confirm first."><input type="checkbox" id="revert-on-fail"> Revert on failure</label>
     <button class="btn-secondary" id="retry-failed-btn" onclick="retryFailed()" style="display:none;">⟳ Retry failed rows</button>
@@ -1049,7 +1059,13 @@ try { if (typeof acquireVsCodeApi !== 'undefined') vsc = acquireVsCodeApi(); } c
 function post(msg) { try { if (vsc) vsc.postMessage(msg); } catch(e) {} }
 function safeGet(id) { return document.getElementById(id); }
 function escHtml(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-function tgtOrgVal() { var s = safeGet('tgt-org'); return (s && s.value) || ''; }
+// A file output has no target org, so nothing is compared against one — otherwise fields would
+// be excluded as "not present in target" for an org that is not part of the operation at all.
+function tgtOrgVal() {
+  if (migrationType() !== 'org') return '';
+  var s = safeGet('tgt-org');
+  return (s && s.value) || '';
+}
 
 /* ══════════════════════════════════════════════════════════════════════════
    Global state
@@ -1878,9 +1894,20 @@ var TYPE_LABEL = { org: '⚡ Start Migration', apex: '⚡ Generate Apex', csv: '
  * machinery are meaningless for the file outputs — hide them rather than leave dead switches on
  * screen.
  */
+var TYPE_NAME = { org: 'Org → Org', apex: 'Org → Apex script', csv: 'Org → CSV', json: 'Org → JSON' };
+var lastMigrationType = null;   // so a re-render does not count as a change
+
 function onMigrationTypeChange() {
   var t = migrationType();
   var toOrg = t === 'org';
+  // A file output has no second org, so the target picker is replaced rather than left to be
+  // filled in pointlessly — and the field comparison that needs it simply does not run.
+  var tgtBlock = safeGet('tgt-org-block');
+  if (tgtBlock) tgtBlock.style.display = toOrg ? '' : 'none';
+  var tgtNone = safeGet('tgt-org-none');
+  if (tgtNone) tgtNone.style.display = toOrg ? 'none' : '';
+  var chip = safeGet('run-type-label');
+  if (chip) chip.textContent = TYPE_NAME[t] || TYPE_NAME.org;
   var btn = safeGet('start-run-btn');
   if (btn) btn.textContent = TYPE_LABEL[t] || TYPE_LABEL.org;
   var rev = safeGet('revert-on-fail');
@@ -1892,6 +1919,14 @@ function onMigrationTypeChange() {
     lbl.textContent = toOrg
       ? 'Ready to run'
       : 'Ready — the same selection and rules, written to a file instead of an org.';
+  }
+  // Which fields are available depends on whether a target org is being compared against, so a
+  // tree built under the previous type has to be described again — but only when the type really
+  // changed, since this also runs every time the run page is prepared.
+  var changed = lastMigrationType !== null && lastMigrationType !== t;
+  lastMigrationType = t;
+  if (changed && Object.keys(nodes || {}).length) {
+    try { redescribeSelected(); } catch (e) { /* nothing described yet */ }
   }
 }
 
@@ -2245,6 +2280,7 @@ window.addEventListener('message', function(ev) {
   if (d.command === 'init') {
     orgsData = d.orgs || [];
     populateOrgSelects(orgsData);
+    onMigrationTypeChange();
     // Self-heal empty dropdowns: trigger one cache refresh if no orgs came back.
     if ((!orgsData || !orgsData.length) && !orgRefreshedOnce) {
       orgRefreshedOnce = true;
