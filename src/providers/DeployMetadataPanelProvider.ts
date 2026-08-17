@@ -21,10 +21,12 @@ import { runCommand } from "../utils/commandRunner";
 import { Logger, DeployLog } from "../utils/outputChannel";
 import { cleanDeployOutput, parseDeployStats, parseCoverageData } from "../commands/devCommands";
 import { addDeployHistoryEntry } from "../commands/deployHistory";
-import { clearDeployDiagnostics, setDeployDiagnosticsFromFailure, setDeployDiagnosticsFromApiResult, formatApiDeployResultForLog } from "../utils/deployDiagnostics";
+import { clearDeployDiagnostics, setDeployDiagnosticsFromFailure, setDeployDiagnosticsFromApiResult, formatApiDeployResultForLog, componentFailuresOf, withSyntheticTestFailures } from "../utils/deployDiagnostics";
 import { runJsonDeploy } from "../utils/deployEngine";
 import { statsFromResult, coverageFromResult, toApiDeployResult, formatStatus, formatElapsed, formatResultSummary, type DeployStats, type CoverageRow } from "../utils/deployStatusMap";
 import { AuthInfo } from "../utils/authInfo";
+import { OperationPanelProvider } from "./OperationPanelProvider";
+import { reportError, reportSuccess } from "../utils/reportError";
 import { upsertTestSuite, deleteTestSuite as deleteTestSuiteEntry, loadTestSuites, type TestSuite } from "../utils/testSuites";
 
 /** Panel state we persist in the extension so it survives webview HTML replacement (tab switch/revive). */
@@ -175,10 +177,18 @@ export class DeployMetadataPanelProvider {
       if (watcherDebounce) { clearTimeout(watcherDebounce); watcherDebounce = null; }
       if (!enabled) return;
 
-      const watcher = vscode.workspace.createFileSystemWatcher(
-        new vscode.RelativePattern(workspaceRoot, "**/*"),
-        false, false, false
-      );
+      // Scoped to the SFDX package directories, not the whole workspace — a watcher on "**/*"
+      // fires for every save anywhere (build output, .sf tracking internals, unrelated files),
+      // each one triggering a git-status call and a selection re-merge that has nothing to do
+      // with deployable metadata.
+      const packageDirs = getPackageDirectories(workspaceRoot)
+        .map((d) => d.replace(/\\/g, "/").replace(/\/$/, ""))
+        .filter(Boolean);
+      const watchPattern = packageDirs.length > 0
+        ? new vscode.RelativePattern(workspaceRoot, packageDirs.length === 1 ? `${packageDirs[0]}/**/*` : `{${packageDirs.join(",")}}/**/*`)
+        : new vscode.RelativePattern(workspaceRoot, "**/*");
+
+      const watcher = vscode.workspace.createFileSystemWatcher(watchPattern, false, false, false);
       const onChange = () => {
         if (watcherDebounce) clearTimeout(watcherDebounce);
         watcherDebounce = setTimeout(async () => {
@@ -354,6 +364,9 @@ export class DeployMetadataPanelProvider {
           .getConfiguration("adure-sfx-toolkit")
           .get<boolean>("deploy.liveStatus", true);
 
+        const deployOpLabel = dryRun ? "Validation" : "Deploy";
+        const operationHandle = OperationPanelProvider.beginOperation(deployOpLabel, msg.targetOrg || undefined);
+
         const outcome: FinalOutcome = await vscode.window.withProgress(
           {
             location: vscode.ProgressLocation.Notification,
@@ -396,7 +409,7 @@ export class DeployMetadataPanelProvider {
                 timeoutMs: DEPLOY_TIMEOUT_MS,
                 onStatus: (s) => {
                   progress.report({ message: formatStatus(s) });
-                  panel.webview.postMessage({ command: "deployProgress", status: s });
+                  operationHandle.updateLiveStatus(s);
                 }
               });
               if (res.kind === "cancelled") return { kind: "cancelled" };
@@ -425,6 +438,7 @@ export class DeployMetadataPanelProvider {
           panel.webview.postMessage({ command: "deployResult", success: false, cancelled: true, dryRun, components: 0, componentErrors: 0, testsPassed: 0, testsFailed: 0, durationMs, targetOrg: msg.targetOrg ?? "" });
           addDeployHistoryEntry({ timestamp: deployStartTime, status: "Cancelled", dryRun, components: 0, componentErrors: 0, testsPassed: 0, testsFailed: 0, durationMs, targetOrg: msg.targetOrg ?? "", sourcePaths: msg.sourcePaths ?? [], presetName: msg.presetName ?? null });
           vscode.window.showInformationMessage(dryRun ? "Validation cancelled." : "Deploy cancelled.");
+          operationHandle.dispose();
           return;
         }
 
@@ -437,45 +451,71 @@ export class DeployMetadataPanelProvider {
           panel.webview.postMessage({ command: "deployResult", success: true, cancelled: false, dryRun, ...stats, coverage, durationMs, targetOrg: msg.targetOrg ?? "" });
           addDeployHistoryEntry({ timestamp: deployStartTime, status: "Succeeded", dryRun, ...stats, durationMs, targetOrg: msg.targetOrg ?? "", sourcePaths: msg.sourcePaths ?? [], presetName: msg.presetName ?? null });
           const okSummary = apiResult ? formatResultSummary(apiResult) : "";
-          vscode.window.showInformationMessage(
-            `${dryRun ? "Validation" : "Deploy"} completed in ${formatElapsed(durationMs)}${okSummary ? ` · ${okSummary}` : ""}.`
-          );
+          reportSuccess({
+            operation: deployOpLabel,
+            org: msg.targetOrg || undefined,
+            summary: `${formatElapsed(durationMs)}${okSummary ? ` · ${okSummary}` : ""}`,
+            apiResult,
+            handle: operationHandle,
+            message: `${deployOpLabel} completed in ${formatElapsed(durationMs)}${okSummary ? ` · ${okSummary}` : ""}.`
+          });
           return;
         }
 
         // outcome.kind === "failed"
-        DeployLog.show();
+        // Not auto-opening the Output log here — everything is still written to it (DeployLog.line
+        // calls below), but "Show details" on the toast should open the Operation panel, not steal
+        // focus to a different view the user didn't ask for.
         const { stats, coverage, apiResult, errorText } = outcome;
         panel.webview.postMessage({ command: "deployResult", success: false, cancelled: false, dryRun, ...stats, coverage, durationMs, targetOrg: msg.targetOrg ?? "" });
         addDeployHistoryEntry({ timestamp: deployStartTime, status: "Failed", dryRun, ...stats, durationMs, targetOrg: msg.targetOrg ?? "", sourcePaths: msg.sourcePaths ?? [], presetName: msg.presetName ?? null });
         const failSummary = apiResult ? formatResultSummary(apiResult) : "";
-        vscode.window.showErrorMessage(
-          `Deploy failed after ${formatElapsed(durationMs)}${failSummary ? ` · ${failSummary}` : ""}. See the deploy log.`,
-          "View Log"
-        ).then((choice) => {
-          if (choice === "View Log") DeployLog.show();
-        });
         void vscode.window
           .withProgress(
             { location: vscode.ProgressLocation.Notification, title: "Parsing failure details…", cancellable: false },
             async (p) => {
               p.report({ message: "Setting diagnostics…" });
               if (apiResult) {
-                // Structured failures straight from the Metadata API → Problems.
-                setDeployDiagnosticsFromApiResult(workspaceRoot, apiResult);
+                // Structured failures straight from the Metadata API → Problems. Fold in code
+                // coverage warnings and Apex test failures — the API returns those in separate
+                // fields (details.runTestResult), not componentFailures, so a deploy that fails
+                // ONLY on org-wide coverage (clean component/test counts) would otherwise show
+                // nothing here at all.
+                setDeployDiagnosticsFromApiResult(workspaceRoot, withSyntheticTestFailures(apiResult));
               } else {
                 await setDeployDiagnosticsFromFailure(workspaceRoot, errorText ?? "", targetOrg);
               }
             }
           )
           .then(() => {
-            vscode.window
-              .showInformationMessage("Failure details are in the Problems view.", "Show diagnostics")
-              .then((choice) => {
-                if (choice === "Show diagnostics") {
-                  void vscode.commands.executeCommand("workbench.actions.view.problems");
-                }
-              });
+            const failures = apiResult ? componentFailuresOf(withSyntheticTestFailures(apiResult)) : [];
+            // "Show original error output" must be the actual unmodified payload, not a
+            // reformatted table and not the synthetic failures merged in above (those are
+            // derived, not what the API returned) — the human-readable summary already went to
+            // the Output log via setDeployDiagnosticsFromApiResult.
+            const raw = errorText || (apiResult ? JSON.stringify(apiResult, null, 2) : `${deployOpLabel} failed.`);
+            // Salesforce sometimes reports Status: Failed with clean component/test counts and no
+            // errorMessage/stateDetail at all (e.g. an org-wide requirement not tied to one
+            // component) — without a fallback here the pretty card has nothing to show.
+            const topError =
+              apiResult?.errorMessage ??
+              apiResult?.stateDetail ??
+              (apiResult && failures.length === 0
+                ? `${deployOpLabel} failed, but the org reported no error message, component failures, or test failures. See the original output below.`
+                : undefined);
+            reportError({
+              operation: deployOpLabel,
+              error: raw,
+              failures,
+              topError,
+              org: msg.targetOrg || undefined,
+              handle: operationHandle,
+              message: `${deployOpLabel} failed after ${formatElapsed(durationMs)}${failSummary ? ` · ${failSummary}` : ""}.`,
+              extraButton: {
+                label: "Show diagnostics",
+                onClick: () => void vscode.commands.executeCommand("workbench.actions.view.problems")
+              }
+            });
           });
       },
       null,
@@ -1257,10 +1297,14 @@ export class DeployMetadataPanelProvider {
 				updateSelectionStatus();
 				filterTree();
 			}
+			// Only paths that actually match something already shown in the tree are selectable —
+			// the tree is already the one place that knows what's real, deployable metadata (built
+			// from the actual project structure), so a git-changed path with no match there (not a
+			// recognized metadata item, or not part of any package directory) is reported as
+			// unmatched but never silently added to the selection/deploy payload as an "extra" path.
 			var pathSet = new Set((paths || []).map(norm));
 			matchedTreePaths.forEach(function(p) { pathSet.delete(p); });
-			pathSet.forEach(function(gitPath) { extraPaths.push(gitPath); });
-			return { total: (paths && paths.length) || 0, matchedExact: matchResult.matchedExact, matchedByBasename: matchResult.matchedByBasename, unmatched: extraPaths.length };
+			return { total: (paths && paths.length) || 0, matchedExact: matchResult.matchedExact, matchedByBasename: matchResult.matchedByBasename, unmatched: pathSet.size };
 		}
 
 		window.addEventListener('message', function(event) {

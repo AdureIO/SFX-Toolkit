@@ -201,7 +201,7 @@ function interpretProblem(problem: string): { category: string; explanation?: st
 }
 
 /** The SF CLI (`--json`) reports fatal errors as a JSON object. Pull out the useful bits. */
-function parseCliError(raw: string): { message?: string; name?: string; warnings?: string[] } {
+function parseCliError(raw: string): { message?: string; name?: string; warnings?: string[]; parsedOk?: boolean } {
     if (!raw) return {};
     const start = raw.indexOf("{");
     const end = raw.lastIndexOf("}");
@@ -211,7 +211,7 @@ function parseCliError(raw: string): { message?: string; name?: string; warnings
         const message = typeof obj.message === "string" ? obj.message : undefined;
         const name = typeof obj.name === "string" ? obj.name : typeof obj.code === "string" ? obj.code : undefined;
         const warnings = Array.isArray(obj.warnings) ? obj.warnings.filter((w): w is string => typeof w === "string") : undefined;
-        return { message, name, warnings };
+        return { message, name, warnings, parsedOk: true };
     } catch {
         return {};
     }
@@ -273,8 +273,12 @@ export function interpretError(input: {
     const cli = parseCliError(input.raw ?? "");
     const warnings = (input.warnings && input.warnings.length ? input.warnings : cli.warnings) ?? [];
     // Fall back to the raw text itself when there's no explicit top error and no CLI JSON message —
-    // most command failures are plain stderr, and they must still produce an issue to show.
-    const topRaw = (input.topError && input.topError.trim()) || cli.message || (issues.length ? "" : (input.raw ?? "").trim());
+    // most command failures are plain stderr, and they must still produce an issue to show. But
+    // when raw parsed cleanly as JSON (a structured API result with no `message` field — e.g. a
+    // deploy that failed with clean component/test counts and no explanation), dumping the whole
+    // blob as the "problem" text is unreadable noise; the full JSON is already preserved verbatim
+    // in `raw` for "Show original error output", so just leave no issue rather than duplicate it.
+    const topRaw = (input.topError && input.topError.trim()) || cli.message || (issues.length || cli.parsedOk ? "" : (input.raw ?? "").trim());
 
     let headline: string | undefined;
     if (topRaw) {

@@ -26,6 +26,28 @@ export interface ApiComponentSuccess {
   deleted?: boolean;
 }
 
+/**
+ * Org-wide (or per-class) coverage shortfall — separate from componentFailures/testFailures.
+ * A deploy can fail with this as the ONLY reason: 0 component errors, 0 test errors, every test
+ * passing, yet Status: Failed, because overall Apex coverage is below the org's minimum. Setup's
+ * own "Deployment Status" page reads this exact field to render its "Code Coverage Failure" card.
+ */
+export interface ApiCodeCoverageWarning {
+  id?: string;
+  name?: string;
+  namespace?: string;
+  message?: string;
+}
+
+/** A failing Apex test — present even when numberTestErrors alone gives no detail. */
+export interface ApiTestFailure {
+  name?: string;
+  methodName?: string;
+  message?: string;
+  stackTrace?: string;
+  type?: string;
+}
+
 export interface ApiDeployResult {
   status?: string;
   numberComponentsDeployed?: number;
@@ -40,6 +62,10 @@ export interface ApiDeployResult {
   details?: {
     componentFailures?: ApiComponentFailure | ApiComponentFailure[];
     componentSuccesses?: ApiComponentSuccess | ApiComponentSuccess[];
+    runTestResult?: {
+      codeCoverageWarnings?: ApiCodeCoverageWarning | ApiCodeCoverageWarning[];
+      failures?: ApiTestFailure | ApiTestFailure[];
+    };
   };
 }
 
@@ -54,6 +80,49 @@ function getComponentFailuresList(result: ApiDeployResult): ApiComponentFailure[
 /** Public accessor for the normalized component-failure list (used by the interpreted error panel). */
 export function componentFailuresOf(result: ApiDeployResult): ApiComponentFailure[] {
   return getComponentFailuresList(result);
+}
+
+function toArray<T>(v: T | T[] | undefined): T[] {
+  if (Array.isArray(v)) return v;
+  if (v && typeof v === "object") return [v];
+  return [];
+}
+
+/** Coverage-shortfall warnings, normalized to the same shape as component failures. */
+export function codeCoverageWarningsOf(result: ApiDeployResult): ApiComponentFailure[] {
+  return toArray(result.details?.runTestResult?.codeCoverageWarnings).map((w) => ({
+    componentType: w.name ? "ApexClass" : undefined,
+    fullName: w.name,
+    problem: w.message?.trim() || "Code coverage warning"
+  }));
+}
+
+/** Failing Apex tests, normalized to the same shape as component failures. */
+export function apexTestFailuresOf(result: ApiDeployResult): ApiComponentFailure[] {
+  return toArray(result.details?.runTestResult?.failures).map((f) => ({
+    componentType: "ApexClass",
+    fullName: f.name,
+    problem: `${f.methodName ? f.methodName + ": " : ""}${f.message?.trim() || "Test failed"}`
+  }));
+}
+
+/**
+ * Merge component failures with coverage warnings and Apex test failures into one failure list —
+ * these are three separate fields the Metadata API returns, but a caller that only reads
+ * componentFailures (Problems view, the interpreted error panel) would miss the other two
+ * entirely, exactly the "Status: Failed but everything else is clean" gap that hides a code
+ * coverage shortfall. Safe to call even when a caller wants componentFailures alone.
+ */
+export function withSyntheticTestFailures(result: ApiDeployResult): ApiDeployResult {
+  const extra = [...codeCoverageWarningsOf(result), ...apexTestFailuresOf(result)];
+  if (!extra.length) return result;
+  return {
+    ...result,
+    details: {
+      ...result.details,
+      componentFailures: [...componentFailuresOf(result), ...extra]
+    }
+  };
 }
 
 /** Normalize API componentSuccesses to an array. */
@@ -106,6 +175,12 @@ export function formatApiDeployResultForLog(
         ((apiResult.numberTestErrors ?? 0) > 0 ? ` (${apiResult.numberTestErrors} failed)` : "")
     );
   }
+  // Whole-deploy failure reason (e.g. org-wide code coverage below minimum) isn't reflected
+  // in any per-component/per-test count, so it must be printed explicitly or the log shows
+  // a clean "Status: Failed" with no explanation.
+  if (apiResult.errorMessage) {
+    lines.push(`  Error: ${apiResult.errorStatusCode ? apiResult.errorStatusCode + ": " : ""}${apiResult.errorMessage}`.replace(/\s+/g, " "));
+  }
   // CLI-style component table: State | Type Name | Location [| problem]. Failures
   // first (most important), then successes with their native state.
   const failures = getComponentFailuresList(apiResult);
@@ -141,6 +216,20 @@ export function formatApiDeployResultForLog(
 
 /** Virtual URI for deploy errors that couldn't be mapped to a file (shows in Problems with full message). */
 export const DEPLOY_ERRORS_URI = vscode.Uri.parse("adure-deploy:errors");
+
+/**
+ * Content provider for the `adure-deploy:` scheme. Without this registered, opening
+ * DEPLOY_ERRORS_URI (e.g. by clicking its entry in the Problems panel) fails with VS
+ * Code's generic "The editor could not be opened due to an unexpected error" — the
+ * diagnostic message itself is never shown. Renders the current diagnostics for that URI.
+ */
+export const deployErrorsContentProvider: vscode.TextDocumentContentProvider = {
+  provideTextDocumentContent(uri: vscode.Uri): string {
+    const diagnostics = getDeployDiagnosticCollection().get(uri) ?? [];
+    if (diagnostics.length === 0) return "No deploy error details recorded. See the deploy log (Adure SFX Toolkit output channel).";
+    return diagnostics.map((d) => d.message).join("\n\n");
+  }
+};
 
 /** Diagnostic collection for deploy/validation errors so they appear in Problems and in the editor. */
 let deployDiagnosticCollection: vscode.DiagnosticCollection | undefined;
@@ -453,8 +542,13 @@ export function setDeployDiagnosticsFromApiResult(
       })
     );
   } else if (failures.length === 0) {
-    // API returned Failed but no componentFailures; show at least one diagnostic so Problems shows something
-    const message = apiResult.stateDetail?.trim() || "Deploy failed. See Output (Adure SFX Toolkit) for details.";
+    // API returned Failed but no componentFailures (e.g. org-wide code coverage below minimum);
+    // prefer errorMessage — that's where the Metadata API puts the actual reason for this case —
+    // over stateDetail, which is normally just in-progress status text.
+    const message =
+      (apiResult.errorMessage
+        ? `${apiResult.errorStatusCode ? apiResult.errorStatusCode + ": " : ""}${apiResult.errorMessage}`.trim()
+        : apiResult.stateDetail?.trim()) || "Deploy failed. See Output (Adure SFX Toolkit) for details.";
     const d = new vscode.Diagnostic(new vscode.Range(0, 0, 0, 0), message, vscode.DiagnosticSeverity.Error);
     d.source = DEPLOY_DIAGNOSTIC_SOURCE;
     collection.set(DEPLOY_ERRORS_URI, [d]);

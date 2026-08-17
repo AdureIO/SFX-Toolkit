@@ -9,8 +9,9 @@ import { getAutoSaveBeforePush, getTestRunTimeout } from "../utils/constants";
 import { DEPLOY_TIMEOUT_MS } from "./deployMetadata";
 import { runJsonDeploy } from "../utils/deployEngine";
 import { formatStatus, formatElapsed, affectedSchemaObjects, componentSuccessList, parseRetrievedComponents, schemaObjectFromPath, toApiDeployResult, type DeployedComponent } from "../utils/deployStatusMap";
-import { clearDeployDiagnostics, setDeployDiagnosticsFromApiResult, setDeployDiagnosticsFromFailure, formatApiDeployResultForLog, componentFailuresOf } from "../utils/deployDiagnostics";
-import { reportError } from "../utils/reportError";
+import { clearDeployDiagnostics, setDeployDiagnosticsFromApiResult, setDeployDiagnosticsFromFailure, formatApiDeployResultForLog, componentFailuresOf, withSyntheticTestFailures } from "../utils/deployDiagnostics";
+import { reportError, reportSuccess } from "../utils/reportError";
+import { OperationPanelProvider } from "../providers/OperationPanelProvider";
 import { getDefaultOrg, getDefaultOrgSync } from "../utils/defaultOrg";
 import { confirmProductionOrgOperation } from "../utils/orgSafety";
 import { Telemetry } from "../utils/telemetry";
@@ -226,6 +227,8 @@ async function pushSourceHelper(force: boolean) {
   statusBar.tooltip = "Click to Show Deployment Logs";
   statusBar.show();
 
+  const operationHandle = OperationPanelProvider.beginOperation(title, defaultOrg?.displayName);
+
   try {
     await vscode.window.withProgress(
       {
@@ -303,7 +306,10 @@ async function pushSourceHelper(force: boolean) {
               org: null,
               token,
               timeoutMs: DEPLOY_TIMEOUT_MS,
-              onStatus: (s) => report(formatStatus(s))
+              onStatus: (s) => {
+                report(formatStatus(s));
+                operationHandle.updateLiveStatus(s);
+              }
             });
             if (outcome.kind === "cancelled") { state.cancelled = true; return false; }
             if (outcome.kind === "nothing") return true; // no local changes
@@ -363,28 +369,44 @@ async function pushSourceHelper(force: boolean) {
           if (state.cancelled) {
             Logger.info("Push cancelled by user.");
             Telemetry.event("push", { force: String(force), status: "cancelled" }, { durationMs: Date.now() - pushStartTime });
+            operationHandle.dispose();
             return;
           }
           if (state.failure) {
             Telemetry.event("push", { force: String(force), status: "failed" }, { durationMs: Date.now() - pushStartTime });
             const apiResult = state.failure.apiResult;
             const errorText = (state.failure.errorText ?? "").trim();
-            const failures = apiResult ? componentFailuresOf(apiResult) : [];
+            // Fold in code coverage warnings and Apex test failures — the API returns those in
+            // separate fields (details.runTestResult), not componentFailures, so a push that
+            // fails ONLY on org-wide coverage (clean component/test counts) would otherwise show
+            // nothing here at all.
+            const failures = apiResult ? componentFailuresOf(withSyntheticTestFailures(apiResult)) : [];
 
             // Populate the Problems view from whichever source has detail.
-            if (failures.length) setDeployDiagnosticsFromApiResult(rootPath, apiResult!);
+            if (failures.length) setDeployDiagnosticsFromApiResult(rootPath, withSyntheticTestFailures(apiResult!));
             else if (errorText) await setDeployDiagnosticsFromFailure(rootPath, errorText, null);
 
             // Prefer the raw CLI error text for the panel — it carries the exact message
-            // (e.g. ExpectedSourceFilesError) that a component-less apiResult drops.
-            const raw = errorText || (apiResult ? formatApiDeployResultForLog(apiResult, "Push failed:") : "Push failed.");
+            // (e.g. ExpectedSourceFilesError) that a component-less apiResult drops. Otherwise
+            // fall back to the actual unmodified JSON payload (the human-readable table already
+            // went to the Output log via setDeployDiagnosticsFromApiResult/setDeployDiagnosticsFromFailure above).
+            const raw = errorText || (apiResult ? JSON.stringify(apiResult, null, 2) : "Push failed.");
+            // Salesforce sometimes reports Status: Failed with clean component/test counts and no
+            // errorMessage/stateDetail at all — without a fallback here the pretty card has nothing to show.
+            const topError =
+              apiResult?.errorMessage ??
+              apiResult?.stateDetail ??
+              (!errorText && apiResult && failures.length === 0
+                ? "Push failed, but the org reported no error message, component failures, or test failures. See the original output below."
+                : undefined);
             reportError({
               operation: "Push",
               error: raw,
               failures,
-              topError: apiResult?.errorMessage ?? apiResult?.stateDetail,
+              topError,
               org: getDefaultOrgSync()?.displayName,
-              retry: () => { void pushSourceHelper(force); }
+              retry: () => { void pushSourceHelper(force); },
+              handle: operationHandle
             });
             return;
           }
@@ -422,14 +444,25 @@ async function pushSourceHelper(force: boolean) {
             { force: String(force), status: state.totalCount > 0 ? "succeeded" : "nothing" },
             { durationMs: Date.now() - pushStartTime }
           );
-          vscode.window.showInformationMessage(
-            state.totalCount > 0
-              ? `Source pushed successfully in ${pushElapsed}. Deployed ${state.totalCount} components.`
-              : `Nothing to push — no local changes to deploy.`
-          );
+          reportSuccess({
+            operation: "Push",
+            org: getDefaultOrgSync()?.displayName,
+            summary:
+              state.totalCount > 0
+                ? `Deployed ${state.totalCount} components in ${pushElapsed}.`
+                : `Nothing to push — no local changes to deploy.`,
+            apiResult: {
+              numberComponentsDeployed: state.totalCount,
+              numberComponentsTotal: state.numTotal || state.totalCount,
+              numberComponentErrors: state.numErrors,
+              details: { componentSuccesses: state.components }
+            },
+            handle: operationHandle
+          });
         } catch (e: any) {
           if (e.cancelled) {
             Logger.info("Push cancelled by user.");
+            operationHandle.dispose();
             return;
           }
           // e.message contains combined stdout/stderr from commandRunner
@@ -440,7 +473,8 @@ async function pushSourceHelper(force: boolean) {
             operation: "Push",
             error: raw,
             org: getDefaultOrgSync()?.displayName,
-            retry: () => { void pushSourceHelper(force); }
+            retry: () => { void pushSourceHelper(force); },
+            handle: operationHandle
           });
         }
       }
@@ -460,6 +494,8 @@ export async function pushSourceForce() {
 
 async function pullSourceHelper(force: boolean) {
   const title = force ? "Force Pulling Source from Default Org..." : "Pulling Source from Default Org...";
+  const org = getDefaultOrgSync()?.displayName;
+  const operationHandle = OperationPanelProvider.beginOperation("Pull", org);
   await vscode.window.withProgress(
     {
       location: vscode.ProgressLocation.Notification,
@@ -496,15 +532,16 @@ async function pullSourceHelper(force: boolean) {
           { force: String(force), status: (components?.length ?? 0) > 0 ? "succeeded" : "nothing" },
           { durationMs: Date.now() - pullStartTime }
         );
-        vscode.window.showInformationMessage("Source pulled successfully.");
+        reportSuccess({ operation: "Pull", org, summary: "Source pulled successfully.", handle: operationHandle });
       } catch (e: any) {
         if (e.cancelled) {
           Logger.info("Pull cancelled by user.");
           Telemetry.event("pull", { force: String(force), status: "cancelled" }, { durationMs: Date.now() - pullStartTime });
+          operationHandle.dispose();
           return;
         }
         Telemetry.event("pull", { force: String(force), status: "failed" }, { durationMs: Date.now() - pullStartTime });
-        reportError({ operation: "Pull", error: e, org: getDefaultOrgSync()?.displayName });
+        reportError({ operation: "Pull", error: e, org, handle: operationHandle });
       }
     }
   );
@@ -530,6 +567,7 @@ export async function deployCurrentFile() {
   const filePath = editor.document.uri.fsPath;
   const defaultOrg = getDefaultOrgSync() ?? (await getDefaultOrg());
   const deployTitle = defaultOrg ? `Deploy file to ${defaultOrg.displayName}` : "Deploying current file...";
+  const operationHandle = OperationPanelProvider.beginOperation("Deploy", defaultOrg?.displayName);
 
   await vscode.window.withProgress(
     {
@@ -563,17 +601,21 @@ export async function deployCurrentFile() {
           if (schema.structural) OrgMetadataCache.warmDefaultOrg();
         }
         Telemetry.event("deployFile", { status: "succeeded" });
-        vscode.window.showInformationMessage(
-          count > 0 ? `File deployed successfully. Deployed ${count} components.` : "File deployed successfully."
-        );
+        reportSuccess({
+          operation: "Deploy",
+          org: defaultOrg?.displayName,
+          summary: count > 0 ? `Deployed ${count} components.` : "File deployed successfully.",
+          handle: operationHandle
+        });
       } catch (e: any) {
         if (e.cancelled) {
           Logger.info("Deploy cancelled by user.");
           Telemetry.event("deployFile", { status: "cancelled" });
+          operationHandle.dispose();
           return;
         }
         Telemetry.event("deployFile", { status: "failed" });
-        reportError({ operation: "Deploy", error: e, org: getDefaultOrgSync()?.displayName });
+        reportError({ operation: "Deploy", error: e, org: defaultOrg?.displayName, handle: operationHandle });
       }
     }
   );
@@ -587,6 +629,8 @@ export async function retrieveCurrentFile() {
   }
 
   const filePath = editor.document.uri.fsPath;
+  const org = getDefaultOrgSync()?.displayName;
+  const operationHandle = OperationPanelProvider.beginOperation("Retrieve", org);
 
   await vscode.window.withProgress(
     {
@@ -612,21 +656,25 @@ export async function retrieveCurrentFile() {
           if (schema.structural) OrgMetadataCache.warmDefaultOrg();
         }
         Telemetry.event("retrieveFile", { status: "succeeded" });
-        vscode.window.showInformationMessage("File retrieved successfully.");
+        reportSuccess({ operation: "Retrieve", org, summary: "File retrieved successfully.", handle: operationHandle });
       } catch (e: any) {
         if (e.cancelled) {
           Logger.info("Retrieve cancelled by user.");
           Telemetry.event("retrieveFile", { status: "cancelled" });
+          operationHandle.dispose();
           return;
         }
         Telemetry.event("retrieveFile", { status: "failed" });
-        reportError({ operation: "Retrieve", error: e, org: getDefaultOrgSync()?.displayName });
+        reportError({ operation: "Retrieve", error: e, org, handle: operationHandle });
       }
     }
   );
 }
 
 export async function runLocalTests() {
+  const org = getDefaultOrgSync()?.displayName;
+  const operationHandle = OperationPanelProvider.beginOperation("Run local tests", org);
+
   await vscode.window.withProgress(
     {
       location: vscode.ProgressLocation.Notification,
@@ -652,17 +700,23 @@ export async function runLocalTests() {
         const passed = result.includes("Pass") && !result.includes("Fail");
         Telemetry.event("testRun", { outcome: passed ? "pass" : "fail" });
         if (passed) {
-          vscode.window.showInformationMessage("Tests Passed.");
+          reportSuccess({ operation: "Run local tests", org, summary: "Tests passed.", handle: operationHandle });
         } else {
-          vscode.window.showWarningMessage("Some tests failed. Check output.");
+          reportError({
+            operation: "Run local tests",
+            error: "Some tests failed. See the 'Salesforce Test Results' output channel for details.",
+            org,
+            handle: operationHandle
+          });
         }
       } catch (e: any) {
         if (e.cancelled) {
           Logger.info("Run Local Tests cancelled by user.");
+          operationHandle.dispose();
           return;
         }
         Telemetry.event("testRun", { outcome: "error" });
-        reportError({ operation: "Run local tests", error: e, org: getDefaultOrgSync()?.displayName });
+        reportError({ operation: "Run local tests", error: e, org, handle: operationHandle });
       }
     }
   );

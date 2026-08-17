@@ -87,7 +87,8 @@ import { startLanguageServer, stopLanguageServer } from "./languageClient";
 import { isSalesforceProject, updateSalesforceProjectContext, NOT_SFDX_PROJECT_MESSAGE } from "./utils/projectUtils";
 import { OrgMetadataCache } from "./utils/orgMetadataCache";
 import { AuthInfo } from "./utils/authInfo";
-import { getDeployDiagnosticCollection, registerDeployDiagnosticAutoClear } from "./utils/deployDiagnostics";
+import { getDeployDiagnosticCollection, registerDeployDiagnosticAutoClear, deployErrorsContentProvider } from "./utils/deployDiagnostics";
+import { OperationPanelProvider, REVEAL_OPERATION_PANEL_COMMAND } from "./providers/OperationPanelProvider";
 import { warmOrgListCache, invalidateOrgListCache, refreshOrgListCache } from "./utils/orgListCache";
 import { initDefaultOrgWatcher } from "./utils/defaultOrgEvents";
 
@@ -425,6 +426,7 @@ export function activate(context: vscode.ExtensionContext) {
     // 11. Log Content Provider (sf-log and sf-anon-log scheme); clear cache when log doc closed to avoid leak
     context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider("sf-log", logContentProvider));
     context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider("sf-anon-log", logContentProvider));
+    context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider("adure-deploy", deployErrorsContentProvider));
     context.subscriptions.push(
       vscode.workspace.onDidCloseTextDocument((doc) => {
         if (doc.uri.scheme === "sf-log" || doc.uri.scheme === "sf-anon-log") {
@@ -471,6 +473,10 @@ export function activate(context: vscode.ExtensionContext) {
     // 14. Show Output
     const showOutputCmd = register("adure-sfx-toolkit.showOutput", () => {
       outputChannel.show();
+    });
+    // Status bar "Live Progress" item click → reveal the Operation panel (Deploy/Push/Pull/…).
+    const revealOperationPanelCmd = register(REVEAL_OPERATION_PANEL_COMMAND, () => {
+      OperationPanelProvider.revealCurrent();
     });
 
     // 15. New Feature Commands
@@ -670,6 +676,7 @@ export function activate(context: vscode.ExtensionContext) {
       objectVisualizerCmd,
       processMapCmd,
       showOutputCmd,
+      revealOperationPanelCmd,
       metadataDiffCmd,
       orgHealthCmd,
       quickSoqlCmd,

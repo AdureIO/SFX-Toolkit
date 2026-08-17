@@ -7,7 +7,7 @@
  * REST endpoint: GET /services/data/vXX.0/metadata/deployRequest/{id}?includeDetails=true
  * (see meta_rest_deploy_checkstatus).
  */
-import type { ApiDeployResult, ApiComponentFailure } from "./deployDiagnostics";
+import type { ApiDeployResult, ApiComponentFailure, ApiCodeCoverageWarning, ApiTestFailure } from "./deployDiagnostics";
 
 /** Subset of the Metadata API deployResult we read. */
 export interface RawDeployResult {
@@ -28,6 +28,11 @@ export interface RawDeployResult {
 		componentSuccesses?: DeployedComponent | DeployedComponent[];
 		runTestResult?: {
 			codeCoverage?: Array<{ name?: string; numLocations?: number; numLocationsNotCovered?: number }>;
+			/** Org-wide or per-class coverage shortfall — can be the ONLY reason a deploy fails
+			 * (clean component/test counts, Status: Failed). Setup's own "Deployment Status" page
+			 * reads this exact field for its "Code Coverage Failure" card. */
+			codeCoverageWarnings?: ApiCodeCoverageWarning | ApiCodeCoverageWarning[];
+			failures?: ApiTestFailure | ApiTestFailure[];
 		};
 	};
 }
@@ -217,6 +222,12 @@ export function toApiDeployResult(dr: RawDeployResult): ApiDeployResult {
 		details: {
 			componentFailures: dr.details?.componentFailures,
 			componentSuccesses: dr.details?.componentSuccesses,
+			runTestResult: dr.details?.runTestResult
+				? {
+						codeCoverageWarnings: dr.details.runTestResult.codeCoverageWarnings,
+						failures: dr.details.runTestResult.failures
+					}
+				: undefined,
 		},
 	};
 }
