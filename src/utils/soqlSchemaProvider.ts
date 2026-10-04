@@ -49,6 +49,8 @@ export interface SoqlHostDescribe {
 }
 
 const CACHE_KEY_DEFAULT = "__default__";
+/** Cap on cached admin descriptions across all orgs (LRU by insertion/access order). */
+const MAX_DESCRIPTIONS = 1000;
 
 class SoqlSchemaProviderImpl {
 	/** org+sobject → admin description (null = none). */
@@ -70,7 +72,13 @@ class SoqlSchemaProviderImpl {
 		const orgKeyStr = org || CACHE_KEY_DEFAULT;
 		if (this.descriptionUnavailable.has(orgKeyStr)) return null;
 		const key = `${orgKeyStr}|${sobject}`;
-		if (this.descriptionCache.has(key)) return this.descriptionCache.get(key) ?? null;
+		if (this.descriptionCache.has(key)) {
+			const hit = this.descriptionCache.get(key) ?? null;
+			// Refresh LRU position.
+			this.descriptionCache.delete(key);
+			this.descriptionCache.set(key, hit);
+			return hit;
+		}
 
 		const version = getToolingApiVersion();
 		const soql = `SELECT Description FROM EntityDefinition WHERE QualifiedApiName='${sobject.replace(/'/g, "")}'`;
@@ -81,11 +89,21 @@ class SoqlSchemaProviderImpl {
 			const data = JSON.parse(body);
 			const desc = (data.records && data.records[0] && data.records[0].Description) || null;
 			this.descriptionCache.set(key, desc);
+			while (this.descriptionCache.size > MAX_DESCRIPTIONS) {
+				const oldest = this.descriptionCache.keys().next().value;
+				if (oldest === undefined) break;
+				this.descriptionCache.delete(oldest);
+			}
 			return desc;
 		} catch (e: any) {
-			// Likely INVALID_FIELD on this org/version — stop retrying to avoid noise.
-			this.descriptionUnavailable.add(orgKeyStr);
-			outputChannel.appendLine(`SoqlSchemaProvider: object description unavailable (${sobject}): ${e?.message ?? e}`);
+			const msg = String(e?.message ?? e);
+			// Only a 400 INVALID_FIELD / INVALID_TYPE means EntityDefinition.Description isn't
+			// queryable on this org/version — stop retrying for this org. Timeouts, 5xx and
+			// auth errors are transient: don't cache them, a later hover can try again.
+			if (/HTTP 400/.test(msg) && /INVALID_FIELD|INVALID_TYPE/.test(msg)) {
+				this.descriptionUnavailable.add(orgKeyStr);
+			}
+			outputChannel.appendLine(`SoqlSchemaProvider: object description unavailable (${sobject}): ${msg}`);
 			return null;
 		}
 	}
@@ -157,6 +175,11 @@ class SoqlSchemaProviderImpl {
 		this.descriptionCache.clear();
 		this.descriptionUnavailable.clear();
 		DescribeStore.invalidateAll();
+	}
+
+	/** Release everything this provider (and the shared DescribeStore) holds. */
+	disposeAll(): void {
+		this.invalidateAll();
 	}
 }
 

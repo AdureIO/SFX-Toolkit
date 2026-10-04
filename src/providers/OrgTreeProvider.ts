@@ -1,7 +1,6 @@
 import * as vscode from "vscode";
-import { runCommand } from "../utils/commandRunner";
 import { isSalesforceProject } from "../utils/projectUtils";
-import { setOrgListCacheFromSfResult } from "../utils/orgListCache";
+import { getOrgListResult } from "../utils/orgListCache";
 
 export class OrgItem extends vscode.TreeItem {
   constructor(
@@ -81,10 +80,13 @@ export class OrgTreeProvider implements vscode.TreeDataProvider<OrgItem> {
 
   private data: any = null;
   private _rootItems: OrgItem[] = [];
+  /** Time of the last explicit refresh; data fetched before it is stale. 0 = initial load. */
+  private refreshRequestedAt = 0;
 
   constructor() {}
 
   refresh(): void {
+    this.refreshRequestedAt = Date.now();
     this.data = null; // Clear cache
     this._rootItems = []; // Clear root item cache
     this._onDidChangeTreeData.fire();
@@ -216,14 +218,12 @@ export class OrgTreeProvider implements vscode.TreeDataProvider<OrgItem> {
 
   private async fetchOrgs() {
     try {
-      const output = await runCommand("sf org list --json");
-      const json = JSON.parse(output);
-      if (json.status === 0) {
-        this.data = json.result;
-        setOrgListCacheFromSfResult(this.data);
-      } else {
-        this.data = { nonScratchOrgs: [], scratchOrgs: [], _error: json.message || "Unknown error" };
-      }
+      // Shared, deduplicated `sf org list` (also feeds the picker cache). The initial
+      // load may reuse a recent fetch; an explicit refresh requires data fetched after it.
+      const result = await getOrgListResult(
+        this.refreshRequestedAt ? { notBefore: this.refreshRequestedAt } : { maxAgeMs: 60_000 }
+      );
+      this.data = result;
     } catch (e: any) {
       const msg = e?.message || String(e);
       if (msg.includes("not found") || msg.includes("ENOENT") || msg.includes("command not found")) {
@@ -259,6 +259,12 @@ export class OrgTreeProvider implements vscode.TreeDataProvider<OrgItem> {
 
   getRootItems(): OrgItem[] {
     return this._rootItems;
+  }
+
+  dispose(): void {
+    this.data = null;
+    this._rootItems = [];
+    this._onDidChangeTreeData.dispose();
   }
 }
 

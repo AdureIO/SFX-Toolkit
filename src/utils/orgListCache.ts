@@ -1,4 +1,4 @@
-import { runCommand } from "./commandRunner";
+import { runCommandArgs } from "./commandRunner";
 import { readTargetOrgFromSfdxConfig } from "./sfdxConfig";
 
 export type OrgOption = { label: string; username: string };
@@ -53,7 +53,7 @@ export function getOrgByTarget(targetOrg?: string | null): OrgRecord | null {
 /** Current default target org from Salesforce CLI (not the cached isDefault flag). */
 export async function getTargetOrgUsernameFromCli(): Promise<string | null> {
   try {
-    const result = await runCommand("sf config get target-org --json", undefined, undefined, true);
+    const result = await runCommandArgs("sf", ["config", "get", "target-org", "--json"]);
     const parsed = JSON.parse(result);
     const value = parsed.result?.value;
     return typeof value === "string" && value.trim() ? value.trim() : null;
@@ -117,8 +117,22 @@ export function orgOptionsFromSfListResult(result: {
   return options;
 }
 
+/** Raw `result` object of `sf org list --json` (OrgTreeProvider needs every field). */
+export type SfOrgListResult = {
+  nonScratchOrgs?: any[];
+  scratchOrgs?: any[];
+  [key: string]: any;
+};
+
+/** Background warm-ups within this window reuse the cache instead of spawning the CLI. */
+const WARM_TTL_MS = 60_000;
+
 let cached: OrgOption[] | null = null;
-let inflight: Promise<OrgOption[]> | null = null;
+let cachedRaw: SfOrgListResult | null = null;
+/** Start time of the fetch that produced the cache (0 = no cache). */
+let cachedFetchStart = 0;
+let inflight: Promise<SfOrgListResult> | null = null;
+let inflightStart = 0;
 
 /** Cached org list for instant quick picks; null until first load. */
 export function getCachedOrgList(): OrgOption[] | null {
@@ -129,7 +143,7 @@ export function setOrgListCache(orgs: OrgOption[]): void {
   cached = orgs;
 }
 
-/** Update cache from `sf org list` result object (OrgTreeProvider). */
+/** Update cache from `sf org list` result object. */
 export function setOrgListCacheFromSfResult(
   result:
     | {
@@ -150,37 +164,81 @@ export function setOrgListCacheFromSfResult(
 
 export function invalidateOrgListCache(): void {
   cached = null;
+  cachedRaw = null;
+  cachedFetchStart = 0;
   cachedRecords = [];
 }
 
-async function fetchOrgList(): Promise<OrgOption[]> {
-  const result = await runCommand("sf org list --json", undefined, undefined, true);
+/** Error thrown when the CLI answered with a non-zero JSON status. */
+class OrgListStatusError extends Error {}
+
+async function fetchOrgListRaw(startedAt: number): Promise<SfOrgListResult> {
+  const result = await runCommandArgs("sf", ["org", "list", "--json"]);
   const parsed = JSON.parse(result);
   if (parsed.status !== 0 || !parsed.result) {
     cached = [];
-    return [];
+    cachedRaw = null;
+    cachedFetchStart = 0;
+    throw new OrgListStatusError(parsed.message || "Unknown error");
   }
-  const orgs = orgOptionsFromSfListResult(parsed.result);
-  cached = orgs;
-  cachedRecords = recordsFromSfListResult(parsed.result);
-  syncKnownTargetFromSfdxConfig();
-  return orgs;
+  cachedRaw = parsed.result;
+  cachedFetchStart = startedAt;
+  setOrgListCacheFromSfResult(parsed.result);
+  return parsed.result;
+}
+
+function startFetch(): Promise<SfOrgListResult> {
+  const startedAt = Date.now();
+  inflightStart = startedAt;
+  const p = fetchOrgListRaw(startedAt).finally(() => {
+    if (inflight === p) inflight = null;
+  });
+  inflight = p;
+  return p;
+}
+
+/**
+ * Raw `sf org list` result, deduplicated: reuses the cache when it is younger than
+ * `maxAgeMs` (default: always fetch) and was fetched after `notBefore`, or joins a
+ * fetch already in flight that started after `notBefore`. Only one CLI process runs
+ * at a time. Rejects on CLI failure or a non-zero JSON status.
+ */
+export async function getOrgListResult(opts: { maxAgeMs?: number; notBefore?: number } = {}): Promise<SfOrgListResult> {
+  const notBefore = opts.notBefore ?? 0;
+  if (
+    cachedRaw &&
+    opts.maxAgeMs !== undefined &&
+    cachedFetchStart >= notBefore &&
+    Date.now() - cachedFetchStart <= opts.maxAgeMs
+  ) {
+    return cachedRaw;
+  }
+  if (inflight) {
+    if (inflightStart >= notBefore) return inflight;
+    // A stale fetch is running; let it finish, then start one that reflects the change.
+    await inflight.catch(() => undefined);
+    if (inflight && inflightStart >= notBefore) return inflight;
+  }
+  return startFetch();
 }
 
 /** Load org list from CLI (deduped). Updates cache. */
 export async function refreshOrgListCache(): Promise<OrgOption[]> {
-  if (inflight) {
-    return inflight;
+  try {
+    const raw = await (inflight ?? startFetch());
+    return cached ?? orgOptionsFromSfListResult(raw);
+  } catch (e) {
+    if (e instanceof OrgListStatusError) return [];
+    throw e;
   }
-  inflight = fetchOrgList().finally(() => {
-    inflight = null;
-  });
-  return inflight;
 }
 
-/** Prefetch org list in the background (no-op if a fetch is already running). */
+/** Prefetch org list in the background (no-op if a fetch is running or the cache is fresh). */
 export function warmOrgListCache(): void {
   if (inflight) {
+    return;
+  }
+  if (cached && cachedFetchStart && Date.now() - cachedFetchStart < WARM_TTL_MS) {
     return;
   }
   void refreshOrgListCache().catch(() => {

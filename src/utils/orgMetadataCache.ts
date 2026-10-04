@@ -5,6 +5,10 @@ import { isSalesforceProject } from "./projectUtils";
 import { DescribeStore } from "./describeStore";
 
 const CACHE_KEY_DEFAULT = "__default__";
+/** Max orgs whose object list is retained (LRU). Pruned lazily on access — no timers. */
+const MAX_ORGS = 5;
+/** Non-default orgs whose object list hasn't been used for this long are dropped on next access. */
+const ORG_IDLE_MS = 30 * 60 * 1000;
 
 export interface SObjectDescribe {
 	fields: {
@@ -22,6 +26,8 @@ interface OrgCache {
 	sobjects: string[] | null;
 	/** When sobject list was last fetched (for background refresh). */
 	sobjectsFetchedAt: number;
+	/** Last access (ms), for lazy idle pruning. */
+	lastUsed: number;
 }
 
 
@@ -93,15 +99,37 @@ class OrgMetadataCacheImpl {
 	}
 
 	private getOrCreateOrgCache(key: string): OrgCache {
+		const now = Date.now();
+		this.pruneOrgs(now, key);
 		let entry = this.cache.get(key);
 		if (!entry) {
 			entry = {
 				sobjects: null,
 				sobjectsFetchedAt: 0,
+				lastUsed: now,
 			};
-			this.cache.set(key, entry);
+		} else {
+			this.cache.delete(key); // re-insert → most-recently-used
 		}
+		entry.lastUsed = now;
+		this.cache.set(key, entry);
 		return entry;
+	}
+
+	/** Drop idle non-default orgs and enforce the org cap (never the org being accessed). */
+	private pruneOrgs(now: number, current: string): void {
+		for (const [k, e] of this.cache) {
+			if (k !== current && k !== CACHE_KEY_DEFAULT && now - e.lastUsed > ORG_IDLE_MS) {
+				this.cache.delete(k);
+				this.fetchLocks.delete(k);
+			}
+		}
+		while (this.cache.size >= MAX_ORGS && !this.cache.has(current)) {
+			const oldest = this.cache.keys().next().value;
+			if (oldest === undefined) break;
+			this.cache.delete(oldest);
+			this.fetchLocks.delete(oldest);
+		}
 	}
 
 	private async fetchSObjectList(org: string | null): Promise<string[]> {
@@ -160,16 +188,21 @@ class OrgMetadataCacheImpl {
 		}
 		const existing = this.fetchLocks.get(key);
 		if (existing) return existing;
-		const promise = this.fetchSObjectList(org)
+		// Only the current lock owner writes back: an invalidate/refresh while this was in
+		// flight removes the lock, and the stale list must not overwrite the reset entry.
+		const owns = () => this.fetchLocks.get(key) === promise;
+		const promise: Promise<string[]> = this.fetchSObjectList(org)
 			.then((list) => {
-				entry.sobjects = list;
-				entry.sobjectsFetchedAt = now;
-				this.fetchLocks.delete(key);
+				if (owns()) {
+					entry.sobjects = list;
+					entry.sobjectsFetchedAt = now;
+					this.fetchLocks.delete(key);
+				}
 				return list;
 			})
 			.catch((err: any) => {
 				// Release the lock so the next call can retry instead of replaying this rejection forever.
-				this.fetchLocks.delete(key);
+				if (owns()) this.fetchLocks.delete(key);
 				outputChannel.appendLine(`OrgMetadataCache: getObjectList failed: ${err?.message ?? err}`);
 				return [] as string[];
 			});
@@ -280,6 +313,8 @@ class OrgMetadataCacheImpl {
 		const entry = this.getOrCreateOrgCache(key);
 		entry.sobjects = null;
 		entry.sobjectsFetchedAt = 0;
+		// Drop any in-flight fetch so the refresh really refetches (and the stale one can't write back).
+		this.fetchLocks.delete(key);
 		DescribeStore.invalidate(org);
 		this.emitChange(org);
 
@@ -294,7 +329,7 @@ class OrgMetadataCacheImpl {
 		};
 
 		if (options?.background) {
-			doRefresh();
+			void doRefresh();
 			return;
 		}
 		await doRefresh();
@@ -317,6 +352,22 @@ class OrgMetadataCacheImpl {
 	warmDefaultOrg(): void {
 		if (!isSalesforceProject()) return;
 		this.getObjectList(null).catch(() => {});
+	}
+
+	/**
+	 * Drop every cached object list and describe (all orgs) without notifying listeners.
+	 * Use on workspace switch; listeners stay subscribed.
+	 */
+	clearAll(): void {
+		this.cache.clear();
+		this.fetchLocks.clear();
+		DescribeStore.invalidateAll();
+	}
+
+	/** Release everything including change listeners (deactivate). Holds no timers. */
+	disposeAll(): void {
+		this.clearAll();
+		this.changeListeners = [];
 	}
 }
 
