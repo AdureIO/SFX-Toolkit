@@ -176,30 +176,41 @@ export function collectUsedObjectsFromTexts(texts: string[], objectNames: string
 // ─── File-walking + sync (impure) ───────────────────────────────────────────────
 
 const SOURCE_EXT = /\.(cls|trigger|soql)$/i;
-const IGNORE_DIRS = new Set(["node_modules", ".git", ".sfdx", "out", "dist"]);
+const IGNORE_DIRS = new Set(["node_modules", ".git", ".sfdx", ".sf", ".vscode", "out", "dist"]);
+/** Directory entries / files processed between event-loop yields during a walk. */
+const YIELD_EVERY = 50;
+
+const yieldToLoop = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
+/** Bumped by disposeStubSync() so an in-flight walk/sync stops promptly on deactivate. */
+let generation = 0;
 
 // Stream workspace source files (one at a time, never all in memory) to find the
-// referenced object names.
-function collectUsedObjects(root: string, objectNames: string[], namespace: string | null, cap = 8000): Set<string> {
+// referenced object names. Async + periodic yielding: this runs on the extension
+// host thread and may visit thousands of files.
+async function collectUsedObjects(root: string, objectNames: string[], namespace: string | null, cap = 8000): Promise<Set<string>> {
+	const gen = generation;
 	const lookup = buildLookup(objectNames, namespace);
 	const used = new Set<string>();
 	let scanned = 0;
-	const walk = (dir: string): void => {
-		if (scanned >= cap) return;
+	let steps = 0;
+	const walk = async (dir: string): Promise<void> => {
+		if (scanned >= cap || gen !== generation) return;
 		let entries: fs.Dirent[];
 		try {
-			entries = fs.readdirSync(dir, { withFileTypes: true });
+			entries = await fs.promises.readdir(dir, { withFileTypes: true });
 		} catch {
 			return;
 		}
 		for (const e of entries) {
-			if (scanned >= cap) return;
+			if (scanned >= cap || gen !== generation) return;
+			if (++steps % YIELD_EVERY === 0) await yieldToLoop();
 			const full = path.join(dir, e.name);
 			if (e.isDirectory()) {
-				if (!IGNORE_DIRS.has(e.name)) walk(full);
+				if (!IGNORE_DIRS.has(e.name)) await walk(full);
 			} else if (SOURCE_EXT.test(e.name)) {
 				try {
-					matchTokensInto(fs.readFileSync(full, "utf8"), lookup, used);
+					matchTokensInto(await fs.promises.readFile(full, "utf8"), lookup, used);
 					scanned++;
 				} catch {
 					/* ignore */
@@ -207,21 +218,30 @@ function collectUsedObjects(root: string, objectNames: string[], namespace: stri
 			}
 		}
 	};
-	walk(root);
+	await walk(root);
 	return used;
 }
 
-function readFileOrEmpty(file: string): string {
+async function readFileOrEmpty(file: string): Promise<string> {
 	try {
-		return fs.readFileSync(file, "utf8");
+		return await fs.promises.readFile(file, "utf8");
 	} catch {
 		return "";
 	}
 }
 
-function writeFile(file: string, content: string): void {
-	fs.mkdirSync(path.dirname(file), { recursive: true });
-	fs.writeFileSync(file, content, "utf8");
+async function writeFile(file: string, content: string): Promise<void> {
+	await fs.promises.mkdir(path.dirname(file), { recursive: true });
+	await fs.promises.writeFile(file, content, "utf8");
+}
+
+async function fileExists(file: string): Promise<boolean> {
+	try {
+		await fs.promises.access(file);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 // Cap deletions per run so we never delete a huge batch of stub files at once,
@@ -229,13 +249,14 @@ function writeFile(file: string, content: string): void {
 const MAX_DELETIONS_PER_RUN = 100;
 
 /** Remove managed stubs whose object no longer exists in the org (capped). */
-function cleanupStaleManaged(base: string, liveNames: Set<string>): void {
+async function cleanupStaleManaged(base: string, liveNames: Set<string>): Promise<void> {
 	let deleted = 0;
+	let steps = 0;
 	for (const sub of ["standardObjects", "customObjects"]) {
 		const dir = path.join(base, sub);
 		let entries: fs.Dirent[];
 		try {
-			entries = fs.readdirSync(dir, { withFileTypes: true });
+			entries = await fs.promises.readdir(dir, { withFileTypes: true });
 		} catch {
 			continue;
 		}
@@ -244,10 +265,11 @@ function cleanupStaleManaged(base: string, liveNames: Set<string>): void {
 			if (!e.isFile() || !e.name.endsWith(".cls")) continue;
 			const name = e.name.slice(0, -4);
 			if (liveNames.has(name)) continue;
+			if (++steps % YIELD_EVERY === 0) await yieldToLoop();
 			const file = path.join(dir, e.name);
 			try {
-				if (fs.readFileSync(file, "utf8").startsWith(STUB_MARKER)) {
-					fs.unlinkSync(file);
+				if ((await fs.promises.readFile(file, "utf8")).startsWith(STUB_MARKER)) {
+					await fs.promises.unlink(file);
 					deleted++;
 				}
 			} catch {
@@ -275,29 +297,47 @@ async function syncProject(
 
 	let namespace: string | null = null;
 	try {
-		const raw = fs.readFileSync(path.join(projectDir, "sfdx-project.json"), "utf8");
+		const raw = await fs.promises.readFile(path.join(projectDir, "sfdx-project.json"), "utf8");
 		const ns = JSON.parse(raw).namespace;
 		namespace = typeof ns === "string" && ns.trim() ? ns.trim() : null;
 	} catch {
 		namespace = null;
 	}
 
-	const used = collectUsedObjects(projectDir, objectNames, namespace);
 	const base = path.join(projectDir, ".sfdx", "tools", "sobjects");
+	const liveSet = new Set(objectNames);
+	const stubFile = (name: string) => path.join(base, isCustomObject(name) ? "customObjects" : "standardObjects", `${name}.cls`);
+
+	// Targeted (push/pull changed specific objects, no forced refresh): touch only those
+	// stubs. An object that already has a stub is in use; only when one has no stub yet
+	// do we need the (whole-workspace) reference scan to decide whether to create it.
+	const targeted = !force && !!only;
+	let used: Set<string>;
+	if (targeted) {
+		const onlyLive = [...only!].filter((n) => liveSet.has(n));
+		const missing: string[] = [];
+		for (const n of onlyLive) if (!(await fileExists(stubFile(n)))) missing.push(n);
+		const referenced = missing.length ? await collectUsedObjects(projectDir, missing, namespace) : new Set<string>();
+		used = new Set(onlyLive.filter((n) => !missing.includes(n) || referenced.has(n)));
+	} else {
+		used = await collectUsedObjects(projectDir, objectNames, namespace);
+	}
 
 	// Default ("referenced") only touches objects used in code — tens, not the
 	// thousands a full org has. "all" additionally writes type-only stubs for the
 	// rest (heavier I/O).
-	const liveSet = new Set(objectNames);
-	const targets = scope === "all" ? objectNames : objectNames.filter((n) => used.has(n));
+	const targets = targeted
+		? [...only!].filter((n) => liveSet.has(n) && (scope === "all" || used.has(n)))
+		: scope === "all" ? objectNames : objectNames.filter((n) => used.has(n));
 
 	let written = 0;
 	let done = 0;
 	let skipped = 0;
+	const gen = generation;
 	for (const name of targets) {
-		const dir = path.join(base, isCustomObject(name) ? "customObjects" : "standardObjects");
-		const file = path.join(dir, `${name}.cls`);
-		const before = readFileOrEmpty(file);
+		if (gen !== generation) break; // disposed (deactivate / window close) — stop writing
+		const file = stubFile(name);
+		const before = await readFileOrEmpty(file);
 		const isSalesforceOwned = !!before && !before.startsWith(STUB_MARKER);
 
 		// Incremental (non-forced) sync: a stub already on disk is assumed current,
@@ -325,16 +365,27 @@ async function syncProject(
 		}
 
 		if (content !== before) {
-			writeFile(file, content);
+			await writeFile(file, content);
 			written++;
 		}
 	}
 
-	// Remove our managed stubs that are stale (object gone, or no longer used in
-	// "referenced" mode).
-	cleanupStaleManaged(base, scope === "all" ? liveSet : new Set(used));
+	if (targeted) {
+		// Only the touched objects can have gone stale: drop managed stubs of deleted ones.
+		for (const name of only!) {
+			if (liveSet.has(name)) continue;
+			const file = stubFile(name);
+			if ((await readFileOrEmpty(file)).startsWith(STUB_MARKER)) {
+				try { await fs.promises.unlink(file); } catch { /* ignore */ }
+			}
+		}
+	} else {
+		// Remove our managed stubs that are stale (object gone, or no longer used in
+		// "referenced" mode).
+		if (gen === generation) await cleanupStaleManaged(base, scope === "all" ? liveSet : new Set(used));
+	}
 	outputChannel.appendLine(
-		`SObjectStubSync: ${projectDir} — ${written} stub(s) written/extended, ${skipped} up-to-date skipped (${used.size} referenced, scope=${scope}, ${force ? "forced" : "incremental"}).`,
+		`SObjectStubSync: ${projectDir} — ${written} stub(s) written/extended, ${skipped} up-to-date skipped (${used.size} referenced, scope=${scope}, ${force ? "forced" : targeted ? `targeted: ${[...only!].join(", ")}` : "incremental"}).`,
 	);
 	return written;
 }
@@ -360,13 +411,40 @@ export function scheduleStubSync(opts?: { force?: boolean; only?: string[] }): v
 		for (const n of opts.only) pendingOnly.add(n);
 	}
 	if (timer) clearTimeout(timer);
-	timer = setTimeout(() => {
-		const force = pendingForce;
-		const only = pendingForce ? undefined : pendingOnly;
-		pendingForce = false;
-		pendingOnly = undefined;
-		void runStubSync(force, only);
-	}, 1500);
+	timer = setTimeout(fireScheduledSync, 1500);
+}
+
+/** In-flight sync; a sync scheduled meanwhile waits for it instead of running concurrently. */
+let running: Promise<void> | undefined;
+
+function fireScheduledSync(): void {
+	timer = undefined;
+	if (running) {
+		// Re-check once the current run finishes (pending flags stay accumulated).
+		void running.finally(() => {
+			if (!timer && (pendingForce || pendingOnly)) timer = setTimeout(fireScheduledSync, 0);
+		});
+		return;
+	}
+	const force = pendingForce;
+	const only = pendingForce ? undefined : pendingOnly;
+	pendingForce = false;
+	pendingOnly = undefined;
+	running = runStubSync(force, only).finally(() => {
+		running = undefined;
+	});
+}
+
+/**
+ * Cancel any scheduled sync and make an in-flight one stop at its next checkpoint.
+ * Called when the extension deactivates (window close / project switch).
+ */
+export function disposeStubSync(): void {
+	generation++;
+	if (timer) clearTimeout(timer);
+	timer = undefined;
+	pendingForce = false;
+	pendingOnly = undefined;
 }
 
 let firstSyncDone = false;
@@ -387,6 +465,7 @@ async function runStubSync(force = false, only?: Set<string>): Promise<void> {
 		const { resolveDefaultTargetOrgUsernameSync } = require("./defaultOrg");
 		const scope = vscode.workspace.getConfiguration("adure-sfx-toolkit").get("apex.stubScope", "referenced") === "all" ? "all" : "referenced";
 		const folders: { uri: { fsPath: string } }[] = vscode.workspace.workspaceFolders ?? [];
+		const gen = generation;
 		let changed = 0;
 		// Status-bar (Window) progress so the user knows we're caching org schema.
 		await vscode.window.withProgress(
@@ -395,7 +474,8 @@ async function runStubSync(force = false, only?: Set<string>): Promise<void> {
 				for (const folder of folders) {
 					const root = folder.uri.fsPath;
 					// Sync the workspace root project and any nested sfdx-project.json dirs.
-					for (const projectDir of findSfdxProjectDirs(root)) {
+					for (const projectDir of await findSfdxProjectDirs(root)) {
+						if (gen !== generation) return; // disposed mid-run
 						const org = resolveDefaultTargetOrgUsernameSync(projectDir) ?? null;
 						changed += await syncProject(projectDir, org, scope, force, (msg) => progress.report({ message: msg }), only);
 					}
@@ -405,6 +485,7 @@ async function runStubSync(force = false, only?: Set<string>): Promise<void> {
 		// Record the first sync's outcome so the post-initial-load restart (handled
 		// by the health monitor, after the LS finishes loading) knows whether new
 		// stub types were written and need to be picked up.
+		if (gen !== generation) return;
 		if (!firstSyncDone) {
 			firstSyncDone = true;
 			firstSyncWrote = changed > 0;
@@ -502,22 +583,30 @@ export async function cleanRestartApex(vscode: any): Promise<boolean> {
 	return ok;
 }
 
-/** All directories under root (incl. root) that contain an sfdx-project.json. */
-function findSfdxProjectDirs(root: string, cap = 50): string[] {
+/**
+ * All directories under root (incl. root) that contain an sfdx-project.json. Async,
+ * depth-limited (nested sub-projects sit near the top, never deep inside source
+ * trees) and yielding, so it never stalls the extension host.
+ */
+async function findSfdxProjectDirs(root: string, cap = 50, maxDepth = 6): Promise<string[]> {
+	const gen = generation;
 	const dirs: string[] = [];
-	const walk = (dir: string): void => {
-		if (dirs.length >= cap) return;
-		if (fs.existsSync(path.join(dir, "sfdx-project.json"))) dirs.push(dir);
+	let steps = 0;
+	const walk = async (dir: string, depth: number): Promise<void> => {
+		if (dirs.length >= cap || gen !== generation) return;
+		if (await fileExists(path.join(dir, "sfdx-project.json"))) dirs.push(dir);
+		if (depth >= maxDepth) return;
 		let entries: fs.Dirent[];
 		try {
-			entries = fs.readdirSync(dir, { withFileTypes: true });
+			entries = await fs.promises.readdir(dir, { withFileTypes: true });
 		} catch {
 			return;
 		}
 		for (const e of entries) {
-			if (e.isDirectory() && !IGNORE_DIRS.has(e.name)) walk(path.join(dir, e.name));
+			if (++steps % YIELD_EVERY === 0) await yieldToLoop();
+			if (e.isDirectory() && !IGNORE_DIRS.has(e.name)) await walk(path.join(dir, e.name), depth + 1);
 		}
 	};
-	walk(root);
+	await walk(root, 0);
 	return dirs;
 }

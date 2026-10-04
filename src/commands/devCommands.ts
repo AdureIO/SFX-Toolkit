@@ -5,7 +5,7 @@ import * as path from "path";
 import { Logger, outputChannel, DeployLog } from "../utils/outputChannel";
 import { AuthInfo } from "../utils/authInfo";
 import { OrgMetadataCache } from "../utils/orgMetadataCache";
-import { getAutoSaveBeforePush, getTestRunTimeout } from "../utils/constants";
+import { getAutoSaveBeforePush } from "../utils/constants";
 import { DEPLOY_TIMEOUT_MS } from "./deployMetadata";
 import { runJsonDeploy } from "../utils/deployEngine";
 import { formatStatus, formatElapsed, affectedSchemaObjects, componentSuccessList, parseRetrievedComponents, schemaObjectFromPath, toApiDeployResult, type DeployedComponent } from "../utils/deployStatusMap";
@@ -200,11 +200,26 @@ function getDeployedCount(output: string): number {
   return count;
 }
 
+/** ` -o <username>` to pin a CLI command to the org that was resolved (and confirmed) up front. */
+function targetOrgFlag(username: string | null | undefined): string {
+  return username ? ` -o ${escapeShellArg(username)}` : "";
+}
+
 // Helper to reuse push logic
 async function pushSourceHelper(force: boolean) {
   const title = force ? "Force Push" : "Push";
+  // Resolve the org ONCE: the production check, every CLI call and the REST poll all
+  // target this exact username, so a default-org change mid-flight can't redirect the push.
   const defaultOrg = getDefaultOrgSync() ?? (await getDefaultOrg());
+  const targetUser = defaultOrg?.username ?? null;
+  const orgFlag = targetOrgFlag(targetUser);
   const titleWithOrg = defaultOrg ? `${title} to ${defaultOrg.displayName}` : title;
+
+  // Confirm before creating any status bar item / operation handle so a declined
+  // prompt leaves nothing behind.
+  if (!(await confirmProductionOrgOperation("push source to", targetUser))) {
+    return;
+  }
 
   if (getAutoSaveBeforePush()) {
     await vscode.workspace.saveAll(false);
@@ -238,18 +253,16 @@ async function pushSourceHelper(force: boolean) {
       },
       async (progress, token) => {
         try {
-          if (!(await confirmProductionOrgOperation("push source to"))) {
-            return;
-          }
           // 1. Detect sfdx-project.json
           const workspaceFolders = vscode.workspace.workspaceFolders;
           if (!workspaceFolders) {
             // Fallback
             const flag = force ? "--ignore-conflicts" : "";
-            Logger.info(`Running: sf project deploy start ${flag}`);
-            const result = await runCommand(`sf project deploy start ${flag}`, undefined, undefined, true, token);
+            Logger.info(`Running: sf project deploy start ${flag}${orgFlag}`);
+            const result = await runCommand(`sf project deploy start ${flag}${orgFlag}`, undefined, undefined, true, token);
             Logger.info(result);
             vscode.window.showInformationMessage("Source pushed successfully (No workspace).");
+            operationHandle.dispose();
             return;
           }
 
@@ -301,9 +314,9 @@ async function pushSourceHelper(force: boolean) {
             };
             report("Deploying (source tracking)…");
             const outcome = await runJsonDeploy({
-              submitCommand: submitBase,
+              submitCommand: `${submitBase}${orgFlag}`,
               cwd: rootPath,
-              org: null,
+              org: targetUser,
               token,
               timeoutMs: DEPLOY_TIMEOUT_MS,
               onStatus: (s) => {
@@ -325,6 +338,12 @@ async function pushSourceHelper(force: boolean) {
               state.numTotal += dr.numberComponentsTotal ?? 0;
               state.numErrors += dr.numberComponentErrors ?? 0;
               state.components.push(...componentSuccessList(dr));
+            } else if (Array.isArray((dr as { files?: unknown }).files)) {
+              // CLI JSON without a Metadata API details block — its files[] (type/fullName/state)
+              // is enough for a targeted schema refresh, so don't fall back to a full one.
+              const files = (dr as { files: { type?: string; fullName?: string; state?: string }[] }).files;
+              state.totalCount += files.length;
+              state.components.push(...files.map((f) => ({ type: f.type, fullName: f.fullName, state: f.state })));
             } else {
               state.fallbackUsed = true; // couldn't read the structured result → refresh fully
             }
@@ -336,7 +355,7 @@ async function pushSourceHelper(force: boolean) {
           let hasSourceTracking = false;
 
           try {
-            const authInfo = await AuthInfo.getAuthInfo();
+            const authInfo = await AuthInfo.getAuthInfoForOrg(targetUser);
             if (authInfo && authInfo.orgId) {
               const sfOrgPath = path.join(rootPath, ".sf", "orgs", authInfo.orgId);
               if (fs.existsSync(sfOrgPath)) {
@@ -404,7 +423,7 @@ async function pushSourceHelper(force: boolean) {
               error: raw,
               failures,
               topError,
-              org: getDefaultOrgSync()?.displayName,
+              org: defaultOrg?.displayName,
               retry: () => { void pushSourceHelper(force); },
               handle: operationHandle
             });
@@ -446,7 +465,7 @@ async function pushSourceHelper(force: boolean) {
           );
           reportSuccess({
             operation: "Push",
-            org: getDefaultOrgSync()?.displayName,
+            org: defaultOrg?.displayName,
             summary:
               state.totalCount > 0
                 ? `Deployed ${state.totalCount} components in ${pushElapsed}.`
@@ -472,7 +491,7 @@ async function pushSourceHelper(force: boolean) {
           reportError({
             operation: "Push",
             error: raw,
-            org: getDefaultOrgSync()?.displayName,
+            org: defaultOrg?.displayName,
             retry: () => { void pushSourceHelper(force); },
             handle: operationHandle
           });
@@ -494,7 +513,9 @@ export async function pushSourceForce() {
 
 async function pullSourceHelper(force: boolean) {
   const title = force ? "Force Pulling Source from Default Org..." : "Pulling Source from Default Org...";
-  const org = getDefaultOrgSync()?.displayName;
+  const defaultOrg = getDefaultOrgSync() ?? (await getDefaultOrg());
+  const org = defaultOrg?.displayName;
+  const orgFlag = targetOrgFlag(defaultOrg?.username);
   const operationHandle = OperationPanelProvider.beginOperation("Pull", org);
   await vscode.window.withProgress(
     {
@@ -507,7 +528,7 @@ async function pullSourceHelper(force: boolean) {
       try {
         const flag = force ? "--ignore-conflicts" : "";
         // --json so we can see exactly which components were retrieved and refresh smartly.
-        const command = `sf project retrieve start ${flag} --json`.replace(/\s+/g, " ").trim();
+        const command = `sf project retrieve start ${flag}${orgFlag} --json`.replace(/\s+/g, " ").trim();
         Logger.info(`Running: ${command}`);
         const result = await runCommand(command, undefined, undefined, false, token);
         Logger.info("Pull completed successfully.");
@@ -566,7 +587,12 @@ export async function deployCurrentFile() {
 
   const filePath = editor.document.uri.fsPath;
   const defaultOrg = getDefaultOrgSync() ?? (await getDefaultOrg());
+  const targetUser = defaultOrg?.username ?? null;
   const deployTitle = defaultOrg ? `Deploy file to ${defaultOrg.displayName}` : "Deploying current file...";
+  // Confirm before creating the operation handle so a declined prompt leaks nothing.
+  if (!(await confirmProductionOrgOperation("deploy metadata to", targetUser))) {
+    return;
+  }
   const operationHandle = OperationPanelProvider.beginOperation("Deploy", defaultOrg?.displayName);
 
   await vscode.window.withProgress(
@@ -577,11 +603,8 @@ export async function deployCurrentFile() {
     },
     async (_progress, token) => {
       try {
-        if (!(await confirmProductionOrgOperation("deploy metadata to"))) {
-          return;
-        }
         const result = await runCommand(
-          `sf project deploy start -d ${escapeShellArg(filePath)}`,
+          `sf project deploy start -d ${escapeShellArg(filePath)}${targetOrgFlag(targetUser)}`,
           undefined,
           undefined,
           true,
@@ -629,7 +652,9 @@ export async function retrieveCurrentFile() {
   }
 
   const filePath = editor.document.uri.fsPath;
-  const org = getDefaultOrgSync()?.displayName;
+  const defaultOrg = getDefaultOrgSync() ?? (await getDefaultOrg());
+  const org = defaultOrg?.displayName;
+  const orgFlag = targetOrgFlag(defaultOrg?.username);
   const operationHandle = OperationPanelProvider.beginOperation("Retrieve", org);
 
   await vscode.window.withProgress(
@@ -641,7 +666,7 @@ export async function retrieveCurrentFile() {
     async (_progress, token) => {
       try {
         const result = await runCommand(
-          `sf project retrieve start -d ${escapeShellArg(filePath)}`,
+          `sf project retrieve start -d ${escapeShellArg(filePath)}${orgFlag}`,
           undefined,
           undefined,
           true,
@@ -666,57 +691,6 @@ export async function retrieveCurrentFile() {
         }
         Telemetry.event("retrieveFile", { status: "failed" });
         reportError({ operation: "Retrieve", error: e, org, handle: operationHandle });
-      }
-    }
-  );
-}
-
-export async function runLocalTests() {
-  const org = getDefaultOrgSync()?.displayName;
-  const operationHandle = OperationPanelProvider.beginOperation("Run local tests", org);
-
-  await vscode.window.withProgress(
-    {
-      location: vscode.ProgressLocation.Notification,
-      title: "Running Local Tests...",
-      cancellable: true
-    },
-    async (progress, token) => {
-      try {
-        // -w 10 (wait 10 mins), -l RunLocalTests, -r human
-        const result = await runCommand(
-          `sf apex run test -l RunLocalTests -w ${getTestRunTimeout()} -r human`,
-          undefined,
-          undefined,
-          true,
-          token
-        );
-
-        const channel = vscode.window.createOutputChannel("Salesforce Test Results");
-        channel.clear();
-        channel.append(result);
-        channel.show();
-
-        const passed = result.includes("Pass") && !result.includes("Fail");
-        Telemetry.event("testRun", { outcome: passed ? "pass" : "fail" });
-        if (passed) {
-          reportSuccess({ operation: "Run local tests", org, summary: "Tests passed.", handle: operationHandle });
-        } else {
-          reportError({
-            operation: "Run local tests",
-            error: "Some tests failed. See the 'Salesforce Test Results' output channel for details.",
-            org,
-            handle: operationHandle
-          });
-        }
-      } catch (e: any) {
-        if (e.cancelled) {
-          Logger.info("Run Local Tests cancelled by user.");
-          operationHandle.dispose();
-          return;
-        }
-        Telemetry.event("testRun", { outcome: "error" });
-        reportError({ operation: "Run local tests", error: e, org, handle: operationHandle });
       }
     }
   );

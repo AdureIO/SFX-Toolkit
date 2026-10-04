@@ -47,6 +47,27 @@ export interface DeployedComponent {
 	created?: boolean;
 	changed?: boolean;
 	deleted?: boolean;
+	/** CLI `files[]` entries: Created | Changed | Unchanged | Deleted | Failed. */
+	state?: string;
+}
+
+/**
+ * Whether a component actually changed in the org. The Metadata API reports every
+ * component in the package (a field push also lists its parent CustomObject, with
+ * changed/created/deleted all false), so untouched entries must not trigger a refresh.
+ * When neither flags nor state are present we can't tell → assume changed.
+ */
+function componentChanged(c: DeployedComponent): boolean {
+	if (c.state) return !/^(unchanged|failed)$/i.test(c.state);
+	if (c.created === undefined && c.changed === undefined && c.deleted === undefined) return true;
+	return !!(c.created || c.changed || c.deleted);
+}
+
+/** Created/deleted (or unknown) — i.e. the org's object *list* may have changed. */
+function componentAddedOrRemoved(c: DeployedComponent): boolean {
+	if (c.state) return /^(created|deleted)$/i.test(c.state);
+	if (c.created === undefined && c.deleted === undefined) return true;
+	return !!(c.created || c.deleted);
 }
 
 /**
@@ -61,13 +82,14 @@ export function affectedSchemaObjects(components: DeployedComponent[]): { object
 	for (const c of components) {
 		const type = c.componentType ?? c.type;
 		const full = c.fullName ?? "";
-		if (!type || !full) continue;
+		if (!type || !full || !componentChanged(c)) continue;
 		if (type === "CustomField") {
 			const obj = full.split(".")[0]; // "Account.Foo__c" → "Account"
 			if (obj) objects.add(obj);
 		} else if (type === "CustomObject") {
 			objects.add(full);
-			structural = true; // object may be new/removed → the object list can change
+			// Only a new/removed object changes the object list; an edited one just needs its describe.
+			if (componentAddedOrRemoved(c)) structural = true;
 		}
 	}
 	return { objects: [...objects], structural };
@@ -104,11 +126,16 @@ export function schemaObjectFromPath(filePath: string): { object: string; struct
  * Returns null if the JSON can't be read (caller should then refresh fully to be safe).
  */
 export function parseRetrievedComponents(stdout: string): DeployedComponent[] | null {
+	// The CLI runs through a login shell, so profile output can precede the JSON — parse
+	// from the first `{` (same as parseCliDeployJson) instead of failing → full refresh.
+	const start = stdout.indexOf("{");
+	const end = stdout.lastIndexOf("}");
+	if (start < 0 || end <= start) return null;
 	try {
-		const parsed = JSON.parse(stdout.trim());
+		const parsed = JSON.parse(stdout.slice(start, end + 1));
 		const files = parsed?.result?.files ?? parsed?.result?.inboundFiles;
 		if (!Array.isArray(files)) return null;
-		return files.map((f: { type?: string; fullName?: string }) => ({ type: f?.type, fullName: f?.fullName }));
+		return files.map((f: { type?: string; fullName?: string; state?: string }) => ({ type: f?.type, fullName: f?.fullName, state: f?.state }));
 	} catch {
 		return null;
 	}

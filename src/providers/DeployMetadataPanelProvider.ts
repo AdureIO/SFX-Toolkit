@@ -17,6 +17,7 @@ import {
 import { confirmProductionOrgOperation } from "../utils/orgSafety";
 import { loadPresets, addPreset, type DeployPreset, type DeployTypeKey } from "../utils/deployPresets";
 import { getAnonymousApexOrgList } from "../commands/executeAnonymous";
+import { onDidChangeDefaultOrg } from "../utils/defaultOrgEvents";
 import { runCommand } from "../utils/commandRunner";
 import { Logger, DeployLog } from "../utils/outputChannel";
 import { cleanDeployOutput, parseDeployStats, parseCoverageData } from "../commands/devCommands";
@@ -60,10 +61,15 @@ export class DeployMetadataPanelProvider {
     testSuites: TestSuite[];
   } | null = null;
 
-  /** Per-panel message listener disposable; disposed when panel closes or before re-attach on revive to avoid leaks. */
-  private static messageListenerByPanel = new WeakMap<vscode.WebviewPanel, vscode.Disposable>();
+  /**
+   * Per-panel cleanup (message listener, file watcher + debounce timer, default-org subscription).
+   * Run when the panel closes or before re-attaching on revive, so a re-attach never leaks the previous closure.
+   */
+  private static cleanupByPanel = new WeakMap<vscode.WebviewPanel, () => void>();
   /** Panels for which we already registered onDidDispose (one-time cleanup per panel). */
   private static panelsWithDisposeRegistered = new WeakSet<vscode.WebviewPanel>();
+  /** Singleton: one Deploy panel (and one retained renderer) at most. */
+  private static _panel: vscode.WebviewPanel | undefined;
 
   public static async show(initialPreset?: DeployPreset): Promise<void> {
     const folder = vscode.workspace.workspaceFolders?.[0];
@@ -74,9 +80,16 @@ export class DeployMetadataPanelProvider {
     const workspaceRoot = folder.uri.fsPath;
     const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
 
+    const existing = DeployMetadataPanelProvider._panel;
+    if (existing) {
+      existing.reveal(column);
+      if (initialPreset) void existing.webview.postMessage({ command: "applyPresetFromHost", preset: initialPreset });
+      return;
+    }
+
     const panel = vscode.window.createWebviewPanel(DeployMetadataPanelProvider.viewType, "Deploy Metadata", column, {
       enableScripts: true,
-      retainContextWhenHidden: true  // keeps DOM alive on tab switch — no revive/re-render on switching back
+      retainContextWhenHidden: true  // selection tree + in-flight deploy state live in the DOM; kept, but only one panel exists
     });
 
     // Render HTML immediately — panel is visible with "Loading…" while data loads in parallel.
@@ -159,12 +172,15 @@ export class DeployMetadataPanelProvider {
     folder: vscode.WorkspaceFolder,
     workspaceRoot: string
   ): void {
-    // Dispose previous listener when re-attaching (e.g. on revive) to avoid leaking listeners and large closures.
-    const existing = DeployMetadataPanelProvider.messageListenerByPanel.get(panel);
-    if (existing) {
-      existing.dispose();
-      DeployMetadataPanelProvider.messageListenerByPanel.delete(panel);
+    // Dispose previous listener/watcher when re-attaching (e.g. on revive) to avoid leaking listeners and large closures.
+    const previousCleanup = DeployMetadataPanelProvider.cleanupByPanel.get(panel);
+    if (previousCleanup) {
+      previousCleanup();
+      DeployMetadataPanelProvider.cleanupByPanel.delete(panel);
     }
+    // A restored panel arriving while another is open: keep just one.
+    if (DeployMetadataPanelProvider._panel && DeployMetadataPanelProvider._panel !== panel) DeployMetadataPanelProvider._panel.dispose();
+    DeployMetadataPanelProvider._panel = panel;
 
     // ── FileSystemWatcher for auto-git ──────────────────────────────────────
     // Created/destroyed based on the autoGitSelect panel-state flag. Fires with
@@ -337,17 +353,23 @@ export class DeployMetadataPanelProvider {
           return;
         }
         const testLevel = msg.testLevel;
-        let testFlags = "";
-        if (
-          msg.testLevel === "RunSpecifiedTests" &&
-          Array.isArray(msg.testClassNames) &&
-          msg.testClassNames.length > 0
-        ) {
-          testFlags = msg.testClassNames.map((t) => `-t ${t}`).join(" ");
-        }
+        // Test names go as an array; buildDeployCommand validates level + names and throws on bad input.
+        const testFlags: string[] =
+          msg.testLevel === "RunSpecifiedTests" && Array.isArray(msg.testClassNames)
+            ? msg.testClassNames.filter((t): t is string => typeof t === "string" && t.trim() !== "")
+            : [];
         const resolved = resolveSourcePaths(msg.sourcePaths, workspaceRoot);
         const absPaths = filterPathsToPackageDirs(workspaceRoot, resolved);
         const targetOrg = msg.targetOrg || null;
+        try {
+          // Validate up front so invalid input is reported, not an unhandled rejection mid-deploy.
+          buildDeployCommand(absPaths, testLevel, testFlags, dryRun, workspaceRoot, msg.targetOrg || undefined);
+        } catch (e) {
+          const error = e instanceof Error ? e.message : String(e);
+          panel.webview.postMessage({ command: "deployResult", success: false, cancelled: false, dryRun, components: 0, componentErrors: 0, testsPassed: 0, testsFailed: 0, durationMs: 0, targetOrg: msg.targetOrg ?? "", error });
+          vscode.window.showErrorMessage(`${dryRun ? "Validation" : "Deploy"} not started: ${error}`);
+          return;
+        }
 
         // Normalized result the post-processing consumes, whichever deploy path ran.
         // `apiResult` (REST) feeds Problems directly; `errorText` (CLI fallback) is
@@ -436,7 +458,7 @@ export class DeployMetadataPanelProvider {
 
         if (outcome.kind === "cancelled") {
           panel.webview.postMessage({ command: "deployResult", success: false, cancelled: true, dryRun, components: 0, componentErrors: 0, testsPassed: 0, testsFailed: 0, durationMs, targetOrg: msg.targetOrg ?? "" });
-          addDeployHistoryEntry({ timestamp: deployStartTime, status: "Cancelled", dryRun, components: 0, componentErrors: 0, testsPassed: 0, testsFailed: 0, durationMs, targetOrg: msg.targetOrg ?? "", sourcePaths: msg.sourcePaths ?? [], presetName: msg.presetName ?? null });
+          addDeployHistoryEntry({ timestamp: deployStartTime, status: "Cancelled", dryRun, components: 0, componentErrors: 0, testsPassed: 0, testsFailed: 0, durationMs, targetOrg: msg.targetOrg ?? "", sourcePaths: msg.sourcePaths ?? [], presetName: msg.presetName ?? null, deployType: msg.deployType, testClassNames: msg.testClassNames });
           vscode.window.showInformationMessage(dryRun ? "Validation cancelled." : "Deploy cancelled.");
           operationHandle.dispose();
           return;
@@ -449,7 +471,7 @@ export class DeployMetadataPanelProvider {
             DeployLog.line(formatApiDeployResultForLog(apiResult, `${dryRun ? "Validation" : "Deploy"} succeeded (${formatElapsed(durationMs)}):`));
           }
           panel.webview.postMessage({ command: "deployResult", success: true, cancelled: false, dryRun, ...stats, coverage, durationMs, targetOrg: msg.targetOrg ?? "" });
-          addDeployHistoryEntry({ timestamp: deployStartTime, status: "Succeeded", dryRun, ...stats, durationMs, targetOrg: msg.targetOrg ?? "", sourcePaths: msg.sourcePaths ?? [], presetName: msg.presetName ?? null });
+          addDeployHistoryEntry({ timestamp: deployStartTime, status: "Succeeded", dryRun, ...stats, durationMs, targetOrg: msg.targetOrg ?? "", sourcePaths: msg.sourcePaths ?? [], presetName: msg.presetName ?? null, deployType: msg.deployType, testClassNames: msg.testClassNames });
           const okSummary = apiResult ? formatResultSummary(apiResult) : "";
           reportSuccess({
             operation: deployOpLabel,
@@ -468,7 +490,7 @@ export class DeployMetadataPanelProvider {
         // focus to a different view the user didn't ask for.
         const { stats, coverage, apiResult, errorText } = outcome;
         panel.webview.postMessage({ command: "deployResult", success: false, cancelled: false, dryRun, ...stats, coverage, durationMs, targetOrg: msg.targetOrg ?? "" });
-        addDeployHistoryEntry({ timestamp: deployStartTime, status: "Failed", dryRun, ...stats, durationMs, targetOrg: msg.targetOrg ?? "", sourcePaths: msg.sourcePaths ?? [], presetName: msg.presetName ?? null });
+        addDeployHistoryEntry({ timestamp: deployStartTime, status: "Failed", dryRun, ...stats, durationMs, targetOrg: msg.targetOrg ?? "", sourcePaths: msg.sourcePaths ?? [], presetName: msg.presetName ?? null, deployType: msg.deployType, testClassNames: msg.testClassNames });
         const failSummary = apiResult ? formatResultSummary(apiResult) : "";
         void vscode.window
           .withProgress(
@@ -521,17 +543,34 @@ export class DeployMetadataPanelProvider {
       null,
       []
     );
-    DeployMetadataPanelProvider.messageListenerByPanel.set(panel, listenerDisposable);
+    // Default org changed: drop cached init data (its org list/default is stale) and realign the selector.
+    const defaultOrgSub = onDidChangeDefaultOrg(async () => {
+      DeployMetadataPanelProvider.initCache = null;
+      try {
+        const orgs = await getAnonymousApexOrgList();
+        if (DeployMetadataPanelProvider._panel !== panel) return;
+        void panel.webview.postMessage({ command: "defaultOrgChanged", orgs, defaultOrg: orgs[0]?.username ?? "" });
+      } catch { /* keep the current list */ }
+    });
+
+    DeployMetadataPanelProvider.cleanupByPanel.set(panel, () => {
+      updateFileWatcher(false); // dispose watcher + debounce timer
+      listenerDisposable.dispose();
+      defaultOrgSub.dispose();
+    });
     if (!DeployMetadataPanelProvider.panelsWithDisposeRegistered.has(panel)) {
       DeployMetadataPanelProvider.panelsWithDisposeRegistered.add(panel);
       panel.onDidDispose(() => {
-        updateFileWatcher(false); // dispose watcher + debounce timer
-        const d = DeployMetadataPanelProvider.messageListenerByPanel.get(panel);
-        if (d) {
-          d.dispose();
-          DeployMetadataPanelProvider.messageListenerByPanel.delete(panel);
+        const cleanup = DeployMetadataPanelProvider.cleanupByPanel.get(panel);
+        if (cleanup) {
+          cleanup();
+          DeployMetadataPanelProvider.cleanupByPanel.delete(panel);
         }
-        DeployMetadataPanelProvider.initCache = null;
+        if (DeployMetadataPanelProvider._panel === panel) {
+          DeployMetadataPanelProvider._panel = undefined;
+          // Only the singleton's close releases the cached tree/test data.
+          DeployMetadataPanelProvider.initCache = null;
+        }
       });
     }
   }
@@ -1316,6 +1355,16 @@ export class DeployMetadataPanelProvider {
 				if (bar) { bar.className = 'deploy-result-bar running'; bar.textContent = data.dryRun ? 'Validating…' : 'Deploying…'; bar.style.display = 'block'; }
 				return;
 			}
+			if (data.command === 'defaultOrgChanged') {
+				orgsData = Array.isArray(data.orgs) ? data.orgs : orgsData;
+				defaultOrgVal = (data.defaultOrg != null && data.defaultOrg !== '') ? String(data.defaultOrg) : '';
+				renderOrgSelect();
+				return;
+			}
+			if (data.command === 'applyPresetFromHost') {
+				if (data.preset) applyPreset(data.preset);
+				return;
+			}
 			if (data.command === 'testSuitesUpdated') {
 				testSuitesData = data.suites || [];
 				renderSuiteSelect();
@@ -1342,6 +1391,7 @@ export class DeployMetadataPanelProvider {
 					parts.push('Tests: ' + data.testsPassed + ' passed' + tf);
 				}
 				if (data.durationMs) { var s = Math.round(data.durationMs / 1000); parts.push(s >= 60 ? Math.floor(s / 60) + 'm ' + (s % 60) + 's' : s + 's'); }
+				if (data.error) parts.push(String(data.error));
 				bar.textContent = parts.join(' · ');
 				bar.style.display = 'block';
 				// ── Coverage table ───────────────────────────────────────────────────────
@@ -1441,6 +1491,7 @@ export class DeployMetadataPanelProvider {
 			var deployType = preset.deployType || 'NoTestRun';
 			var presetValidate = false;
 			if (deployType === 'ValidateOnly') { presetValidate = true; deployType = 'NoTestRun'; }
+			if (preset.validateOnly) presetValidate = true;
 			var radio = document.querySelector('input[name="testLevel"][value="' + deployType + '"]');
 			if (radio) { radio.checked = true; var w = safeGet('specified-tests-wrap'); if (w) w.classList.toggle('visible', deployType === 'RunSpecifiedTests'); }
 			var presetValidateEl = safeGet('validate-only-check');
@@ -1507,7 +1558,9 @@ export class DeployMetadataPanelProvider {
 			};
 			if (initialPreset) {
 				var idx = (presetsData || []).findIndex(function(p){ return p.name === initialPreset.name; });
-				if (idx !== -1) { sel.value = String(idx); applyPreset(presetsData[idx]); } else { applyPreset(initialPreset); }
+				// Apply the object we were given (e.g. a history entry carrying validateOnly/tests), not a same-named saved preset.
+				if (idx !== -1) sel.value = String(idx);
+				applyPreset(initialPreset);
 			}
 		}
 

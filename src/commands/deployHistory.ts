@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import { Telemetry } from '../utils/telemetry';
+import { escapeHtml, getNonce } from '../utils/htmlUtils';
+import type { DeployPreset, DeployTypeKey } from '../utils/deployPresets';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -14,8 +16,12 @@ export interface DeployHistoryEntry {
   testsFailed: number;
   durationMs: number;
   targetOrg: string;
-  sourcePaths: string[];      // relative paths passed to CLI
+  sourcePaths: string[];      // relative paths passed to CLI (relative to this workspace)
   presetName?: string | null;
+  /** Test level used for the deploy (absent on entries recorded before this was stored). */
+  deployType?: DeployTypeKey;
+  /** Apex test classes for RunSpecifiedTests. */
+  testClassNames?: string[];
 }
 
 // ─── Storage ──────────────────────────────────────────────────────────────────
@@ -24,9 +30,46 @@ const HISTORY_KEY = 'adure-sfx-toolkit.deployHistory';
 const MAX_ENTRIES = 50;
 
 let _ctx: vscode.ExtensionContext | null = null;
-/** Call once from activate() before any history operations. */
+/**
+ * Call once from activate() before any history operations.
+ *
+ * History is stored in workspaceState: sourcePaths are workspace-relative, so entries
+ * from one project are meaningless (and wrong to re-deploy) in another. Older versions
+ * kept a single list in globalState shared by every workspace — it can't be attributed
+ * to a workspace, so it is dropped (start fresh) rather than migrated.
+ */
 export function initDeployHistory(context: vscode.ExtensionContext): void {
   _ctx = context;
+  if (context.globalState.get(HISTORY_KEY) !== undefined) {
+    void context.globalState.update(HISTORY_KEY, undefined);
+  }
+}
+
+/** Release the context reference and close the history panel (deactivate). */
+export function disposeDeployHistory(): void {
+  DeployHistoryProvider.disposePanel();
+  _openDeployPanel = null;
+  _ctx = null;
+}
+
+/**
+ * Map a history entry back to a Deploy panel preset for "Re-deploy", preserving the
+ * test level and the validate-only (dry run) choice.
+ * - dry run + no explicit test level → legacy `ValidateOnly` (the panel maps it to the
+ *   validate checkbox + NoTestRun).
+ * - dry run + a test level → keeps the test level and sets `validateOnly: true`.
+ */
+export function presetFromHistoryEntry(entry: DeployHistoryEntry): DeployPreset & { validateOnly?: boolean } {
+  const level: DeployTypeKey = entry.deployType ?? 'NoTestRun';
+  const deployType: DeployTypeKey = entry.dryRun && level === 'NoTestRun' ? 'ValidateOnly' : level;
+  return {
+    name: entry.presetName || 'Re-deploy',
+    sourcePaths: entry.sourcePaths,
+    deployType,
+    testClassNames: entry.testClassNames ?? [],
+    targetOrg: entry.targetOrg || undefined,
+    ...(entry.dryRun ? { validateOnly: true } : {}),
+  };
 }
 
 export function addDeployHistoryEntry(entry: Omit<DeployHistoryEntry, 'id'>): void {
@@ -44,21 +87,22 @@ export function addDeployHistoryEntry(entry: Omit<DeployHistoryEntry, 'id'>): vo
   );
 
   if (!_ctx) return;
-  const existing: DeployHistoryEntry[] = _ctx.globalState.get(HISTORY_KEY, []);
+  const existing: DeployHistoryEntry[] = _ctx.workspaceState.get(HISTORY_KEY, []);
   const newEntry: DeployHistoryEntry = {
     id: `${entry.timestamp}-${Math.random().toString(36).slice(2, 7)}`,
     ...entry
   };
-  void _ctx.globalState.update(HISTORY_KEY, [newEntry, ...existing].slice(0, MAX_ENTRIES));
+  void _ctx.workspaceState.update(HISTORY_KEY, [newEntry, ...existing].slice(0, MAX_ENTRIES));
+  DeployHistoryProvider.refresh();
 }
 
 export function getDeployHistory(): DeployHistoryEntry[] {
-  return _ctx?.globalState.get<DeployHistoryEntry[]>(HISTORY_KEY, []) ?? [];
+  return _ctx?.workspaceState.get<DeployHistoryEntry[]>(HISTORY_KEY, []) ?? [];
 }
 
 function clearHistory(): void {
   if (!_ctx) return;
-  void _ctx.globalState.update(HISTORY_KEY, []);
+  void _ctx.workspaceState.update(HISTORY_KEY, []);
 }
 
 // ─── Re-deploy callback (set from extension.ts to avoid circular import) ──────
@@ -71,28 +115,61 @@ export function setOpenDeployPanelCallback(cb: (entry: DeployHistoryEntry) => vo
 // ─── Provider ─────────────────────────────────────────────────────────────────
 
 export class DeployHistoryProvider {
+  /** Singleton panel: re-running the command reveals it instead of stacking copies. */
+  private static panel: vscode.WebviewPanel | undefined;
+
   public static async show(): Promise<void> {
-    const entries = getDeployHistory();
+    if (this.panel) {
+      this.panel.webview.html = DeployHistoryProvider.getHtml(getDeployHistory());
+      this.panel.reveal();
+      return;
+    }
     const panel = vscode.window.createWebviewPanel(
       'adure-sfx-toolkit.deployHistory',
       'Deployment History',
       vscode.ViewColumn.One,
-      { enableScripts: true, retainContextWhenHidden: true }
+      // Static content re-rendered on demand — no need to keep a hidden webview alive.
+      { enableScripts: true, retainContextWhenHidden: false }
     );
-    panel.webview.html = DeployHistoryProvider.getHtml(entries);
+    this.panel = panel;
+    panel.webview.html = DeployHistoryProvider.getHtml(getDeployHistory());
 
-    panel.webview.onDidReceiveMessage((msg: { command: string; entryId?: string }) => {
-      if (msg.command === 'clearHistory') {
-        clearHistory();
-        panel.webview.html = DeployHistoryProvider.getHtml([]);
-      }
-      if (msg.command === 'redeploy' && msg.entryId) {
-        const entry = getDeployHistory().find((e) => e.id === msg.entryId);
-        if (entry && _openDeployPanel) {
-          _openDeployPanel(entry);
+    const subs: vscode.Disposable[] = [];
+    subs.push(
+      panel.webview.onDidReceiveMessage((msg: { command: string; entryId?: string }) => {
+        if (msg.command === 'clearHistory') {
+          // Webviews can't show window.confirm() (sandboxed without allow-modals) — ask here.
+          void vscode.window
+            .showWarningMessage('Clear all deployment history for this workspace?', { modal: true }, 'Clear')
+            .then((choice) => {
+              if (choice !== 'Clear') return;
+              clearHistory();
+              if (this.panel === panel) panel.webview.html = DeployHistoryProvider.getHtml([]);
+            });
         }
-      }
-    });
+        if (msg.command === 'redeploy' && msg.entryId) {
+          const entry = getDeployHistory().find((e) => e.id === msg.entryId);
+          if (entry && _openDeployPanel) {
+            _openDeployPanel(entry);
+          }
+        }
+      }),
+      panel.onDidDispose(() => {
+        if (this.panel === panel) this.panel = undefined;
+        subs.forEach((d) => d.dispose());
+        subs.length = 0;
+      })
+    );
+  }
+
+  /** Re-render the open panel (if any) after a new entry is recorded. */
+  public static refresh(): void {
+    if (this.panel) this.panel.webview.html = DeployHistoryProvider.getHtml(getDeployHistory());
+  }
+
+  public static disposePanel(): void {
+    this.panel?.dispose();
+    this.panel = undefined;
   }
 
   // ─── HTML ──────────────────────────────────────────────────────────────────
@@ -116,7 +193,7 @@ export class DeployHistoryProvider {
   }
 
   private static escHtml(s: string): string {
-    return (s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    return escapeHtml(s);
   }
 
   private static renderEntry(e: DeployHistoryEntry): string {
@@ -152,7 +229,7 @@ export class DeployHistoryProvider {
       <div class="entry-header">
         <span class="entry-status">${icon}</span>
         <span class="entry-label">${label}</span>
-        <span class="entry-time" title="${absTime}">${DeployHistoryProvider.relativeTime(e.timestamp)}</span>
+        <span class="entry-time" title="${DeployHistoryProvider.escHtml(absTime)}">${DeployHistoryProvider.relativeTime(e.timestamp)}</span>
         ${redeployBtn}
       </div>
       <div class="entry-meta">${metaParts.join(' · ')}</div>
@@ -165,11 +242,12 @@ export class DeployHistoryProvider {
       ? '<div class="empty">No deployments recorded yet.<br>Deployments run from the Deploy Metadata panel are saved here automatically.</div>'
       : entries.map((e) => DeployHistoryProvider.renderEntry(e)).join('');
 
+    const nonce = getNonce();
     return `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
   <style>
     * { box-sizing: border-box; }
     body { font-family: var(--vscode-font-family); font-size: 13px; color: var(--vscode-foreground); background: var(--vscode-editor-background); margin: 0; padding: 0; }
@@ -201,11 +279,11 @@ export class DeployHistoryProvider {
     <button class="btn-clear" id="btn-clear">Clear all</button>
   </div>
   ${body}
-  <script>
+  <script nonce="${nonce}">
     var vscode = acquireVsCodeApi();
     var clearBtn = document.getElementById('btn-clear');
     if (clearBtn) clearBtn.onclick = function() {
-      if (confirm('Clear all deployment history?')) vscode.postMessage({ command: 'clearHistory' });
+      vscode.postMessage({ command: 'clearHistory' });
     };
     document.querySelectorAll('.paths-toggle').forEach(function(btn) {
       btn.onclick = function() {
