@@ -33,6 +33,37 @@ export interface VarDecl {
     line: number;
     /** The range this declaration is visible in — its enclosing method/constructor (locals/params) or class (fields). */
     scope: Range;
+    /** Column (0-based) where the declared name starts on `line` (set by parseApex). */
+    character?: number;
+}
+
+/** A member declared in a type body, with its modifiers (for hierarchy / rename). */
+export interface ApexMemberDecl {
+    name: string;
+    kind: 'method' | 'field' | 'property' | 'constructor';
+    /** The declared name token. */
+    nameRange: Range;
+    /** The whole declaration. */
+    range: Range;
+    /** Lower-cased modifiers (`public`, `static`, `abstract`, `virtual`, `override`, `@istest`…). */
+    modifiers: string[];
+}
+
+/** A class/interface/enum/trigger declaration with its supertypes and members. */
+export interface ApexTypeDecl {
+    name: string;
+    kind: 'class' | 'interface' | 'enum' | 'trigger';
+    /** Name of the enclosing type for inner types (Apex allows one level). */
+    outer?: string;
+    /** Lower-cased modifiers (`abstract`, `virtual`, `public`, `with sharing` → `with`,`sharing`…). */
+    modifiers: string[];
+    /** `extends` target of a class (generics stripped), e.g. `Base` or `Outer.Base`. */
+    extendsType?: string;
+    /** `implements` targets of a class / `extends` list of an interface (generics stripped). */
+    implementsTypes: string[];
+    nameRange: Range;
+    range: Range;
+    members: ApexMemberDecl[];
 }
 
 export interface ApexIndex {
@@ -48,25 +79,64 @@ export interface ApexIndex {
     decls: Map<string, Range>;
     /** Method name → signature label(s) (overloads; for signature help). */
     methods: Map<string, string[]>;
+    /**
+     * Every type declaration (top-level and inner) with supertypes, modifiers and member
+     * name ranges — for rename / implementation / type hierarchy. Always set by parseApex
+     * (optional only so hand-built indexes stay valid).
+     */
+    typeDecls?: ApexTypeDecl[];
 }
 
 /**
  * A `receiver.member` field/property access (NOT a method call). The `chain` is
  * the raw text of the base expression (e.g. `acc`, `acc.Contact__r`); `member`
- * is the accessed name; `range` covers the member token. Used by the schema
- * validator to flag members that don't exist on the resolved SObject.
+ * is the accessed name; (`line`, `character`) is where the member token starts
+ * (0-based; it spans `member.length` characters). Used by the schema validator to
+ * flag members that don't exist on the resolved SObject.
+ *
+ * Only accesses the validator can act on are kept: a plain identifier chain whose
+ * root is a variable declared in the document (anything else it skips anyway).
+ * Stored without a Range object — these are the most numerous parse records.
  */
 export interface FieldAccess {
     chain: string;
     member: string;
-    range: Range;
+    line: number;
+    character: number;
 }
+
+/** A plain identifier dot-chain (no calls/indexing/casts) — the only chains the validator resolves. */
+const IDENT_CHAIN = /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*$/;
 
 export interface ApexParseResult {
     symbols: DocumentSymbol[];
     diagnostics: Diagnostic[];
     index: ApexIndex;
     fieldAccesses: FieldAccess[];
+}
+
+/**
+ * Per-parse string canonicalizer. ANTLR builds token/rule text by per-character
+ * concatenation, so every `getText()` returns a fresh (often rope/cons) string, and
+ * the same identifier or type is materialized many times per file. Routing every
+ * retained string through one map flattens it (map hashing flattens ropes) and makes
+ * repeated names/types share a single instance. The map itself is dropped with the
+ * listener after the parse.
+ */
+class Interner {
+    private map = new Map<string, string>();
+    s(x: string): string;
+    s(x: string | undefined): string | undefined;
+    s(x: string | undefined): string | undefined {
+        if (x === undefined) return undefined;
+        const hit = this.map.get(x);
+        if (hit !== undefined) return hit;
+        // Long strings from ANTLR are ropes of per-character pieces; copy them into one
+        // flat string so the pieces can be collected. (Short ones are already flat.)
+        const flat = x.length >= 13 ? (JSON.parse(JSON.stringify(x)) as string) : x;
+        this.map.set(flat, flat);
+        return flat;
+    }
 }
 
 // antlr tokens: line is 1-based, column 0-based.
@@ -86,7 +156,7 @@ function nameRange(idCtx: any, fallback: any): Range {
 }
 
 class DiagnosticCollector extends ApexErrorListener {
-    constructor(public diagnostics: Diagnostic[]) {
+    constructor(public diagnostics: Diagnostic[], private readonly strings: Interner) {
         super();
     }
     apexSyntaxError(line: number, column: number, msg: string): void {
@@ -94,18 +164,22 @@ class DiagnosticCollector extends ApexErrorListener {
         this.diagnostics.push({
             severity: DiagnosticSeverity.Error,
             range: Range.create(pos, Position.create(pos.line, pos.character + 1)),
-            message: msg,
+            message: this.strings.s(msg),
             source: 'asfx-apex',
         });
     }
 }
 
 class SymbolListener extends ApexParserBaseListener {
+    constructor(private readonly strings: Interner) {
+        super();
+    }
     roots: DocumentSymbol[] = [];
-    index: ApexIndex = { types: new Map(), varTypes: new Map(), varDecls: [], classRanges: [], decls: new Map(), methods: new Map() };
+    index: ApexIndex = { types: new Map(), varTypes: new Map(), varDecls: [], classRanges: [], decls: new Map(), methods: new Map(), typeDecls: [] };
     fieldAccesses: FieldAccess[] = [];
     private stack: DocumentSymbol[] = [];
     private typeNameStack: string[] = [];
+    private typeDeclStack: ApexTypeDecl[] = [];
     private methodScope: Range[] = []; // enclosing method/constructor ranges (for local/param scope)
     private classScope: Range[] = [];  // enclosing class/interface/enum ranges (for field/property scope)
 
@@ -115,10 +189,21 @@ class SymbolListener extends ApexParserBaseListener {
         if (this.classScope.length) return this.classScope[this.classScope.length - 1];
         return Range.create(0, 0, 1_000_000, 0); // whole document fallback
     }
+    /** Interned text of a parse-tree node (see Interner). */
+    private text(node: any): string | undefined {
+        const t = node?.getText?.();
+        return typeof t === 'string' ? this.strings.s(t) : undefined;
+    }
     private addVar(name: string | undefined, type: string, idCtx: any, kind: 'local' | 'member'): void {
         if (!name || !type) return;
         this.index.varTypes.set(name, type); // flat, last-wins fallback
-        this.index.varDecls.push({ name, type, line: (idCtx?.start?.line ?? 1) - 1, scope: this.scopeFor(kind) });
+        this.index.varDecls.push({
+            name,
+            type,
+            line: (idCtx?.start?.line ?? 1) - 1,
+            scope: this.scopeFor(kind),
+            character: idCtx?.start?.column ?? 0,
+        });
     }
 
     // `receiver.member` where the RHS is an identifier (field/property/relationship),
@@ -131,12 +216,29 @@ class SymbolListener extends ApexParserBaseListener {
         if (!idc || !baseCtx) return;
         const chain = baseCtx.getText?.();
         const member = idc.getText?.();
-        if (!chain || !member) return;
-        this.fieldAccesses.push({ chain, member, range: nameRange(idc, ctx) });
+        if (!chain || !member || !IDENT_CHAIN.test(chain)) return; // the validator skips non-plain chains
+        const t = idc.start ?? ctx.start;
+        this.fieldAccesses.push({
+            chain: this.strings.s(chain),
+            member: this.strings.s(member),
+            line: (t?.line ?? 1) - 1,
+            character: t?.column ?? 0,
+        });
     };
 
-    private recordDecl(name: string | undefined, idCtx: any, fallback: any): void {
-        if (name) this.index.decls.set(name, nameRange(idCtx, fallback));
+    /** Record a declaration; reuses `range` (the symbol's own name range object) when given. */
+    private recordDecl(name: string | undefined, idCtx: any, fallback: any, range?: Range): void {
+        if (name) this.index.decls.set(name, range ?? nameRange(idCtx, fallback));
+    }
+
+    /** Drop field accesses whose root isn't a declared variable — the validator can't resolve them. */
+    finish(): void {
+        const declared = new Set(this.index.varDecls.map((d) => d.name.toLowerCase()));
+        for (const k of this.index.varTypes.keys()) declared.add(k.toLowerCase());
+        this.fieldAccesses = this.fieldAccesses.filter((a) => {
+            const dot = a.chain.indexOf('.');
+            return declared.has((dot === -1 ? a.chain : a.chain.slice(0, dot)).toLowerCase());
+        });
     }
 
     private container(): DocumentSymbol[] {
@@ -148,10 +250,74 @@ class SymbolListener extends ApexParserBaseListener {
         return name ? this.index.types.get(name) : undefined;
     }
 
+    /** Lower-cased modifiers of a declaration (from its own list or its classBodyDeclaration / typeDeclaration). */
+    private modifiersOf(ctx: any): string[] {
+        let list: any[] | undefined = ctx?.modifier_list?.();
+        if (!list || !list.length) {
+            let p = ctx?.parentCtx;
+            // methodDeclaration → memberDeclaration → classBodyDeclaration; classDeclaration → typeDeclaration
+            for (let i = 0; i < 2 && p && !(p.modifier_list?.()?.length); i++) p = p.parentCtx;
+            list = p?.modifier_list?.() ?? [];
+        }
+        const out: string[] = [];
+        for (const m of list ?? []) {
+            const t = m?.getText?.();
+            if (typeof t !== 'string') continue;
+            const lc = t.toLowerCase();
+            // `withsharing` etc. come out concatenated (getText drops whitespace) — split known pairs.
+            const pair = /^(with|without|inherited)sharing$/.exec(lc);
+            if (pair) out.push(this.strings.s(pair[1]), 'sharing');
+            else out.push(this.strings.s(lc.startsWith('@') ? lc.replace(/\(.*$/, '') : lc));
+        }
+        return out;
+    }
+    private currentTypeDecl(): ApexTypeDecl | undefined {
+        return this.typeDeclStack[this.typeDeclStack.length - 1];
+    }
+    private addMemberDecl(name: string, kind: ApexMemberDecl['kind'], nameR: Range, range: Range, modCtx: any): void {
+        this.currentTypeDecl()?.members.push({ name, kind, nameRange: nameR, range, modifiers: this.modifiersOf(modCtx) });
+    }
+    private stripGenerics(t: string | undefined): string | undefined {
+        if (!t) return undefined;
+        const s = t.replace(/<.*$/s, '').replace(/\[\]$/, '').trim();
+        return s ? this.strings.s(s) : undefined;
+    }
+
     private pushType(ctx: any, kind: SymbolKind): void {
-        const name = ctx.id?.()?.getText() ?? '<anonymous>';
+        const name = this.text(ctx.id?.()) ?? '<anonymous>';
         const range = ctxRange(ctx);
-        const sym = makeSymbol(name, kind, range, nameRange(ctx.id?.(), ctx));
+        const sel = nameRange(ctx.id?.(), ctx);
+        {
+            const outer = this.typeDeclStack.length ? this.typeDeclStack[this.typeDeclStack.length - 1].name : undefined;
+            const k: ApexTypeDecl['kind'] =
+                kind === SymbolKind.Interface ? 'interface' : kind === SymbolKind.Enum ? 'enum' : ctx.TRIGGER ? 'trigger' : 'class';
+            let extendsType: string | undefined;
+            const implementsTypes: string[] = [];
+            const listTypes = (tl: any): string[] =>
+                ((tl?.typeRef_list?.() ?? []) as any[]).map((t) => this.stripGenerics(this.text(t))).filter((x): x is string => !!x);
+            if (k === 'class') {
+                extendsType = ctx.EXTENDS?.() ? this.stripGenerics(this.text(ctx.typeRef?.())) : undefined;
+                if (ctx.IMPLEMENTS?.()) implementsTypes.push(...listTypes(ctx.typeList?.()));
+            } else if (k === 'interface' && ctx.EXTENDS?.()) {
+                implementsTypes.push(...listTypes(ctx.typeList?.()));
+            }
+            const decl: ApexTypeDecl = {
+                name,
+                kind: k,
+                outer,
+                modifiers: k === 'trigger' ? [] : this.modifiersOf(ctx),
+                extendsType,
+                implementsTypes,
+                nameRange: sel,
+                range,
+                members: [],
+            };
+            if (!outer) delete decl.outer;
+            if (!extendsType) delete decl.extendsType;
+            this.index.typeDecls!.push(decl);
+            this.typeDeclStack.push(decl);
+        }
+        const sym = makeSymbol(name, kind, range, sel);
         sym.children = [];
         this.container().push(sym);
         this.stack.push(sym);
@@ -159,9 +325,10 @@ class SymbolListener extends ApexParserBaseListener {
         if (!this.index.types.has(name)) this.index.types.set(name, []);
         if (kind === SymbolKind.Class) this.index.classRanges.push({ name, range });
         this.classScope.push(range);
-        this.recordDecl(name, ctx.id?.(), ctx);
+        this.recordDecl(name, ctx.id?.(), ctx, sel);
     }
     private popType(): void {
+        this.typeDeclStack.pop();
         this.stack.pop();
         this.typeNameStack.pop();
         this.classScope.pop();
@@ -177,74 +344,123 @@ class SymbolListener extends ApexParserBaseListener {
     exitTriggerUnit = () => this.popType();
 
     enterMethodDeclaration = (ctx: any) => {
-        const ret = ctx.typeRef?.()?.getText?.() ?? 'void';
-        const name = ctx.id?.()?.getText() ?? '<method>';
+        const ret = this.text(ctx.typeRef?.()) ?? 'void';
+        const name = this.text(ctx.id?.()) ?? '<method>';
         const params = formalParams(ctx);
-        const sig = `${name}(${params.join(', ')}) : ${ret}`;
-        const sym = makeSymbol(name, SymbolKind.Method, ctxRange(ctx), nameRange(ctx.id?.(), ctx));
-        sym.detail = `(${params.join(', ')}) : ${ret}`;
+        const sig = this.strings.s(`${name}(${params.join(', ')}) : ${ret}`);
+        const range = ctxRange(ctx);
+        const sel = nameRange(ctx.id?.(), ctx);
+        const sym = makeSymbol(name, SymbolKind.Method, range, sel);
+        sym.detail = this.strings.s(`(${params.join(', ')}) : ${ret}`);
         this.container().push(sym);
         this.currentMembers()?.push({ name, kind: 'method', detail: sym.detail });
-        this.recordDecl(name, ctx.id?.(), ctx);
+        this.addMemberDecl(name, 'method', sel, range, ctx);
+        this.recordDecl(name, ctx.id?.(), ctx, sel);
         const sigs = this.index.methods.get(name) ?? [];
         sigs.push(sig);
         this.index.methods.set(name, sigs);
-        this.methodScope.push(ctxRange(ctx));
+        this.methodScope.push(range);
     };
     exitMethodDeclaration = () => { this.methodScope.pop(); };
+    // Interface methods (`Integer area();`) are a separate grammar rule; record them like
+    // methods (outline, members, signatures) and give their parameters a method scope.
+    enterInterfaceMethodDeclaration = (ctx: any) => {
+        const ret = this.text(ctx.typeRef?.()) ?? 'void';
+        const name = this.text(ctx.id?.()) ?? '<method>';
+        const params = formalParams(ctx);
+        const range = ctxRange(ctx);
+        const sel = nameRange(ctx.id?.(), ctx);
+        const sym = makeSymbol(name, SymbolKind.Method, range, sel);
+        sym.detail = this.strings.s(`(${params.join(', ')}) : ${ret}`);
+        this.container().push(sym);
+        this.currentMembers()?.push({ name, kind: 'method', detail: sym.detail });
+        this.addMemberDecl(name, 'method', sel, range, ctx);
+        this.recordDecl(name, ctx.id?.(), ctx, sel);
+        const sigs = this.index.methods.get(name) ?? [];
+        sigs.push(this.strings.s(`${name}(${params.join(', ')}) : ${ret}`));
+        this.index.methods.set(name, sigs);
+        this.methodScope.push(range);
+    };
+    exitInterfaceMethodDeclaration = () => { this.methodScope.pop(); };
     enterConstructorDeclaration = (ctx: any) => {
-        const name = ctx.qualifiedName?.()?.getText?.() ?? ctx.id?.()?.getText?.() ?? '<ctor>';
-        this.container().push(makeSymbol(name, SymbolKind.Constructor, ctxRange(ctx), nameRange(ctx.qualifiedName?.() ?? ctx.id?.(), ctx)));
-        this.methodScope.push(ctxRange(ctx));
+        const name = this.text(ctx.qualifiedName?.()) ?? this.text(ctx.id?.()) ?? '<ctor>';
+        const range = ctxRange(ctx);
+        const sel = nameRange(ctx.qualifiedName?.() ?? ctx.id?.(), ctx);
+        this.container().push(makeSymbol(name, SymbolKind.Constructor, range, sel));
+        this.addMemberDecl(name, 'constructor', sel, range, ctx);
+        this.methodScope.push(range);
     };
     exitConstructorDeclaration = () => { this.methodScope.pop(); };
     enterFieldDeclaration = (ctx: any) => {
-        const type = ctx.typeRef?.()?.getText?.() ?? '';
+        const type = this.text(ctx.typeRef?.()) ?? '';
         const vds = ctx.variableDeclarators?.();
         // apex-parser v5 (antlr4 target) exposes repeated rules via `<rule>_list()`.
         const list: any[] = vds?.variableDeclarator_list?.() ?? [];
         for (const d of list) {
             const id = d?.id?.();
             if (!id) continue;
-            const name = id.getText();
-            const sym = makeSymbol(name, SymbolKind.Field, ctxRange(d), nameRange(id, d));
+            const name = this.text(id) as string;
+            const sel = nameRange(id, d);
+            const sym = makeSymbol(name, SymbolKind.Field, ctxRange(d), sel);
             sym.detail = type;
             this.container().push(sym);
             this.currentMembers()?.push({ name, kind: 'field', detail: type });
+            this.addMemberDecl(name, 'field', sel, ctxRange(d), ctx);
             this.addVar(name, type, id, 'member');
-            this.recordDecl(name, id, d);
+            this.recordDecl(name, id, d, sel);
         }
     };
     enterPropertyDeclaration = (ctx: any) => {
-        const type = ctx.typeRef?.()?.getText?.() ?? '';
-        const name = ctx.id?.()?.getText?.() ?? '<prop>';
-        const sym = makeSymbol(name, SymbolKind.Property, ctxRange(ctx), nameRange(ctx.id?.(), ctx));
+        const type = this.text(ctx.typeRef?.()) ?? '';
+        const name = this.text(ctx.id?.()) ?? '<prop>';
+        const sel = nameRange(ctx.id?.(), ctx);
+        const sym = makeSymbol(name, SymbolKind.Property, ctxRange(ctx), sel);
         sym.detail = type;
         this.container().push(sym);
         this.currentMembers()?.push({ name, kind: 'property', detail: type });
+        this.addMemberDecl(name, 'property', sel, ctxRange(ctx), ctx);
         this.addVar(name, type, ctx.id?.(), 'member');
-        this.recordDecl(name, ctx.id?.(), ctx);
+        this.recordDecl(name, ctx.id?.(), ctx, sel);
     };
 
     // Locals and parameters feed the (flat) variable-type map for member completion
     // and the declaration map for go-to-definition.
     enterLocalVariableDeclaration = (ctx: any) => {
-        const type = ctx.typeRef?.()?.getText?.() ?? '';
+        const type = this.text(ctx.typeRef?.()) ?? '';
         if (!type) return;
         const list: any[] = ctx.variableDeclarators?.()?.variableDeclarator_list?.() ?? [];
         for (const d of list) {
             const id = d?.id?.();
-            const name = id?.getText?.();
+            const name = this.text(id);
             if (name) {
                 this.addVar(name, type, id, 'local');
                 this.recordDecl(name, id, d);
             }
         }
     };
-    enterFormalParameter = (ctx: any) => {
-        const type = ctx.typeRef?.()?.getText?.();
+    // `for (Account a : accs)` and `catch (DmlException e)` declare locals too.
+    enterEnhancedForControl = (ctx: any) => {
+        const type = this.text(ctx.typeRef?.());
         const id = ctx.id?.();
-        const name = id?.getText?.();
+        const name = this.text(id);
+        if (type && name) {
+            this.addVar(name, type, id, 'local');
+            this.recordDecl(name, id, ctx);
+        }
+    };
+    enterCatchClause = (ctx: any) => {
+        const type = this.text(ctx.qualifiedName?.());
+        const id = ctx.id?.();
+        const name = this.text(id);
+        if (type && name) {
+            this.addVar(name, type, id, 'local');
+            this.recordDecl(name, id, ctx);
+        }
+    };
+    enterFormalParameter = (ctx: any) => {
+        const type = this.text(ctx.typeRef?.());
+        const id = ctx.id?.();
+        const name = this.text(id);
         if (type && name) {
             this.addVar(name, type, id, 'local');
             this.recordDecl(name, id, ctx);
@@ -280,15 +496,19 @@ function isContained(outer: Range, inner: Range): boolean {
 export function parseApex(text: string): ApexParseResult {
     const diagnostics: Diagnostic[] = [];
     let symbols: DocumentSymbol[] = [];
-    let index: ApexIndex = { types: new Map(), varTypes: new Map(), varDecls: [], classRanges: [], decls: new Map(), methods: new Map() };
+    let index: ApexIndex = { types: new Map(), varTypes: new Map(), varDecls: [], classRanges: [], decls: new Map(), methods: new Map(), typeDecls: [] };
     let fieldAccesses: FieldAccess[] = [];
     try {
+        // Nothing below may keep a reference to the parser, token stream or parse tree:
+        // only plain objects (symbols, ranges, interned strings) leave this function.
+        const strings = new Interner();
         const parser = ApexParserFactory.createParser(text);
         parser.removeErrorListeners();
-        parser.addErrorListener(new DiagnosticCollector(diagnostics));
+        parser.addErrorListener(new DiagnosticCollector(diagnostics, strings));
         const tree = parser.compilationUnit();
-        const listener = new SymbolListener();
+        const listener = new SymbolListener(strings);
         ApexParseTreeWalker.DEFAULT.walk(listener, tree);
+        listener.finish();
         symbols = listener.roots;
         index = listener.index;
         fieldAccesses = listener.fieldAccesses;

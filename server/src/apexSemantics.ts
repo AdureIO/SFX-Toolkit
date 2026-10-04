@@ -12,7 +12,7 @@
  * Pure logic with injected async lookups, so it's unit-testable without a live
  * org or the language-server runtime.
  */
-import { Diagnostic, DiagnosticSeverity } from 'vscode-languageserver/node';
+import { Diagnostic, DiagnosticSeverity, Range } from 'vscode-languageserver/node';
 import { FieldAccess } from './apexSymbols';
 
 /** Minimal describe shape this validator needs (a subset of the host describe). */
@@ -93,7 +93,7 @@ export async function validateFieldAccesses(
         // Root must be a declared variable, resolved at THIS access's position (so a
         // same-name variable in another method doesn't leak in). We deliberately do NOT
         // treat a bare SObject *type* name as a receiver here (that'd flag static access).
-        const rootType = deps.varTypeAt(root, a.range.start.line, a.range.start.character);
+        const rootType = deps.varTypeAt(root, a.line, a.character);
         if (!rootType) continue;
 
         // The root's type must itself describe to a real SObject; otherwise it's a
@@ -109,7 +109,7 @@ export async function validateFieldAccesses(
         if (!memberExists(d, a.member)) {
             out.push({
                 severity: DiagnosticSeverity.Warning,
-                range: a.range,
+                range: Range.create(a.line, a.character, a.line, a.character + a.member.length),
                 message: `'${a.member}' is not a field or relationship of ${base}.`,
                 source: SCHEMA_DIAGNOSTIC_SOURCE,
             });
