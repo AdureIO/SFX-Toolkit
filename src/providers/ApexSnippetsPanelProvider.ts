@@ -4,10 +4,12 @@ import {
   runSnippetFromTree,
   addSnippet,
   editSnippetFile,
-  deleteSnippetByIndex,
+  deleteSnippet,
   openSnippetEditor,
+  onDidChangeSnippets,
   ApexSnippet
 } from "../commands/apexSnippets";
+import { getNonce } from "../utils/htmlUtils";
 
 export class ApexSnippetsPanelProvider {
   public static readonly viewType = "adure-sfx-toolkit.snippetsPanel";
@@ -32,24 +34,32 @@ export class ApexSnippetsPanelProvider {
     ApexSnippetsPanelProvider._panel = panel;
     panel.webview.html = this.getHtml([]);
 
-    const messageListener = panel.webview.onDidReceiveMessage(
-      async (msg: { command: string; index?: number }) => {
-        switch (msg.command) {
-          case "run":
-            if (typeof msg.index === "number") {
-              const snippets = await loadSnippets();
-              if (snippets[msg.index]) await runSnippetFromTree(snippets[msg.index]);
-            }
-            break;
-          case "delete":
-            if (typeof msg.index === "number") {
-              const ok = await deleteSnippetByIndex(msg.index);
-              if (ok) await this.refreshPanel();
-            }
-            break;
-          case "add":
-            await addSnippet();
+    /** Resolve a snippet sent back by the webview — by file path, verified against the current list. */
+    const findSnippet = async (filePath: unknown): Promise<ApexSnippet | undefined> => {
+      if (typeof filePath !== "string" || !filePath) return undefined;
+      return (await loadSnippets()).find((s) => s.filePath === filePath);
+    };
+
+    const subscriptions: vscode.Disposable[] = [];
+    subscriptions.push(
+      panel.webview.onDidReceiveMessage(async (msg: { command: string; filePath?: string }) => {
+        switch (msg?.command) {
+          case "ready":
+            // Webview (re)loaded — initial open or re-shown after being hidden.
             await this.refreshPanel();
+            break;
+          case "run": {
+            const snippet = await findSnippet(msg.filePath);
+            if (snippet) await runSnippetFromTree(snippet);
+            break;
+          }
+          case "delete": {
+            const snippet = await findSnippet(msg.filePath);
+            if (snippet) await deleteSnippet(snippet); // confirms, deletes, fires onDidChangeSnippets
+            break;
+          }
+          case "add":
+            await addSnippet(); // fires onDidChangeSnippets
             break;
           case "refresh":
             await this.refreshPanel();
@@ -58,40 +68,40 @@ export class ApexSnippetsPanelProvider {
             await editSnippetFile();
             await this.refreshPanel();
             break;
-          case "edit":
-            if (typeof msg.index === "number") {
-              const snippets = await loadSnippets();
-              if (snippets[msg.index]) await openSnippetEditor(snippets[msg.index]);
-            }
+          case "edit": {
+            const snippet = await findSnippet(msg.filePath);
+            if (snippet) await openSnippetEditor(snippet);
             break;
+          }
         }
-      },
-      null,
-      []
+      }),
+      // Tree view / palette / on-disk changes keep this panel in sync.
+      onDidChangeSnippets(() => void this.refreshPanel())
     );
 
     panel.onDidDispose(() => {
-      messageListener.dispose();
+      subscriptions.forEach((d) => d.dispose());
+      subscriptions.length = 0;
       ApexSnippetsPanelProvider._panel = undefined;
     });
-
-    await this.refreshPanel();
   }
 
   public static async refreshPanel(): Promise<void> {
     const panel = ApexSnippetsPanelProvider._panel;
     if (!panel) return;
     const snippets = await loadSnippets();
-    panel.webview.postMessage({ command: "setSnippets", snippets });
+    if (ApexSnippetsPanelProvider._panel !== panel) return; // closed meanwhile
+    void panel.webview.postMessage({ command: "setSnippets", snippets });
   }
 
   private static getHtml(_snippets: ApexSnippet[]): string {
+    const nonce = getNonce();
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
     <style>
         * { box-sizing: border-box; }
         body {
@@ -170,7 +180,7 @@ export class ApexSnippetsPanelProvider {
         <button id="btn-refresh" class="secondary">Refresh</button>
     </div>
     <ul class="snippet-list" id="list"></ul>
-    <script>
+    <script nonce="${nonce}">
         const vscode = acquireVsCodeApi();
         const listEl = document.getElementById('list');
         const btnAdd = document.getElementById('btn-add');
@@ -182,8 +192,10 @@ export class ApexSnippetsPanelProvider {
                 listEl.innerHTML = '<li class="empty">No snippets yet. Click Add Snippet or Open Snippets Folder to create one.</li>';
                 return;
             }
+            current = snippets;
             listEl.innerHTML = snippets.map((s, i) => {
-                const codePreview = s.code.length > 200 ? s.code.substring(0, 197) + '...' : s.code;
+                const code = s.code || '';
+                const codePreview = code.length > 200 ? code.substring(0, 197) + '...' : code;
                 const esc = (t) => (t || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
                 return '<li class="snippet-item">' +
                     '<div class="snippet-header">' +
@@ -197,14 +209,16 @@ export class ApexSnippetsPanelProvider {
                     '<pre class="snippet-code">' + esc(codePreview) + '</pre>' +
                     '</li>';
             }).join('');
-            listEl.querySelectorAll('[data-action]').forEach(el => {
-                el.addEventListener('click', () => {
-                    const cmd = el.getAttribute('data-action');
-                    const idx = el.getAttribute('data-index');
-                    vscode.postMessage({ command: cmd, index: idx !== null ? parseInt(idx, 10) : undefined });
-                });
-            });
         }
+
+        // One delegated listener (no per-render handler churn); identify snippets by file path, not index.
+        let current = [];
+        listEl.addEventListener('click', (e) => {
+            const el = e.target.closest('[data-action]');
+            if (!el) return;
+            const s = current[parseInt(el.getAttribute('data-index'), 10)];
+            if (s) vscode.postMessage({ command: el.getAttribute('data-action'), filePath: s.filePath });
+        });
 
         window.addEventListener('message', e => {
             if (e.data && e.data.command === 'setSnippets') render(e.data.snippets);
@@ -213,6 +227,7 @@ export class ApexSnippetsPanelProvider {
         btnAdd.addEventListener('click', () => vscode.postMessage({ command: 'add' }));
         btnFile.addEventListener('click', () => vscode.postMessage({ command: 'openFile' }));
         btnRefresh.addEventListener('click', () => vscode.postMessage({ command: 'refresh' }));
+        vscode.postMessage({ command: 'ready' });
     </script>
 </body>
 </html>`;

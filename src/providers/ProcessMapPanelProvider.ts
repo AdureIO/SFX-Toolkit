@@ -7,6 +7,7 @@ import { buildProcessGraph, scopeMetadataToObjects, ProcessGraph, ProcessNode } 
 import { OrgMetadataCache } from "../utils/orgMetadataCache";
 import { runCommandArgs } from "../utils/commandRunner";
 import { getNonce } from "../utils/htmlUtils";
+import { onDidChangeDefaultOrg } from "../utils/defaultOrgEvents";
 
 
 export class ProcessMapPanelProvider {
@@ -62,9 +63,19 @@ export class ProcessMapPanelProvider {
             }
         });
 
+        // Realign the org selector (default first) when the default org changes.
+        const defaultOrgSub = onDidChangeDefaultOrg(async () => {
+            const orgs = getCachedOrgList() ?? (await refreshOrgListCache().catch(() => [] as OrgOption[]));
+            if (ProcessMapPanelProvider._panel === panel) void panel.webview.postMessage({ command: "orgList", orgs });
+        });
+
         panel.onDidDispose(() => {
             listener.dispose();
+            defaultOrgSub.dispose();
             ProcessMapPanelProvider._panel = undefined;
+            // Release the (potentially large) graph held for "open in org".
+            ProcessMapPanelProvider._graph = undefined;
+            ProcessMapPanelProvider._org = undefined;
         });
     }
 
@@ -79,6 +90,7 @@ export class ProcessMapPanelProvider {
             panel.webview.postMessage({ command: "progress", label: "Building graph", completed: 1, total: 1, phase: "build" });
             const scoped = seeds.length ? scopeMetadataToObjects(metadata, seeds) : metadata;
             const graph = buildProcessGraph(scoped);
+            if (ProcessMapPanelProvider._panel !== panel) return; // closed while building — don't retain the graph
             ProcessMapPanelProvider._graph = graph;
             panel.webview.postMessage({ command: "graph", graph });
         } catch (error) {
@@ -137,7 +149,10 @@ export class ProcessMapPanelProvider {
 
     private static async export(filename?: string, content?: string, base64 = false): Promise<void> {
         if (!content) return;
-        const uri = await vscode.window.showSaveDialog({ defaultUri: vscode.Uri.file(filename ?? "process-map") });
+        // A bare relative Uri.file() resolves to the filesystem root — default next to the workspace instead.
+        const name = path.basename(filename || "process-map");
+        const ws = vscode.workspace.workspaceFolders?.[0]?.uri;
+        const uri = await vscode.window.showSaveDialog({ defaultUri: ws ? vscode.Uri.joinPath(ws, name) : undefined });
         if (!uri) return;
         try {
             if (base64) fs.writeFileSync(uri.fsPath, new Uint8Array(Buffer.from(content, "base64")));

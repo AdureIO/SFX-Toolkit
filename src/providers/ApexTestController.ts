@@ -3,6 +3,7 @@ import { runCommandArgs } from "../utils/commandRunner";
 import { Logger } from "../utils/outputChannel";
 import { isSalesforceProject } from "../utils/projectUtils";
 import { apexCoverage } from "../utils/apexCoverageService";
+import { getTestRunTimeout } from "../utils/constants";
 
 /**
  * Integrates Apex tests with VS Code's native Testing view ("Test Explorer").
@@ -39,6 +40,12 @@ function parseTestClass(fileName: string, text: string): Parsed | null {
     methods.push({ name, line });
   }
   return { className, methods };
+}
+
+/** CLI caches (.sfdx/.sf hold generated sObject stubs) and dependencies are never test sources. */
+const IGNORED_GLOB = "{**/node_modules/**,**/.sfdx/**,**/.sf/**}";
+function isIgnoredPath(uri: vscode.Uri): boolean {
+  return /\/(node_modules|\.sfdx|\.sf)\//.test(uri.path);
 }
 
 export function registerApexTestController(context: vscode.ExtensionContext): vscode.Disposable {
@@ -80,7 +87,7 @@ export function registerApexTestController(context: vscode.ExtensionContext): vs
     if (!isSalesforceProject()) return;
     let files: vscode.Uri[];
     try {
-      files = await vscode.workspace.findFiles("**/classes/*.cls", "**/node_modules/**", 5000);
+      files = await vscode.workspace.findFiles("**/classes/*.cls", IGNORED_GLOB, 5000);
     } catch {
       return;
     }
@@ -93,11 +100,12 @@ export function registerApexTestController(context: vscode.ExtensionContext): vs
   controller.refreshHandler = async () => { await discoverAll(); };
 
   // Keep in sync with edits/creates/deletes of Apex classes.
+  // Disposed with the extension via context.subscriptions; CLI caches are ignored.
   const watcher = vscode.workspace.createFileSystemWatcher("**/classes/*.cls");
   context.subscriptions.push(
     watcher,
-    watcher.onDidCreate((u) => void discoverFile(u)),
-    watcher.onDidChange((u) => void discoverFile(u)),
+    watcher.onDidCreate((u) => { if (!isIgnoredPath(u)) void discoverFile(u); }),
+    watcher.onDidChange((u) => { if (!isIgnoredPath(u)) void discoverFile(u); }),
     watcher.onDidDelete((u) => {
       const prev = fileToClassId.get(u.toString());
       if (prev) { controller.items.delete(prev); fileToClassId.delete(u.toString()); }
@@ -170,52 +178,92 @@ async function runTests(
 ): Promise<void> {
   const run = controller.createTestRun(request);
   const items = collectItems(controller, request);
-  // Map FullName (Class.Method) → TestItem for result correlation.
-  const byFullName = new Map<string, vscode.TestItem>();
-  const testArgs: string[] = [];
+  // Method items (id "class:Class.method") correlate 1:1 by FullName; whole-class items
+  // (classes with no parsed methods) aggregate every result of that class.
+  const methodItems = new Map<string, vscode.TestItem>();
+  const classItems = new Map<string, vscode.TestItem>();
+  const classNames = new Set<string>();
+  const names: string[] = [];
   for (const item of items) {
-    // item.id is "class:Class.method" for methods, "class:Class" for whole class.
     const id = item.id.replace(/^class:/, "");
     run.enqueued(item);
-    if (id.includes(".")) {
-      byFullName.set(id.toLowerCase(), item);
-      testArgs.push("--tests", id);
-    } else {
-      // Whole class — correlate by class prefix later.
-      byFullName.set(id.toLowerCase(), item);
-      testArgs.push("--class-names", id);
-    }
+    if (id.includes(".")) methodItems.set(id.toLowerCase(), item);
+    else classItems.set(id.toLowerCase(), item);
+    classNames.add(id.split(".")[0].toLowerCase());
+    names.push(id);
   }
-  if (testArgs.length === 0) { run.end(); return; }
+  if (names.length === 0) { run.end(); return; }
 
   items.forEach((i) => run.started(i));
 
-  const args = ["apex", "run", "test", ...testArgs, "--result-format", "json", "--synchronous", "--wait", "30"];
+  // `--class-names` and `--tests` are mutually exclusive: use class names only when every
+  // selection is a whole class, otherwise `--tests` (accepts both Class and Class.method).
+  const flag = methodItems.size === 0 ? "--class-names" : "--tests";
+  const waitMinutes = Math.max(1, getTestRunTimeout());
+  const args = ["apex", "run", "test", ...names.flatMap((n) => [flag, n]), "--result-format", "json", "--wait", String(waitMinutes)];
+  // The CLI rejects --synchronous for more than one class.
+  if (classNames.size === 1) args.push("--synchronous");
   if (withCoverage) args.push("--code-coverage");
 
+  const parseResult = (text: string | undefined): any => {
+    if (!text) return null;
+    const start = text.indexOf("{");
+    if (start < 0) return null;
+    try {
+      const parsed = JSON.parse(text.slice(start));
+      const result = parsed.result ?? parsed;
+      return Array.isArray(result?.tests) ? result : null;
+    } catch {
+      return null;
+    }
+  };
+
   try {
-    if (token.isCancellationRequested) { run.end(); return; }
-    const raw = await runCommandArgs("sf", args);
-    const parsed = JSON.parse(raw);
-    const result = parsed.result ?? parsed;
-    const tests: Array<Record<string, unknown>> = result?.tests ?? [];
+    if (token.isCancellationRequested) return;
+    let result: any;
+    try {
+      const raw = await runCommandArgs("sf", args, undefined, undefined, false, (waitMinutes + 2) * 60_000, token);
+      result = parseResult(raw);
+    } catch (e: any) {
+      if (e?.cancelled) {
+        items.forEach((i) => run.skipped(i));
+        return;
+      }
+      // `sf apex run test` exits non-zero (100) when any test fails — the JSON is still on stdout.
+      result = parseResult(e?.stdout);
+      if (!result) throw e;
+    }
+    if (!result) throw new Error("Unexpected output from sf apex run test.");
+
+    const tests: Array<Record<string, unknown>> = result.tests ?? [];
+    const classAgg = new Map<string, { failed: string[]; runtime: number; any: boolean }>();
     for (const t of tests) {
-      const fullName = String(t.FullName ?? `${(t.ApexClass as { Name?: string })?.Name ?? ""}.${t.MethodName ?? ""}`);
+      const clsName = String((t.ApexClass as { Name?: string })?.Name ?? "");
+      const fullName = String(t.FullName ?? `${clsName}.${t.MethodName ?? ""}`);
       const outcome = String(t.Outcome ?? "");
       const runtime = Number(t.RunTime ?? 0);
-      const item = byFullName.get(fullName.toLowerCase())
-        ?? byFullName.get(String((t.ApexClass as { Name?: string })?.Name ?? "").toLowerCase());
-      if (!item) continue;
-      if (/pass/i.test(outcome)) {
-        run.passed(item, runtime);
-      } else if (/skip/i.test(outcome)) {
-        run.skipped(item);
-      } else {
-        const msg = new vscode.TestMessage(`${t.Message ?? "Test failed"}\n${t.StackTrace ?? ""}`.trim());
-        run.failed(item, msg, runtime);
+      const failText = `${t.Message ?? "Test failed"}\n${t.StackTrace ?? ""}`.trim();
+      const item = methodItems.get(fullName.toLowerCase());
+      if (item) {
+        if (/pass/i.test(outcome)) run.passed(item, runtime);
+        else if (/skip/i.test(outcome)) run.skipped(item);
+        else run.failed(item, new vscode.TestMessage(failText), runtime);
+        continue;
       }
+      const key = (clsName || fullName.split(".")[0]).toLowerCase();
+      if (!classItems.has(key)) continue;
+      const agg = classAgg.get(key) ?? { failed: [], runtime: 0, any: false };
+      agg.any = true;
+      agg.runtime += runtime;
+      if (!/pass|skip/i.test(outcome)) agg.failed.push(`${fullName}: ${failText}`);
+      classAgg.set(key, agg);
     }
-    const summary = result?.summary ?? {};
+    for (const [key, agg] of classAgg) {
+      const item = classItems.get(key)!;
+      if (agg.failed.length > 0) run.failed(item, new vscode.TestMessage(agg.failed.join("\n\n")), agg.runtime);
+      else run.passed(item, agg.runtime);
+    }
+    const summary = result.summary ?? {};
     run.appendOutput(
       `Apex tests: ${summary.passing ?? "?"} passed, ${summary.failing ?? "?"} failed` +
       (withCoverage && summary.testRunCoverage ? ` · coverage ${summary.testRunCoverage}` : "") + "\r\n"

@@ -56,6 +56,12 @@ export class OperationPanelProvider {
     private static _generation = 0;
     /** Latest known state, painted lazily the first time the panel is actually revealed. */
     private static _pending: { state: PanelState; data: RenderData } | undefined;
+    /** Last live tick of the current run — re-sent when the webview reloads (it is not retained while hidden). */
+    private static _lastLiveStatus: DeployLiveStatus | undefined;
+    /** Releases the running operation's status bar item + safety timer; called when a newer run supersedes it. */
+    private static _releaseActive: (() => void) | undefined;
+    /** An operation nobody finalizes (caller bug / crash) must not keep a status bar item forever. */
+    private static readonly MAX_OPERATION_MS = 3 * 60 * 60 * 1000;
 
     /** Reveal the panel — creating it on first use — painted with the latest known state. No-op if no operation has run yet this session. */
     public static revealCurrent(): void {
@@ -72,14 +78,25 @@ export class OperationPanelProvider {
                 OperationPanelProvider.viewType,
                 operationTitle || "Operation",
                 { viewColumn: vscode.ViewColumn.Active, preserveFocus: true },
-                { enableScripts: true, retainContextWhenHidden: true }
+                // Not retained while hidden: the page re-renders from `_pending` on reload and asks for
+                // the latest live tick via 'ready', so a background tab costs no renderer process.
+                { enableScripts: true }
             );
-            OperationPanelProvider._panel.onDidDispose(() => {
+            const panel = OperationPanelProvider._panel;
+            const subs: vscode.Disposable[] = [];
+            panel.onDidDispose(() => {
                 OperationPanelProvider._panel = undefined;
                 OperationPanelProvider._onRetry = undefined;
+                subs.forEach((d) => d.dispose());
+                subs.length = 0;
             });
-            OperationPanelProvider._panel.webview.onDidReceiveMessage((msg: { command: string; [k: string]: unknown }) => {
-                if (msg.command === "openFile") {
+            subs.push(panel.webview.onDidReceiveMessage((msg: { command: string; [k: string]: unknown }) => {
+                if (msg?.command === "ready") {
+                    const live = OperationPanelProvider._lastLiveStatus;
+                    if (live && OperationPanelProvider._pending?.state === "live") {
+                        void panel.webview.postMessage({ command: "liveStatus", status: live });
+                    }
+                } else if (msg.command === "openFile") {
                     void OperationPanelProvider.openFile(
                         typeof msg.file === "string" ? msg.file : undefined,
                         typeof msg.line === "number" ? msg.line : undefined,
@@ -93,7 +110,7 @@ export class OperationPanelProvider {
                     OperationPanelProvider._panel?.dispose(); // the push reopens this panel if it fails again
                     retry?.();
                 }
-            });
+            }));
         }
         return OperationPanelProvider._panel;
     }
@@ -105,11 +122,16 @@ export class OperationPanelProvider {
 
     /** Track a fresh "live" operation and return a handle to drive it. Does NOT open the panel. */
     public static beginOperation(operation: string, org?: string): OperationHandle {
+        // A newer run supersedes the previous one: release its status bar item even if it never finished.
+        OperationPanelProvider._releaseActive?.();
         const myGeneration = ++OperationPanelProvider._generation;
         OperationPanelProvider._onRetry = undefined;
+        OperationPanelProvider._lastLiveStatus = undefined;
         const startTime = Date.now();
         const base: RenderData = { operation, org, startTime };
         OperationPanelProvider._pending = { state: "live", data: base };
+        // An already-open panel would otherwise keep showing the previous result while this one runs.
+        if (OperationPanelProvider._panel) OperationPanelProvider.paint(OperationPanelProvider._panel, "live", base);
 
         const isCurrent = () => myGeneration === OperationPanelProvider._generation;
 
@@ -121,15 +143,24 @@ export class OperationPanelProvider {
         statusBarItem.tooltip = `${operation} running — click to view live progress`;
         statusBarItem.command = REVEAL_OPERATION_PANEL_COMMAND;
         statusBarItem.show();
+        let safetyTimer: ReturnType<typeof setTimeout> | undefined;
         const disposeStatusBar = () => {
+            if (safetyTimer) {
+                clearTimeout(safetyTimer);
+                safetyTimer = undefined;
+            }
+            if (OperationPanelProvider._releaseActive === disposeStatusBar) OperationPanelProvider._releaseActive = undefined;
             if (statusBarDisposed) return;
             statusBarDisposed = true;
             statusBarItem.dispose();
         };
+        safetyTimer = setTimeout(disposeStatusBar, OperationPanelProvider.MAX_OPERATION_MS);
+        OperationPanelProvider._releaseActive = disposeStatusBar;
 
         return {
             updateLiveStatus(s: DeployLiveStatus): void {
                 if (!isCurrent()) return;
+                OperationPanelProvider._lastLiveStatus = s;
                 // Only an already-open panel needs the tick — nothing to patch if the user never opened it.
                 if (OperationPanelProvider._panel) {
                     OperationPanelProvider._panel.webview.postMessage({ command: "liveStatus", status: s });
@@ -138,6 +169,7 @@ export class OperationPanelProvider {
             succeed(summary: string, apiResult?: ApiDeployResult): void {
                 disposeStatusBar();
                 if (!isCurrent()) return;
+                OperationPanelProvider._lastLiveStatus = undefined;
                 const data: RenderData = { ...base, summary, apiResult };
                 OperationPanelProvider._pending = { state: "succeeded", data };
                 if (OperationPanelProvider._panel) OperationPanelProvider.paint(OperationPanelProvider._panel, "succeeded", data);
@@ -146,6 +178,7 @@ export class OperationPanelProvider {
                 disposeStatusBar();
                 if (!isCurrent()) return;
                 OperationPanelProvider._onRetry = onRetry;
+                OperationPanelProvider._lastLiveStatus = undefined;
                 const data: RenderData = { ...base, report, canRetry: !!onRetry };
                 OperationPanelProvider._pending = { state: "failed", data };
                 if (OperationPanelProvider._panel) OperationPanelProvider.paint(OperationPanelProvider._panel, "failed", data);
@@ -160,6 +193,16 @@ export class OperationPanelProvider {
                 // once a newer beginOperation() bumps the generation.
             }
         };
+    }
+
+    /** Release everything (panel, running status bar item, retained results). Safe to call repeatedly — e.g. from deactivate. */
+    public static disposeAll(): void {
+        OperationPanelProvider._releaseActive?.();
+        OperationPanelProvider._generation++;
+        OperationPanelProvider._panel?.dispose();
+        OperationPanelProvider._pending = undefined;
+        OperationPanelProvider._lastLiveStatus = undefined;
+        OperationPanelProvider._onRetry = undefined;
     }
 
     /** Back-compat entry point for existing failure-only callers: begin + immediately fail. Does NOT open the panel — call revealCurrent() to show it. */
@@ -198,7 +241,7 @@ export class OperationPanelProvider {
         const { operation, org, startTime, report, canRetry, summary, apiResult } = data;
 
         const dotClass = state === "live" ? "live" : state === "succeeded" ? "ok" : "err";
-        const title = state === "failed" ? report!.title : state === "succeeded" ? `${esc(operation)} succeeded` : esc(operation);
+        const title = state === "failed" ? esc(report?.title || "Error") : state === "succeeded" ? `${esc(operation)} succeeded` : esc(operation);
 
         const issueCards = (report?.issues ?? [])
             .map((it, idx) => {
@@ -438,7 +481,8 @@ export class OperationPanelProvider {
         statsEl.classList.add("shown");
         valTests.textContent = (s.testsCompleted + s.testErrors) + "/" + s.testsTotal + (s.testErrors > 0 ? " (" + s.testErrors + " failed)" : "");
       }
-    });`
+    });
+    vscode.postMessage({ command: "ready" });`
             : ""
     }
   </script>

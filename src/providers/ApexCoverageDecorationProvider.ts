@@ -12,16 +12,22 @@ const BADGE_STATE_KEY = "asfx.apexCoverage.showBadge";
  * filename tint, since VS Code's decoration color applies to the whole label.
  * Refreshes whenever the coverage store reloads.
  */
-export class ApexCoverageDecorationProvider implements vscode.FileDecorationProvider {
+export class ApexCoverageDecorationProvider implements vscode.FileDecorationProvider, vscode.Disposable {
   private readonly _onDidChange = new vscode.EventEmitter<vscode.Uri[] | undefined>();
   readonly onDidChangeFileDecorations = this._onDidChange.event;
   private showBadge: boolean;
+  private readonly _storeSubscription: vscode.Disposable;
 
   constructor(private readonly context: vscode.ExtensionContext) {
     this.showBadge = context.globalState.get<boolean>(BADGE_STATE_KEY, true);
     // Fire `undefined` to invalidate ALL decorations — firing a specific URI list is
     // treated as "these changed" and VS Code can skip repainting already-rendered badges.
-    apexCoverage.onDidChange(() => this._onDidChange.fire(undefined));
+    this._storeSubscription = apexCoverage.onDidChange(() => this._onDidChange.fire(undefined));
+  }
+
+  dispose(): void {
+    this._storeSubscription.dispose();
+    this._onDidChange.dispose();
   }
 
   /** Show/hide the numeric badge (hover coverage is unaffected). Persisted. */

@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { apexCoverage, clearApexTestResults, COVERAGE_THRESHOLD, CoverageRecord } from "../utils/apexCoverageService";
 import { categorizeError, Telemetry } from "../utils/telemetry";
+import { getNonce } from "../utils/htmlUtils";
 
 /**
  * Structured, refreshable Apex coverage dashboard: org-wide coverage, a worst-first
@@ -10,6 +11,10 @@ import { categorizeError, Telemetry } from "../utils/telemetry";
 export class CoveragePanelProvider {
   public static readonly viewType = "adure-sfx-toolkit.coveragePanel";
   private static _panel: vscode.WebviewPanel | undefined;
+  /** True while load() is querying, so the store's onDidChange doesn't trigger a duplicate repaint. */
+  private static _loading = false;
+  /** First 'ready' after creating the panel queries the org; later ones (re-show after hide) repaint from the store. */
+  private static _initialLoadPending = false;
 
   public static async show(): Promise<void> {
     const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
@@ -22,9 +27,18 @@ export class CoveragePanelProvider {
       enableScripts: true
     });
     CoveragePanelProvider._panel = panel;
+    CoveragePanelProvider._initialLoadPending = true;
     panel.webview.html = this.getHtml();
     const listener = panel.webview.onDidReceiveMessage(async (msg: { command: string; name?: string }) => {
-      if (msg.command === "refresh") await this.load(true);
+      if (msg?.command === "ready") {
+        // Webview (re)loaded. Not retained while hidden, so repaint from the shared store.
+        if (CoveragePanelProvider._initialLoadPending || apexCoverage.loadedAt === null) {
+          CoveragePanelProvider._initialLoadPending = false;
+          await this.load();
+        } else {
+          this.postData(panel);
+        }
+      } else if (msg.command === "refresh") await this.load(true);
       else if (msg.command === "open" && msg.name) await this.openApexFile(msg.name);
       else if (msg.command === "clear") await this.clear();
     });
@@ -33,12 +47,41 @@ export class CoveragePanelProvider {
       const stale = Date.now() - (apexCoverage.loadedAt ?? 0) > 4000;
       if (e.webviewPanel.active && stale) void this.load();
     });
+    // Keep in sync with refreshes triggered elsewhere (test runs, Explorer badges, file watcher).
+    const storeChanged = apexCoverage.onDidChange(() => {
+      if (CoveragePanelProvider._loading || CoveragePanelProvider._panel !== panel) return;
+      this.postData(panel);
+    });
     panel.onDidDispose(() => {
       listener.dispose();
       viewState.dispose();
+      storeChanged.dispose();
       CoveragePanelProvider._panel = undefined;
     });
-    await this.load();
+  }
+
+  /** Paint the panel from the shared store without querying the org. */
+  private static postData(panel: vscode.WebviewPanel): void {
+    if (apexCoverage.loadedAt === null || apexCoverage.all().length === 0) {
+      void panel.webview.postMessage({
+        command: "empty",
+        message: "No Apex coverage found. Run your Apex tests first — coverage is only available after a test run."
+      });
+      return;
+    }
+    void panel.webview.postMessage({
+      command: "data",
+      overall: apexCoverage.overall(),
+      loadedAt: apexCoverage.loadedAt,
+      threshold: COVERAGE_THRESHOLD,
+      records: apexCoverage.all().map((r: CoverageRecord) => ({
+        name: r.name,
+        percent: r.percent,
+        covered: r.covered,
+        uncovered: r.uncovered,
+        total: r.total
+      }))
+    });
   }
 
   /** Refresh the shared store and repaint the panel if open. Used by the standalone refresh command too. */
@@ -57,30 +100,15 @@ export class CoveragePanelProvider {
   private static async load(userInitiated = false): Promise<void> {
     const panel = CoveragePanelProvider._panel;
     if (!panel) return;
+    if (CoveragePanelProvider._loading) return; // a query is already running; its result repaints the panel
+    CoveragePanelProvider._loading = true;
     panel.webview.postMessage({ command: "loading" });
     try {
-      const found = await apexCoverage.refresh();
-      if (!found) {
-        panel.webview.postMessage({
-          command: "empty",
-          message: "No Apex coverage found. Run your Apex tests first — coverage is only available after a test run."
-        });
-        return;
-      }
-      panel.webview.postMessage({
-        command: "data",
-        overall: apexCoverage.overall(),
-        loadedAt: apexCoverage.loadedAt,
-        threshold: COVERAGE_THRESHOLD,
-        records: apexCoverage.all().map((r: CoverageRecord) => ({
-          name: r.name,
-          percent: r.percent,
-          covered: r.covered,
-          uncovered: r.uncovered,
-          total: r.total
-        }))
-      });
+      await apexCoverage.refresh();
+      if (CoveragePanelProvider._panel !== panel) return;
+      this.postData(panel);
     } catch (error) {
+      if (CoveragePanelProvider._panel !== panel) return;
       panel.webview.postMessage({
         command: "empty",
         message:
@@ -88,6 +116,11 @@ export class CoveragePanelProvider {
           categorizeError(error) +
           ")"
       });
+    } finally {
+      CoveragePanelProvider._loading = false;
+      // Panel was closed and reopened while we were querying — paint the new one too.
+      const current = CoveragePanelProvider._panel;
+      if (current && current !== panel) this.postData(current);
     }
     if (userInitiated) Telemetry.event("apexCoverage", { status: "panel-refresh" });
   }
@@ -117,11 +150,12 @@ export class CoveragePanelProvider {
   }
 
   private static getHtml(): string {
+    const nonce = getNonce();
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
     <style>
         * { box-sizing: border-box; }
         body { font-family: var(--vscode-font-family, system-ui, sans-serif); font-size: 13px; color: var(--vscode-foreground); background: var(--vscode-editor-background); margin: 0; padding: 16px; }
@@ -165,7 +199,7 @@ export class CoveragePanelProvider {
         <button id="clear">Clear results</button>
     </div>
     <div id="content"><div class="status">Loading…</div></div>
-    <script>
+    <script nonce="${nonce}">
         const vscode = acquireVsCodeApi();
         const summaryEl = document.getElementById('summary');
         const contentEl = document.getElementById('content');
@@ -217,13 +251,20 @@ export class CoveragePanelProvider {
                     '</tr>'
                 ).join('') +
                 '</tbody></table>';
-            contentEl.querySelectorAll('th[data-sort]').forEach(th => th.addEventListener('click', () => {
-                const k = th.getAttribute('data-sort');
-                if (sortKey === k) sortDir = -sortDir; else { sortKey = k; sortDir = (k === 'name') ? 1 : 1; }
-                renderTable();
-            }));
-            contentEl.querySelectorAll('tr.row').forEach(tr => tr.addEventListener('click', () => vscode.postMessage({ command: 'open', name: tr.getAttribute('data-name') })));
         }
+
+        // Delegated: one listener survives every re-render (no per-row handlers on large orgs).
+        contentEl.addEventListener('click', (e) => {
+            const th = e.target.closest('th[data-sort]');
+            if (th) {
+                const k = th.getAttribute('data-sort');
+                if (sortKey === k) sortDir = -sortDir; else { sortKey = k; sortDir = 1; }
+                renderTable();
+                return;
+            }
+            const tr = e.target.closest('tr.row');
+            if (tr) vscode.postMessage({ command: 'open', name: tr.getAttribute('data-name') });
+        });
 
         searchEl.addEventListener('input', renderTable);
         belowOnly.addEventListener('change', renderTable);
@@ -242,6 +283,7 @@ export class CoveragePanelProvider {
                 renderTable();
             }
         });
+        vscode.postMessage({ command: 'ready' });
     </script>
 </body>
 </html>`;

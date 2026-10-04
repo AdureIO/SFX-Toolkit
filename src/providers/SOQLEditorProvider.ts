@@ -57,8 +57,23 @@ export class SOQLEditorProvider {
     return { auth, result };
   }
 
+  /**
+   * Singleton panel. The Monaco buffer bridge, its org override and the editable-fields cache are
+   * shared statics, so a single panel keeps them consistent; everything is released on dispose.
+   */
+  private static _panel: vscode.WebviewPanel | undefined;
+
   public static async show(extensionUri: vscode.Uri, initialQuery?: string, initialOrg?: string) {
     const column = vscode.window.activeTextEditor ? vscode.window.activeTextEditor.viewColumn : undefined;
+
+    const existing = SOQLEditorProvider._panel;
+    if (existing) {
+      existing.reveal(column);
+      if (initialQuery || initialOrg) {
+        void existing.webview.postMessage({ command: "setInitial", query: initialQuery || "", org: initialOrg || "" });
+      }
+      return;
+    }
 
     const panel = vscode.window.createWebviewPanel(
       SOQLEditorProvider.viewType,
@@ -95,6 +110,9 @@ export class SOQLEditorProvider {
 
   /** Wire HTML + message handling onto a (new or restored) panel. */
   private static async attach(panel: vscode.WebviewPanel, extensionUri: vscode.Uri, initialQuery?: string, initialOrg?: string) {
+    // A restored panel arriving while another is open: keep just one (they share the buffer bridge).
+    if (SOQLEditorProvider._panel && SOQLEditorProvider._panel !== panel) SOQLEditorProvider._panel.dispose();
+    SOQLEditorProvider._panel = panel;
     const { lastQuery, history } = await SOQLEditorProvider.loadSoqlState();
     const saved = SOQLEditorProvider.loadSavedQueries();
     panel.webview.html = this._getHtmlForWebview(panel.webview, extensionUri, initialQuery || lastQuery, history, saved, initialOrg);
@@ -234,12 +252,20 @@ export class SOQLEditorProvider {
     );
 
     // Realign the org selector when the default org changes (extension command or external).
-    const defaultOrgSub = onDidChangeDefaultOrg(() => { void SOQLEditorProvider.sendOrgList(panel, true); });
+    const defaultOrgSub = onDidChangeDefaultOrg(() => {
+      // "__default__" now points at a different org.
+      delete SOQLEditorProvider.editableFieldsCache["__default__"];
+      void SOQLEditorProvider.sendOrgList(panel, true);
+    });
 
     panel.onDidDispose(() => {
       messageListener.dispose();
       defaultOrgSub.dispose();
-      SOQLEditorProvider.editableFieldsCache = {};
+      if (SOQLEditorProvider._panel === panel) {
+        SOQLEditorProvider._panel = undefined;
+        // Only the singleton's close releases shared caches.
+        SOQLEditorProvider.editableFieldsCache = {};
+      }
     });
   }
 
@@ -468,6 +494,11 @@ export class SOQLEditorProvider {
   ): Promise<Record<string, Record<string, boolean>>> {
     const orgKey = targetOrg || "__default__";
     if (!SOQLEditorProvider.editableFieldsCache[orgKey]) {
+      // Bound memory: keep at most a handful of orgs' maps.
+      const keys = Object.keys(SOQLEditorProvider.editableFieldsCache);
+      if (keys.length >= 5) delete SOQLEditorProvider.editableFieldsCache[keys[0]];
+      SOQLEditorProvider.editableFieldsCache[orgKey] = {};
+    } else if (Object.keys(SOQLEditorProvider.editableFieldsCache[orgKey]).length > 300) {
       SOQLEditorProvider.editableFieldsCache[orgKey] = {};
     }
     const orgCache = SOQLEditorProvider.editableFieldsCache[orgKey];
@@ -516,19 +547,19 @@ export class SOQLEditorProvider {
     const toWebview = (orgs: { username: string; label: string }[]) =>
       panel.webview.postMessage({ command: "orgList", orgs, defaultChanged });
 
+    // Shared cache first (no CLI spawn). On a default-org change the notifier has already
+    // invalidated + refreshed it, so a cached list here is the fresh one.
     const cached = getCachedOrgList();
-    if (cached && !defaultChanged) {
-      // On a default-org change skip the (now stale) cached list; wait for the fresh one.
+    if (cached) {
       toWebview(cached);
+      return;
     }
 
     try {
       const fresh = await refreshOrgListCache();
       toWebview(fresh);
     } catch (e: any) {
-      if (!cached) {
-        panel.webview.postMessage({ command: "orgList", orgs: [] });
-      }
+      panel.webview.postMessage({ command: "orgList", orgs: [] });
     }
   }
 
@@ -2132,6 +2163,19 @@ export class SOQLEditorProvider {
                 }
                 case 'historyUpdated':
                     setHistoryDropdown(message.history || []);
+                    break;
+                case 'setInitial':
+                    // Re-invoked on the open singleton (e.g. Quick SOQL from a selection).
+                    if (message.query) queryInput.value = message.query;
+                    if (message.org) {
+                        if (Array.prototype.some.call(orgSelect.options, o => o.value === message.org)) {
+                            orgSelect.value = message.org;
+                            orgSelect.dispatchEvent(new Event('change'));
+                        } else {
+                            initialOrgPreset = message.org;
+                            vscode.postMessage({ command: 'getOrgList' });
+                        }
+                    }
                     break;
                 case 'error': {
                     errorMsg.textContent = message.text;
