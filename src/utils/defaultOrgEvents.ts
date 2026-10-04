@@ -4,6 +4,7 @@ import { setKnownTargetOrg, invalidateOrgListCache, refreshOrgListCache } from "
 import { AuthInfo } from "./authInfo";
 import { OrgMetadataCache } from "./orgMetadataCache";
 import { outputChannel } from "./outputChannel";
+import { isSalesforceProject } from "./projectUtils";
 
 /**
  * Single source of truth for "the default (target) org changed" — whether via this
@@ -40,26 +41,57 @@ export async function notifyDefaultOrgChanged(username?: string | null): Promise
 	emitter.fire(next);
 }
 
-/** Watch the SF config files so an external default-org switch is picked up live. */
-export function initDefaultOrgWatcher(context: vscode.ExtensionContext): void {
-	lastKnown = resolveDefaultTargetOrgUsernameSync() ?? null;
-	context.subscriptions.push(emitter);
+/** Live watchers on the current project's SF config files, plus their debounce timer. */
+let watchers: vscode.Disposable[] = [];
+let debounceTimer: ReturnType<typeof setTimeout> | undefined;
 
+function disposeWatchers(): void {
+	if (debounceTimer) {
+		clearTimeout(debounceTimer);
+		debounceTimer = undefined;
+	}
+	for (const w of watchers) {
+		try { w.dispose(); } catch { /* ignore */ }
+	}
+	watchers = [];
+}
+
+/** (Re)create the config-file watchers for the current first workspace folder. */
+function createWatchers(): void {
+	disposeWatchers();
 	const folder = vscode.workspace.workspaceFolders?.[0];
 	if (!folder) return;
 
-	let timer: ReturnType<typeof setTimeout> | undefined;
 	const schedule = () => {
-		if (timer) clearTimeout(timer);
+		if (debounceTimer) clearTimeout(debounceTimer);
 		// Config writes can be multi-step; debounce so we read a settled file.
-		timer = setTimeout(() => { void notifyDefaultOrgChanged(); }, 250);
+		debounceTimer = setTimeout(() => {
+			debounceTimer = undefined;
+			void notifyDefaultOrgChanged();
+		}, 250);
 	};
 
 	for (const pattern of [".sfdx/sfdx-config.json", ".sf/config.json"]) {
 		const w = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(folder, pattern));
-		w.onDidCreate(schedule);
-		w.onDidChange(schedule);
-		w.onDidDelete(schedule);
-		context.subscriptions.push(w);
+		watchers.push(w, w.onDidCreate(schedule), w.onDidChange(schedule), w.onDidDelete(schedule));
 	}
+}
+
+/** Watch the SF config files so an external default-org switch is picked up live. */
+export function initDefaultOrgWatcher(context: vscode.ExtensionContext): void {
+	lastKnown = resolveDefaultTargetOrgUsernameSync() ?? null;
+	context.subscriptions.push(emitter, new vscode.Disposable(disposeWatchers));
+	createWatchers();
+}
+
+/**
+ * Re-root after a workspace-folder change (project switch in the same window):
+ * watch the new project's config files and re-resolve its default org, notifying
+ * listeners when it differs from the previous project's.
+ */
+export function resetDefaultOrgWatcher(): void {
+	createWatchers();
+	// Outside an SFDX project there is no default org to resolve (and no CLI to spawn).
+	if (isSalesforceProject()) void notifyDefaultOrgChanged();
+	else lastKnown = undefined;
 }

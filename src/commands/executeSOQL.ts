@@ -19,19 +19,16 @@ export async function executeSOQL() {
     query = input;
   }
 
-  // Determine output format. JSON? Table?
-  // Let's do a quick pick for format if we want to be fancy, or just default to human readable table.
-  // 'sf data query' default output is table.
-
-  vscode.window.withProgress(
+  // 'sf data query' default output is a human-readable table.
+  await vscode.window.withProgress(
     {
       location: vscode.ProgressLocation.Notification,
       title: "Executing SOQL Query...",
       cancellable: true
     },
-    async () => {
+    async (_progress, token) => {
       try {
-        outputChannel.clear();
+        // Don't clear the shared log channel — it holds the extension's diagnostic history.
         Logger.info(`Running SOQL query: ${query}`);
 
         const result = await runCommandArgs(
@@ -39,7 +36,9 @@ export async function executeSOQL() {
           ["data", "query", "--query", query],
           undefined,
           (chunk) => outputChannel.append(chunk),
-          true
+          true,
+          undefined,
+          token
         );
 
         Logger.info("SOQL query executed successfully.");
@@ -53,7 +52,7 @@ export async function executeSOQL() {
 
         vscode.window.showInformationMessage("SOQL query executed. Results opened in a new document.");
       } catch (e: any) {
-        if (e.cancelled) return;
+        if (e?.cancelled || token.isCancellationRequested) return;
         Telemetry.event("soqlExecute", { success: "0" });
         reportError({ operation: "SOQL query", error: e });
       }

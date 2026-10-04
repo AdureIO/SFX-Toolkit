@@ -26,6 +26,18 @@ export const DESCRIBE_TTL_MS = 10 * 60 * 1000;
  *  or misspelled name — yet a genuinely new object appears after it expires. */
 const NEGATIVE_TTL_MS = 60 * 1000;
 
+/**
+ * Memory bounds. A raw describe of a wide object can be several hundred KB of parsed
+ * JSON, so the store is an LRU per org and keeps only a handful of orgs. Pruning is
+ * lazy (on access) — no background timers.
+ */
+/** Max raw describes kept per org (least-recently-used evicted first). */
+export const MAX_DESCRIBES_PER_ORG = 300;
+/** Max orgs with cached describes (least-recently-used org evicted first). */
+export const MAX_ORGS = 5;
+/** Non-default orgs untouched for this long are dropped on the next access. */
+export const ORG_IDLE_MS = 30 * 60 * 1000;
+
 function orgKey(org: string | null): string {
 	return org === null || org === "" ? CACHE_KEY_DEFAULT : org;
 }
@@ -38,15 +50,53 @@ interface RawEntry {
 class DescribeStoreImpl {
 	private cache = new Map<string, Map<string, RawEntry>>();
 	private locks = new Map<string, Promise<any | null>>();
+	/** orgKey → last access (ms), for lazy idle-org pruning. */
+	private orgLastUsed = new Map<string, number>();
 
 	private orgMap(org: string | null): Map<string, RawEntry> {
 		const key = orgKey(org);
+		const now = Date.now();
+		this.pruneOrgs(now, key);
 		let m = this.cache.get(key);
 		if (!m) {
 			m = new Map();
-			this.cache.set(key, m);
+		} else {
+			// Re-insert to mark this org most-recently-used.
+			this.cache.delete(key);
 		}
+		this.cache.set(key, m);
+		this.orgLastUsed.set(key, now);
 		return m;
+	}
+
+	/** Lazily drop idle non-default orgs and enforce the org cap (excluding `current`). */
+	private pruneOrgs(now: number, current: string): void {
+		for (const [k, last] of this.orgLastUsed) {
+			if (k !== current && k !== CACHE_KEY_DEFAULT && now - last > ORG_IDLE_MS) this.dropOrg(k);
+		}
+		while (this.cache.size >= MAX_ORGS && !this.cache.has(current)) {
+			const oldest = this.cache.keys().next().value;
+			if (oldest === undefined) break;
+			this.dropOrg(oldest);
+		}
+	}
+
+	private dropOrg(key: string): void {
+		this.cache.delete(key);
+		this.orgLastUsed.delete(key);
+		for (const lk of [...this.locks.keys()]) {
+			if (lk.startsWith(`${key}|`)) this.locks.delete(lk);
+		}
+	}
+
+	private store(map: Map<string, RawEntry>, sobject: string, entry: RawEntry): void {
+		map.delete(sobject);
+		map.set(sobject, entry);
+		while (map.size > MAX_DESCRIBES_PER_ORG) {
+			const oldest = map.keys().next().value;
+			if (oldest === undefined) break;
+			map.delete(oldest);
+		}
 	}
 
 	/**
@@ -62,23 +112,36 @@ class DescribeStoreImpl {
 			// Hits live for ttlMs (~10 min); misses for a shorter window so a genuinely
 			// new / correctly-typed name resolves soon after a typo.
 			const effectiveTtl = hit.raw === null ? NEGATIVE_TTL_MS : ttlMs;
-			if (Date.now() - hit.fetchedAt < effectiveTtl) return hit.raw;
+			if (Date.now() - hit.fetchedAt < effectiveTtl) {
+				// LRU touch.
+				map.delete(sobject);
+				map.set(sobject, hit);
+				return hit.raw;
+			}
+			map.delete(sobject); // expired — release it now rather than at eviction
 		}
 
 		const lockKey = `${orgKey(org)}|${sobject}`;
 		const inflight = this.locks.get(lockKey);
 		if (inflight) return inflight;
 
-		const promise = this.fetch(org, sobject)
+		// Only the current lock owner may write: if the org/sobject was invalidated while
+		// this request was in flight its lock is gone, and a stale payload must not be cached.
+		const owns = () => this.locks.get(lockKey) === promise;
+		const promise: Promise<any | null> = this.fetch(org, sobject)
 			.then((raw) => {
-				// Cache the result either way (null = negative cache) to avoid re-fetching.
-				map.set(sobject, { raw: raw ?? null, fetchedAt: Date.now() });
-				this.locks.delete(lockKey);
+				if (owns()) {
+					// Cache the result either way (null = negative cache) to avoid re-fetching.
+					this.store(map, sobject, { raw: raw ?? null, fetchedAt: Date.now() });
+					this.locks.delete(lockKey);
+				}
 				return raw;
 			})
 			.catch((e: any) => {
-				map.set(sobject, { raw: null, fetchedAt: Date.now() });
-				this.locks.delete(lockKey);
+				if (owns()) {
+					this.store(map, sobject, { raw: null, fetchedAt: Date.now() });
+					this.locks.delete(lockKey);
+				}
 				// A 404 just means "that name isn't an SObject" — an expected negative result
 				// (Apex class, generic, system type). Negative-cached; not worth logging. Only
 				// surface genuine failures (network / auth / 5xx).
@@ -94,7 +157,7 @@ class DescribeStoreImpl {
 
 	/** Whether a fresh, successful raw describe is already cached (no network). */
 	hasFresh(org: string | null, sobject: string, ttlMs: number = DESCRIBE_TTL_MS): boolean {
-		const hit = this.orgMap(org).get(sobject);
+		const hit = this.cache.get(orgKey(org))?.get(sobject);
 		return !!hit && hit.raw !== null && Date.now() - hit.fetchedAt < ttlMs;
 	}
 
@@ -107,21 +170,23 @@ class DescribeStoreImpl {
 	}
 
 	invalidate(org: string | null): void {
-		const key = orgKey(org);
-		this.cache.delete(key);
-		for (const lk of [...this.locks.keys()]) {
-			if (lk.startsWith(`${key}|`)) this.locks.delete(lk);
-		}
+		this.dropOrg(orgKey(org));
 	}
 
 	invalidateSObject(org: string | null, sobject: string): void {
-		this.orgMap(org).delete(sobject);
+		this.cache.get(orgKey(org))?.delete(sobject);
 		this.locks.delete(`${orgKey(org)}|${sobject}`);
 	}
 
 	invalidateAll(): void {
 		this.cache.clear();
 		this.locks.clear();
+		this.orgLastUsed.clear();
+	}
+
+	/** Release everything (deactivate / workspace switch). Holds no timers. */
+	disposeAll(): void {
+		this.invalidateAll();
 	}
 }
 

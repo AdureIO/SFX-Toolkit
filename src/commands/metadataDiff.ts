@@ -6,6 +6,37 @@ import * as os from "os";
 import { escapeShellArg, runCommand } from "../utils/commandRunner";
 import { Logger } from "../utils/outputChannel";
 
+/** Org-side copies for the diff editor live here; swept so they never accumulate. */
+const DIFF_TMP_DIR = path.join(os.tmpdir(), "asfx-metadata-diff");
+const DIFF_TMP_MAX_AGE_MS = 60 * 60 * 1000;
+
+/** Remove org copies older than an hour (left behind by a crashed/closed window). */
+function sweepOldDiffFiles(): void {
+  try {
+    const now = Date.now();
+    for (const name of fs.readdirSync(DIFF_TMP_DIR)) {
+      const f = path.join(DIFF_TMP_DIR, name);
+      try {
+        if (now - fs.statSync(f).mtimeMs > DIFF_TMP_MAX_AGE_MS) fs.unlinkSync(f);
+      } catch {
+        /* ignore */
+      }
+    }
+  } catch {
+    /* dir doesn't exist yet */
+  }
+}
+
+/** Delete the temp org copy as soon as its diff document is closed. */
+function deleteWhenClosed(tmpFile: string): void {
+  const sub = vscode.workspace.onDidCloseTextDocument((doc) => {
+    if (doc.uri.scheme === "file" && doc.uri.fsPath === tmpFile) {
+      sub.dispose();
+      fs.promises.unlink(tmpFile).catch(() => undefined);
+    }
+  });
+}
+
 export async function metadataDiff() {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
@@ -54,8 +85,11 @@ export async function metadataDiff() {
           return;
         }
 
-        const tmpFile = path.join(os.tmpdir(), `org-${Date.now()}-${fileName}`);
+        sweepOldDiffFiles();
+        fs.mkdirSync(DIFF_TMP_DIR, { recursive: true });
+        const tmpFile = path.join(DIFF_TMP_DIR, `org-${Date.now()}-${fileName}`);
         fs.writeFileSync(tmpFile, orgContent, "utf8");
+        deleteWhenClosed(tmpFile);
 
         await vscode.commands.executeCommand(
           "vscode.diff",

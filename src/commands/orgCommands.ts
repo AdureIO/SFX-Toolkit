@@ -1,10 +1,14 @@
 import * as vscode from "vscode";
 import { reportError } from "../utils/reportError";
-import { runCommand } from "../utils/commandRunner";
+import { runCommandArgs } from "../utils/commandRunner";
+import { getOrgListResult } from "../utils/orgListCache";
 import { OrgItem, orgTreeProvider } from "../providers/OrgTreeProvider";
 import { AuthInfo } from "../utils/authInfo";
 import { Logger } from "../utils/outputChannel";
 import { notifyDefaultOrgChanged } from "../utils/defaultOrgEvents";
+
+/** Scratch org creation regularly exceeds the default 5-minute command timeout. */
+const SCRATCH_CREATE_TIMEOUT_MS = 30 * 60 * 1000;
 
 export async function openOrg(item: OrgItem) {
   if (!item.orgData || !item.orgData.username) return;
@@ -17,7 +21,7 @@ export async function openOrg(item: OrgItem) {
     },
     async (_progress, token) => {
       try {
-        await runCommand(`sf org open -o ${item.orgData.username}`, undefined, undefined, true, token);
+        await runCommandArgs("sf", ["org", "open", "-o", item.orgData.username], undefined, undefined, true, undefined, token);
       } catch (e: any) {
         if (e.cancelled) return;
         reportError({ operation: "Open org", error: e });
@@ -37,7 +41,7 @@ export async function setAsDefault(item: OrgItem) {
     },
     async (_progress, token) => {
       try {
-        await runCommand(`sf config set target-org=${item.orgData.username}`, undefined, undefined, true, token);
+        await runCommandArgs("sf", ["config", "set", `target-org=${item.orgData.username}`], undefined, undefined, true, undefined, token);
         // Invalidate default-org caches, refresh the org list, and notify listeners
         // (the workbenches realign their selected org). No-op if already this default.
         await notifyDefaultOrgChanged(item.orgData.username);
@@ -63,7 +67,7 @@ export async function setAsDefaultDevHub(item: OrgItem) {
     },
     async (_progress, token) => {
       try {
-        await runCommand(`sf config set target-dev-hub=${item.orgData.username}`, undefined, undefined, true, token);
+        await runCommandArgs("sf", ["config", "set", `target-dev-hub=${item.orgData.username}`], undefined, undefined, true, undefined, token);
         AuthInfo.clearCache();
         vscode.window.showInformationMessage(`Set ${item.label} as default Dev Hub.`);
         orgTreeProvider.refresh();
@@ -87,9 +91,9 @@ export async function deleteOrg(item: OrgItem) {
   // Check if scratch or regular
   const isScratch = item.contextValue === "org-scratch";
   const action = isScratch ? "Deleting Scratch Org" : "Logging out from Org";
-  const cmd = isScratch
-    ? `sf org delete scratch -o ${item.orgData.username} -p`
-    : `sf org logout -o ${item.orgData.username} -p`;
+  const args = isScratch
+    ? ["org", "delete", "scratch", "-o", item.orgData.username, "-p"]
+    : ["org", "logout", "-o", item.orgData.username, "-p"];
 
   const confirm = await vscode.window.showWarningMessage(
     `Are you sure you want to ${action.toLowerCase()} "${item.orgData.username}"?`,
@@ -107,7 +111,7 @@ export async function deleteOrg(item: OrgItem) {
     },
     async (_progress, token) => {
       try {
-        await runCommand(cmd, undefined, undefined, true, token);
+        await runCommandArgs("sf", args, undefined, undefined, true, undefined, token);
         AuthInfo.clearCache();
         vscode.window.showInformationMessage(`${action} successful.`);
         orgTreeProvider.refresh();
@@ -130,11 +134,13 @@ export async function generatePassword(item: OrgItem) {
     },
     async (_progress, token) => {
       try {
-        const res = await runCommand(
-          `sf org generate password -o ${item.orgData.username} --json`,
+        const res = await runCommandArgs(
+          "sf",
+          ["org", "generate", "password", "-o", item.orgData.username, "--json"],
           undefined,
           undefined,
           true,
+          undefined,
           token
         );
         const json = JSON.parse(res);
@@ -181,9 +187,9 @@ export async function renameAlias(item: OrgItem) {
     async (_progress, token) => {
       try {
         if (oldAlias && oldAlias !== newAlias) {
-          await runCommand(`sf alias unset ${oldAlias}`, undefined, undefined, true, token);
+          await runCommandArgs("sf", ["alias", "unset", oldAlias], undefined, undefined, true, undefined, token);
         }
-        await runCommand(`sf alias set ${newAlias}=${item.orgData.username}`, undefined, undefined, true, token);
+        await runCommandArgs("sf", ["alias", "set", `${newAlias}=${item.orgData.username}`], undefined, undefined, true, undefined, token);
         orgTreeProvider.refresh();
       } catch (e: any) {
         if (e.cancelled) return;
@@ -230,11 +236,13 @@ export async function connectOrg() {
     },
     async (progress, token) => {
       try {
-        await runCommand(
-          `sf org login web --alias ${alias} --instance-url ${instanceUrl} --set-default`,
+        await runCommandArgs(
+          "sf",
+          ["org", "login", "web", "--alias", alias, "--instance-url", instanceUrl!, "--set-default"],
           undefined,
           undefined,
           true,
+          undefined,
           token
         );
         AuthInfo.clearCache();
@@ -258,12 +266,12 @@ export async function createScratch() {
       {
         location: vscode.ProgressLocation.Notification,
         title: "Fetching Dev Hubs...",
-        cancellable: true
+        cancellable: false
       },
-      async (_progress, token) => {
+      async () => {
         try {
-          const orgsJson = await runCommand("sf org list --json", undefined, undefined, true, token);
-          const orgs = JSON.parse(orgsJson).result;
+          // Shared, deduplicated org list (reuses a fetch from the last minute).
+          const orgs = await getOrgListResult({ maxAgeMs: 60_000 });
           hubs = (orgs.nonScratchOrgs || []).filter((o: any) => o.isDevHub);
         } catch (e: any) {
           if (e.cancelled) throw e;
@@ -339,8 +347,15 @@ export async function createScratch() {
     });
     if (!duration) return;
 
-    // Command Construction
-    const cmd = `sf org create scratch -f "${fileUri.fsPath}" -a ${alias} --duration-days ${duration} -v ${targetDevHub} --set-default`;
+    // Command Construction (argv — alias / orgName / paths are never shell-parsed)
+    const args = [
+      "org", "create", "scratch",
+      "-f", fileUri.fsPath,
+      "-a", alias,
+      "--duration-days", String(parseInt(duration, 10)),
+      "-v", targetDevHub,
+      "--set-default"
+    ];
 
     await vscode.window.withProgress(
       {
@@ -350,7 +365,7 @@ export async function createScratch() {
       },
       async (_progress, token) => {
         try {
-          await runCommand(cmd, undefined, undefined, true, token);
+          await runCommandArgs("sf", args, undefined, undefined, true, SCRATCH_CREATE_TIMEOUT_MS, token);
           vscode.window.showInformationMessage(`Scratch Org ${alias} created successfully.`);
           orgTreeProvider.refresh();
         } catch (e: any) {
@@ -423,11 +438,13 @@ export async function quickScratch() {
       },
       async (_progress, token) => {
         try {
-          await runCommand(
-            `sf org create scratch -f "${defFile}" -a ${alias} --duration-days 30 --set-default`,
+          await runCommandArgs(
+            "sf",
+            ["org", "create", "scratch", "-f", defFile, "-a", alias, "--duration-days", "30", "--set-default"],
             undefined,
             undefined,
             true,
+            SCRATCH_CREATE_TIMEOUT_MS,
             token
           );
           vscode.window.showInformationMessage(`Scratch Org ${alias} created.`);

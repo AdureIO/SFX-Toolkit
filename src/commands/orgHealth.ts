@@ -1,28 +1,54 @@
 import * as vscode from "vscode";
 import { runCommandArgs } from "../utils/commandRunner";
 import { Logger } from "../utils/outputChannel";
+import { escapeHtml, getNonce } from "../utils/htmlUtils";
 
 export class OrgHealthProvider {
-  public static async show(_extensionUri: vscode.Uri) {
-    const panel = vscode.window.createWebviewPanel(
-      "adure-sfx-toolkit.orgHealth",
-      "Org Health Dashboard",
-      vscode.ViewColumn.One,
-      { enableScripts: true }
-    );
+  /** Singleton: re-running the command reveals (and refreshes) the open panel. */
+  private static panel: vscode.WebviewPanel | undefined;
+  /** Bumped per load so a slow, superseded `sf limits` call can't overwrite newer content. */
+  private static loadSeq = 0;
 
-    panel.webview.html = OrgHealthProvider.getLoadingHtml();
+  public static async show(_extensionUri: vscode.Uri) {
+    let panel = OrgHealthProvider.panel;
+    if (panel) {
+      panel.reveal();
+    } else {
+      panel = vscode.window.createWebviewPanel(
+        "adure-sfx-toolkit.orgHealth",
+        "Org Health Dashboard",
+        vscode.ViewColumn.One,
+        { enableScripts: true }
+      );
+      OrgHealthProvider.panel = panel;
+      const created = panel;
+      const sub = created.onDidDispose(() => {
+        if (OrgHealthProvider.panel === created) OrgHealthProvider.panel = undefined;
+        sub.dispose();
+      });
+    }
+
+    const seq = ++OrgHealthProvider.loadSeq;
+    const target = panel;
+    const isCurrent = () => OrgHealthProvider.panel === target && OrgHealthProvider.loadSeq === seq;
+    target.webview.html = OrgHealthProvider.getLoadingHtml();
 
     try {
       const limitsStr = await runCommandArgs("sf", ["limits", "api", "display", "--json"]);
       const limitsJson = JSON.parse(limitsStr);
-      const limits = limitsJson.result || [];
+      const limits = Array.isArray(limitsJson.result) ? limitsJson.result : [];
 
-      panel.webview.html = OrgHealthProvider.getHtml(limits);
+      if (isCurrent()) target.webview.html = OrgHealthProvider.getHtml(limits);
     } catch (e: any) {
       Logger.error("Failed to fetch org limits", e);
-      panel.webview.html = OrgHealthProvider.getErrorHtml(e.message || "Failed to fetch org limits");
+      if (isCurrent()) target.webview.html = OrgHealthProvider.getErrorHtml(e?.message || "Failed to fetch org limits");
     }
+  }
+
+  /** Close the panel (deactivate). */
+  public static dispose(): void {
+    OrgHealthProvider.panel?.dispose();
+    OrgHealthProvider.panel = undefined;
   }
 
   private static getLoadingHtml(): string {
@@ -39,15 +65,15 @@ export class OrgHealthProvider {
             <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';">
             <style>body { font-family: var(--vscode-font-family); padding: 40px; color: var(--vscode-foreground); background: var(--vscode-editor-background); }
             .error { color: var(--vscode-errorForeground); padding: 16px; background: var(--vscode-inputValidation-errorBackground); border: 1px solid var(--vscode-inputValidation-errorBorder); border-radius: 4px; }</style>
-            </head><body><h2>Org Health Dashboard</h2><div class="error">${message}</div></body></html>`;
+            </head><body><h2>Org Health Dashboard</h2><div class="error">${escapeHtml(message)}</div></body></html>`;
   }
 
   private static getHtml(limits: any[]): string {
     const rows = limits
       .map((l: any) => {
-        const name = l.name || "";
-        const max = l.max ?? 0;
-        const remaining = l.remaining ?? 0;
+        const name = escapeHtml(l?.name || "");
+        const max = Number(l?.max) || 0;
+        const remaining = Number(l?.remaining) || 0;
         const used = max - remaining;
         const pct = max > 0 ? Math.round((used / max) * 100) : 0;
         const color =
@@ -68,9 +94,10 @@ export class OrgHealthProvider {
       })
       .join("");
 
+    const nonce = getNonce();
     return `<!DOCTYPE html><html><head>
             <meta charset="UTF-8">
-            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+            <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
             <style>
                 body { font-family: var(--vscode-font-family); padding: 20px; color: var(--vscode-foreground); background: var(--vscode-editor-background); }
                 h2 { margin-bottom: 16px; }
@@ -84,12 +111,12 @@ export class OrgHealthProvider {
             </style>
         </head><body>
             <h2>Org Health Dashboard</h2>
-            <input type="text" id="search" placeholder="Filter limits..." oninput="filterTable()">
+            <input type="text" id="search" placeholder="Filter limits...">
             <table id="limitsTable">
                 <thead><tr><th>Limit Name</th><th>Used / Max</th><th>Remaining</th><th>Usage</th></tr></thead>
                 <tbody>${rows}</tbody>
             </table>
-            <script>
+            <script nonce="${nonce}">
                 function filterTable() {
                     const filter = document.getElementById('search').value.toUpperCase();
                     const rows = document.querySelectorAll('#limitsTable tbody tr');
@@ -98,6 +125,7 @@ export class OrgHealthProvider {
                         row.style.display = name.toUpperCase().includes(filter) ? '' : 'none';
                     });
                 }
+                document.getElementById('search').addEventListener('input', filterTable);
             </script>
         </body></html>`;
   }

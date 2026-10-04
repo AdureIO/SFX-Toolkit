@@ -47,6 +47,21 @@ function buildOrgAuth(parsed: any): OrgAuth {
 export class AuthInfo {
 	private static cache = new Map<string, OrgAuth>();
 	private static fetchLocks = new Map<string, Promise<OrgAuth | null>>();
+	/**
+	 * Per-key generation counter. Bumped whenever a key is invalidated/cleared so an
+	 * in-flight fetch that started before the invalidation does not write a stale
+	 * token back into the cache (or delete a newer fetch's lock) when it completes.
+	 */
+	private static generations = new Map<string, number>();
+	private static globalGeneration = 0;
+
+	private static genOf(key: string): string {
+		return `${this.globalGeneration}:${this.generations.get(key) ?? 0}`;
+	}
+
+	private static bumpGen(key: string): void {
+		this.generations.set(key, (this.generations.get(key) ?? 0) + 1);
+	}
 
 	private static cacheKey(targetOrg: string | null): string {
 		return targetOrg === null || targetOrg === "" ? CACHE_KEY_DEFAULT : targetOrg;
@@ -75,7 +90,13 @@ export class AuthInfo {
 		const args = ["org", "display", "--json"];
 		if (targetOrg) args.push("--target-org", targetOrg);
 		const result = await runCommandArgs("sf", args);
-		const parsed = JSON.parse(result);
+		let parsed: any;
+		try {
+			parsed = JSON.parse(result);
+		} catch {
+			outputChannel.appendLine(`AuthInfo: sf org display returned non-JSON output${targetOrg ? ` (${targetOrg})` : ""}`);
+			return null;
+		}
 		if (parsed.status !== 0 || !parsed.result) {
 			outputChannel.appendLine(`AuthInfo: sf org display failed${targetOrg ? ` (${targetOrg})` : ""}: ${parsed.message || "Unknown"}`);
 			return null;
@@ -118,20 +139,25 @@ export class AuthInfo {
 		const existing = this.fetchLocks.get(key);
 		if (existing) return existing;
 
+		const gen = this.genOf(key);
+		let promise: Promise<OrgAuth | null>;
 		const doFetch = async (): Promise<OrgAuth | null> => {
 			try {
 				const auth = await this.fetchOrgAuth(targetOrg);
-				if (auth) {
+				// Only cache when nothing invalidated this key while we were fetching;
+				// otherwise the caller still gets the result but it is not retained.
+				if (auth && this.genOf(key) === gen) {
 					this.cache.set(key, auth);
 					outputChannel.appendLine(`AuthInfo: Cached ${auth.instanceUrl} (${auth.username})`);
 				}
 				return auth;
 			} finally {
-				this.fetchLocks.delete(key);
+				// Never remove a newer fetch's lock.
+				if (this.fetchLocks.get(key) === promise) this.fetchLocks.delete(key);
 			}
 		};
 
-		const promise = doFetch();
+		promise = doFetch();
 		this.fetchLocks.set(key, promise);
 		return promise;
 	}
@@ -145,19 +171,39 @@ export class AuthInfo {
 		const key = this.cacheKey(targetOrg);
 		if (this.getValidFromCache(key)) return;
 		if (this.fetchLocks.has(key)) return;
-		void this.getAuthInfoForOrg(targetOrg);
+		this.getAuthInfoForOrg(targetOrg).catch((e) => {
+			outputChannel.appendLine(`AuthInfo: background auth warm-up failed${targetOrg ? ` (${targetOrg})` : ""}: ${e?.message ?? e}`);
+		});
 	}
 
 	/** Clear all cached auth. Call after login, set default org, or when tokens may have changed. */
 	public static clearCache(): void {
+		this.globalGeneration++;
 		this.cache.clear();
 		this.fetchLocks.clear();
+		this.generations.clear();
+	}
+
+	/** Release everything (deactivate / workspace switch). Holds no timers. */
+	public static disposeAll(): void {
+		this.clearCache();
 	}
 
 	/** Invalidate one org in the cache so the next getAuthInfoForOrg refetches. */
 	public static invalidateOrg(targetOrg: string | null): void {
 		const key = this.cacheKey(targetOrg);
+		this.bumpGen(key);
 		this.cache.delete(key);
+		this.fetchLocks.delete(key);
+	}
+
+	/**
+	 * Force the CLI to refresh the stored access token (refresh-token flow) and drop
+	 * our cached copy, so the next getAuthInfoForOrg returns the new token. Use after
+	 * an INVALID_SESSION_ID / 401 from a call that does not go through withRetry.
+	 */
+	public static async refreshAuth(org: string | null): Promise<void> {
+		await this.forceCliAuthRefresh(org);
 	}
 
 	/**
@@ -170,11 +216,9 @@ export class AuthInfo {
 	 * the newly-written token.
 	 */
 	private static async forceCliAuthRefresh(org: string | null): Promise<void> {
-		const key = this.cacheKey(org);
 		// Clear both cache and any in-flight dedup fetch so getAuthInfoForOrg always
 		// starts a fresh sf org display call after the CLI refresh completes.
-		this.cache.delete(key);
-		this.fetchLocks.delete(key);
+		this.invalidateOrg(org);
 		const args = ["org", "display", "user", "--json"];
 		if (org) args.push("--target-org", org);
 		try {
@@ -185,8 +229,7 @@ export class AuthInfo {
 		}
 		// Evict whatever was written to cache during the CLI call so getAuthInfoForOrg
 		// re-reads the auth file with the token the CLI just refreshed.
-		this.cache.delete(key);
-		this.fetchLocks.delete(key);
+		this.invalidateOrg(org);
 	}
 
 	/**
