@@ -3,15 +3,46 @@ import { runCommand } from '../utils/commandRunner';
 import { isSalesforceProject } from '../utils/projectUtils';
 import { Logger } from '../utils/outputChannel';
 
-export class TraceTreeProvider implements vscode.TreeDataProvider<TraceItem> {
+export class TraceTreeProvider implements vscode.TreeDataProvider<TraceItem>, vscode.Disposable {
     private _onDidChangeTreeData: vscode.EventEmitter<TraceItem | undefined | null | void> = new vscode.EventEmitter<TraceItem | undefined | null | void>();
     readonly onDidChangeTreeData: vscode.Event<TraceItem | undefined | null | void> = this._onDidChangeTreeData.event;
+    /** One-shot timer for the next trace expiration (never a polling interval). */
     private timer: NodeJS.Timeout | undefined;
+    /** Assume visible until told otherwise (callers without a TreeView keep the old behaviour). */
+    private visible = true;
+    /** A refresh requested while hidden — performed when the view becomes visible again. */
+    private staleWhileHidden = false;
 
     constructor() { }
 
     refresh(): void {
+        if (!this.visible) {
+            this.staleWhileHidden = true;
+            return;
+        }
         this._onDidChangeTreeData.fire();
+    }
+
+    /**
+     * Wire to `treeView.onDidChangeVisibility`: while hidden no expiration timer runs and no CLI query
+     * is triggered; becoming visible again refreshes once if something changed meanwhile.
+     */
+    setVisible(visible: boolean): void {
+        this.visible = visible;
+        if (!visible) {
+            this.clearTimer();
+            this.staleWhileHidden = true; // the expiration we stopped tracking may pass while hidden
+            return;
+        }
+        if (this.staleWhileHidden) {
+            this.staleWhileHidden = false;
+            this._onDidChangeTreeData.fire();
+        }
+    }
+
+    dispose(): void {
+        this.clearTimer();
+        this._onDidChangeTreeData.dispose();
     }
 
     /** Clear the expiration timer (e.g. on extension deactivate) to avoid leaking. */
@@ -47,7 +78,7 @@ export class TraceTreeProvider implements vscode.TreeDataProvider<TraceItem> {
 
             const traces: any[] = parsed.result.records;
             if (!traces || traces.length === 0) {
-                if (this.timer) clearTimeout(this.timer);
+                this.clearTimer();
                 return [new TraceItem('No debug traces', '', '', vscode.TreeItemCollapsibleState.None)];
             }
 
@@ -83,16 +114,12 @@ export class TraceTreeProvider implements vscode.TreeDataProvider<TraceItem> {
                 }
                 const description = `[${statusStr}] ${trace.DebugLevel?.DeveloperName} - ${timeInfo}`;
                 
+                // No click command: there is no edit-trace command; actions live in the item's context menu.
                 const item = new TraceItem(
                     label,
                     description,
                     trace.Id,
-                    vscode.TreeItemCollapsibleState.None,
-                    {
-                        command: 'adure-sfx-toolkit.editTrace', // Placeholder
-                        title: 'Edit Trace',
-                        arguments: [trace.Id]
-                    }
+                    vscode.TreeItemCollapsibleState.None
                 );
                 item.iconPath = icon;
                 return item;
@@ -102,8 +129,8 @@ export class TraceTreeProvider implements vscode.TreeDataProvider<TraceItem> {
             if (nextExpirationTime) {
                 this.scheduleRefresh(nextExpirationTime);
             } else {
-               // No active traces needing a timer
-               if(this.timer) clearTimeout(this.timer);
+                // No active traces needing a timer
+                this.clearTimer();
             }
             
             return traceItems;
@@ -169,16 +196,19 @@ export class TraceTreeProvider implements vscode.TreeDataProvider<TraceItem> {
     }
 
     private scheduleRefresh(expirationTime: number) {
-        if (this.timer) clearTimeout(this.timer);
-        
+        this.clearTimer();
+        if (!this.visible) return;
+
         const now = Date.now();
         const delay = expirationTime - now + 1000; // +1s buffer
         
         if (delay > 0) {
             // max delay for setTimeout is roughly 24 days, unlikely to exceed for debugging
+            // Clamp to setTimeout's max (~24.8 days) so a far-future expiry can't overflow into an immediate fire.
             this.timer = setTimeout(() => {
+                this.timer = undefined;
                 this.refresh();
-            }, delay);
+            }, Math.min(delay, 2_147_000_000));
         }
     }
 }

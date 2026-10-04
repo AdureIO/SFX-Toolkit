@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { logContentProvider } from '../providers/LogContentProvider';
 import { listApexLogs, fetchApexLogBody } from '../utils/apexLogApi';
+import { reportError } from '../utils/reportError';
 
 /**
  * List the org's recent Apex logs (over REST, same as the sidebar/workbench) and
@@ -30,26 +31,15 @@ export async function listLogs() {
 }
 
 /**
- * Open a log by id. Fetches the body over REST via apexLogApi (default org, or
- * `targetOrg` when the log belongs to another environment) and feeds it to the
+ * Open a log by id. Fetches the body over REST via apexLogApi (default org) and feeds it to the
  * shared content provider — no local files, no CLI.
- * @param skipProgress - when true, do not show "Opening Log..." (e.g. already in execute flow)
- * @param targetOrg - when set, fetch the log from this org (non-default)
  */
-export async function openLogById(
-    logId: string,
-    viewColumn?: vscode.ViewColumn,
-    _scheme: string = 'sf-log',
-    skipProgress?: boolean,
-    targetOrg?: string
-) {
+export async function openLogById(logId: string) {
     async function doOpen(): Promise<void> {
-        const body = await fetchApexLogBody(targetOrg ?? null, logId);
+        const body = await fetchApexLogBody(null, logId);
         if (!body) throw new Error('Log body could not be retrieved.');
-        const scheme = _scheme || 'sf-log';
-        // Give the virtual doc a `.log` path so it's recognized as a Salesforce log
-        // (language/highlighting + the log filter buttons). The id is parsed back out.
-        const uri = vscode.Uri.parse(`${scheme}://log/${logId}.log`);
+        // Give the virtual doc a `.log` path so it's recognized as a Salesforce log (language/highlighting). The id is parsed back out.
+        const uri = vscode.Uri.parse(`sf-log://log/${logId}.log`);
         logContentProvider.setContent(uri, body);
         const doc = await vscode.workspace.openTextDocument(uri);
         try {
@@ -57,16 +47,7 @@ export async function openLogById(
         } catch {
             // ignore
         }
-        await vscode.window.showTextDocument(doc, { preview: false, viewColumn: viewColumn ?? vscode.ViewColumn.Active });
-    }
-
-    if (skipProgress) {
-        try {
-            await doOpen();
-        } catch (e: any) {
-            reportError({ operation: "Open log", error: e });
-        }
-        return;
+        await vscode.window.showTextDocument(doc, { preview: false, viewColumn: vscode.ViewColumn.Active });
     }
 
     await vscode.window.withProgress(

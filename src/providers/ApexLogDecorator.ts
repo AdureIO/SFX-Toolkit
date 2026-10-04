@@ -1,6 +1,6 @@
 /**
  * Applies the configured debug-log highlight rules to native log editors:
- * `.log` files and the in-memory `sf-log` / `sf-anon-log` documents opened by the
+ * `.log` files and the in-memory `sf-log` documents opened by the
  * extension (all registered as the `salesforce-log` language). Uses editor
  * decorations — like the logFileHighlighter extension — so colors come from the
  * user's settings and native search still works.
@@ -98,7 +98,7 @@ export function registerApexLogDecorator(context: vscode.ExtensionContext): void
 				decorator.applyAll();
 			}
 		}),
-		// Content of sf-log / sf-anon-log virtual docs arrives after the editor opens.
+		// Content of sf-log virtual docs arrives after the editor opens.
 		vscode.workspace.onDidChangeTextDocument((e) => {
 			for (const editor of vscode.window.visibleTextEditors) {
 				if (editor.document === e.document) decorator.apply(editor);

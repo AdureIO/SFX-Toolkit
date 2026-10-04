@@ -1,40 +1,45 @@
+import { reportError } from '../utils/reportError';
 import * as vscode from 'vscode';
-import { createTrace } from './traceCommands';
-import { runCommand } from '../utils/commandRunner';
+import { createTrace, isSalesforceId } from './traceCommands';
+import { runCommandArgs } from '../utils/commandRunner';
+import { Logger } from '../utils/outputChannel';
 
 export async function addDebugTrace() {
     try {
         let targetUserId: string | null = null;
         let targetLevelId: string | null = null;
 
-        // 1. Select User
-        const userItems: vscode.QuickPickItem[] = [];
-        
+        // 1. Select User — "Current User" is always offered, even if the user query fails.
+        const userItems: vscode.QuickPickItem[] = [{
+            label: "$(person) Current User",
+            description: "Use the currently authenticated user",
+            detail: "current"
+        }];
+
         await vscode.window.withProgress({
             location: vscode.ProgressLocation.Notification,
             title: "Fetching Users...",
             cancellable: true
         }, async (_progress, token) => {
-            const usersQuery = "SELECT Id, Name, Username FROM User WHERE IsActive = true ORDER BY Name LIMIT 50";
-            const usersRes = await runCommand(`sf data query -q "${usersQuery}" --json`, undefined, undefined, true, token);
-            const usersJson = JSON.parse(usersRes);
-            
-            userItems.push({
-                label: "$(person) Current User",
-                description: "Use the currently authenticated user",
-                detail: "current"
-            });
-            
-            if (usersJson.status === 0 && usersJson.result.records) {
-                usersJson.result.records.forEach((u: any) => {
-                    userItems.push({
-                        label: u.Name,
-                        description: u.Username,
-                        detail: u.Id
+            try {
+                const usersQuery = "SELECT Id, Name, Username FROM User WHERE IsActive = true ORDER BY Name LIMIT 50";
+                const usersRes = await runCommandArgs('sf', ['data', 'query', '-q', usersQuery, '--json'], undefined, undefined, true, undefined, token);
+                const usersJson = JSON.parse(usersRes);
+                if (usersJson.status === 0 && Array.isArray(usersJson.result?.records)) {
+                    usersJson.result.records.forEach((u: any) => {
+                        if (!isSalesforceId(u?.Id)) return;
+                        userItems.push({
+                            label: u.Name,
+                            description: u.Username,
+                            detail: u.Id
+                        });
                     });
-                });
+                }
+            } catch (e: any) {
+                if (e?.cancelled) throw e;
+                Logger.warn('Failed to load users for debug trace: ' + (e?.message || e));
             }
-        }).then(undefined, (e: any) => { if (e.cancelled) throw e; });
+        });
 
         const selectedUser = await vscode.window.showQuickPick(userItems, {
             placeHolder: 'Select User for Trace (or use Current User)'
@@ -54,18 +59,20 @@ export async function addDebugTrace() {
             cancellable: true
         }, async (_progress, token) => {
             const levelsQuery = "SELECT Id, DeveloperName FROM DebugLevel ORDER BY DeveloperName";
-            const levelsRes = await runCommand(`sf data query -q "${levelsQuery}" -t --json`, undefined, undefined, true, token);
+            const levelsRes = await runCommandArgs('sf', ['data', 'query', '-q', levelsQuery, '-t', '--json'], undefined, undefined, true, undefined, token);
             const levelsJson = JSON.parse(levelsRes);
-            
-            if (levelsJson.status === 0 && levelsJson.result.records) {
+
+            if (levelsJson.status === 0 && Array.isArray(levelsJson.result?.records)) {
                  levelsJson.result.records.forEach((l: any) => {
+                    if (!isSalesforceId(l?.Id)) return;
                     levelItems.push({
                         label: l.DeveloperName,
                         detail: l.Id
                     });
                 });
             }
-        }).then(undefined, (e: any) => { if (e.cancelled) throw e; });
+        });
+        // (errors — including cancellation — propagate to the outer catch)
 
         if (levelItems.length === 0) {
             vscode.window.showWarningMessage('No Debug Levels found in Org. Please create one first.');
