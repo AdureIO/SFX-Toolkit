@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import * as fs from "fs";
 import { findAuraEnabledMethods, formatSignature, parseApexImport, AuraMethod } from "../utils/apexAuraMethods";
 
 /**
@@ -10,8 +11,16 @@ import { findAuraEnabledMethods, formatSignature, parseApexImport, AuraMethod } 
  * types, cacheable flag, ApexDoc) on hover.
  */
 
-/** Cache of resolved class name → file uri (cleared when Apex files change). */
+/**
+ * Generated / tooling folders. `.sfdx/tools/sobjects` holds SObject stub classes
+ * (`Account.cls`, …) that must never be mistaken for a user Apex class.
+ */
+const EXCLUDE_GLOB = "{**/node_modules/**,**/.sfdx/**,**/.sf/**}";
+const GENERATED_PATH = /[\\/](?:\.sfdx|\.sf|node_modules)[\\/]/;
+
+/** Cache of resolved class name → file uri (cleared when Apex files are created/deleted). LRU-capped. */
 const classFileCache = new Map<string, vscode.Uri | null>();
+const MAX_CLASS_FILE_CACHE = 500;
 
 export function clearLwcApexCache(): void {
     classFileCache.clear();
@@ -21,10 +30,30 @@ async function findClassFile(className: string): Promise<vscode.Uri | undefined>
     // A namespaced import (`ns.Class`) still lives in `Class.cls` locally.
     const bare = className.includes(".") ? className.split(".").pop()! : className;
     if (classFileCache.has(bare)) return classFileCache.get(bare) ?? undefined;
-    const hits = await vscode.workspace.findFiles(`**/${bare}.cls`, "**/node_modules/**", 5);
-    const uri = hits[0];
+    const hits = await vscode.workspace.findFiles(`**/${bare}.cls`, EXCLUDE_GLOB, 5);
+    const uri = hits.find((h) => !GENERATED_PATH.test(h.fsPath));
     classFileCache.set(bare, uri ?? null);
+    while (classFileCache.size > MAX_CLASS_FILE_CACHE) {
+        const oldest = classFileCache.keys().next().value;
+        if (oldest === undefined) break;
+        classFileCache.delete(oldest);
+    }
     return uri;
+}
+
+/**
+ * Text of a class: the open editor buffer when there is one, else the file on disk.
+ * Deliberately NOT openTextDocument — that would open a model (and send didOpen to
+ * every Apex language server) just to render a hover.
+ */
+async function readClassText(uri: vscode.Uri): Promise<string | undefined> {
+    const open = vscode.workspace.textDocuments.find((d) => d.uri.toString() === uri.toString());
+    if (open) return open.getText();
+    try {
+        return await fs.promises.readFile(uri.fsPath, "utf8");
+    } catch {
+        return undefined;
+    }
 }
 
 /** Resolve an `@salesforce/apex/...` import to its Apex method, if the class is in the workspace. */
@@ -35,8 +64,9 @@ async function resolveApexMethod(
     if (!parsed) return undefined;
     const uri = await findClassFile(parsed.className);
     if (!uri) return undefined;
-    const doc = await vscode.workspace.openTextDocument(uri);
-    const method = findAuraEnabledMethods(doc.getText()).find((m) => m.name === parsed.methodName);
+    const text = await readClassText(uri);
+    if (text === undefined) return undefined;
+    const method = findAuraEnabledMethods(text).find((m) => m.name === parsed.methodName);
     return { uri, method, methodName: parsed.methodName };
 }
 
@@ -67,7 +97,7 @@ async function resolveLwcComponent(spec: string): Promise<vscode.Uri | undefined
     const m = /^c\/(\w+)$/.exec(spec.trim());
     if (!m) return undefined;
     const name = m[1];
-    const hits = await vscode.workspace.findFiles(`**/lwc/${name}/${name}.js`, "**/node_modules/**", 2);
+    const hits = await vscode.workspace.findFiles(`**/lwc/${name}/${name}.js`, EXCLUDE_GLOB, 2);
     return hits[0];
 }
 
@@ -150,8 +180,15 @@ export function registerLwcApexProviders(context: vscode.ExtensionContext): void
         vscode.languages.registerHoverProvider(selector, new LwcApexHoverProvider())
     );
     // Apex files moving/changing invalidates the class→file lookup.
-    const watcher = vscode.workspace.createFileSystemWatcher("**/*.cls");
-    watcher.onDidCreate(clearLwcApexCache);
-    watcher.onDidDelete(clearLwcApexCache);
-    context.subscriptions.push(watcher);
+    // Stub (re)generation under .sfdx creates/deletes thousands of .cls files — ignore those.
+    const watcher = vscode.workspace.createFileSystemWatcher("**/*.cls", false, true, false);
+    const onApexFileSetChanged = (uri: vscode.Uri) => {
+        if (!GENERATED_PATH.test(uri.fsPath)) clearLwcApexCache();
+    };
+    context.subscriptions.push(
+        watcher,
+        watcher.onDidCreate(onApexFileSetChanged),
+        watcher.onDidDelete(onApexFileSetChanged),
+        { dispose: clearLwcApexCache },
+    );
 }

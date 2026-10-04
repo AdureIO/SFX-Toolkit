@@ -18,6 +18,13 @@ interface ImportIndex {
 
 let cache: ImportIndex | undefined;
 let building: Promise<ImportIndex> | undefined;
+/** Bumped on invalidation so a build that started before a change can't install a stale index. */
+let generation = 0;
+
+const EXCLUDE_GLOB = "{**/node_modules/**,**/.sfdx/**,**/.sf/**}";
+const GENERATED_PATH = /[\\/](?:\.sfdx|\.sf|node_modules)[\\/]/;
+const INVALIDATE_DEBOUNCE_MS = 500;
+const YIELD_EVERY = 25;
 
 function offsetToPosition(text: string, offset: number): vscode.Position {
     let line = 0;
@@ -37,14 +44,17 @@ function escapeRegExp(s: string): string {
 
 async function buildIndex(): Promise<ImportIndex> {
     const map = new Map<string, vscode.Location[]>();
-    const files = await vscode.workspace.findFiles("**/lwc/**/*.js");
+    const files = await vscode.workspace.findFiles("**/lwc/**/*.js", EXCLUDE_GLOB);
+    let n = 0;
     for (const uri of files) {
+        if (++n % YIELD_EVERY === 0) await new Promise<void>((resolve) => setImmediate(resolve));
         let text: string;
         try {
-            text = fs.readFileSync(uri.fsPath, "utf8");
+            text = await fs.promises.readFile(uri.fsPath, "utf8");
         } catch {
             continue;
         }
+        if (!text.includes("@salesforce/apex/")) continue; // cheap reject
         const re = /@salesforce\/apex\/([\w.]+)/g;
         let m: RegExpExecArray | null;
         while ((m = re.exec(text))) {
@@ -65,11 +75,21 @@ async function buildIndex(): Promise<ImportIndex> {
 function getIndex(): Promise<ImportIndex> {
     if (cache) return Promise.resolve(cache);
     if (!building) {
-        building = buildIndex().then((idx) => {
-            cache = idx;
-            building = undefined;
-            return idx;
-        });
+        const gen = generation;
+        const b = buildIndex().then(
+            (idx) => {
+                if (gen === generation) {
+                    cache = idx;
+                    building = undefined;
+                }
+                return idx;
+            },
+            (e) => {
+                if (gen === generation) building = undefined;
+                throw e;
+            },
+        );
+        building = b;
     }
     return building;
 }
@@ -85,11 +105,17 @@ class AuraEnabledCodeLensProvider implements vscode.CodeLensProvider {
         this._onDidChange.fire();
     }
 
-    async provideCodeLenses(doc: vscode.TextDocument): Promise<vscode.CodeLens[]> {
-        if (!doc.fileName.toLowerCase().endsWith(".cls")) return [];
+    dispose(): void {
+        this._onDidChange.dispose();
+    }
+
+    async provideCodeLenses(doc: vscode.TextDocument, token?: vscode.CancellationToken): Promise<vscode.CodeLens[]> {
+        if (!doc.fileName.toLowerCase().endsWith(".cls") || GENERATED_PATH.test(doc.fileName)) return [];
         const text = doc.getText();
+        if (!/@AuraEnabled\b/i.test(text)) return []; // no index build for classes without lenses
         const className = path.basename(doc.fileName, ".cls");
         const index = await getIndex();
+        if (token?.isCancellationRequested) return [];
         const lenses: vscode.CodeLens[] = [];
         const seen = new Set<string>();
 
@@ -120,6 +146,7 @@ export function registerLwcApexBridge(context: vscode.ExtensionContext): void {
     const codeLens = new AuraEnabledCodeLensProvider();
 
     context.subscriptions.push(
+        codeLens,
         // Go-to-definition for `@salesforce/apex/...` lives in LwcApexProvider, which also
         // resolves the local name at a call site and lands on the method's exact position.
         // Registering a second provider for the same thing only produces a disambiguation
@@ -137,15 +164,34 @@ export function registerLwcApexBridge(context: vscode.ExtensionContext): void {
         )
     );
 
-    // Invalidate the import index and refresh lenses when LWC JS changes.
+    // Invalidate the import index and refresh lenses when LWC JS changes — debounced, so a
+    // pull/retrieve touching many components triggers one rebuild (lazily, on next lens).
     const watcher = vscode.workspace.createFileSystemWatcher("**/lwc/**/*.js");
-    const invalidate = () => {
+    let timer: NodeJS.Timeout | undefined;
+    const invalidate = (uri: vscode.Uri) => {
+        if (GENERATED_PATH.test(uri.fsPath)) return;
+        generation++;
         cache = undefined;
         building = undefined;
-        codeLens.fireChange();
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => {
+            timer = undefined;
+            codeLens.fireChange();
+        }, INVALIDATE_DEBOUNCE_MS);
     };
-    watcher.onDidCreate(invalidate);
-    watcher.onDidChange(invalidate);
-    watcher.onDidDelete(invalidate);
-    context.subscriptions.push(watcher);
+    context.subscriptions.push(
+        watcher,
+        watcher.onDidCreate(invalidate),
+        watcher.onDidChange(invalidate),
+        watcher.onDidDelete(invalidate),
+        {
+            dispose: () => {
+                if (timer) clearTimeout(timer);
+                timer = undefined;
+                generation++;
+                cache = undefined;
+                building = undefined;
+            },
+        },
+    );
 }
