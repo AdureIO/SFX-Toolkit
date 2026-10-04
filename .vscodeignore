@@ -1,21 +1,46 @@
+# ── Dependencies ───────────────────────────────────────────────────────────
+# esbuild bundles every runtime dependency into out/extension.js, out/server.js and
+# resources/webview/*.js (only `vscode` is external). The one exception is
+# monaco-editor's prebuilt AMD build, which the SOQL editor / Workbench webviews load
+# from node_modules/monaco-editor/min at runtime — ship that and its licence only.
+node_modules/**
+!node_modules/monaco-editor/min/**
+!node_modules/monaco-editor/package.json
+!node_modules/monaco-editor/LICENSE
+!node_modules/monaco-editor/ThirdPartyNotices.txt
+
+# ── Build output ───────────────────────────────────────────────────────────
+# tsc emits per-module JS (+ tests) into out/ for the unit tests; the VSIX needs only
+# the two esbuild bundles. Webview bundles live in resources/webview (shipped).
+out/**
+!out/extension.js
+!out/server.js
+**/*.map
+
+# ── Sources, tooling and repo metadata ─────────────────────────────────────
+src/**
+server/**
+spike/**
+dist/**
+.github/**
 .vscode/**
 .vscode-test/**
 .claude/**
-src/**
-out/test/**
-.gitignore
+.sfdx/**
+.sf/**
 .git/**
-tsconfig.json
-**/*.map
-.DS_Store
+.gitignore
+.eslintrc.json
+.prettierrc
+tsconfig*.json
+esbuild.js
 package-lock.json
+*.vsix
+**/*.ts
+**/.DS_Store
 settings.md
 features.md
 functions.md
-*.vsix
-server/**
-node_modules/.bin/**
-node_modules/monaco-editor/esm/**
-node_modules/monaco-editor/dev/**
-node_modules/monaco-editor/dev-package.json
-node_modules/monaco-editor/min-maps/**
+
+# docs/screenshots stays in the package: README.md references the images with relative
+# paths (docs/screenshots/*.png).

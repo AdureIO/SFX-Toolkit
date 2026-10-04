@@ -28,8 +28,16 @@ export class Telemetry {
   /** Call once from activate(). */
   static init(context: vscode.ExtensionContext): void {
     try {
-      this.reporter = new TelemetryReporter(CONNECTION_STRING);
-      context.subscriptions.push(this.reporter);
+      const reporter = new TelemetryReporter(CONNECTION_STRING);
+      this.reporter = reporter;
+      // Flushes pending events on dispose; drop our reference so nothing sends afterwards.
+      context.subscriptions.push(
+        new vscode.Disposable(() => {
+          if (this.reporter === reporter) this.reporter = undefined;
+          this.lastThrottled.clear();
+          void reporter.dispose();
+        })
+      );
 
       // Stable-per-install anonymous id (secondary to VS Code's machineId).
       let id = context.globalState.get<string>(INSTALL_ID_KEY);

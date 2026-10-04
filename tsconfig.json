@@ -3,9 +3,11 @@
 		"module": "commonjs",
 		"target": "ES2020",
 		"outDir": "out",
+		/* No "DOM": the extension host is Node. DOM's globals (e.g. reportError, fetch
+		   overloads) would hide missing imports. Browser bundles are checked by
+		   tsconfig.webview.json instead. */
 		"lib": [
-			"ES2020",
-			"DOM"
+			"ES2020"
 		],
 		"sourceMap": true,
 		"rootDir": "src",
@@ -16,6 +18,9 @@
 		"node_modules",
 		".vscode-test",
 		"server",
-		"spike"
+		"spike",
+		/* Browser (webview) entry points — bundled by esbuild, type-checked with DOM by tsconfig.webview.json */
+		"src/webview/objectVisualizer.ts",
+		"src/webview/processMap.ts"
 	]
 }

@@ -6,6 +6,27 @@ const esbuild = require("esbuild");
 const production = process.argv.includes("--production");
 const watch = process.argv.includes("--watch");
 
+// Watch mode: print one "[watch] build started" / "[watch] build finished" pair per
+// rebuild wave across all three contexts (plus file:line:col for errors), so the VS Code
+// background task (see .vscode/tasks.json) knows when the debuggee bundles are ready.
+let pendingBuilds = 0;
+const watchMarkersPlugin = {
+  name: "watch-markers",
+  setup(build) {
+    if (!watch) return;
+    build.onStart(() => {
+      if (pendingBuilds++ === 0) console.log("[watch] build started");
+    });
+    build.onEnd((result) => {
+      for (const { text, location } of result.errors) {
+        console.error(`✘ [ERROR] ${text}`);
+        if (location) console.error(`    ${location.file}:${location.line}:${location.column}:`);
+      }
+      if (--pendingBuilds === 0) console.log("[watch] build finished");
+    });
+  },
+};
+
 const shared = {
   bundle: true,
   format: "cjs",
@@ -14,6 +35,7 @@ const shared = {
   sourcemap: !production,
   minify: production,
   logLevel: "info",
+  plugins: [watchMarkersPlugin],
 };
 
 async function main() {
@@ -40,7 +62,8 @@ async function main() {
     outdir: "resources/webview",
     sourcemap: !production,
     minify: production,
-    logLevel: "info"
+    logLevel: "info",
+    plugins: [watchMarkersPlugin],
   });
 
   // Language server: a standalone Node process spawned by the extension. Bundles
