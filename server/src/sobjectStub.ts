@@ -36,7 +36,20 @@ export interface StubInfo {
 }
 
 let rootDir: string | null = null;
+// Stub line maps for go-to-definition, LRU-capped (an org has thousands of objects;
+// only the recently navigated ones are worth keeping).
 const cache = new Map<string, StubInfo>();
+const MAX_STUB_CACHE = 200;
+
+function remember(sobject: string, info: StubInfo): void {
+    cache.delete(sobject);
+    cache.set(sobject, info);
+    while (cache.size > MAX_STUB_CACHE) {
+        const oldest = cache.keys().next().value;
+        if (oldest === undefined) break;
+        cache.delete(oldest);
+    }
+}
 let stubbedNames: Set<string> | null = null;
 
 /**
@@ -69,6 +82,7 @@ export function invalidateStubbedNames(): void {
 export function setStubRoot(dir: string | null): void {
     rootDir = dir;
     stubbedNames = null;
+    cache.clear(); // locations belong to the previous root
     // Remove the legacy custom stub dir from earlier versions (now unified into
     // .sfdx/tools/sobjects so the Salesforce LS and AI read the same files).
     if (dir) {
@@ -79,8 +93,11 @@ export function setStubRoot(dir: string | null): void {
         }
     }
 }
-export function clearStubs(): void {
-    cache.clear();
+/** Drop cached stub locations — all of them, or just the given objects (targeted push/pull). */
+export function clearStubs(objects?: string[]): void {
+    if (!objects) { cache.clear(); return; }
+    const lower = new Set(objects.map((o) => o.toLowerCase()));
+    for (const k of [...cache.keys()]) if (lower.has(k.toLowerCase())) cache.delete(k);
 }
 
 function isCustomObject(name: string): boolean {
@@ -166,7 +183,10 @@ function generate(sobject: string, d: StubDescribe): { content: string; classLin
 
 export function getStub(sobject: string, d: StubDescribe): StubInfo | null {
     const cached = cache.get(sobject);
-    if (cached) return cached;
+    if (cached) {
+        remember(sobject, cached); // refresh LRU position
+        return cached;
+    }
 
     const file = stubFilePath(sobject);
 
@@ -176,7 +196,7 @@ export function getStub(sobject: string, d: StubDescribe): StubInfo | null {
         const existing = fs.readFileSync(file, 'utf8');
         const parsed = parseStub(existing);
         const info: StubInfo = { uri: pathToFileURL(file).href, classLine: parsed.classLine, fieldLines: parsed.fieldLines };
-        cache.set(sobject, info);
+        remember(sobject, info);
         return info;
     } catch {
         /* not generated yet — create it below */
@@ -190,6 +210,6 @@ export function getStub(sobject: string, d: StubDescribe): StubInfo | null {
         return null;
     }
     const info: StubInfo = { uri: pathToFileURL(file).href, classLine: gen.classLine, fieldLines: gen.fieldLines };
-    cache.set(sobject, info);
+    remember(sobject, info);
     return info;
 }

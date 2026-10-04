@@ -13,14 +13,18 @@ import {
 	ServerOptions,
 	TransportKind,
 	State,
+	DidChangeWatchedFilesNotification,
+	FileChangeType,
+	FileEvent,
 } from "vscode-languageclient/node";
 import { SoqlSchemaProvider } from "./utils/soqlSchemaProvider";
 import { OrgMetadataCache } from "./utils/orgMetadataCache";
 import { findSfdxProjectDir, isSalesforceProject } from "./utils/projectUtils";
 import { resolveDefaultTargetOrgUsernameSync } from "./utils/defaultOrg";
-import { scheduleStubSync, cleanRestartApex, getInitialSyncState } from "./utils/sobjectStubSync";
+import { scheduleStubSync, cleanRestartApex, getInitialSyncState, disposeStubSync } from "./utils/sobjectStubSync";
 import { getBufferOrgOverride } from "./utils/bufferOrgOverride";
 import { outputChannel } from "./utils/outputChannel";
+import { registerApexQuickFixCommands } from "./commands/apexQuickFixCommands";
 
 const REQ_OBJECT_LIST = "sfx/objectList";
 const REQ_DESCRIBE = "sfx/describe";
@@ -29,10 +33,96 @@ const REQ_OBJECT_INFO = "sfx/objectInfo";
 const NOTE_REFRESH = "sfx/refreshSchema";
 const NOTE_EPHEMERAL = "sfx/ephemeralBuffers";
 
-let client: LanguageClient | undefined;
+// How long a graceful shutdown/exit handshake may take before we kill the process.
+const STOP_TIMEOUT_MS = 2000;
+// Apex sources outside generated/tooling dirs — the server's type index cares only
+// about these (`.sfdx/tools/sobjects` holds thousands of generated stub classes).
+const GENERATED_PATH = /[\\/](?:\.sfdx|\.sf|node_modules)[\\/]/;
 
+let client: LanguageClient | undefined;
+/** Workspace folders the running client was started for (detects project switches). */
+let clientRootsKey: string | undefined;
+/** Whether the running server provides org-aware Apex completion (see ApexCompletionProvider). */
+let clientApexCompletion = false;
+/** Resolves once the current client has started (or failed to). */
+let clientStarted: Promise<void> | undefined;
+/** Per-client listeners/watchers — disposed when that client stops (restart-safe). */
+let clientDisposables: vscode.Disposable[] = [];
+let stopping: Promise<void> | undefined;
+let transitions: Promise<void> = Promise.resolve();
+let lifetimeRegistered = false;
+
+function workspaceRootsKey(): string {
+	return (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.toString()).join("|");
+}
+
+/**
+ * True while our language server is (being) started with Apex completion enabled.
+ * The standalone ApexCompletionProvider steps aside then, so items aren't duplicated.
+ */
+export function isLanguageServerApexCompletionActive(): boolean {
+	if (!client || !clientApexCompletion) return false;
+	return client.state === State.Running || client.state === State.Starting;
+}
+
+/**
+ * Start the language server for the current workspace. Idempotent; when the
+ * workspace folders changed since the server started (project switch in the same
+ * window) or the workspace is no longer an SFDX project, the server is restarted /
+ * stopped so its stub root and type index follow the new folders. Safe to call from
+ * `onDidChangeWorkspaceFolders`.
+ */
 export function startLanguageServer(context: vscode.ExtensionContext): void {
-	if (client) return; // already started (idempotent across workspace-folder changes)
+	registerLifetime(context);
+	if (client) {
+		if (clientRootsKey !== workspaceRootsKey() || !isSalesforceProject()) {
+			void restartLanguageServerForWorkspaceChange(context);
+		}
+		return;
+	}
+	startClient(context);
+}
+
+/**
+ * Re-root the language server after a workspace-folder change: stop the running
+ * server (if its roots differ) and start a fresh one for the new folders — or just
+ * stop it when the workspace is no longer an SFDX project. Serialized, so rapid
+ * folder changes can't interleave a stop with a start.
+ */
+export function restartLanguageServerForWorkspaceChange(context: vscode.ExtensionContext): Promise<void> {
+	transitions = transitions
+		.then(async () => {
+			const isProject = isSalesforceProject();
+			if (client && clientRootsKey === workspaceRootsKey() && isProject) return;
+			if (client || stopping) {
+				outputChannel.appendLine("languageClient: workspace folders changed — restarting ASFX language server.");
+				await stopLanguageServer();
+			}
+			if (isProject) startClient(context);
+		})
+		.catch((e: any) => outputChannel.appendLine(`languageClient: restart after workspace change failed: ${e?.message ?? e}`));
+	return transitions;
+}
+
+/** Once per activation: make sure everything we own is torn down with the extension. */
+function registerLifetime(context: vscode.ExtensionContext): void {
+	if (lifetimeRegistered) return;
+	lifetimeRegistered = true;
+	context.subscriptions.push({
+		dispose: () => {
+			lifetimeRegistered = false;
+			disposeStubSync();
+			void stopLanguageServer();
+		},
+	});
+	// The Salesforce Apex LS watchdog is independent of our server's lifetime.
+	startApexHealthMonitor(context);
+	// Host commands used by the server's quick fixes (e.g. create a field stub file).
+	registerApexQuickFixCommands(context);
+}
+
+function startClient(context: vscode.ExtensionContext): void {
+	if (client) return;
 	// Never start outside an SFDX project — mirrors how the extension's UI is hidden.
 	if (!isSalesforceProject()) return;
 	const enabled = vscode.workspace
@@ -41,12 +131,15 @@ export function startLanguageServer(context: vscode.ExtensionContext): void {
 	if (!enabled) return;
 
 	const serverModule = context.asAbsolutePath(path.join("out", "server.js"));
+	// Heap cap for the server process so a pathological workspace can't balloon it
+	// (adure-sfx-toolkit.apex.languageServerMaxMemoryMB, default 512).
+	const heapArg = `--max-old-space-size=${languageServerHeapMB()}`;
 	const serverOptions: ServerOptions = {
-		run: { module: serverModule, transport: TransportKind.ipc },
+		run: { module: serverModule, transport: TransportKind.ipc, options: { execArgv: [heapArg] } },
 		debug: {
 			module: serverModule,
 			transport: TransportKind.ipc,
-			options: { execArgv: ["--nolazy", "--inspect=6019"] },
+			options: { execArgv: ["--nolazy", "--inspect=6019", heapArg] },
 		},
 	};
 
@@ -69,6 +162,10 @@ export function startLanguageServer(context: vscode.ExtensionContext): void {
 	const apexValidateSchema = vscode.workspace
 		.getConfiguration("adure-sfx-toolkit")
 		.get<boolean>("apex.validateSemantics", true);
+	// Semantic highlighting for Apex/SOQL (SObject fields vs locals, etc.).
+	const apexSemanticHighlighting = vscode.workspace
+		.getConfiguration("adure-sfx-toolkit")
+		.get<boolean>("apex.semanticHighlighting", true);
 
 	const clientOptions: LanguageClientOptions = {
 		documentSelector: [
@@ -84,16 +181,21 @@ export function startLanguageServer(context: vscode.ExtensionContext): void {
 			{ scheme: "file", pattern: "**/*.cls" },
 			{ scheme: "file", pattern: "**/*.trigger" },
 		],
-		initializationOptions: { apexFeatures, apexCompletion, apexValidateSchema },
+		initializationOptions: { apexFeatures, apexCompletion, apexValidateSchema, apexSemanticHighlighting },
 		outputChannel,
 	};
 
-	client = new LanguageClient(
+	const lc = new LanguageClient(
 		"sfxLanguageServer",
 		"ASFX Language Server",
 		serverOptions,
 		clientOptions
 	);
+	client = lc;
+	clientRootsKey = workspaceRootsKey();
+	clientApexCompletion = apexCompletion;
+	const disposables: vscode.Disposable[] = [];
+	clientDisposables = disposables;
 
 	// Resolve which org a request's document belongs to. Walks up to the nearest
 	// sfdx-project.json so nested sub-projects (e.g. billing/force-app/...) use their
@@ -112,7 +214,7 @@ export function startLanguageServer(context: vscode.ExtensionContext): void {
 		}
 	};
 
-	client.onRequest(REQ_OBJECT_LIST, async (params: { uri?: string }) => {
+	lc.onRequest(REQ_OBJECT_LIST, async (params: { uri?: string }) => {
 		try {
 			const org = orgForUri(params?.uri);
 			const list = await SoqlSchemaProvider.getObjectList(org);
@@ -124,7 +226,7 @@ export function startLanguageServer(context: vscode.ExtensionContext): void {
 		}
 	});
 
-	client.onRequest(REQ_DESCRIBE, async (params: { uri?: string; sobject: string }) => {
+	lc.onRequest(REQ_DESCRIBE, async (params: { uri?: string; sobject: string }) => {
 		try {
 			return await SoqlSchemaProvider.getDescribe(orgForUri(params?.uri), params?.sobject);
 		} catch (e: any) {
@@ -134,7 +236,7 @@ export function startLanguageServer(context: vscode.ExtensionContext): void {
 	});
 
 	// Object-level admin Description (Tooling API; not in the standard describe).
-	client.onRequest(REQ_OBJECT_INFO, async (params: { uri?: string; sobject: string }) => {
+	lc.onRequest(REQ_OBJECT_INFO, async (params: { uri?: string; sobject: string }) => {
 		try {
 			const description = await SoqlSchemaProvider.getObjectDescription(orgForUri(params?.uri), params?.sobject);
 			return { description };
@@ -146,7 +248,7 @@ export function startLanguageServer(context: vscode.ExtensionContext): void {
 	// Project namespace (from sfdx-project.json) for the document's sub-project.
 	// Lets the server match/resolve names with the namespace optional.
 	const nsCache = new Map<string, string | null>();
-	client.onRequest(REQ_PROJECT_INFO, (params: { uri?: string }) => {
+	lc.onRequest(REQ_PROJECT_INFO, (params: { uri?: string }) => {
 		try {
 			if (!params?.uri) return { namespace: null };
 			const fsPath = vscode.Uri.parse(params.uri).fsPath;
@@ -171,12 +273,13 @@ export function startLanguageServer(context: vscode.ExtensionContext): void {
 	// When the org switches or metadata is refreshed, drop the host-side describe
 	// cache and tell the server to drop its own.
 	const unsubscribe = OrgMetadataCache.onChange((_org, change) => {
-		// Always tell the server to drop its cached schema doc (cheap).
-		void client?.sendNotification(NOTE_REFRESH).catch(() => {});
-		if (change && change.objects.length) {
+		// Tell the server to drop its cached schema — only the touched objects when targeted.
+		const objects = change && change.objects.length ? change.objects : undefined;
+		if (lc.isRunning()) void lc.sendNotification(NOTE_REFRESH, objects ? { objects } : undefined).catch(() => {});
+		if (objects) {
 			// Targeted: a push/pull touched only these objects' schema. The affected
 			// describes were already dropped; regenerate just those stubs — not the org.
-			scheduleStubSync({ only: change.objects });
+			scheduleStubSync({ only: objects });
 		} else {
 			// Full invalidation (org switch / manual refresh): don't trust any stub.
 			SoqlSchemaProvider.invalidateAll();
@@ -184,29 +287,131 @@ export function startLanguageServer(context: vscode.ExtensionContext): void {
 		}
 	});
 
+	disposables.push({ dispose: unsubscribe });
+
+	// Keep the server's Apex type index current (new / deleted classes). Events are
+	// filtered here — the stub sync writes thousands of `.cls` files under `.sfdx` that
+	// must never reach the server — and batched into one notification.
+	disposables.push(watchApexSources(lc));
+
 	// Initial background stub generation: incremental — only create stubs that
 	// don't exist yet, so a reload with stubs already on disk does almost no work.
 	scheduleStubSync();
 
-	// Watch the Salesforce Apex LS and auto-restart it if it gets stuck stopped.
-	startApexHealthMonitor(context);
-
-	client.start();
-	context.subscriptions.push({ dispose: unsubscribe });
-	context.subscriptions.push({ dispose: () => void client?.stop() });
+	clientStarted = lc.start().then(
+		() => {
+			// A restarted server starts with an empty ephemeral set — re-send it.
+			if (ephemeralBufferUris.size && client === lc) {
+				void lc.sendNotification(NOTE_EPHEMERAL, { uris: [...ephemeralBufferUris] }).catch(() => {});
+			}
+		},
+		(e: any) => {
+			outputChannel.appendLine(`languageClient: failed to start ASFX language server: ${e?.message ?? e}`);
+		},
+	);
 }
 
-export function stopLanguageServer(): Thenable<void> | undefined {
-	return client?.stop();
+const DEFAULT_SERVER_HEAP_MB = 512;
+
+/** The language server's V8 heap cap in MB (setting, clamped to a sane range). */
+function languageServerHeapMB(): number {
+	const v = vscode.workspace
+		.getConfiguration("adure-sfx-toolkit")
+		.get<number>("apex.languageServerMaxMemoryMB", DEFAULT_SERVER_HEAP_MB);
+	return typeof v === "number" && Number.isFinite(v) ? Math.min(8192, Math.max(128, Math.round(v))) : DEFAULT_SERVER_HEAP_MB;
+}
+
+/** Forward relevant `.cls`/`.trigger` create/change/delete events to the server (batched). */
+function watchApexSources(lc: LanguageClient): vscode.Disposable {
+	const watcher = vscode.workspace.createFileSystemWatcher("**/*.{cls,trigger}");
+	let pending: FileEvent[] = [];
+	let flushTimer: NodeJS.Timeout | undefined;
+	const flush = () => {
+		flushTimer = undefined;
+		const changes = pending;
+		pending = [];
+		if (!changes.length || !lc.isRunning()) return;
+		void lc.sendNotification(DidChangeWatchedFilesNotification.type, { changes }).catch(() => {});
+	};
+	const queue = (uri: vscode.Uri, type: FileChangeType) => {
+		if (uri.scheme !== "file" || GENERATED_PATH.test(uri.fsPath)) return;
+		pending.push({ uri: uri.toString(), type });
+		if (pending.length > 5000) pending = pending.slice(-5000); // backstop for a huge checkout
+		if (!flushTimer) flushTimer = setTimeout(flush, 500);
+	};
+	const subs = [
+		watcher,
+		watcher.onDidCreate((u) => queue(u, FileChangeType.Created)),
+		watcher.onDidChange((u) => queue(u, FileChangeType.Changed)),
+		watcher.onDidDelete((u) => queue(u, FileChangeType.Deleted)),
+	];
+	return {
+		dispose: () => {
+			if (flushTimer) clearTimeout(flushTimer);
+			flushTimer = undefined;
+			pending = [];
+			for (const d of subs) d.dispose();
+		},
+	};
+}
+
+/**
+ * Stop the language server and make sure its process is gone: graceful
+ * shutdown/exit with a timeout, then a hard kill of the child process if it is
+ * still alive (e.g. the server hung). Safe to call repeatedly / concurrently;
+ * returns the in-flight stop.
+ */
+export function stopLanguageServer(): Promise<void> | undefined {
+	if (stopping) return stopping;
+	const lc = client;
+	if (!lc) return undefined;
+	const started = clientStarted;
+	client = undefined;
+	clientRootsKey = undefined;
+	clientApexCompletion = false;
+	clientStarted = undefined;
+	for (const d of clientDisposables.splice(0)) {
+		try {
+			d.dispose();
+		} catch {
+			/* ignore */
+		}
+	}
+	stopping = (async () => {
+		// A client that is still starting can't be stopped — wait (bounded) for it first.
+		if (lc.state === State.Starting && started) {
+			await Promise.race([started, delay(STOP_TIMEOUT_MS)]);
+		}
+		// Grab the child before stop() forgets it, for the kill fallback.
+		const proc: import("child_process").ChildProcess | undefined = (lc as any)._serverProcess;
+		try {
+			await lc.stop(STOP_TIMEOUT_MS);
+		} catch (e: any) {
+			outputChannel.appendLine(`languageClient: stop failed (${e?.message ?? e}) — killing server process.`);
+		} finally {
+			try {
+				if (proc && proc.exitCode === null && proc.signalCode === null) proc.kill();
+			} catch {
+				/* already gone */
+			}
+		}
+	})().finally(() => {
+		stopping = undefined;
+	});
+	return stopping;
+}
+
+function delay(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
  * Tell the language server to drop its cached schema so subsequent completion/
  * hover re-fetch it — used when a webview buffer's org override changes, since the
- * server caches describes by object name (not per org).
+ * server caches describes per project/buffer (it cannot see org overrides).
  */
 export function refreshLanguageServerSchema(): void {
-	void client?.sendNotification(NOTE_REFRESH).catch(() => {});
+	if (client?.isRunning()) void client.sendNotification(NOTE_REFRESH).catch(() => {});
 }
 
 /**
@@ -217,7 +422,7 @@ export function refreshLanguageServerSchema(): void {
 const ephemeralBufferUris = new Set<string>();
 export function setEphemeralBuffers(uris: string[]): void {
 	for (const u of uris) ephemeralBufferUris.add(u);
-	void client?.sendNotification(NOTE_EPHEMERAL, { uris: [...ephemeralBufferUris] }).catch(() => {});
+	if (client?.isRunning()) void client.sendNotification(NOTE_EPHEMERAL, { uris: [...ephemeralBufferUris] }).catch(() => {});
 }
 
 /**
@@ -228,6 +433,7 @@ export function setEphemeralBuffers(uris: string[]): void {
  * budget resets once the server is healthy again.
  */
 const MAX_CLEAN_RESTARTS = 2;
+const HEALTH_CHECK_INTERVAL_MS = 30000;
 function startApexHealthMonitor(context: vscode.ExtensionContext): void {
 	const enabled = vscode.workspace
 		.getConfiguration("adure-sfx-toolkit")
@@ -245,9 +451,37 @@ function startApexHealthMonitor(context: vscode.ExtensionContext): void {
 	let gaveUp = false;
 	let initialRestartHandled = false;
 
-	const timer = setInterval(async () => {
+	// Self-rescheduling timeout (not setInterval): the next check is only scheduled
+	// after the current one — including any awaited clean restart — has finished, so
+	// two checks can never run concurrently and fight over restartBehavior.
+	let timer: NodeJS.Timeout | undefined;
+	let disposed = false;
+	const schedule = () => {
+		if (disposed) return;
+		timer = setTimeout(() => {
+			timer = undefined;
+			void check().finally(schedule);
+		}, HEALTH_CHECK_INTERVAL_MS);
+		timer.unref?.();
+	};
+	const stop = () => {
+		disposed = true;
+		if (timer) clearTimeout(timer);
+		timer = undefined;
+	};
+
+	const check = async (): Promise<void> => {
+		if (disposed) return;
+		// Extension uninstalled/disabled since activation → stop monitoring for good.
+		if (!vscode.extensions.getExtension("salesforce.salesforcedx-vscode-apex")) {
+			stop();
+			return;
+		}
+		// Never activate the Salesforce extension ourselves (that would boot its JVM
+		// language server in a workspace where nothing asked for it).
+		if (!apexExt.isActive) return;
 		try {
-			const api = apexExt.isActive ? apexExt.exports : await apexExt.activate();
+			const api = apexExt.exports;
 			const lcm: any = api?.languageClientManager;
 			if (!lcm?.getClientInstance) return; // API not available; nothing to monitor
 			const lspClient = lcm.getClientInstance();
@@ -301,7 +535,8 @@ function startApexHealthMonitor(context: vscode.ExtensionContext): void {
 		} catch {
 			/* ignore transient errors */
 		}
-	}, 30000);
+	};
 
-	context.subscriptions.push({ dispose: () => clearInterval(timer) });
+	schedule();
+	context.subscriptions.push({ dispose: stop });
 }

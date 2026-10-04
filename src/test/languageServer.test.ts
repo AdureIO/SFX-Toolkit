@@ -105,6 +105,8 @@ function itemsOf(res: any): any[] {
 
 const diagnosticsByUri = new Map<string, any[]>();
 const describeCalls: string[] = []; // every sobject name the server asked the host to describe
+const describeLog: { uri: string; sobject: string }[] = []; // same, with the requesting document
+const SLOW_DESCRIBE_MS = 3000; // the fake host answers describes of `Slow__c` this late
 /** Wait until a publishDiagnostics for `uri` satisfies `pred` (or time out). */
 async function waitForDiagnostics(uri: string, pred: (d: any[]) => boolean, timeoutMs = 4000): Promise<any[]> {
   const start = Date.now();
@@ -136,8 +138,10 @@ before(async function () {
   conn = rpc.createMessageConnection(new rpc.StreamMessageReader(child.stdout!), new rpc.StreamMessageWriter(child.stdin!));
 
   conn.onRequest("sfx/objectList", () => OBJECTS);
-  conn.onRequest("sfx/describe", ({ uri, sobject }: { uri?: string; sobject: string }) => {
+  conn.onRequest("sfx/describe", async ({ uri, sobject }: { uri?: string; sobject: string }) => {
     describeCalls.push(sobject);
+    describeLog.push({ uri: uri ?? "", sobject });
+    if (sobject === "Slow__c") await new Promise((r) => setTimeout(r, SLOW_DESCRIBE_MS));
     const d = DESCRIBES[sobject];
     if (!d) return null;
     if (uri && uri.includes("billing") && sobject === "Account") {
@@ -370,7 +374,9 @@ describe("Apex language features", () => {
 
   it("describes SObjects by heuristic: custom suffix + standard name, not arbitrary types", async () => {
     describeCalls.length = 0;
-    const uri = `file:///tmp/Sem${version++}.cls`;
+    // Its own directory = its own org context, so earlier tests' cached describes
+    // (the server caches describes per org context) don't hide the host calls.
+    const uri = `file:///tmp/heuristic${version++}/Sem.cls`;
     // `Whatever__c` (custom suffix) and `Account` (standard) are SObjects; `Widget` is neither.
     const src = "public class C {\n  void m() {\n    Whatever__c wc;\n    Object a = wc.foo;\n    Account acc;\n    Object b = acc.Name;\n    Widget w;\n    Object d = w.bar;\n  }\n}\n";
     await conn.sendNotification("textDocument/didOpen", { textDocument: { uri, languageId: "apex", version: 1, text: src } });
@@ -635,6 +641,112 @@ describe("Completion weighting", () => {
     assert.strictEqual(tier("Industry"), "0");
     assert.strictEqual(tier("CreatedDate"), "2");
     assert.strictEqual(tier("SystemModstamp"), "2");
+  });
+});
+
+// ─── Responsiveness: cancellation, describe cache, stale-parse completion ───────
+
+describe("Cancellation", () => {
+  it("returns promptly when a completion waiting on a slow describe is cancelled, and stops asking the host", async function () {
+    this.timeout(SLOW_DESCRIBE_MS + 5000);
+    const uri = `file:///tmp/cancel${version++}/Slow.cls`;
+    const src = "public class C {\n  void m() {\n    Slow__c s;\n    s.\n  }\n}\n";
+    await conn.sendNotification("textDocument/didOpen", { textDocument: { uri, languageId: "apex", version: 1, text: src } });
+    const before = describeLog.length;
+    const cts = new rpc.CancellationTokenSource();
+    const started = Date.now();
+    const pending = conn.sendRequest("textDocument/completion", { textDocument: { uri }, position: { line: 3, character: 6 } }, cts.token);
+    // Cancel once the server is blocked on the host describe for Slow__c.
+    const waitStart = Date.now();
+    while (!describeLog.slice(before).some((c) => c.sobject === "Slow__c") && Date.now() - waitStart < 2000) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    cts.cancel();
+    let res: any;
+    try {
+      res = await pending;
+    } catch {
+      res = []; // a client may surface the cancellation as an error — still prompt
+    }
+    const elapsed = Date.now() - started;
+    assert.ok(elapsed < SLOW_DESCRIBE_MS / 2, `cancelled completion took ${elapsed}ms`);
+    assert.strictEqual(itemsOf(res ?? []).length, 0, "cancelled completion returns no items");
+    // After the slow describe finally answers (null), a live request would fall back to
+    // the namespaced name (`acme__Slow__c`); a cancelled one must not send it.
+    await new Promise((r) => setTimeout(r, SLOW_DESCRIBE_MS - (Date.now() - started) + 300));
+    const later = describeLog.slice(before).map((c) => c.sobject);
+    assert.ok(!later.includes("acme__Slow__c"), `no further host requests after cancel: ${later.join(",")}`);
+  });
+});
+
+describe("Server-side describe cache", () => {
+  const dir = `file:///tmp/sfx-describe-cache-${process.pid}`;
+  const count = (sobject: string) => describeLog.filter((c) => c.uri.startsWith(dir + "/") && c.sobject === sobject).length;
+  const src = "public class A {\n  void m() {\n    Contact c;\n    Account a;\n    String n = a.Name;\n    String x = c.\n  }\n}\n";
+  const uri = `${dir}/A.cls`;
+  const completeAt = async () => labelsOf(await conn.sendRequest("textDocument/completion", { textDocument: { uri }, position: { line: 5, character: 17 } }));
+
+  it("asks the host once per object, then serves from cache", async () => {
+    await conn.sendNotification("textDocument/didOpen", { textDocument: { uri, languageId: "apex", version: 1, text: src } });
+    assert.ok((await completeAt()).includes("LastName"));
+    await new Promise((r) => setTimeout(r, 500)); // let the schema-validation pass run
+    assert.ok((await completeAt()).includes("LastName"));
+    const sib = `${dir}/B.cls`; // another document in the same project shares the cache
+    await conn.sendNotification("textDocument/didOpen", { textDocument: { uri: sib, languageId: "apex", version: 1, text: src } });
+    assert.ok(labelsOf(await conn.sendRequest("textDocument/completion", { textDocument: { uri: sib }, position: { line: 5, character: 17 } })).includes("LastName"));
+    assert.strictEqual(count("Contact"), 1, "Contact described once");
+    assert.strictEqual(count("Account"), 1, "Account described once");
+  });
+
+  it("a targeted refresh drops only the named objects", async () => {
+    const contact = count("Contact");
+    const account = count("Account");
+    await conn.sendNotification("sfx/refreshSchema", { objects: ["Contact"] });
+    assert.ok((await completeAt()).includes("LastName"), "still completes after refresh");
+    const h: any = await conn.sendRequest("textDocument/hover", { textDocument: { uri }, position: { line: 4, character: 18 } });
+    assert.ok(h && /Account Name/.test(h.contents.value), "hover served (from cache)");
+    await new Promise((r) => setTimeout(r, 500)); // re-validation after the refresh
+    assert.strictEqual(count("Contact"), contact + 1, "Contact re-described exactly once");
+    assert.strictEqual(count("Account"), account, "Account stays cached");
+  });
+
+  it("a full refresh drops everything", async () => {
+    const account = count("Account");
+    await conn.sendNotification("sfx/refreshSchema");
+    const h: any = await conn.sendRequest("textDocument/hover", { textDocument: { uri }, position: { line: 4, character: 18 } });
+    assert.ok(h && /Account Name/.test(h.contents.value));
+    assert.ok(count("Account") > account, "Account re-described after a full refresh");
+  });
+});
+
+describe("Completion right after an edit (stale parse)", () => {
+  it("maps the cursor into the last parse so scope resolution stays correct", async () => {
+    const uri = `file:///tmp/Stale${version++}.cls`;
+    const src = "public class C {\n  void m1() {\n    Account x;\n    x.\n  }\n  void m2() {\n    acme__Widget__c x;\n    x.\n  }\n}\n";
+    await conn.sendNotification("textDocument/didOpen", { textDocument: { uri, languageId: "apex", version: 1, text: src } });
+    await conn.sendRequest("textDocument/documentSymbol", { textDocument: { uri } }); // parsed (v1)
+    // Insert two lines above m1, then complete immediately — before the debounced
+    // background parse runs, so the server reads the v1 parse. m1's `x.` moves from
+    // line 3 to line 5 (where m2 used to start); without position mapping it would
+    // resolve to m2's acme__Widget__c.
+    await conn.sendNotification("textDocument/didChange", {
+      textDocument: { uri, version: 2 },
+      contentChanges: [{ range: { start: { line: 1, character: 0 }, end: { line: 1, character: 0 } }, text: "  Integer pad1;\n  Integer pad2;\n" }],
+    });
+    const now = labelsOf(await conn.sendRequest("textDocument/completion", { textDocument: { uri }, position: { line: 5, character: 6 } }));
+    assert.ok(now.includes("Industry"), `m1 x should still be Account: ${now.slice(0, 6).join(",")}`);
+    assert.ok(!now.includes("acme__Amount__c"), "must not resolve to m2's type");
+    // A member access typed on a brand-new line (inside the edited span) also resolves.
+    await conn.sendNotification("textDocument/didChange", {
+      textDocument: { uri, version: 3 },
+      contentChanges: [{ range: { start: { line: 9, character: 6 }, end: { line: 9, character: 6 } }, text: "\n    x.acme" }],
+    });
+    const typed = labelsOf(await conn.sendRequest("textDocument/completion", { textDocument: { uri }, position: { line: 10, character: 10 } }));
+    assert.ok(typed.includes("acme__Amount__c"), `m2 x should be acme__Widget__c: ${typed.join(",")}`);
+    // And after the background parse has caught up.
+    await new Promise((r) => setTimeout(r, 400));
+    const later = labelsOf(await conn.sendRequest("textDocument/completion", { textDocument: { uri }, position: { line: 5, character: 6 } }));
+    assert.ok(later.includes("Industry") && !later.includes("acme__Amount__c"));
   });
 });
 
