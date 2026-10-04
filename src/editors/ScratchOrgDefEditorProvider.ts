@@ -1,15 +1,16 @@
 import * as vscode from "vscode";
 import { ScratchOrgDefinition, validateDefinition, ALL_FEATURES } from "./scratchOrgDefSchema";
 import * as scratchOrgDefSchema from "./scratchOrgDefSchema";
+import { getNonce } from "../utils/htmlUtils";
 
 export class ScratchOrgDefEditorProvider implements vscode.CustomTextEditorProvider {
   private _isApplyingEdit = false;
 
   public static register(context: vscode.ExtensionContext): vscode.Disposable {
     const provider = new ScratchOrgDefEditorProvider(context);
-    return vscode.window.registerCustomEditorProvider("adure-sfx-toolkit.scratchOrgDefEditor", provider, {
-      webviewOptions: { retainContextWhenHidden: true }
-    });
+    // No retainContextWhenHidden: the webview sends 'ready' on (re)load and gets the current document back,
+    // so a hidden tab costs no renderer process.
+    return vscode.window.registerCustomEditorProvider("adure-sfx-toolkit.scratchOrgDefEditor", provider);
   }
 
   constructor(private readonly context: vscode.ExtensionContext) {}
@@ -32,8 +33,22 @@ export class ScratchOrgDefEditorProvider implements vscode.CustomTextEditorProvi
     // Initial data is embedded in the HTML itself — no postMessage timing issues
     webviewPanel.webview.html = this.getHtmlForWebview(currentDef);
 
+    const postCurrentDocument = () => {
+      try {
+        const text = document.getText();
+        const data = text.trim() ? JSON.parse(text) : {};
+        void webviewPanel.webview.postMessage({ type: "update", data });
+      } catch {
+        // ignore mid-edit parse errors
+      }
+    };
+
     const messageListener = webviewPanel.webview.onDidReceiveMessage((message) => {
       switch (message.type) {
+        case "ready":
+          // Webview (re)loaded — e.g. after being hidden — resync with the live document.
+          postCurrentDocument();
+          break;
         case "update":
           this.updateDocument(document, message.data);
           break;
@@ -52,12 +67,8 @@ export class ScratchOrgDefEditorProvider implements vscode.CustomTextEditorProvi
     const changeDocumentSubscription = vscode.workspace.onDidChangeTextDocument((e) => {
       if (this._isApplyingEdit) return;
       if (e.document.uri.toString() !== document.uri.toString()) return;
-      try {
-        const newDef = JSON.parse(e.document.getText());
-        webviewPanel.webview.postMessage({ type: "update", data: newDef });
-      } catch {
-        // ignore mid-edit parse errors
-      }
+      if (e.contentChanges.length === 0) return;
+      postCurrentDocument();
     });
 
     webviewPanel.onDidDispose(() => {
@@ -79,13 +90,14 @@ export class ScratchOrgDefEditorProvider implements vscode.CustomTextEditorProvi
 
   private getHtmlForWebview(initialDef: ScratchOrgDefinition = {}): string {
     const initialDataEscaped = JSON.stringify(initialDef).replace(/</g, "\\u003c").replace(/>/g, "\\u003e");
+    const nonce = getNonce();
 
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
     <title>Scratch Org Definition Editor</title>
     <style>
         body {
@@ -276,7 +288,7 @@ export class ScratchOrgDefEditorProvider implements vscode.CustomTextEditorProvi
         </div>
     </div>
 
-    <script>
+    <script nonce="${nonce}">
         const vscode = acquireVsCodeApi();
 
         // Read initial data embedded in the HTML — no postMessage race condition
@@ -586,7 +598,8 @@ export class ScratchOrgDefEditorProvider implements vscode.CustomTextEditorProvi
             }
             errorDiv.style.display = 'block';
             errorDiv.className = 'error';
-            errorDiv.innerHTML = '<strong>Validation Errors:</strong><br>' + errors.map(e => '• ' + e).join('<br>');
+            const esc = (v) => String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+            errorDiv.innerHTML = '<strong>Validation Errors:</strong><br>' + errors.map(e => '• ' + esc(e)).join('<br>');
         }
 
         // Debounced listeners for general fields
@@ -598,8 +611,9 @@ export class ScratchOrgDefEditorProvider implements vscode.CustomTextEditorProvi
             }
         });
 
-        // Initial render from embedded data
+        // Initial render from embedded data, then ask the host for the live document
         updateUI();
+        vscode.postMessage({ type: 'ready' });
     </script>
 </body>
 </html>`;

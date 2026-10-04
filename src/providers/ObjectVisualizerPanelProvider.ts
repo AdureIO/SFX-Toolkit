@@ -11,6 +11,7 @@ import {
   OrgOption
 } from "../utils/orgListCache";
 import { buildObjectGraph, GraphDirection } from "../utils/objectGraph";
+import { onDidChangeDefaultOrg } from "../utils/defaultOrgEvents";
 
 /** Max concurrent describe requests when fanning out over neighbours. */
 const DESCRIBE_CONCURRENCY = 6;
@@ -38,9 +39,16 @@ async function mapPool<T, R>(items: T[], limit: number, fn: (item: T, i: number)
 
 export class ObjectVisualizerPanelProvider {
   public static readonly viewType = "adure-sfx-toolkit.objectVisualizer";
+  /** Singleton: one visualizer (and one retained renderer) at most. */
+  private static _panel: vscode.WebviewPanel | undefined;
 
   public static async show(extensionUri: vscode.Uri) {
     const column = vscode.window.activeTextEditor ? vscode.window.activeTextEditor.viewColumn : undefined;
+    if (ObjectVisualizerPanelProvider._panel) {
+      ObjectVisualizerPanelProvider._panel.reveal(column);
+      return;
+    }
+    // retainContextWhenHidden kept: the rendered graph (layout, zoom, selection) lives only in the webview.
     const panel = vscode.window.createWebviewPanel(
       ObjectVisualizerPanelProvider.viewType,
       "Object Visualizer",
@@ -64,6 +72,9 @@ export class ObjectVisualizerPanelProvider {
   }
 
   private static async attach(panel: vscode.WebviewPanel, extensionUri: vscode.Uri) {
+    // A restored panel arriving while another is open: keep just one.
+    if (ObjectVisualizerPanelProvider._panel && ObjectVisualizerPanelProvider._panel !== panel) ObjectVisualizerPanelProvider._panel.dispose();
+    ObjectVisualizerPanelProvider._panel = panel;
     panel.webview.html = this._getHtmlForWebview(panel.webview, extensionUri);
 
     AuthInfo.warmAuthForOrg(null);
@@ -103,21 +114,34 @@ export class ObjectVisualizerPanelProvider {
       }
     });
 
-    panel.onDidDispose(() => listener.dispose());
+    // Realign the org selector when the default org changes (extension command or external).
+    const defaultOrgSub = onDidChangeDefaultOrg((username) => {
+      void this.sendOrgList(panel, username);
+    });
+
+    panel.onDidDispose(() => {
+      listener.dispose();
+      defaultOrgSub.dispose();
+      if (ObjectVisualizerPanelProvider._panel === panel) ObjectVisualizerPanelProvider._panel = undefined;
+    });
   }
 
-  private static async sendOrgList(panel: vscode.WebviewPanel) {
+  /** Post the org list — from the shared cache when available (no CLI spawn), else one deduped fetch. */
+  private static async sendOrgList(panel: vscode.WebviewPanel, defaultUsername?: string | null) {
     const withDefault = (orgs: OrgOption[]) => {
-      const def = getDefaultUsernameFromOrgCache();
+      const def = defaultUsername ?? getDefaultUsernameFromOrgCache();
       return orgs.map((o) => ({ ...o, isDefault: !!def && o.username === def }));
     };
     const cached = getCachedOrgList();
-    if (cached) panel.webview.postMessage({ command: "orgList", orgs: withDefault(cached) });
+    if (cached) {
+      panel.webview.postMessage({ command: "orgList", orgs: withDefault(cached) });
+      return;
+    }
     try {
       const fresh = await refreshOrgListCache();
       panel.webview.postMessage({ command: "orgList", orgs: withDefault(fresh) });
     } catch {
-      if (!cached) panel.webview.postMessage({ command: "orgList", orgs: [] });
+      panel.webview.postMessage({ command: "orgList", orgs: [] });
     }
   }
 

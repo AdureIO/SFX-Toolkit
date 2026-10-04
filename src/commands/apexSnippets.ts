@@ -13,6 +13,49 @@ export interface ApexSnippet {
   name: string;
   code: string;
   description?: string;
+  /** Absolute path of the backing .apex file — the snippet's real identity (display names are lossy). */
+  filePath?: string;
+}
+
+// --- Change notifications (tree view + overview panel both listen) ---
+
+const snippetsChangedEmitter = new vscode.EventEmitter<void>();
+/** Fires (debounced) whenever snippets are added/removed/edited via this module or on disk. */
+export const onDidChangeSnippets: vscode.Event<void> = snippetsChangedEmitter.event;
+let snippetsChangedTimer: ReturnType<typeof setTimeout> | undefined;
+
+/** Signal that the snippet set changed. Debounced so an explicit notify + file-watcher event collapse into one. */
+export function notifySnippetsChanged(): void {
+  if (snippetsChangedTimer) clearTimeout(snippetsChangedTimer);
+  snippetsChangedTimer = setTimeout(() => {
+    snippetsChangedTimer = undefined;
+    snippetsChangedEmitter.fire();
+  }, 100);
+}
+
+/** Watch the snippets folder so files created/deleted/saved outside the UI refresh tree + panel. */
+export function createSnippetsWatcher(): vscode.Disposable {
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  if (!folder) return new vscode.Disposable(() => undefined);
+  const watcher = vscode.workspace.createFileSystemWatcher(
+    new vscode.RelativePattern(folder, `.vscode/${SNIPPETS_DIR_NAME}/*.apex`)
+  );
+  const subs = [
+    watcher.onDidCreate(notifySnippetsChanged),
+    watcher.onDidDelete(notifySnippetsChanged),
+    watcher.onDidChange(notifySnippetsChanged)
+  ];
+  return new vscode.Disposable(() => {
+    subs.forEach((d) => d.dispose());
+    watcher.dispose();
+  });
+}
+
+/** Release the module-level emitter/timer (extension deactivate). */
+export function disposeSnippetEvents(): void {
+  if (snippetsChangedTimer) clearTimeout(snippetsChangedTimer);
+  snippetsChangedTimer = undefined;
+  snippetsChangedEmitter.dispose();
 }
 
 function getSnippetsDir(): string | null {
@@ -21,12 +64,14 @@ function getSnippetsDir(): string | null {
   return path.join(root, ".vscode", SNIPPETS_DIR_NAME);
 }
 
-/** Sanitize display name to a safe filename stem (e.g. "My Snippet" -> "My_Snippet"). */
+/** Sanitize display name to a safe filename stem for NEW files (e.g. "My Snippet" -> "My_Snippet", "v1.2" stays "v1.2"). */
 function nameToFilename(name: string): string {
-  return name
+  const stem = name
     .trim()
     .replace(/\s+/g, "_")
-    .replace(/[^\w\-_]/g, "");
+    .replace(/[^\w\-.]/g, "")
+    .replace(/^\.+/, "");
+  return stem || "Snippet";
 }
 
 /** Filename stem to display name (e.g. "My_Snippet" -> "My Snippet"). */
@@ -75,30 +120,58 @@ export async function loadSnippets(): Promise<ApexSnippet[]> {
       const code = fs.readFileSync(filePath, "utf8");
       snippets.push({
         name: filenameToName(stem),
-        code
+        code,
+        filePath
       });
     } catch {
       // skip unreadable files
     }
   }
+  snippets.sort((a, b) => a.name.localeCompare(b.name));
   return snippets;
 }
 
-/** Path to the .apex file for a snippet (by display name). */
+/** Path to the .apex file for a snippet (by display name). Prefer {@link snippetFilePath} for loaded snippets. */
 export function getSnippetFilePath(snippetName: string): string | null {
   const dir = getSnippetsDir();
   if (!dir) return null;
   return path.join(dir, nameToFilename(snippetName) + ".apex");
 }
 
+/** The snippet's real backing file: its loaded filePath, else derived from its display name (legacy callers). */
+export function snippetFilePath(snippet: Pick<ApexSnippet, "name" | "filePath">): string | null {
+  return snippet.filePath || getSnippetFilePath(snippet.name || "");
+}
+
+/** True when filePath is a .apex file directly inside the snippets folder (guards paths coming from webviews). */
+function isInSnippetsDir(filePath: string): boolean {
+  const dir = getSnippetsDir();
+  if (!dir || !filePath.endsWith(".apex")) return false;
+  return path.dirname(path.resolve(filePath)) === path.resolve(dir);
+}
+
+/** Read the snippet's current code from disk (falls back to the in-memory code). */
+function currentSnippetCode(snippet: { code?: string; name?: string; filePath?: string }): string {
+  const filePath = snippet.filePath || getSnippetFilePath(snippet.name || "");
+  if (filePath && fs.existsSync(filePath)) {
+    try {
+      return fs.readFileSync(filePath, "utf8");
+    } catch {
+      // keep in-memory snippet code when the file cannot be read
+    }
+  }
+  return snippet.code ?? "";
+}
+
 /** Open the .apex file for a snippet in the editor (code completion, Cursor chat). */
 export async function openSnippetEditor(snippet: ApexSnippet): Promise<void> {
-  const filePath = getSnippetFilePath(snippet.name);
+  const filePath = snippetFilePath(snippet);
   if (!filePath) return;
   if (!fs.existsSync(filePath)) {
     const dir = path.dirname(filePath);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(filePath, snippet.code || "System.debug('Hello');", "utf8");
+    notifySnippetsChanged();
   }
   const doc = await vscode.workspace.openTextDocument(filePath);
   await vscode.window.showTextDocument(doc);
@@ -170,6 +243,7 @@ export async function addSnippet(): Promise<void> {
   }
 
   fs.writeFileSync(filePath, initialCode.trim(), "utf8");
+  notifySnippetsChanged();
   const doc = await vscode.workspace.openTextDocument(filePath);
   await vscode.window.showTextDocument(doc);
   vscode.window.showInformationMessage(
@@ -215,22 +289,14 @@ export async function runSnippetFromTree(snippet: ApexSnippet): Promise<void> {
     targetOrg = picked.label.endsWith("(default)") ? undefined : picked.username;
   }
 
-  let codeToRun = snippet.code;
-  const filePath = getSnippetFilePath(snippet.name || "");
-  if (filePath && fs.existsSync(filePath)) {
-    try {
-      codeToRun = fs.readFileSync(filePath, "utf8");
-    } catch {
-      // keep in-memory snippet code when the file cannot be read
-    }
-  }
-  const result = await executeAnonymousApex(codeToRun, { fromPanel: false, targetOrg });
+  const codeToRun = currentSnippetCode(snippet);
+  const result = await executeAnonymousApex(codeToRun, { targetOrg });
   if (!result.success) {
     Logger.error(`Snippet "${snippet.name || "unnamed"}" failed`);
   }
 }
 
-export async function runSnippet(snippet?: ApexSnippet | { code?: string; name?: string }): Promise<void> {
+export async function runSnippet(snippet?: ApexSnippet | { code?: string; name?: string; filePath?: string }): Promise<void> {
   if (!snippet || !snippet.code) {
     const snippets = await loadSnippets();
     if (snippets.length === 0) {
@@ -259,57 +325,64 @@ export async function runSnippet(snippet?: ApexSnippet | { code?: string; name?:
     snippet = picked.snippet;
   }
 
-  let codeToRun = snippet.code!;
-  const filePath = getSnippetFilePath(snippet.name || "");
-  if (filePath && fs.existsSync(filePath)) {
-    try {
-      codeToRun = fs.readFileSync(filePath, "utf8");
-    } catch {
-      // use in-memory code
-    }
-  }
-  const result = await executeAnonymousApex(codeToRun, { fromPanel: false });
+  const codeToRun = currentSnippetCode(snippet);
+  const result = await executeAnonymousApex(codeToRun);
   if (!result.success) {
     Logger.error(`Snippet "${snippet.name || "unnamed"}" failed`);
   }
 }
 
-export async function deleteSnippet(): Promise<void> {
-  const snippets = await loadSnippets();
-  if (snippets.length === 0) {
-    vscode.window.showInformationMessage("No snippets to delete.");
-    return;
+/**
+ * Delete a snippet. With a target (snippet, or tree item carrying `.snippet`) it deletes that file
+ * after confirmation; without one it asks which snippet to delete.
+ */
+export async function deleteSnippet(target?: ApexSnippet | { snippet?: ApexSnippet }): Promise<void> {
+  const given = target && "snippet" in target ? target.snippet : (target as ApexSnippet | undefined);
+  let snippet: ApexSnippet | undefined = given && typeof given.name === "string" ? given : undefined;
+
+  if (!snippet) {
+    const snippets = await loadSnippets();
+    if (snippets.length === 0) {
+      vscode.window.showInformationMessage("No snippets to delete.");
+      return;
+    }
+
+    type PickItem = vscode.QuickPickItem & { snippet: ApexSnippet };
+    const picked = await vscode.window.showQuickPick<PickItem>(
+      snippets.map((s) => ({ label: s.name, description: s.description || "", snippet: s })),
+      { placeHolder: "Select snippet to delete" }
+    );
+    if (!picked) return;
+    snippet = picked.snippet;
   }
 
-  type PickItem = vscode.QuickPickItem & { index: number };
-  const picked = await vscode.window.showQuickPick<PickItem>(
-    snippets.map((s, i) => ({ label: s.name, description: s.description || "", index: i })),
-    { placeHolder: "Select snippet to delete" }
-  );
-  if (!picked) return;
-
   const confirm = await vscode.window.showWarningMessage(
-    `Delete snippet "${picked.label}"? This removes the .apex file.`,
+    `Delete snippet "${snippet.name}"? This removes the .apex file.`,
     "Delete",
     "Cancel"
   );
   if (confirm !== "Delete") return;
 
-  const filePath = getSnippetFilePath(snippets[picked.index].name);
-  if (filePath && fs.existsSync(filePath)) {
-    fs.unlinkSync(filePath);
-    vscode.window.showInformationMessage(`Snippet "${picked.label}" deleted.`);
-  }
+  const filePath = snippetFilePath(snippet);
+  if (filePath) await deleteSnippetByPath(filePath);
 }
 
-/** Delete snippet by index (for use from tree/panel). Returns true if deleted. */
+/** Delete the snippet stored at filePath (must be inside the snippets folder). Returns true if deleted. */
+export async function deleteSnippetByPath(filePath: string): Promise<boolean> {
+  if (!isInSnippetsDir(filePath) || !fs.existsSync(filePath)) return false;
+  fs.unlinkSync(filePath);
+  notifySnippetsChanged();
+  vscode.window.showInformationMessage(`Snippet "${filenameToName(path.basename(filePath, ".apex"))}" deleted.`);
+  return true;
+}
+
+/**
+ * Delete snippet by index (legacy, for tree/panel callers). Index refers to {@link loadSnippets} order,
+ * which can shift between listing and deleting — prefer {@link deleteSnippetByPath}. Returns true if deleted.
+ */
 export async function deleteSnippetByIndex(index: number): Promise<boolean> {
   const snippets = await loadSnippets();
   if (index < 0 || index >= snippets.length) return false;
-  const name = snippets[index].name;
-  const filePath = getSnippetFilePath(name);
-  if (!filePath || !fs.existsSync(filePath)) return false;
-  fs.unlinkSync(filePath);
-  vscode.window.showInformationMessage(`Snippet "${name}" deleted.`);
-  return true;
+  const filePath = snippetFilePath(snippets[index]);
+  return filePath ? deleteSnippetByPath(filePath) : false;
 }

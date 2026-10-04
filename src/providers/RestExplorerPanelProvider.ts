@@ -5,6 +5,7 @@ import { Logger } from "../utils/outputChannel";
 import { AuthInfo } from "../utils/authInfo";
 import { OrgMetadataCache } from "../utils/orgMetadataCache";
 import { getCachedOrgList, refreshOrgListCache, warmOrgListCache } from "../utils/orgListCache";
+import { onDidChangeDefaultOrg } from "../utils/defaultOrgEvents";
 import { getToolingApiVersion } from "../utils/constants";
 import { scanApexRestResources } from "../utils/apexRestScanner";
 import { Telemetry } from "../utils/telemetry";
@@ -120,10 +121,19 @@ export class RestExplorerPanelProvider {
   private static stateByWorkspace: Record<string, RestExplorerState> = {};
   /** A request to preload into the panel once it's ready (e.g. from an @RestResource CodeLens). */
   private static _pendingPrefill: { method?: string; url?: string } | undefined;
+  /** Singleton: CodeLens clicks / command invocations reuse the open explorer instead of opening new tabs. */
+  private static _panel: vscode.WebviewPanel | undefined;
 
   public static async show(prefill?: { method?: string; url?: string }): Promise<void> {
     const folder = vscode.workspace.workspaceFolders?.[0];
     if (!folder) { vscode.window.showErrorMessage("No workspace open."); return; }
+
+    const existing = RestExplorerPanelProvider._panel;
+    if (existing) {
+      existing.reveal();
+      if (prefill) void existing.webview.postMessage({ command: "prefill", ...prefill });
+      return;
+    }
 
     RestExplorerPanelProvider._pendingPrefill = prefill;
     const panel = vscode.window.createWebviewPanel(
@@ -142,13 +152,25 @@ export class RestExplorerPanelProvider {
   }
 
   private static attach(panel: vscode.WebviewPanel, workspaceRoot: string): void {
+    // A restored panel arriving while another is open: keep just one.
+    if (RestExplorerPanelProvider._panel && RestExplorerPanelProvider._panel !== panel) RestExplorerPanelProvider._panel.dispose();
+    RestExplorerPanelProvider._panel = panel;
     panel.webview.html = RestExplorerPanelProvider.getHtml();
+
+    // Realign the org selector when the default org changes (extension command or external).
+    const defaultOrgSub = onDidChangeDefaultOrg(async (username) => {
+      try {
+        const orgs = getCachedOrgList() ?? await refreshOrgListCache();
+        if (RestExplorerPanelProvider._panel !== panel) return;
+        void panel.webview.postMessage({ command: "defaultOrgChanged", orgs, defaultOrg: username ?? orgs[0]?.username ?? "" });
+      } catch { /* keep the current list */ }
+    });
 
     // Warm caches in background on panel open
     warmOrgListCache();
     AuthInfo.warmAuthForOrg(null);
 
-    panel.webview.onDidReceiveMessage(async (msg: {
+    const messageListener = panel.webview.onDidReceiveMessage(async (msg: {
       command: string;
       org?: string;
       request?: RequestPayload;
@@ -271,6 +293,13 @@ export class RestExplorerPanelProvider {
         }
         return;
       }
+    });
+
+    panel.onDidDispose(() => {
+      messageListener.dispose();
+      defaultOrgSub.dispose();
+      if (RestExplorerPanelProvider._panel === panel) RestExplorerPanelProvider._panel = undefined;
+      RestExplorerPanelProvider._pendingPrefill = undefined;
     });
   }
 
@@ -945,6 +974,18 @@ export class RestExplorerPanelProvider {
       return;
     }
 
+    if (d.command === 'defaultOrgChanged') {
+      orgsData = d.orgs || orgsData;
+      var orgSel3 = safeGet('req-org');
+      if (orgSel3) {
+        orgSel3.innerHTML = (orgsData.length ? '' : '<option value="">No orgs found</option>') +
+          orgsData.map(function(o) { return '<option value="'+escHtml(o.username)+'">'+escHtml(o.label)+'</option>'; }).join('');
+        if (d.defaultOrg) orgSel3.value = d.defaultOrg;
+        orgSel3.dispatchEvent(new Event('change'));
+      }
+      objectListOrg = null; objectListData = [];
+      return;
+    }
     if (d.command === 'cacheRefreshed') {
       var btn2 = safeGet('refresh-cache-btn');
       var row2 = safeGet('cache-status-row');

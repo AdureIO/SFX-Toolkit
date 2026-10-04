@@ -1,11 +1,12 @@
 import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
-import { runCommand } from "../utils/commandRunner";
+import { runCommandArgs } from "../utils/commandRunner";
 import { Logger } from "../utils/outputChannel";
 import { AuthInfo } from "../utils/authInfo";
 import { SchemaCache } from "../utils/schemaCache";
 import { getCachedOrgList, refreshOrgListCache, warmOrgListCache } from "../utils/orgListCache";
+import { onDidChangeDefaultOrg } from "../utils/defaultOrgEvents";
 import { generateApexDataFactory, recommendedSelectFields, type RefMapping } from "../utils/apexDataFactory";
 import { extractSObjectFromQuery, queryAllRecords, sfRequest, resolveOrgToInfo, type OrgInfo } from "../utils/dataMigration";
 import { Telemetry } from "../utils/telemetry";
@@ -212,20 +213,38 @@ export class DataToolsPanelProvider {
 
   private static _lastFilePath: string | null = null;
   private static _lastCsvData: CsvData | null = null;
+  /** Singleton: one panel (and one retained renderer) at most. */
+  private static _panel: vscode.WebviewPanel | undefined;
 
   public static async show(): Promise<void> {
     const folder = vscode.workspace.workspaceFolders?.[0];
     if (!folder) { vscode.window.showErrorMessage("No workspace open."); return; }
     const workspaceRoot = folder.uri.fsPath;
 
+    if (DataToolsPanelProvider._panel) {
+      DataToolsPanelProvider._panel.reveal();
+      return;
+    }
+
+    // retainContextWhenHidden kept: the form holds unsent user input (query, loaded import file, progress).
     const panel = vscode.window.createWebviewPanel(DataToolsPanelProvider.viewType, "Data Export / Import", vscode.ViewColumn.One, { enableScripts: true, retainContextWhenHidden: true });
+    DataToolsPanelProvider._panel = panel;
     panel.webview.html = DataToolsPanelProvider.getHtml();
+
+    // Realign the org selectors when the default org changes (extension command or external).
+    const defaultOrgSub = onDidChangeDefaultOrg(async (username) => {
+      try {
+        const orgs = getCachedOrgList() ?? await refreshOrgListCache();
+        if (DataToolsPanelProvider._panel !== panel) return;
+        void panel.webview.postMessage({ command: "init", orgs, defaultOrg: username ?? orgs[0]?.username ?? "" });
+      } catch { /* keep the current list */ }
+    });
 
     // Warm caches in background on panel open
     warmOrgListCache();
     AuthInfo.warmAuthForOrg(null);
 
-    panel.webview.onDidReceiveMessage(async (msg: {
+    const messageListener = panel.webview.onDidReceiveMessage(async (msg: {
       command: string;
       query?: string; org?: string; format?: string; outputFile?: string;
       sobject?: string; operation?: string;
@@ -265,10 +284,11 @@ export class DataToolsPanelProvider {
         panel.webview.postMessage({ command: "exportProgress", message: "Running query…" });
         try {
           const resultFormat = format === "json" ? "json" : "csv";
-          const safeQuery = query.replace(/"/g, '\\"').replace(/\r?\n/g, " ");
-          const output = await runCommand(
-            `sf data query --query "${safeQuery}" --result-format ${resultFormat} -o "${org}"`,
-            workspaceRoot, undefined, false, undefined, 60000
+          // argv form: the query/org are never parsed by a shell (quotes, $, & are safe).
+          const output = await runCommandArgs(
+            "sf",
+            ["data", "query", "--query", query.replace(/\r?\n/g, " "), "--result-format", resultFormat, "-o", org],
+            workspaceRoot, undefined, false, 60000
           );
           // Parse row count
           const { rows } = parseCsv(output);
@@ -455,6 +475,15 @@ export class DataToolsPanelProvider {
         if (fp && fs.existsSync(fp)) void vscode.window.showTextDocument(vscode.Uri.file(fp));
         return;
       }
+    });
+
+    panel.onDidDispose(() => {
+      messageListener.dispose();
+      defaultOrgSub.dispose();
+      DataToolsPanelProvider._panel = undefined;
+      // Release the parsed import file (can be large).
+      DataToolsPanelProvider._lastFilePath = null;
+      DataToolsPanelProvider._lastCsvData = null;
     });
   }
 

@@ -6,6 +6,7 @@ import { AuthInfo } from "../utils/authInfo";
 import { SchemaCache } from "../utils/schemaCache";
 import { OrgMetadataCache } from "../utils/orgMetadataCache";
 import { getCachedOrgList, refreshOrgListCache, warmOrgListCache } from "../utils/orgListCache";
+import { onDidChangeDefaultOrg } from "../utils/defaultOrgEvents";
 import {
   getCreatableFields,
   extractSObjectFromQuery,
@@ -133,19 +134,37 @@ async function performRevert(
 
 export class DataMigrationPanelProvider {
   public static readonly viewType = "adure-sfx-toolkit.dataMigration";
+  /** Singleton: one wizard (and one retained renderer) at most. */
+  private static _panel: vscode.WebviewPanel | undefined;
 
   public static async show(globalStorageDir: string): Promise<void> {
     const folder = vscode.workspace.workspaceFolders?.[0];
     if (!folder) { vscode.window.showErrorMessage("No workspace open."); return; }
     const workspaceRoot = folder.uri.fsPath;
 
+    if (DataMigrationPanelProvider._panel) {
+      DataMigrationPanelProvider._panel.reveal();
+      return;
+    }
+
+    // retainContextWhenHidden kept: the wizard holds multi-step, unsaved user state (plan, mappings, run log).
     const panel = vscode.window.createWebviewPanel(
       DataMigrationPanelProvider.viewType,
       "Data Migration Wizard",
       vscode.ViewColumn.One,
       { enableScripts: true, retainContextWhenHidden: true }
     );
+    DataMigrationPanelProvider._panel = panel;
     panel.webview.html = DataMigrationPanelProvider.getHtml();
+
+    // Default org changed: refresh the org list ("(default)" label). Explicit source/target picks are preserved.
+    const defaultOrgSub = onDidChangeDefaultOrg(async (username) => {
+      try {
+        const orgs = getCachedOrgList() ?? await refreshOrgListCache();
+        if (DataMigrationPanelProvider._panel !== panel) return;
+        void panel.webview.postMessage({ command: "init", orgs, defaultOrg: username ?? orgs[0]?.username ?? "" });
+      } catch { /* keep the current list */ }
+    });
 
     // Warm caches in background on panel open
     warmOrgListCache();
@@ -155,7 +174,7 @@ export class DataMigrationPanelProvider {
     // always acts on what was really written. Cleared once reverted so it can't be replayed.
     let lastRun: { org: string; orgInfo: OrgInfo; order: string[]; journal: MigrationJournal } | null = null;
 
-    panel.webview.onDidReceiveMessage(async (msg: {
+    const messageListener = panel.webview.onDidReceiveMessage(async (msg: {
       command: string;
       sourceOrg?: string;
       targetOrg?: string;
@@ -175,7 +194,8 @@ export class DataMigrationPanelProvider {
         const cached = getCachedOrgList();
         const orgs = cached ?? await refreshOrgListCache();
         panel.webview.postMessage({ command: "init", orgs, defaultOrg: orgs[0]?.username ?? "" });
-        if (!cached) void refreshOrgListCache(); // re-warm if we just fetched
+        // Served from cache: re-warm in the background (deduped) so the list isn't stale next time.
+        if (cached) warmOrgListCache();
         return;
       }
 
@@ -666,6 +686,13 @@ export class DataMigrationPanelProvider {
         if (fp && fs.existsSync(fp)) void vscode.window.showTextDocument(vscode.Uri.file(fp));
         return;
       }
+    });
+
+    panel.onDidDispose(() => {
+      messageListener.dispose();
+      defaultOrgSub.dispose();
+      DataMigrationPanelProvider._panel = undefined;
+      lastRun = null; // release the undo journal
     });
   }
 
