@@ -35,7 +35,22 @@ const HISTORY_MAX = 10;
  *     a results pane, running anonymous Apex against the selected org.
  * This is the single home for Apex logs; the sidebar keeps only the Traces view.
  */
-export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
+/** Shape pushed into the workbench's Execute tab, whether the run started there or elsewhere. */
+interface ExecResultPayload {
+	success: boolean;
+	error: string;
+	log: string;
+	hasLog: boolean;
+	/** True when this came from outside the workbench (command palette, snippets, rerun) — the
+	 * client uses this to switch to the Execute tab so the result is actually visible. */
+	external: boolean;
+}
+
+export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
+	/** Single instance (constructed once in extension.ts) — lets other command files reach the
+	 * live workbench without extension.ts having to thread a reference through every caller. */
+	private static _instance: ApexWorkbenchViewProvider | undefined;
+
 	private _view?: vscode.WebviewView;
 	private _listener?: vscode.Disposable;
 	private _lastLog = '';
@@ -46,13 +61,91 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	/** Live-log subscription for the Logs tab's current org (shared LiveLogService). */
 	private _logSub?: vscode.Disposable;
 	private _logOrg: string | null = null;
+	/** The Logs tab has been loaded at least once — resubscribe when the view is shown again. */
+	private _logsWanted = false;
+	/** An external exec result that arrived before the webview's script had loaded (e.g. the
+	 * very first reveal of the view this session) — flushed once the client signals it's ready. */
+	private _pendingExternal: ExecResultPayload | null = null;
+	/** Provider-lifetime subscriptions (default-org events). */
+	private readonly _disposables: vscode.Disposable[] = [];
+	/** Subscriptions tied to the current webview view (visibility, dispose) — reset per resolve. */
+	private _viewDisposables: vscode.Disposable[] = [];
 
 	constructor(private readonly _extensionUri: vscode.Uri) {
+		ApexWorkbenchViewProvider._instance = this;
 		// When the default org changes, re-send the org list so the selector realigns
 		// (the "(default)" marker follows, and a default-selected user follows along).
-		onDidChangeDefaultOrg(async () => {
+		this._disposables.push(onDidChangeDefaultOrg(async () => {
 			if (this._view) this._post('orgList', { orgs: await getAnonymousApexOrgList(), defaultChanged: true });
-		});
+		}));
+	}
+
+	/** Release everything (extension deactivate): subscriptions, live-log feed, cached log bodies. */
+	public dispose(): void {
+		this._releaseView();
+		this._disposables.forEach((d) => d.dispose());
+		this._disposables.length = 0;
+		this._bodyCache.clear();
+		this._lastLog = '';
+		this._pendingExternal = null;
+		if (ApexWorkbenchViewProvider._instance === this) ApexWorkbenchViewProvider._instance = undefined;
+	}
+
+	/** Drop everything bound to the current webview view (it was disposed or is being replaced). */
+	private _releaseView(): void {
+		this._viewDisposables.forEach((d) => d.dispose());
+		this._viewDisposables = [];
+		this._listener?.dispose();
+		this._listener = undefined;
+		// No view → nobody to feed: stop live log polling.
+		this._logSub?.dispose();
+		this._logSub = undefined;
+		this._view = undefined;
+	}
+
+	/**
+	 * Reveal the Apex Workbench and show the result of an anonymous Apex run executed elsewhere
+	 * (command palette, snippets, rerun) on its Execute tab — inline, the same way a run started
+	 * from the workbench itself is shown. This is the ONLY place those commands should send a
+	 * result: never open the debug log as a separate editor tab/file automatically — the
+	 * workbench's own "Open log" button is the sole, explicit opt-in for that.
+	 *
+	 * Use this for anything the user should see immediately (a failure — you DO want the error
+	 * in front of you). For a quiet success (e.g. a snippet that just ran fine), use
+	 * `pushExecResultSilently` instead and let the user pull it up via a toast button.
+	 */
+	public static async showExternalExecResult(result: { success: boolean; errorMessage?: string; log?: string }): Promise<void> {
+		await ApexWorkbenchViewProvider.reveal();
+		ApexWorkbenchViewProvider._instance?._pushExternalResult(result, true);
+	}
+
+	/**
+	 * Update the workbench's Execute tab with a result WITHOUT revealing the view or forcing it
+	 * to the Execute tab. Popping the workbench open (or yanking it off whatever tab the user is
+	 * already looking at) on every successful snippet run would be disruptive when snippets run
+	 * often/in quick succession — the result is there the moment the user does look (already
+	 * painted if the view is resolved, or flushed on the next reveal otherwise).
+	 */
+	public static pushExecResultSilently(result: { success: boolean; errorMessage?: string; log?: string }): void {
+		ApexWorkbenchViewProvider._instance?._pushExternalResult(result, false);
+	}
+
+	/** Reveal the workbench to show whatever exec result is already there — the "Open log" action on a quiet-success toast. */
+	public static async reveal(): Promise<void> {
+		await vscode.commands.executeCommand('adure-sfx-toolkit.apexWorkbench.focus');
+	}
+
+	private _pushExternalResult(result: { success: boolean; errorMessage?: string; log?: string }, focusTab: boolean): void {
+		const payload: ExecResultPayload = {
+			success: result.success,
+			error: result.errorMessage || '',
+			log: result.log || '',
+			hasLog: !!(result.log && result.log.trim()),
+			external: focusTab
+		};
+		this._lastLog = result.log || '';
+		if (this._view) this._post('execResult', { ...payload }); // best-effort immediate paint if already loaded
+		this._pendingExternal = payload; // always stash — flushed on 'getOrgs' covers a fresh/first-ever load
 	}
 
 	private _post(type: string, payload: Record<string, unknown> = {}): void {
@@ -89,12 +182,15 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	}
 
 	public async resolveWebviewView(view: vscode.WebviewView): Promise<void> {
+		this._releaseView();
 		this._view = view;
 		// Stop live log discovery while the panel is hidden; resume (re-subscribe) when shown.
-		view.onDidChangeVisibility(() => {
-			if (view.visible) { if (this._logSub) this._subscribeLogs(this._logOrg); }
+		// (_logsWanted remembers the Logs tab was loaded — _logSub is cleared while hidden,
+		// so it can't be the resume signal or the tab silently stops updating after a hide.)
+		this._viewDisposables.push(view.onDidChangeVisibility(() => {
+			if (view.visible) { if (this._logsWanted) this._subscribeLogs(this._logOrg); }
 			else { this._logSub?.dispose(); this._logSub = undefined; }
-		});
+		}));
 		view.webview.options = {
 			enableScripts: true,
 			localResourceRoots: [
@@ -113,6 +209,13 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 			switch (data?.type) {
 				case 'getOrgs':
 					this._post('orgList', { orgs: await getAnonymousApexOrgList() });
+					// The client only starts listening for messages once its script has run —
+					// 'getOrgs' is the first thing it sends, so it's the reliable "ready" signal
+					// for flushing a result that arrived before this webview instance existed.
+					if (this._pendingExternal) {
+						this._post('execResult', { ...this._pendingExternal });
+						this._pendingExternal = null;
+					}
 					break;
 				case 'warmOrg': {
 					const org = (typeof data.org === 'string' && data.org) ? data.org : null;
@@ -166,9 +269,24 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 					const pick = await vscode.window.showWarningMessage(
 						'Delete all debug logs for the selected org?', { modal: true }, 'Delete all');
 					if (pick !== 'Delete all') break;
-					const n = await deleteAllApexLogs(data.org || null);
-					vscode.window.showInformationMessage(`Deleted ${n} log${n === 1 ? '' : 's'}.`);
-					void LiveLogService.refresh(data.org || null);
+					const org: string | null = data.org || null;
+					// Always clear the local side first — the list, the open log, cached bodies and
+					// log files saved under .sfdx — whether or not the org call below succeeds.
+					this._bodyCache.clear();
+					this._deleteLocalLogFiles();
+					this._post('logsCleared', { org: org ?? '' });
+					if (!this._logSub || org !== this._logOrg) this._subscribeLogs(org);
+					try {
+						const { deleted, failed, firstError } = await deleteAllApexLogs(org);
+						if (failed) {
+							vscode.window.showWarningMessage(`Deleted ${deleted} log${deleted === 1 ? '' : 's'}; ${failed} could not be deleted: ${firstError}`);
+						} else {
+							vscode.window.showInformationMessage(deleted ? `Deleted ${deleted} log${deleted === 1 ? '' : 's'}.` : 'No logs to delete in the org.');
+						}
+					} catch (e: any) {
+						vscode.window.showErrorMessage(`Could not delete logs in the org: ${e?.message ?? e}. Local logs were cleared.`);
+					}
+					await LiveLogService.clear(org);
 					break;
 				}
 				case 'openLog': {
@@ -244,7 +362,9 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 			}
 		});
 
-		view.onDidDispose(() => { this._listener?.dispose(); this._listener = undefined; });
+		this._viewDisposables.push(view.onDidDispose(() => {
+			if (this._view === view) this._releaseView();
+		}));
 	}
 
 	/**
@@ -253,6 +373,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	 * trace is active. Pushes the full list (+ resolved units + live flag) on each update.
 	 */
 	private _subscribeLogs(org: string | null): void {
+		this._logsWanted = true;
 		this._logSub?.dispose();
 		this._logOrg = org;
 		this._logSub = LiveLogService.subscribe(org, (snap) => {
@@ -275,6 +396,17 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 			const p = parseSoqlError(e?.message ?? String(e));
 			return { error: p.code ? `${p.code}: ${p.message}` : p.message, errorDetails: p.details, errorLine: p.line, errorColumn: p.column };
 		}
+	}
+
+	/** Remove downloaded `.log` files from the local Salesforce debug-log folder (best effort). */
+	private _deleteLocalLogFiles(): void {
+		const dir = getSalesforceLogDirectory();
+		if (!dir) return;
+		try {
+			for (const f of fs.readdirSync(dir)) {
+				if (f.endsWith('.log')) { try { fs.unlinkSync(path.join(dir, f)); } catch { /* in use / gone */ } }
+			}
+		} catch { /* folder doesn't exist yet */ }
 	}
 
 	private async _openLogFile(name: string, text: string): Promise<void> {
@@ -661,6 +793,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 			vscode.postMessage({type:'warmOrg', org:orgVal()}); loadLogs(); }
 		else if(d.type==='logList'){ if((d.org||'')!==orgVal()) return; if(d.units){ for(const k in d.units) unitById[k]=d.units[k]; } renderList(d.rows||[]);
 			const lb=document.getElementById('listen'); if(lb) lb.classList.toggle('on', !!d.live); }
+		else if(d.type==='logsCleared'){ if((d.org||'')!==orgVal()) return; currentId=''; for(const k in unitById) delete unitById[k]; logView.setText('Select a log to view it.', true); renderList([]); }
 		else if(d.type==='logLoading'){ if(d.id===currentId) logView.setText('Loading log…', true); }
 		else if(d.type==='logBody'){ if(d.unit){ unitById[d.id]=d.unit; const r=listRows.querySelector('.row[data-id="'+d.id+'"]'); if(r&&r.firstElementChild) r.firstElementChild.textContent=d.unit; } if(d.id===currentId) logView.setLog(d.text||''); }
 		else if(d.type==='historyUpdated'){ setHistory(d.history||[]); }
@@ -668,6 +801,9 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 			const pill=document.getElementById('tracePill'); pill.classList.toggle('on', d.count>0); pill.textContent= d.count>0 ? ('Trace: '+d.count+' on') : 'Trace: off'; }
 		else if(d.type==='execStarted'){ execTitle.textContent='Running…'; execOpen.style.display='none'; execFilter.style.display='none'; execView.setText('Executing…', true); }
 		else if(d.type==='execResult'){
+			// A run started outside the workbench (command palette, snippet, rerun) — switch to
+			// the Execute tab so the result is actually visible instead of arriving unseen.
+			if(d.external) setTab('exec');
 			if(!d.success){ execTitle.textContent='Error'; execOpen.style.display='none'; execFilter.style.display='none'; execView.setError(d.error||'Execution failed.'); }
 			else if(d.hasLog){ execTitle.textContent='Debug log'; execOpen.style.display='inline-block'; execFilter.style.display='inline-block'; execView.setLog(d.log||''); }
 			else { execTitle.textContent='Result'; execOpen.style.display='none'; execFilter.style.display='none'; execView.setText('Executed successfully.', true); } }

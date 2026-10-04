@@ -36,7 +36,11 @@ interface OrgState {
 	live: boolean;
 	timer?: ReturnType<typeof setTimeout>;
 	polling: boolean;
+	/** Bumped on every stop so an in-flight tick from a stopped loop never re-arms. */
+	loopGen: number;
 	enrichGen: number;
+	/** Set once the last subscriber leaves / disposeAll — all async work bails out. */
+	disposed: boolean;
 }
 
 function liveIntervalMs(): number {
@@ -56,7 +60,7 @@ class LiveLogServiceImpl {
 		const k = this.key(org);
 		let st = this.map.get(k);
 		if (!st) {
-			st = { org, subs: new Set(), rows: [], units: new Map(), live: false, polling: false, enrichGen: 0 };
+			st = { org, subs: new Set(), rows: [], units: new Map(), live: false, polling: false, loopGen: 0, enrichGen: 0, disposed: false };
 			this.map.set(k, st);
 		}
 		st.subs.add(fn);
@@ -67,10 +71,27 @@ class LiveLogServiceImpl {
 			if (!s) return;
 			s.subs.delete(fn);
 			if (s.subs.size === 0) {
-				this.stopLoop(s);
-				this.map.delete(k);
+				this.disposeState(s);
+				if (this.map.get(k) === s) this.map.delete(k);
 			}
 		});
+	}
+
+	/** Stop every poll loop and drop all cached rows/units (deactivate / workspace switch). */
+	disposeAll(): void {
+		for (const st of this.map.values()) {
+			st.subs.clear();
+			this.disposeState(st);
+		}
+		this.map.clear();
+	}
+
+	private disposeState(st: OrgState): void {
+		st.disposed = true;
+		this.stopLoop(st);
+		st.enrichGen++;
+		st.rows = [];
+		st.units.clear();
 	}
 
 	/** Force an immediate re-list + trace re-evaluation for an org (event-driven trigger). */
@@ -79,13 +100,35 @@ class LiveLogServiceImpl {
 		if (st) await this.evaluate(st, true);
 	}
 
+	/**
+	 * Drop everything cached for an org (rows + resolved units), push the empty list to
+	 * every subscriber right away, then re-list from the org. Used after "delete all" so
+	 * the views clear even when the org call failed or no trace/poll loop is running.
+	 */
+	async clear(org: string | null): Promise<void> {
+		const st = this.map.get(this.key(org));
+		if (!st) return;
+		st.enrichGen++; // abandon any in-flight enrichment of the old rows
+		st.rows = [];
+		st.units.clear();
+		this.push(st);
+		await this.evaluate(st, true);
+	}
+
 	private snapshot(st: OrgState): LogSnapshot {
 		return { rows: st.rows, units: Object.fromEntries(st.units), live: st.live };
 	}
 
 	private push(st: OrgState): void {
+		if (st.disposed || st.subs.size === 0) return;
 		const snap = this.snapshot(st);
-		st.subs.forEach((fn) => fn(snap));
+		st.subs.forEach((fn) => {
+			try {
+				fn(snap);
+			} catch {
+				/* one view's failure must not starve the others */
+			}
+		});
 	}
 
 	private async traceActive(org: string | null): Promise<boolean> {
@@ -97,7 +140,9 @@ class LiveLogServiceImpl {
 	}
 
 	private async evaluate(st: OrgState, fetchNow: boolean): Promise<void> {
+		if (st.disposed) return;
 		st.live = await this.traceActive(st.org);
+		if (st.disposed) return;
 		if (st.live) this.ensureLoop(st);
 		if (fetchNow) await this.fetch(st);
 		else this.push(st);
@@ -105,13 +150,20 @@ class LiveLogServiceImpl {
 
 	/** Start the live poll loop (idempotent). It self-terminates when the trace ends. */
 	private ensureLoop(st: OrgState): void {
-		if (st.polling) return;
+		if (st.polling || st.disposed) return;
 		st.polling = true;
+		const gen = ++st.loopGen;
+		const alive = () => !st.disposed && st.polling && st.loopGen === gen;
 		const tick = async () => {
+			st.timer = undefined;
+			if (!alive()) return;
 			if (st.subs.size === 0) { this.stopLoop(st); return; }
-			st.live = await this.traceActive(st.org);
+			const live = await this.traceActive(st.org);
+			if (!alive()) return;
+			st.live = live;
 			if (!st.live) { this.stopLoop(st); this.push(st); return; } // trace gone → back to event-driven
 			await this.fetch(st);
+			if (!alive()) return; // stopped/disposed while fetching — don't re-arm
 			st.timer = setTimeout(tick, liveIntervalMs());
 		};
 		st.timer = setTimeout(tick, liveIntervalMs());
@@ -120,6 +172,7 @@ class LiveLogServiceImpl {
 	private stopLoop(st: OrgState): void {
 		if (st.timer) { clearTimeout(st.timer); st.timer = undefined; }
 		st.polling = false;
+		st.loopGen++;
 	}
 
 	private async fetch(st: OrgState): Promise<void> {
@@ -129,7 +182,13 @@ class LiveLogServiceImpl {
 		} catch {
 			return;
 		}
+		if (st.disposed) return;
 		st.rows = rows;
+		// Keep only units for logs still listed so the map can't grow without bound.
+		if (st.units.size) {
+			const ids = new Set(rows.map((r) => r.id));
+			for (const id of [...st.units.keys()]) if (!ids.has(id)) st.units.delete(id);
+		}
 		this.push(st); // push every fetch — covers row changes and live-flag changes
 		void this.enrich(st, ++st.enrichGen);
 	}
@@ -137,10 +196,11 @@ class LiveLogServiceImpl {
 	/** Resolve each log's entry-point code unit from its head, in the background. */
 	private async enrich(st: OrgState, gen: number): Promise<void> {
 		for (const r of st.rows) {
-			if (gen !== st.enrichGen) return;
+			if (gen !== st.enrichGen || st.disposed) return;
 			if (st.units.has(r.id)) continue;
 			try {
 				const unit = extractCodeUnit(await fetchApexLogHead(st.org, r.id));
+				if (gen !== st.enrichGen || st.disposed) return;
 				if (unit) {
 					st.units.set(r.id, unit);
 					if (gen === st.enrichGen) this.push(st);

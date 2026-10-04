@@ -2,12 +2,9 @@ import * as vscode from 'vscode';
 import { Logger } from '../utils/outputChannel';
 import { fetchApexLogBody } from '../utils/apexLogApi';
 
-// Filter Modes
-export type FilterType = 'DEBUG' | 'SOQL';
-
-export class LogContentProvider implements vscode.TextDocumentContentProvider {
-    // Map uri string -> { original: string, activeFilters: Set<FilterType> }
-    private logData = new Map<string, { original: string, activeFilters: Set<FilterType> }>();
+export class LogContentProvider implements vscode.TextDocumentContentProvider, vscode.Disposable {
+    // Map uri string -> log body (insertion order = age, oldest first)
+    private logData = new Map<string, string>();
     private readonly maxCachedLogs = 10;
 
     // Emitter for content changes
@@ -35,7 +32,7 @@ export class LogContentProvider implements vscode.TextDocumentContentProvider {
         try {
             const content = await fetchApexLogBody(null, logId);
             if (!content) return false;
-            this.logData.set(key, { original: content, activeFilters: new Set() });
+            this.logData.set(key, content);
             this.evictIfNeeded();
             Logger.info(`LogContentProvider: Rehydrated ${key} over REST`);
             return true;
@@ -48,27 +45,21 @@ export class LogContentProvider implements vscode.TextDocumentContentProvider {
     async provideTextDocumentContent(uri: vscode.Uri): Promise<string> {
         const key = this.getKey(uri);
         let data = this.logData.get(key);
-        if (!data && (await this.rehydrate(uri))) {
+        if (data === undefined && (await this.rehydrate(uri))) {
             data = this.logData.get(key);
         }
-        if (!data) {
+        if (data === undefined) {
             Logger.warn(`LogContentProvider: No content found for ${key}`);
             return "Log content not found or cleared.";
         }
-
-        // If no filters are active, return original (Show All)
-        if (data.activeFilters.size === 0) {
-            return data.original;
-        }
-
-        // Otherwise, union of active filters
-        return this.getFilteredContent(data.original, data.activeFilters);
+        return data;
     }
 
     public setContent(uri: vscode.Uri, content: string) {
         const key = this.getKey(uri);
         Logger.info(`LogContentProvider: Setting content for ${key}`);
-        this.logData.set(key, { original: content, activeFilters: new Set() });
+        this.logData.delete(key); // re-insert as newest
+        this.logData.set(key, content);
         this.evictIfNeeded();
         // Fire change if it existed
         this._onDidChange.fire(uri);
@@ -82,81 +73,23 @@ export class LogContentProvider implements vscode.TextDocumentContentProvider {
         }
     }
 
+    /**
+     * Keep at most maxCachedLogs bodies. Open documents are skipped (VS Code holds their text anyway and
+     * clearContent drops them on close), so one open old log no longer blocks eviction of everything newer.
+     */
     private evictIfNeeded(): void {
-        while (this.logData.size > this.maxCachedLogs) {
-            const oldestKey = this.logData.keys().next().value as string | undefined;
-            if (!oldestKey) return;
-
-            const oldestUri = vscode.Uri.parse(oldestKey);
-            const isOpen = vscode.workspace.textDocuments.some(
-                (doc) => doc.uri.toString() === oldestUri.toString()
-            );
-            if (isOpen) return;
-
-            this.logData.delete(oldestKey);
+        if (this.logData.size <= this.maxCachedLogs) return;
+        const open = new Set(vscode.workspace.textDocuments.map((doc) => doc.uri.toString()));
+        for (const key of Array.from(this.logData.keys())) {
+            if (this.logData.size <= this.maxCachedLogs) return;
+            if (open.has(key)) continue;
+            this.logData.delete(key);
         }
     }
 
-    public async toggleFilter(uri: vscode.Uri, type: FilterType) {
-        const key = this.getKey(uri);
-        let data = this.logData.get(key);
-        if (!data && (await this.rehydrate(uri))) {
-            data = this.logData.get(key);
-        }
-
-        if (!data) {
-            Logger.error(`LogContentProvider: Failed to toggle filter ${type} for ${key} - Content not found`);
-            return;
-        }
-
-        if (data.activeFilters.has(type)) {
-            Logger.info(`LogContentProvider: Removing filter ${type} for ${key}`);
-            data.activeFilters.delete(type);
-        } else {
-            Logger.info(`LogContentProvider: Adding filter ${type} for ${key}`);
-            data.activeFilters.add(type);
-        }
-
-        this.logData.set(key, data);
-        this._onDidChange.fire(uri);
-    }
-
-    // Check if a specific filter is active
-    public isFilterActive(uri: vscode.Uri, type: FilterType): boolean {
-        const key = this.getKey(uri);
-        return this.logData.get(key)?.activeFilters.has(type) || false;
-    }
-
-    private getFilteredContent(original: string, filters: Set<FilterType>): string {
-        const lines = original.split('\n');
-
-        let keepNext = false;
-        // Simplified regex: Matches Line starting with Timestamp HH:MM:SS
-        const eventStartRegex = /^\d{2}:\d{2}:\d{2}\./;
-
-        return lines.filter(line => {
-            const isEventStart = eventStartRegex.test(line);
-
-            if (isEventStart) {
-                // Determine if this new event matches any filter
-                let matches = false;
-
-                if (filters.has('DEBUG')) {
-                    if (line.includes('|USER_DEBUG|') || line.includes('FATAL_ERROR') || line.includes('EXCEPTION_THROWN') || line.includes('|ERROR|')) matches = true;
-                }
-                if (!matches && filters.has('SOQL')) {
-                    // Combine SOQL and DML
-                    if (line.includes('|SOQL_EXECUTE') || line.includes('|DML_')) matches = true;
-                }
-
-                keepNext = matches;
-                return matches;
-            } else {
-                // Continuation line (e.g. JSON body, stack trace)
-                // Keep it if the previous event was kept
-                return keepNext;
-            }
-        }).join('\n');
+    dispose(): void {
+        this.logData.clear();
+        this._onDidChange.dispose();
     }
 }
 
