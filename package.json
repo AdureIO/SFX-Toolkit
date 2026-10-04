@@ -50,42 +50,6 @@
     },
     "commands": [
       {
-        "command": "adure-sfx-toolkit.filterLogDebug",
-        "title": "ASFXT: Filter Debug",
-        "icon": {
-          "light": "resources/light/debug-inactive.svg",
-          "dark": "resources/dark/debug-inactive.svg"
-        }
-      },
-      {
-        "command": "adure-sfx-toolkit.filterLogDebugActive",
-        "title": "ASFXT: Filter Debug (Active)",
-        "icon": {
-          "light": "resources/light/debug-active.svg",
-          "dark": "resources/dark/debug-active.svg"
-        }
-      },
-      {
-        "command": "adure-sfx-toolkit.filterLogSOQL",
-        "title": "ASFXT: Filter SOQL/DML",
-        "icon": {
-          "light": "resources/light/soql-inactive.svg",
-          "dark": "resources/dark/soql-inactive.svg"
-        }
-      },
-      {
-        "command": "adure-sfx-toolkit.filterLogSOQLActive",
-        "title": "ASFXT: Filter SOQL/DML (Active)",
-        "icon": {
-          "light": "resources/light/soql-active.svg",
-          "dark": "resources/dark/soql-active.svg"
-        }
-      },
-      {
-        "command": "adure-sfx-toolkit.openLog",
-        "title": "ASFXT: Open Log"
-      },
-      {
         "command": "adure-sfx-toolkit.listLogs",
         "title": "ASFXT: List and Open Logs"
       },
@@ -505,14 +469,6 @@
         "when": "editorTextFocus && resourceExtname == .apex"
       },
       {
-        "command": "adure-sfx-toolkit.filterLogDebug",
-        "key": "cmd+d",
-        "mac": "cmd+d",
-        "win": "ctrl+d",
-        "linux": "ctrl+d",
-        "when": "editorTextFocus && adure-sfx-toolkit:isLogFile"
-      },
-      {
         "command": "adure-sfx-toolkit.lwcNavigate",
         "key": "alt+l",
         "mac": "alt+l",
@@ -720,31 +676,6 @@
           "group": "navigation@2"
         },
         {
-          "command": "adure-sfx-toolkit.rerunLastApex",
-          "when": "resourceScheme == sf-anon-log",
-          "group": "navigation@1"
-        },
-        {
-          "command": "adure-sfx-toolkit.filterLogDebug",
-          "when": "(resourceScheme == sf-log || resourceScheme == sf-anon-log) && !adure-sfx-toolkit:filterDebug",
-          "group": "navigation@2"
-        },
-        {
-          "command": "adure-sfx-toolkit.filterLogDebugActive",
-          "when": "(resourceScheme == sf-log || resourceScheme == sf-anon-log) && adure-sfx-toolkit:filterDebug",
-          "group": "navigation@2"
-        },
-        {
-          "command": "adure-sfx-toolkit.filterLogSOQL",
-          "when": "(resourceScheme == sf-log || resourceScheme == sf-anon-log) && !adure-sfx-toolkit:filterSOQL",
-          "group": "navigation@3"
-        },
-        {
-          "command": "adure-sfx-toolkit.filterLogSOQLActive",
-          "when": "(resourceScheme == sf-log || resourceScheme == sf-anon-log) && adure-sfx-toolkit:filterSOQL",
-          "group": "navigation@3"
-        },
-        {
           "command": "adure-sfx-toolkit.openPermissionSetUI",
           "when": "resourceFilename =~ /\\.permissionset-meta\\.xml$/",
           "group": "navigation@4"
@@ -783,22 +714,6 @@
         }
       ],
       "commandPalette": [
-        {
-          "command": "adure-sfx-toolkit.filterLogDebug",
-          "when": "false"
-        },
-        {
-          "command": "adure-sfx-toolkit.filterLogDebugActive",
-          "when": "false"
-        },
-        {
-          "command": "adure-sfx-toolkit.filterLogSOQL",
-          "when": "false"
-        },
-        {
-          "command": "adure-sfx-toolkit.filterLogSOQLActive",
-          "when": "false"
-        },
         {
           "command": "adure-sfx-toolkit.lwcGoToJs",
           "when": "false"
@@ -967,6 +882,18 @@
           "default": true,
           "markdownDescription": "Org-aware Apex code completion (SObject fields on `var.`, `new` constructors, and SObject type names). This is additive to the Salesforce Apex extension. Turn **off** if you see duplicate suggestions and prefer the Salesforce extension's completion."
         },
+        "adure-sfx-toolkit.apex.languageServerMaxMemoryMB": {
+          "type": "number",
+          "default": 512,
+          "minimum": 128,
+          "maximum": 8192,
+          "markdownDescription": "Heap cap (V8 `--max-old-space-size`, in MB) for the ASFX language server process. Bounds its memory in very large projects; raise it only if the server runs out of memory. Takes effect when the language server (re)starts."
+        },
+        "adure-sfx-toolkit.apex.semanticHighlighting": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Semantic highlighting for Apex and SOQL from the ASFX language server: classes, methods, properties, locals and parameters (with static/final/abstract/`@Deprecated` modifiers), SObject types, and **SObject fields** (`acc.Name`, `Account.Name`, SOQL field references) distinguished from local variables. Uses cached org metadata only. Takes effect when the language server (re)starts."
+        },
         "adure-sfx-toolkit.apex.validateSemantics": {
           "type": "boolean",
           "default": true,
@@ -1051,17 +978,46 @@
           ]
         }
       }
-    }
+    },
+    "semanticTokenModifiers": [
+      {
+        "id": "sobject",
+        "description": "Salesforce SObject type (Account, My_Object__c)"
+      },
+      {
+        "id": "sobjectField",
+        "description": "Salesforce SObject field (acc.Name, SOQL field paths)"
+      }
+    ],
+    "semanticTokenScopes": [
+      {
+        "language": "apex",
+        "scopes": {
+          "property.sobjectField": [
+            "variable.other.property.sobject-field.apex",
+            "support.variable.property"
+          ],
+          "type.sobject": [
+            "support.class.sobject.apex",
+            "support.class"
+          ]
+        }
+      }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./ && node esbuild.js --production",
-    "watch": "tsc -watch -p ./",
+    "clean": "node -e \"require('fs').rmSync('out',{recursive:true,force:true})\"",
+    "compile": "npm run clean && npm run compile:tsc && node esbuild.js --production",
+    "compile:tsc": "tsc -p ./ && tsc -p tsconfig.webview.json",
+    "watch": "node esbuild.js --watch",
+    "watch:tsc": "tsc --noEmit --watch -p ./",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src --ext ts",
-    "test": "npm run compile && node ./out/test/runTest.js",
-    "package": "vsce package",
-    "test:unit": "npm run compile && mocha --reporter spec --timeout 15000 \"out/test/**/*.test.js\" --ignore \"out/test/defaultOrg.test.js\" --ignore \"out/test/orgSafety.test.js\" --ignore \"out/test/shellEscape.test.js\"",
+    "test": "node ./out/test/runTest.js",
+    "package": "npx --yes @vscode/vsce@3 package",
+    "test:unit": "npm run compile && npm run test:unit:run",
+    "test:unit:run": "mocha --reporter spec --timeout 15000 \"out/test/**/*.test.js\" --ignore \"out/test/defaultOrg.test.js\" --ignore \"out/test/orgSafety.test.js\" --ignore \"out/test/shellEscape.test.js\"",
     "bundle": "node esbuild.js --production",
     "bundle:dev": "node esbuild.js"
   },

@@ -61,3 +61,8 @@ export class DeployLog {
 }
 
 export { deployChannel };
+
+/** Tie both output channels to the extension lifetime (disposed after deactivate). */
+export function registerOutputChannels(context: vscode.ExtensionContext): void {
+    context.subscriptions.push(outputChannel, deployChannel);
+}
