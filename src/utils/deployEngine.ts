@@ -14,7 +14,7 @@
 import * as vscode from "vscode";
 import { AuthInfo } from "./authInfo";
 import { getToolingApiVersion } from "./constants";
-import { runCommand } from "./commandRunner";
+import { runCommand, runCommandArgs } from "./commandRunner";
 import {
 	RawDeployResult,
 	DeployLiveStatus,
@@ -41,42 +41,86 @@ export interface RunJsonDeployOptions {
 	timeoutMs: number;
 }
 
+/** Backoff between `deploy report --use-most-recent` discovery attempts (ms). Capped: each is a CLI spawn. */
+const DISCOVERY_BACKOFF_MS = [1000, 2000, 3000, 5000, 8000];
+const DEPLOY_ID_RE = /\b(0Af[0-9A-Za-z]{12}(?:[0-9A-Za-z]{3})?)\b/;
+
 /**
  * Run a SYNCHRONOUS `--json` deploy (waits for the org → advances source tracking) while
- * showing live status: discover the running deploy's id via `deploy report --use-most-recent
- * --json` and REST-poll it. Everything is JSON — no human-table scraping. Returns a structured
- * outcome (component list, counts) for the caller.
+ * showing live status: discover the running deploy's id and REST-poll it. The id is taken
+ * from the CLI's streamed output when it shows up there; in `--json` mode the CLI normally
+ * prints nothing until it finishes, so we fall back to at most a handful of
+ * `deploy report --use-most-recent --json` lookups with increasing backoff. Discovery and
+ * polling stop the moment the deploy settles — nothing outlives this call. Returns a
+ * structured outcome (component list, counts) for the caller.
  */
 export async function runJsonDeploy(opts: RunJsonDeployOptions): Promise<JsonDeployOutcome> {
 	const { submitCommand, cwd, org, token, onStatus, timeoutMs } = opts;
 	const startTime = Date.now();
 	let settled = false;
+	let markSettled!: () => void;
+	const settledSignal = new Promise<void>((r) => (markSettled = r));
+	let streamedId = null as string | null;
+	let idFound!: () => void;
+	const idSignal = new Promise<void>((r) => (idFound = r));
+
+	const onOutput = (chunk: string) => {
+		if (streamedId) return;
+		const m = DEPLOY_ID_RE.exec(chunk);
+		if (m) {
+			streamedId = m[1];
+			idFound();
+		}
+	};
+
+	/** Resolves after `ms`, or earlier when the deploy settles / an id streams in / cancel. */
+	const wait = (ms: number) =>
+		new Promise<void>((resolve) => {
+			const timer = setTimeout(done, ms);
+			const sub = token.onCancellationRequested(done);
+			function done() {
+				clearTimeout(timer);
+				sub.dispose();
+				resolve();
+			}
+			void settledSignal.then(done);
+			void idSignal.then(done);
+		});
 
 	const liveStatus = (async () => {
-		for (let i = 0; i < 30 && !settled && !token.isCancellationRequested; i++) {
-			try {
-				const rep = await runCommand("sf project deploy report --use-most-recent --json", cwd, undefined, false, token, 60000);
-				const dr = parseCliDeployJson(rep);
-				if (dr?.id && !isTerminalStatus(dr.status)) {
-					await streamDeployStatus({ deployId: dr.id, org, token, startTime, timeoutMs, stop: () => settled, onStatus });
-					return;
+		for (let i = 0; i < DISCOVERY_BACKOFF_MS.length; i++) {
+			await wait(DISCOVERY_BACKOFF_MS[i]);
+			if (settled || token.isCancellationRequested) return;
+			let deployId: string | null = streamedId as string | null;
+			if (!deployId) {
+				try {
+					const reportArgs = ["project", "deploy", "report", "--use-most-recent", "--json", ...(org ? ["-o", org] : [])];
+					const rep = await runCommandArgs("sf", reportArgs, cwd, undefined, false, 60000, token);
+					const dr = parseCliDeployJson(rep);
+					// Only accept a running deploy that started after ours was submitted.
+					if (dr?.id && !isTerminalStatus(dr.status) && isFromThisRun(dr, startTime)) deployId = dr.id;
+				} catch {
+					/* not registered yet / no recent deploy */
 				}
-			} catch {
-				/* not registered yet / no recent deploy */
 			}
 			if (settled) return;
-			await new Promise((r) => setTimeout(r, 400));
+			if (deployId) {
+				await streamDeployStatus({ deployId, org, token, startTime, timeoutMs, stop: () => settled, onStatus, fetchDetailsOnFinish: false });
+				return;
+			}
 		}
 	})().catch(() => undefined);
 
 	try {
-		const out = await runCommand(`${submitCommand} --json`.replace(/\s+/g, " ").trim(), cwd, undefined, false, token, timeoutMs);
+		const out = await runCommand(`${submitCommand} --json`.replace(/\s+/g, " ").trim(), cwd, onOutput, false, token, timeoutMs);
 		settled = true;
+		markSettled();
 		await liveStatus;
 		const dr = parseCliDeployJson(out);
 		return dr ? { kind: "success", result: dr } : { kind: "success", result: {} };
 	} catch (e: any) {
 		settled = true;
+		markSettled();
 		await liveStatus;
 		if (e?.cancelled) return { kind: "cancelled" };
 		const msg = e?.message ?? String(e);
@@ -84,6 +128,14 @@ export async function runJsonDeploy(opts: RunJsonDeployOptions): Promise<JsonDep
 		const dr = parseCliDeployJson(msg);
 		return { kind: "failed", result: dr ?? undefined, errorText: msg };
 	}
+}
+
+/** True unless the report clearly describes a deploy created before ours started (clock skew tolerated). */
+function isFromThisRun(dr: RawDeployResult, startTime: number): boolean {
+	const created = (dr as any).createdDate;
+	if (typeof created !== "string") return true;
+	const t = Date.parse(created);
+	return isNaN(t) || t >= startTime - 120000;
 }
 
 export interface StreamDeployStatusOptions {
@@ -98,6 +150,8 @@ export interface StreamDeployStatusOptions {
 	/** Return true to stop polling (e.g. the owning synchronous deploy has finished). */
 	stop: () => boolean;
 	pollIntervalMs?: number;
+	/** Fetch the detailed result once polling ends (default true). Off when the caller has the CLI's JSON anyway. */
+	fetchDetailsOnFinish?: boolean;
 }
 
 /**
@@ -142,7 +196,9 @@ export async function streamDeployStatus(opts: StreamDeployStatusOptions): Promi
 			await interruptibleSleep(pollIntervalMs, token);
 		}
 		// One detailed fetch for the component table / diagnostics / coverage.
-		try { lastDr = await getDeployStatus(org, deployId, true); } catch { /* keep the light result */ }
+		if (opts.fetchDetailsOnFinish !== false) {
+			try { lastDr = await getDeployStatus(org, deployId, true); } catch { /* keep the light result */ }
+		}
 	} finally {
 		clearInterval(ticker);
 	}

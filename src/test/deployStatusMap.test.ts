@@ -166,6 +166,24 @@ describe("deployStatusMap.affectedSchemaObjects (smart refresh)", () => {
     const r = affectedSchemaObjects([{ type: "CustomField", fullName: "Contact.C__c" }]);
     assert.deepStrictEqual(r.objects, ["Contact"]);
   });
+  it("ignores components the org reports as unchanged (parent CustomObject of a field push)", () => {
+    const r = affectedSchemaObjects([
+      { componentType: "CustomObject", fullName: "Account", created: false, changed: false, deleted: false },
+      { componentType: "CustomField", fullName: "Account.Foo__c", created: false, changed: true, deleted: false },
+    ]);
+    assert.deepStrictEqual(r.objects, ["Account"]);
+    assert.strictEqual(r.structural, false);
+  });
+  it("an edited (not created/deleted) object is not structural", () => {
+    const r = affectedSchemaObjects([{ componentType: "CustomObject", fullName: "X__c", changed: true, created: false, deleted: false }]);
+    assert.deepStrictEqual(r.objects, ["X__c"]);
+    assert.strictEqual(r.structural, false);
+  });
+  it("honours CLI files[].state (Unchanged skipped, Created structural)", () => {
+    assert.deepStrictEqual(affectedSchemaObjects([{ type: "CustomField", fullName: "Account.A__c", state: "Unchanged" }]).objects, []);
+    const r = affectedSchemaObjects([{ type: "CustomObject", fullName: "New__c", state: "Created" }]);
+    assert.strictEqual(r.structural, true);
+  });
 });
 
 describe("deployStatusMap.componentSuccessList", () => {
@@ -185,6 +203,10 @@ describe("deployStatusMap.parseRetrievedComponents", () => {
   it("falls back to result.inboundFiles", () => {
     const json = JSON.stringify({ result: { inboundFiles: [{ type: "ApexClass", fullName: "Y" }] } });
     assert.strictEqual(parseRetrievedComponents(json)?.length, 1);
+  });
+  it("tolerates shell/profile output before the JSON", () => {
+    const json = "Welcome!\n" + JSON.stringify({ result: { files: [{ type: "CustomField", fullName: "Account.X__c", state: "Changed" }] } });
+    assert.strictEqual(parseRetrievedComponents(json)?.[0].state, "Changed");
   });
   it("returns null on unparseable output", () => {
     assert.strictEqual(parseRetrievedComponents("not json"), null);
