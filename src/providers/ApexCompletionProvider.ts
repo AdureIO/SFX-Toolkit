@@ -13,6 +13,7 @@ import {
 import { OrgMetadataCache } from '../utils/orgMetadataCache';
 import { SoqlSchemaProvider } from '../utils/soqlSchemaProvider';
 import { Telemetry } from '../utils/telemetry';
+import { isLanguageServerApexCompletionActive } from '../languageClient';
 
 const KIND_MAP: Record<number, vscode.CompletionItemKind> = {
     [CompletionKind.Keyword]:  vscode.CompletionItemKind.Keyword,
@@ -166,12 +167,28 @@ export class ApexCompletionProvider implements vscode.CompletionItemProvider {
         return null;
     }
 
+    /**
+     * Editor completion is a fallback only. The ASFX language server provides the same
+     * (and richer, type-aware) org-aware Apex completion for the same documents, so when
+     * it is running we return nothing to avoid duplicate items. `apex.enableCompletion`
+     * = false turns off both. The Execute Apex webview calls getItems() directly and is
+     * unaffected.
+     */
+    private static editorCompletionEnabled(): boolean {
+        const enabled = vscode.workspace
+            .getConfiguration('adure-sfx-toolkit')
+            .get<boolean>('apex.enableCompletion', true);
+        if (!enabled) return false;
+        return !isLanguageServerApexCompletionActive();
+    }
+
     async provideCompletionItems(
         document: vscode.TextDocument,
         position: vscode.Position,
-        _token: vscode.CancellationToken,
+        token: vscode.CancellationToken,
         _context: vscode.CompletionContext
     ): Promise<vscode.CompletionItem[]> {
+        if (!ApexCompletionProvider.editorCompletionEnabled()) return [];
         const lineText = document.lineAt(position).text;
         const textUpToCursor = lineText.substring(0, position.character);
 
@@ -201,6 +218,7 @@ export class ApexCompletionProvider implements vscode.CompletionItemProvider {
 
         try {
             const raw = await ApexCompletionProvider.getItems(textUpToCursor, surroundingText, null, beforeCursor, document.getText(), afterText);
+            if (token.isCancellationRequested) return [];
             // Fires on every keystroke → throttle to a coarse "completion is used" signal.
             if (raw.length) Telemetry.throttledEvent("completion", 5 * 60 * 1000, { surface: "apex" });
             return raw.map(toVsCodeItem);
