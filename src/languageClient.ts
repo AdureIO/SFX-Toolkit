@@ -22,6 +22,7 @@ import { OrgMetadataCache } from "./utils/orgMetadataCache";
 import { findSfdxProjectDir, isSalesforceProject } from "./utils/projectUtils";
 import { canonicalOrgKey, orgArgForKey } from "./utils/orgKey";
 import { SchemaUnavailableError } from "./utils/describeStore";
+import { shouldForwardDiagnostics } from "./utils/diagnosticsFilter";
 import { FileEventBatcher } from "./utils/fileEventBatcher";
 import { onDidChangeProjectDefaultOrg } from "./utils/defaultOrgEvents";
 import { scheduleStubSync, cleanRestartApex, getInitialSyncState, disposeStubSync } from "./utils/sobjectStubSync";
@@ -176,6 +177,14 @@ function startClient(context: vscode.ExtensionContext): void {
 		],
 		initializationOptions: { apexFeatures, apexCompletion, apexValidateSchema, apexSemanticHighlighting },
 		outputChannel,
+		middleware: {
+			// Virtual workbench buffers must not show up in the Problems panel: clear any
+			// stale entries once, then drop. Everything else is forwarded unchanged.
+			handleDiagnostics: (uri, diagnostics, next) => {
+				if (shouldForwardDiagnostics(uri.toString())) return next(uri, diagnostics);
+				return next(uri, []);
+			},
+		},
 	};
 
 	const lc = new LanguageClient(

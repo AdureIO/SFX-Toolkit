@@ -34,6 +34,7 @@ describe("virtual workbench buffers (asfx-buffer: scheme)", function () {
   let conn: any;
   let root: string;
   const hostUris: string[] = [];
+  const published: { uri: string; diagnostics: unknown[] }[] = [];
 
   before(async () => {
     const serverPath = path.join(__dirname, "..", "server.js");
@@ -45,7 +46,7 @@ describe("virtual workbench buffers (asfx-buffer: scheme)", function () {
     conn.onRequest("sfx/describeMany", (p: { names: string[] }) => p.names.map((n) => (n === "Account" ? ACCOUNT : null)));
     conn.onRequest("sfx/projectInfo", () => ({ namespace: null }));
     conn.onRequest("sfx/objectInfo", () => ({ description: null }));
-    conn.onNotification("textDocument/publishDiagnostics", () => undefined);
+    conn.onNotification("textDocument/publishDiagnostics", (p: { uri: string; diagnostics: unknown[] }) => { published.push(p); });
     conn.listen();
     root = fs.mkdtempSync(path.join(os.tmpdir(), "asfx-vbuf-"));
     await conn.sendRequest("initialize", { processId: process.pid, rootUri: pathToFileURL(root).href, capabilities: {}, initializationOptions: { apexFeatures: true } });
@@ -68,6 +69,16 @@ describe("virtual workbench buffers (asfx-buffer: scheme)", function () {
     const labels = wire.items.map((i) => (typeof i.label === "string" ? i.label : i.label.label));
     assert.ok(labels.includes("Name") && labels.includes("Industry"), labels.join(","));
     assert.ok(hostUris.includes(uri), "schema requests carry the virtual URI (host resolves org by its fsPath)");
+  });
+
+  it("never publishes non-empty diagnostics for asfx-buffer documents", async () => {
+    const uri = vuri(".vscode/anon-workbench-buffer-diag.apex");
+    await conn.sendNotification("textDocument/didOpen", { textDocument: { uri, languageId: "apex", version: 1, text: "Account a = new Account(;\nfoo bar baz" } });
+    await conn.sendNotification("textDocument/didChange", { textDocument: { uri, version: 2 }, contentChanges: [{ text: "Account a = new Account(;\na.NoSuchField__c = 1;" }] });
+    await new Promise((r) => setTimeout(r, 1200)); // past the 300ms schema-validation debounce
+    const bad = published.filter((p) => p.uri === uri && p.diagnostics.length > 0);
+    assert.strictEqual(bad.length, 0, JSON.stringify(bad));
+    await conn.sendNotification("textDocument/didClose", { textDocument: { uri } });
   });
 
   it("serves Apex completion after 20 full-text didChange edits without duplicate labels", async () => {

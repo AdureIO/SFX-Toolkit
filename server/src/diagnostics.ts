@@ -50,6 +50,8 @@ export function register(connection: Connection, ctx: ServerContext): void {
     // the server's event loop; drop the result if the document moved on meanwhile.
     const publish = async (doc: TextDocument): Promise<void> => {
         if (!ctx.settings.apexFeatures || doc.languageId === 'soql' || !isApex(doc.uri)) return;
+        // Virtual/ephemeral buffers (webview editors) are not user-visible documents.
+        if (!doc.uri.startsWith('file:') || ctx.ephemeralDocs.has(doc.uri)) return;
         const parse = await ctx.parses.currentAsync(doc);
         const live = documents.get(doc.uri);
         if (!live || live.version !== doc.version) return;
@@ -192,7 +194,7 @@ function isNonSObjectName(name: string): boolean {
 async function runSchemaValidation(ctx: ServerContext, uri: string): Promise<void> {
     const { documents, settings } = ctx;
     let doc = documents.get(uri);
-    if (!doc || !settings.apexFeatures || !settings.apexValidateSchema || ctx.ephemeralDocs.has(uri) || doc.languageId === 'soql' || !isApex(uri)) return;
+    if (!doc || !settings.apexFeatures || !settings.apexValidateSchema || ctx.ephemeralDocs.has(uri) || !uri.startsWith('file:') || doc.languageId === 'soql' || !isApex(uri)) return;
     // The workspace-class check below must see the full index, or a project class named
     // like a standard object would be validated as that SObject.
     await WorkspaceIndex.ready();
