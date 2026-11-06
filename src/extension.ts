@@ -24,7 +24,6 @@ import {
 import { orgTreeProvider } from "./providers/OrgTreeProvider";
 import { ApexCodeLensProvider } from "./providers/ApexCodeLensProvider";
 import { registerApexTestController } from "./providers/ApexTestController";
-import { ApexCompletionProvider } from "./providers/ApexCompletionProvider";
 import { DevActionsProvider } from "./providers/DevActionsProvider";
 import {
   pushSource,
@@ -287,21 +286,7 @@ export function activate(context: vscode.ExtensionContext) {
     // Apex tests in VS Code's native Testing view (discovery + run + coverage)
     registerApexTestController(context);
 
-    // Apex completion — covers .apex files, .cls files, and any editor with language "apex"
-    context.subscriptions.push(
-      vscode.languages.registerCompletionItemProvider(
-        [
-          { language: "apex", scheme: "file" },
-          { pattern: "**/*.apex", scheme: "file" },
-          { pattern: "**/*.cls", scheme: "file" },
-          { pattern: "**/*.trigger", scheme: "file" }
-        ],
-        new ApexCompletionProvider(),
-        ".", // member completion
-        "@", // Apex annotations (@IsTest, @AuraEnabled, …)
-        "'" // picklist values in obj.Field = '…'
-      )
-    );
+    // Apex completion is served by the ASFX language server (src/languageClient.ts).
 
     // 6. Execute SOQL
     const executeSOQLCmd = register("adure-sfx-toolkit.executeSOQL", executeSOQL);
