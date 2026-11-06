@@ -224,6 +224,11 @@
         "icon": "$(type-hierarchy)"
       },
       {
+        "command": "adure-sfx-toolkit.openOrgBrowser",
+        "title": "ASFXT: Org Browser",
+        "icon": "$(library)"
+      },
+      {
         "command": "adure-sfx-toolkit.processMap",
         "title": "ASFXT: Process Visualizer",
         "icon": "$(circuit-board)"
@@ -545,6 +550,11 @@
           "group": "navigation"
         },
         {
+          "command": "adure-sfx-toolkit.openOrgBrowser",
+          "when": "view == adure-sfx-toolkit.orgs",
+          "group": "navigation"
+        },
+        {
           "command": "adure-sfx-toolkit.connectOrg",
           "when": "view == adure-sfx-toolkit.orgs",
           "group": "navigation"
@@ -620,6 +630,11 @@
           "command": "adure-sfx-toolkit.openOrg",
           "when": "view == adure-sfx-toolkit.orgs && viewItem =~ /org-*/",
           "group": "inline"
+        },
+        {
+          "command": "adure-sfx-toolkit.openOrgBrowser",
+          "when": "view == adure-sfx-toolkit.orgs && viewItem =~ /^org-/",
+          "group": "0_browse"
         },
         {
           "command": "adure-sfx-toolkit.setAsDefaultOrg",

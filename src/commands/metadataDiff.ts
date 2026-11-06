@@ -44,7 +44,14 @@ export async function metadataDiff() {
     return;
   }
 
-  const filePath = editor.document.uri.fsPath;
+  await metadataDiffForFile(editor.document.uri.fsPath);
+}
+
+/**
+ * Compare a local metadata file with its org version (the diff opens beside the local file).
+ * `org` pins the org (alias or username); omitted = the CLI's default org.
+ */
+export async function metadataDiffForFile(filePath: string, org?: string | null) {
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (!workspaceRoot) {
     vscode.window.showErrorMessage("No workspace folder open.");
@@ -53,6 +60,8 @@ export async function metadataDiff() {
 
   const relativePath = path.relative(workspaceRoot, filePath);
   const fileName = path.basename(filePath);
+  const localUri = vscode.Uri.file(filePath);
+  const orgFlag = org ? ` --target-org ${escapeShellArg(org)}` : "";
 
   await vscode.window.withProgress(
     {
@@ -68,7 +77,7 @@ export async function metadataDiff() {
 
         _progress.report({ message: "Retrieving from org..." });
         await runCommand(
-          `sf project retrieve start -d ${escapeShellArg(relativePath)} --json`,
+          `sf project retrieve start -d ${escapeShellArg(relativePath)}${orgFlag} --json`,
           workspaceRoot,
           undefined,
           true,
@@ -94,7 +103,7 @@ export async function metadataDiff() {
         await vscode.commands.executeCommand(
           "vscode.diff",
           vscode.Uri.file(tmpFile),
-          editor.document.uri,
+          localUri,
           `Org ↔ Local: ${fileName}`
         );
       } catch (e: any) {

@@ -40,6 +40,8 @@ import { ScratchOrgDefEditorProvider } from "./editors/ScratchOrgDefEditorProvid
 import { SOQLEditorProvider } from "./providers/SOQLEditorProvider";
 import { ObjectVisualizerPanelProvider } from "./providers/ObjectVisualizerPanelProvider";
 import { ProcessMapPanelProvider } from "./providers/ProcessMapPanelProvider";
+import { OrgBrowserPanelProvider } from "./providers/OrgBrowserPanelProvider";
+import { initRetrieveLog, flushRetrieveLog } from "./utils/retrieveLog";
 import { registerApexLogDecorator } from "./providers/ApexLogDecorator";
 import { ApexWorkbenchViewProvider } from "./providers/ApexWorkbenchViewProvider";
 import { Logger, outputChannel, registerOutputChannels } from "./utils/outputChannel";
@@ -247,6 +249,8 @@ export function activate(context: vscode.ExtensionContext) {
 
     // 0. Bootstrap persistent state stores
     initDeployHistory(context);
+    initRetrieveLog(context.workspaceState);
+    OrgBrowserPanelProvider.init(context);
 
     // Org-aware SOQL language server (JVM-free). Safe no-op outside SFDX projects.
     try {
@@ -507,6 +511,10 @@ export function activate(context: vscode.ExtensionContext) {
     const objectVisualizerCmd = register("adure-sfx-toolkit.objectVisualizer", () => {
       ObjectVisualizerPanelProvider.show(context.extensionUri);
     });
+    // Org Browser: palette (default org), Orgs view title button, and the org-node context menu (that org).
+    const orgBrowserCmd = register("adure-sfx-toolkit.openOrgBrowser", (item?: { orgData?: { username?: string } }) =>
+      OrgBrowserPanelProvider.show(item?.orgData?.username ?? undefined)
+    );
     const processMapCmd = register("adure-sfx-toolkit.processMap", () => {
       ProcessMapPanelProvider.show(context.extensionUri);
     });
@@ -703,6 +711,7 @@ export function activate(context: vscode.ExtensionContext) {
       openSOQLEditorCmd,
       objectVisualizerCmd,
       processMapCmd,
+      orgBrowserCmd,
       showOutputCmd,
       revealOperationPanelCmd,
       metadataDiffCmd,
@@ -821,6 +830,7 @@ export function deactivate(): Thenable<void> | undefined {
     lsStop = stopLanguageServer();
   });
   teardownStep("stop live log polling", () => LiveLogService.disposeAll());
+  teardownStep("flush retrieve log", () => flushRetrieveLog());
   teardownStep("dispose auth cache", () => AuthInfo.disposeAll());
   teardownStep("dispose SOQL schema cache", () => SoqlSchemaProvider.disposeAll());
   // Flushes pending disk-cache writes synchronously and leaves no timers behind.

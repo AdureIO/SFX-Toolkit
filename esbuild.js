@@ -54,7 +54,7 @@ async function main() {
   // These are NOT externalized — the browser context has no module loader. The
   // extension bundle never imports cytoscape, so out/extension.js stays small.
   const webviewCtx = await esbuild.context({
-    entryPoints: ["src/webview/objectVisualizer.ts", "src/webview/processMap.ts"],
+    entryPoints: ["src/webview/objectVisualizer.ts", "src/webview/processMap.ts", "src/webview/orgBrowser.ts"],
     bundle: true,
     format: "iife",
     platform: "browser",
