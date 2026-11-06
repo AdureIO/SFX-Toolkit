@@ -25,6 +25,7 @@ import { SchemaUnavailableError } from "./utils/describeStore";
 import { shouldForwardDiagnostics } from "./utils/diagnosticsFilter";
 import { FileEventBatcher } from "./utils/fileEventBatcher";
 import { MetadataBufferSync, isMetadataBufferPath } from "./utils/metadataBufferSync";
+import { apexFeaturesEnabled } from "./utils/apexProviderSuppression";
 import { ServerSettingsRestarter, Throttle, CONFIG_SECTION } from "./utils/serverSettingsRestart";
 import { onDidChangeProjectDefaultOrg } from "./utils/defaultOrgEvents";
 import { scheduleStubSync, cleanRestartApex, getInitialSyncState, disposeStubSync } from "./utils/sobjectStubSync";
@@ -57,6 +58,17 @@ let clientDisposables: vscode.Disposable[] = [];
 let stopping: Promise<void> | undefined;
 let transitions: Promise<void> = Promise.resolve();
 let lifetimeRegistered = false;
+/** Apex init options the running client was started with. */
+let ownFeatures = { apexFeatures: false, apexCompletion: false };
+const ownStateEmitter = new vscode.EventEmitter<void>();
+/** Fires whenever our server starts, stops or changes state. */
+export const onDidChangeOwnServerState = ownStateEmitter.event;
+
+/** Whether our server is up (running or starting) and which Apex features it was started with. */
+export function ownServerStatus(): { running: boolean; apexFeatures: boolean; apexCompletion: boolean } {
+	const running = !!client && (client.state === State.Running || client.state === State.Starting);
+	return { running, ...ownFeatures };
+}
 
 function workspaceRootsKey(): string {
 	return (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.toString()).join("|");
@@ -180,14 +192,14 @@ function startClient(context: vscode.ExtensionContext): void {
 		},
 	};
 
-	// Apex semantic features (outline, diagnostics). Default "on" — always enabled;
-	// "auto" enables them only when the official Salesforce Apex extension is absent
-	// (avoids duplicate results); "off" disables them.
+	// Apex semantic features (outline, diagnostics, hover, definition, references).
+	// "on" (default) and "auto" (kept for compatibility) are always enabled; "off" disables
+	// them. Duplicates with the Salesforce Apex extension are handled by silencing its
+	// overlapping providers (see salesforceCoexistence.ts), not by switching ours off.
 	const apexMode = vscode.workspace
 		.getConfiguration("adure-sfx-toolkit")
 		.get<string>("apex.languageServer", "on");
-	const hasSalesforceApex = !!vscode.extensions.getExtension("salesforce.salesforcedx-vscode-apex");
-	const apexFeatures = apexMode === "on" || (apexMode === "auto" && !hasSalesforceApex);
+	const apexFeatures = apexFeaturesEnabled(apexMode);
 	// Org-aware Apex completion (SObject fields, `new`, type names) is additive and
 	// on by default — independent of the Salesforce extension. Turn off to avoid
 	// duplicate completion items.
@@ -243,6 +255,7 @@ function startClient(context: vscode.ExtensionContext): void {
 		clientOptions
 	);
 	client = lc;
+	ownFeatures = { apexFeatures, apexCompletion };
 	clientRootsKey = workspaceRootsKey();
 	// Before start(): the new process must receive the open virtual documents when it runs.
 	hookClientState();
@@ -521,6 +534,7 @@ export function stopLanguageServer(): Promise<void> | undefined {
 	client = undefined;
 	clientRootsKey = undefined;
 	clientStarted = undefined;
+	ownStateEmitter.fire();
 	for (const d of clientDisposables.splice(0)) {
 		try {
 			d.dispose();
@@ -734,6 +748,7 @@ function hookClientState(): void {
 	stateHooked = client;
 	const c = client;
 	c.onDidChangeState((e) => {
+		ownStateEmitter.fire();
 		if (e.newState !== State.Running || c !== client) return;
 		for (const [uri, d] of virtualDocs) {
 			void c.sendNotification("textDocument/didOpen", {

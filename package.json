@@ -50,6 +50,10 @@
     },
     "commands": [
       {
+        "command": "adure-sfx-toolkit.optimizeSalesforceMemory",
+        "title": "ASFX: Optimize Salesforce extensions memory"
+      },
+      {
         "command": "adure-sfx-toolkit.listLogs",
         "title": "ASFXT: List and Open Logs"
       },
@@ -875,7 +879,12 @@
             "off"
           ],
           "default": "on",
-          "markdownDescription": "Apex *semantic* features (outline, syntax diagnostics, go-to-definition for your own classes, signature help) from the SFX language server. `on` (default): always enabled. `auto`: enabled only when the official Salesforce Apex extension is not installed (avoids duplicates). `off`: disabled."
+          "markdownDescription": "Apex *semantic* features (outline, syntax diagnostics, hover, go-to-definition, references, signature help) from the ASFX language server. `on` (default): always enabled. `auto`: same as `on`, kept for compatibility; duplicates with the Salesforce Apex extension are avoided by silencing its overlapping providers (see `apex.preferOwnProviders`). `off`: disabled."
+        },
+        "adure-sfx-toolkit.apex.preferOwnProviders": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "While the ASFX language server is running, silence the Salesforce Apex extension's (Jorje) completion, hover, go-to-definition, references, document highlights and signature help so results are not duplicated. Its code lenses, refactorings, rename, diagnostics, Replay Debugger and test features are untouched. Only providers whose ASFX counterpart is enabled (`apex.languageServer`, `apex.enableCompletion`) are silenced. Applies immediately, no reload."
         },
         "adure-sfx-toolkit.apex.enableCompletion": {
           "type": "boolean",
