@@ -329,6 +329,23 @@ export async function scanProject(projectDir: string, packageDirs: string[], tab
 	return { entries, scannedAt: Date.now() };
 }
 
+/**
+ * `CustomObject:<Obj>` keys for objects that have decomposed children locally (fields, record types …)
+ * but no `<Obj>.object-meta.xml` — typical for standard objects. The UI shows them as "Partly in project".
+ */
+export function partialObjectKeys(entries: ReadonlyMap<string, LocalEntry>): string[] {
+	const childTypes = new Set(Object.values(OBJECT_CHILDREN).map((c) => c.type));
+	const out = new Set<string>();
+	for (const e of entries.values()) {
+		if (!childTypes.has(e.type)) continue;
+		const dot = e.name.indexOf(".");
+		if (dot <= 0) continue;
+		const key = compKey("CustomObject", e.name.slice(0, dot));
+		if (!entries.has(key)) out.add(key);
+	}
+	return [...out];
+}
+
 /** Absolute paths a retrieve of this entry would overwrite (the bundle directory, or its files). */
 export function overwriteTargets(entry: LocalEntry): string[] {
 	return entry.root ? [entry.root] : entry.files;

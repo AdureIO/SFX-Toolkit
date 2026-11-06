@@ -8,10 +8,10 @@
  *   type:ApexClass       type equals (wildcards allowed); several type: tokens are ORed
  *   ns:abc  ns:none      namespace prefix equals; `ns:none` / `ns:` = unmanaged; ORed
  *   by:smith  by:"Jo Do" last-modified-by name contains; ORed
- *   status:not-local|local|changed   local status; ORed
+ *   status:not-local|local|changed|partial   local status; ORed
  *   ApexClass:Foo        `Type:Name` (type equals, name contains / wildcard)
  */
-import { Comp, STATUS_CHANGED, STATUS_LOCAL, STATUS_NAMES, STATUS_NOT_LOCAL, StatusName, compKey } from "./types";
+import { Comp, STATUS_CHANGED, STATUS_LOCAL, STATUS_NAMES, STATUS_NOT_LOCAL, STATUS_PARTIAL, StatusName, compKey } from "./types";
 
 // ── Search index ───────────────────────────────────────────────────────────────
 
@@ -151,6 +151,8 @@ const STATUS_ALIASES: Record<string, number> = {
 	"in-project": STATUS_LOCAL,
 	inproject: STATUS_LOCAL,
 	changed: STATUS_CHANGED,
+	partial: STATUS_PARTIAL,
+	"partly-in-project": STATUS_PARTIAL,
 };
 
 function stripQuotes(s: string): string {
@@ -331,8 +333,8 @@ export interface Facets {
 	/** Rows per namespace ("" = unmanaged). */
 	namespaces: Map<string, number>;
 	states: Map<string, number>;
-	/** Rows per local status code: [not-local, local, changed]. */
-	status: [number, number, number];
+	/** Rows per local status code: [not-local, local, changed, partial]. */
+	status: [number, number, number, number];
 }
 
 /** Facet counts in a single pass; each facet ignores its own filter only. */
@@ -341,7 +343,7 @@ export function computeFacets(idx: SearchIndex, state: FilterState, ctx: FilterC
 	const types = new Map<string, number>();
 	const namespaces = new Map<string, number>();
 	const states = new Map<string, number>();
-	const status: [number, number, number] = [0, 0, 0];
+	const status: [number, number, number, number] = [0, 0, 0, 0];
 	const n = idx.comps.length;
 	for (let i = 0; i < n; i++) {
 		if (!p.base(i)) continue;
@@ -353,7 +355,7 @@ export function computeFacets(idx: SearchIndex, state: FilterState, ctx: FilterC
 		if (pn && pm && ps) types.set(c.t, (types.get(c.t) ?? 0) + 1);
 		if (pt && pm && ps) namespaces.set(c.ns, (namespaces.get(c.ns) ?? 0) + 1);
 		if (pt && pn && ps) states.set(c.ms, (states.get(c.ms) ?? 0) + 1);
-		if (pt && pn && pm) status[ctx.status ? (ctx.status[i] as 0 | 1 | 2) : 0]++;
+		if (pt && pn && pm) status[ctx.status ? (ctx.status[i] as 0 | 1 | 2 | 3) : 0]++;
 	}
 	return { types, namespaces, states, status };
 }

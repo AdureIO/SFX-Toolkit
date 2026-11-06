@@ -26,7 +26,8 @@ import {
 	mergeTypeRefresh,
 	saveListingCache,
 } from "../utils/orgBrowser/metadataLister";
-import { LocalIndex, buildTypeTable, overwriteTargets, readPackageDirectories, scanProject } from "../utils/orgBrowser/localIndex";
+import { hiddenSelectionPrompt, splitByVisibility } from "../utils/orgBrowser/selection";
+import { LocalIndex, buildTypeTable, overwriteTargets, partialObjectKeys, readPackageDirectories, scanProject } from "../utils/orgBrowser/localIndex";
 import { makeSoapCall } from "../utils/orgBrowser/soapTransport";
 import { setupTarget } from "../utils/orgBrowser/setupUrl";
 import { Comp, ListFailure, TypeInfo, compKey } from "../utils/orgBrowser/types";
@@ -161,7 +162,10 @@ export class OrgBrowserPanelProvider {
 				if (Array.isArray(msg.types) && msg.types.length > 0) await this.list(msg.types.map(String));
 				break;
 			case "retrieve":
-				await this.retrieve(Array.isArray(msg.items) ? msg.items.map((i: any) => ({ type: String(i.t), fullName: String(i.n) })) : []);
+				await this.retrieve(
+					Array.isArray(msg.items) ? msg.items.map((i: any) => ({ type: String(i.t), fullName: String(i.n) })) : [],
+					Array.isArray(msg.visible) ? new Set<string>(msg.visible.map(String)) : undefined
+				);
 				break;
 			case "setup":
 				await this.openSetup(pair().t, pair().n);
@@ -414,7 +418,7 @@ export class OrgBrowserPanelProvider {
 		const gen = this.gen;
 		const root = primaryProjectRoot();
 		if (!root || !isSalesforceProject()) {
-			this.post({ type: "local", keys: [], retrieved: {}, hasProject: false });
+			this.post({ type: "local", keys: [], partial: [], retrieved: {}, hasProject: false });
 			return;
 		}
 		try {
@@ -422,7 +426,7 @@ export class OrgBrowserPanelProvider {
 			const index = await scanProject(root, dirs.length > 0 ? dirs : ["force-app"], buildTypeTable(this.types));
 			if (gen !== this.gen || !this.panel) return;
 			this.local = index;
-			this.post({ type: "local", keys: [...index.entries.keys()], retrieved: getRetrieveTimes(this.orgKey === DEFAULT_ORG_KEY ? null : this.orgKey), hasProject: true });
+			this.post({ type: "local", keys: [...index.entries.keys()], partial: partialObjectKeys(index.entries), retrieved: getRetrieveTimes(this.orgKey === DEFAULT_ORG_KEY ? null : this.orgKey), hasProject: true });
 		} catch (e: any) {
 			Logger.error("Org Browser: local scan failed", e?.message ?? e);
 		}
@@ -445,7 +449,11 @@ export class OrgBrowserPanelProvider {
 
 	// ── Retrieve ─────────────────────────────────────────────────────────────────
 
-	private static async retrieve(components: { type: string; fullName: string }[]): Promise<void> {
+	/**
+	 * @param visibleKeys keys the current filter shows; when given and some of `components` are not in it,
+	 *   the user is asked whether to retrieve the hidden ones too. Omitted for single-row retrieves.
+	 */
+	private static async retrieve(components: { type: string; fullName: string }[], visibleKeys?: ReadonlySet<string>): Promise<void> {
 		const root = primaryProjectRoot();
 		if (!root || !isSalesforceProject()) {
 			this.post({ type: "toast", text: "Open an SFDX project to retrieve.", kind: "warn" });
@@ -455,6 +463,22 @@ export class OrgBrowserPanelProvider {
 		if (components.length === 0) {
 			this.post({ type: "retrieveResult", results: [], cancelled: true });
 			return;
+		}
+		if (visibleKeys) {
+			const { visible, hidden } = splitByVisibility(components.map((c) => compKey(c.type, c.fullName)), visibleKeys);
+			if (hidden.length > 0) {
+				const { message, detail } = hiddenSelectionPrompt(components.length, hidden);
+				const all = `Retrieve all ${components.length}`;
+				const only = `Retrieve visible ${visible.length} only`;
+				const choice = await vscode.window.showWarningMessage(message, { modal: true, detail }, all, ...(visible.length > 0 ? [only] : []));
+				if (choice === only) {
+					const keep = new Set(visible);
+					components = components.filter((c) => keep.has(compKey(c.type, c.fullName)));
+				} else if (choice !== all) {
+					this.post({ type: "retrieveResult", results: [], cancelled: true });
+					return;
+				}
+			}
 		}
 		const targets = [...new Set(components.flatMap((c) => {
 			const e = this.local?.entries.get(compKey(c.type, c.fullName));
@@ -572,6 +596,7 @@ ${CSS}
     <span id="listedInfo" class="muted"></span>
     <button id="refreshBtn" class="ghost" title="Re-list every type from the org">↻ Refresh</button>
     <span class="spacer"></span>
+    <span id="selHidden" class="selhidden" hidden><span id="selHiddenText"></span> <button id="selHiddenShow" class="link" title="Reset the filters and show only the selected components">show</button> · <button id="selHiddenClear" class="link" title="Deselect the selected components the current filter hides">clear hidden</button></span>
     <span id="selChip" class="selchip" hidden><button id="selChipText" title="Show only the selected components"></button><button id="selChipClear" title="Clear selection" aria-label="Clear selection">×</button></span>
     <button id="retrieveBtn" class="primary" disabled>Retrieve (0)</button>
   </div>
@@ -675,6 +700,8 @@ button.ghost { background: transparent; border: 1px solid var(--ob-border); bord
 button.ghost:hover:not(:disabled) { background: var(--ob-hover); }
 button.linkbtn { background: none; border: 0; color: var(--vscode-textLink-foreground); padding: 0 4px; font-size: 12px; }
 button.linkbtn:hover { text-decoration: underline; }
+.selhidden { font-size: 11px; color: var(--vscode-descriptionForeground); margin-right: 6px; white-space: nowrap; }
+.selhidden .link { background: transparent; border: 0; padding: 0; color: var(--vscode-textLink-foreground); cursor: pointer; text-decoration: underline; font: inherit; }
 .selchip { display: inline-flex; align-items: center; border: 1px solid var(--ob-border-strong); border-radius: 999px; overflow: hidden; }
 .selchip button { background: transparent; border: 0; padding: 3px 9px; }
 .selchip button:hover { background: var(--ob-hover); }
@@ -739,6 +766,7 @@ mark { background: color-mix(in srgb, var(--ob-warn) 45%, transparent); color: i
 .badge { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px; border: 1px solid var(--ob-border); }
 .badge.none { color: var(--vscode-descriptionForeground); }
 .badge.local { color: var(--ob-ok); border-color: color-mix(in srgb, var(--ob-ok) 50%, transparent); }
+.badge.partial { color: var(--ob-accent); border-color: color-mix(in srgb, var(--ob-accent) 50%, transparent); }
 .badge.changed { color: var(--ob-warn); border-color: color-mix(in srgb, var(--ob-warn) 55%, transparent); background: color-mix(in srgb, var(--ob-warn) 12%, transparent); }
 .res { font-weight: 700; cursor: help; }
 .res.ok { color: var(--ob-ok); }

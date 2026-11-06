@@ -83,6 +83,10 @@ describe("orgBrowser filter: query parsing", () => {
 		assert.deepStrictEqual(names(SAMPLE, { query: "status:changed" }, c), ["AccountTrigger"]);
 		assert.strictEqual(names(SAMPLE, { query: "status:not-local" }, c).length, SAMPLE.length - 2);
 		assert.deepStrictEqual(names(SAMPLE, { query: "status:local status:changed" }, c), ["AccountHandler", "AccountTrigger"]);
+		status[1] = 3;
+		const cp = ctx({ status });
+		assert.deepStrictEqual(names(SAMPLE, { query: "status:partial" }, cp), [SAMPLE[1].n]);
+		assert.ok(!names(SAMPLE, { query: "status:local" }, cp).includes(SAMPLE[1].n));
 	});
 
 	it("supports * and ? wildcards that must match the whole name", () => {
@@ -150,7 +154,7 @@ describe("orgBrowser filter: facets and state filters", () => {
 		assert.strictEqual(f.types.get("CustomField"), 1);
 		// Namespace facet respects the type filter.
 		assert.strictEqual(f.namespaces.get(""), 1);
-		assert.deepStrictEqual(f.status, [1, 0, 0]);
+		assert.deepStrictEqual(f.status, [1, 0, 0, 0]);
 	});
 });
 

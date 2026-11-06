@@ -1,6 +1,6 @@
 import * as assert from "assert";
 import * as path from "path";
-import { affectedFiles, isSameOrUnder, overwriteMessage, parsePorcelain } from "../utils/retrieveSafetyPure";
+import { affectedFiles, groupByComponent, isSameOrUnder, overwriteMessage, parsePorcelain } from "../utils/retrieveSafetyPure";
 import {
 	MAX_COMMAND_CHARS,
 	chunkComponents,
@@ -64,11 +64,28 @@ describe("retrieveSafetyPure: path matching", () => {
 		assert.deepStrictEqual(affectedFiles(targets, []), []);
 	});
 
-	it("builds the confirmation text with the first five names", () => {
+	it("builds the confirmation text with counts and the first five component names", () => {
 		const few = overwriteMessage("Retrieve", [p("a", "One.cls"), p("a", "Two.cls")]);
-		assert.strictEqual(few, "Retrieve will overwrite 2 file(s) with local changes: One.cls, Two.cls");
+		assert.strictEqual(few, "Retrieve will overwrite 2 files in 2 components with local changes: One, Two");
 		const many = overwriteMessage("Retrieve", Array.from({ length: 7 }, (_, i) => p("a", `F${i}.cls`)));
-		assert.strictEqual(many, "Retrieve will overwrite 7 file(s) with local changes: F0.cls, F1.cls, F2.cls, F3.cls, F4.cls…");
+		assert.strictEqual(many, "Retrieve will overwrite 7 files in 7 components with local changes: F0, F1, F2, F3, F4…");
+		assert.strictEqual(overwriteMessage("Retrieve", [p("a", "One.cls")]), "Retrieve will overwrite 1 file in 1 component with local changes: One");
+	});
+
+	it("groups .cls and .cls-meta.xml into one component", () => {
+		const files = [p("classes", "Foo.cls"), p("classes", "Foo.cls-meta.xml"), p("classes", "Bar.cls"), p("classes", "Bar.cls-meta.xml"), p("triggers", "T.trigger")];
+		assert.deepStrictEqual(groupByComponent(files).map((g) => [g.name, g.files]), [["Foo", 2], ["Bar", 2], ["T", 1]]);
+		assert.strictEqual(overwriteMessage("Retrieve", files), "Retrieve will overwrite 5 files in 3 components with local changes: Foo, Bar, T");
+	});
+
+	it("groups bundles by folder and names object children Obj.Child", () => {
+		const files = [
+			p("main", "default", "lwc", "myCmp", "myCmp.js"),
+			p("main", "default", "lwc", "myCmp", "myCmp.html"),
+			p("main", "default", "objects", "Account", "Account.object-meta.xml"),
+			p("main", "default", "objects", "Account", "fields", "Region__c.field-meta.xml"),
+		];
+		assert.deepStrictEqual(groupByComponent(files).map((g) => [g.name, g.files]), [["myCmp", 2], ["Account", 1], ["Account.Region__c", 1]]);
 	});
 });
 

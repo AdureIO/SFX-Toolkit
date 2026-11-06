@@ -53,8 +53,10 @@ export interface ListFailure {
 export const STATUS_NOT_LOCAL = 0;
 export const STATUS_LOCAL = 1;
 export const STATUS_CHANGED = 2;
-export type StatusCode = 0 | 1 | 2;
-export const STATUS_NAMES = ["not-local", "local", "changed"] as const;
+/** CustomObject whose object file is missing locally but some of its children (fields …) exist. */
+export const STATUS_PARTIAL = 3;
+export type StatusCode = 0 | 1 | 2 | 3;
+export const STATUS_NAMES = ["not-local", "local", "changed", "partial"] as const;
 export type StatusName = (typeof STATUS_NAMES)[number];
 
 /** `Type:Name` row key used across host, webview, local index and retrieve log. */

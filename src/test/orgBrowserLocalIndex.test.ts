@@ -2,7 +2,7 @@ import * as assert from "assert";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { buildTypeTable, mapSourceFile, overwriteTargets, readPackageDirectories, scanProject } from "../utils/orgBrowser/localIndex";
+import { buildTypeTable, mapSourceFile, overwriteTargets, partialObjectKeys, readPackageDirectories, scanProject } from "../utils/orgBrowser/localIndex";
 
 const table = buildTypeTable();
 const map = (rel: string) => mapSourceFile(rel, table);
@@ -138,6 +138,20 @@ describe("orgBrowser localIndex: project scan", () => {
 		write("force-app/main/default/classes/Orphan.cls");
 		const idx = await scanProject(root, ["force-app"]);
 		assert.ok(!idx.entries.has("ApexClass:Orphan"));
+	});
+
+	it("CustomObject with its object file is indexed (In project), not partial", async () => {
+		write("force-app/main/default/objects/Account/Account.object-meta.xml");
+		const idx = await scanProject(root, ["force-app"]);
+		assert.ok(idx.entries.has("CustomObject:Account"));
+		assert.deepStrictEqual(partialObjectKeys(idx.entries), []);
+	});
+
+	it("an object folder with only children is partial (no CustomObject entry)", async () => {
+		write("force-app/main/default/objects/Contact/listViews/All.listView-meta.xml");
+		const idx = await scanProject(root, ["force-app"]);
+		assert.ok(!idx.entries.has("CustomObject:Account"));
+		assert.deepStrictEqual(partialObjectKeys(idx.entries).sort(), ["CustomObject:Account", "CustomObject:Contact"]);
 	});
 
 	it("tolerates a missing package directory", async () => {

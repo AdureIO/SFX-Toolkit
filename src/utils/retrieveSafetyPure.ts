@@ -84,8 +84,49 @@ export function affectedFiles(targets: string[], dirty: string[]): string[] {
 	return result;
 }
 
-/** The confirmation text: first five base names, `…` when more. */
+const BUNDLE_DIRS = new Set(["lwc", "aura", "experiences", "waveTemplates", "lightningTypes"]);
+
+/**
+ * Group files by the metadata component they belong to, so `Foo.cls` and `Foo.cls-meta.xml` count
+ * once. Bundles (lwc, aura …) group by their folder; object children (`objects/Account/fields/X.field-meta.xml`)
+ * are named `Account.X`; everything else by the file name without `-meta.xml` and extension.
+ * Order of first appearance; `files` is the number of input files in the group.
+ */
+export function groupByComponent(files: string[]): { name: string; files: number }[] {
+	const groups = new Map<string, { name: string; files: number }>();
+	for (const f of files) {
+		const seg = f.split(/[\\/]/).filter(Boolean);
+		let key: string;
+		let name: string;
+		const b = seg.findIndex((s, i) => BUNDLE_DIRS.has(s) && i < seg.length - 2);
+		const o = seg.lastIndexOf("objects");
+		const stem = (n: string) => n.replace(/-meta\.xml$/, "").replace(/\.[^.]+$/, "");
+		if (b >= 0) {
+			key = seg.slice(0, b + 2).join("/");
+			name = seg[b + 1];
+		} else if (o >= 0 && o < seg.length - 2) {
+			const obj = seg[o + 1];
+			const base = stem(seg[seg.length - 1]);
+			const isObjectFile = seg.length === o + 3;
+			key = isObjectFile ? seg.slice(0, o + 2).join("/") : [...seg.slice(0, -1), base].join("/");
+			name = isObjectFile ? obj : `${obj}.${base}`;
+		} else {
+			const base = stem(seg[seg.length - 1] ?? f);
+			key = [...seg.slice(0, -1), base].join("/");
+			name = base;
+		}
+		const g = groups.get(key);
+		if (g) g.files++;
+		else groups.set(key, { name, files: 1 });
+	}
+	return [...groups.values()];
+}
+
+/** The confirmation text: file and component counts, first five component names, `…` when more. */
 export function overwriteMessage(what: string, files: string[]): string {
-	const names = files.slice(0, 5).map((f) => path.basename(f));
-	return `${what} will overwrite ${files.length} file(s) with local changes: ${names.join(", ")}${files.length > 5 ? "…" : ""}`;
+	const comps = groupByComponent(files);
+	const names = comps.slice(0, 5).map((c) => c.name);
+	const fl = `${files.length} file${files.length === 1 ? "" : "s"}`;
+	const cl = `${comps.length} component${comps.length === 1 ? "" : "s"}`;
+	return `${what} will overwrite ${fl} in ${cl} with local changes: ${names.join(", ")}${comps.length > 5 ? "…" : ""}`;
 }

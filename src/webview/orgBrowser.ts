@@ -20,7 +20,8 @@ import {
 	relativeTime,
 	sortIndices,
 } from "../utils/orgBrowser/filter";
-import { Comp, ListFailure, STATUS_CHANGED, STATUS_LOCAL, TypeInfo, compKey } from "../utils/orgBrowser/types";
+import { splitByVisibility } from "../utils/orgBrowser/selection";
+import { Comp, ListFailure, STATUS_CHANGED, STATUS_LOCAL, STATUS_PARTIAL, TypeInfo, compKey } from "../utils/orgBrowser/types";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -90,7 +91,7 @@ let loading: LoadState | null = null;
 let pending: Comp[] | null = null;
 let errorView: { state: string; message: string } | null = null;
 let noOrg = false;
-let local = { keys: new Set<string>(), retrieved: {} as Record<string, number>, known: false };
+let local = { keys: new Set<string>(), partial: new Set<string>(), retrieved: {} as Record<string, number>, known: false };
 let me = { ids: [] as string[], name: "" };
 let statusArr: Uint8Array = new Uint8Array(0);
 let statusDirty = true;
@@ -140,7 +141,10 @@ function ensureStatus(): void {
 		for (let i = 0; i < n; i++) {
 			const c = idx.comps[i];
 			const key = c.t + ":" + c.n;
-			if (!local.keys.has(key)) continue;
+			if (!local.keys.has(key)) {
+				if (local.partial.has(key)) arr[i] = STATUS_PARTIAL;
+				continue;
+			}
 			const rt = local.retrieved[key];
 			arr[i] = rt !== undefined && c.lm > rt ? STATUS_CHANGED : STATUS_LOCAL;
 		}
@@ -157,7 +161,21 @@ function ctx(): FilterContext {
 	return { now: Date.now(), status: statusArr, selected, meIds: me.ids, meName: me.name };
 }
 
+let visibleKeysCache: Set<string> | null = null;
+
+/** Keys of the rows the current filter shows (lazy; reset on every recompute). */
+function visibleKeys(): Set<string> {
+	if (!visibleKeysCache) visibleKeysCache = new Set(rows.map(keyAt));
+	return visibleKeysCache;
+}
+
+/** Selected keys the current filter hides. */
+function hiddenSelected(): string[] {
+	return selected.size === 0 ? [] : splitByVisibility(selected, visibleKeys()).hidden;
+}
+
 function recompute(resetScroll = false): void {
+	visibleKeysCache = null;
 	ensureStatus();
 	const c = ctx();
 	terms = highlightTerms(ui.filter.query);
@@ -219,6 +237,7 @@ function statusBadge(code: number, key: string): string {
 	const res = results.get(key);
 	let s = "";
 	if (code === STATUS_CHANGED) s = '<span class="badge changed" title="Modified in the org after your last retrieve">Changed in org</span>';
+	else if (code === STATUS_PARTIAL) s = '<span class="badge partial" title="Some parts (fields, record types …) are in the project, the object file itself is not. Retrieving adds it.">Partly in project</span>';
 	else if (code === STATUS_LOCAL) s = '<span class="badge local">In project</span>';
 	else s = '<span class="badge none">Not in project</span>';
 	if (res) {
@@ -234,7 +253,7 @@ function rowHtml(pos: number, i: number): string {
 	const key = c.t + ":" + c.n;
 	const sel = selected.has(key);
 	const st = statusArr[i] ?? 0;
-	const isLocal = st !== 0;
+	const isLocal = st === STATUS_LOCAL || st === STATUS_CHANGED;
 	const exact = c.lm ? new Date(c.lm).toLocaleString() : "";
 	const failed = results.get(key);
 	return (
@@ -324,13 +343,19 @@ function renderTop(): void {
 	chip.classList.toggle("on", ui.filter.onlySelected);
 	$("selChipText").textContent = `Selected (${sel.toLocaleString()})`;
 	const btn = $("retrieveBtn") as HTMLButtonElement;
-	btn.textContent = retrieving ? "Retrieving…" : `Retrieve (${sel.toLocaleString()})`;
+	const hidden = hiddenSelected().length;
+	const hb = $("selHidden");
+	hb.hidden = hidden === 0;
+	$("selHiddenText").textContent = `${hidden.toLocaleString()} hidden by filter —`;
+	btn.textContent = retrieving ? "Retrieving…" : hidden > 0 ? `Retrieve ${sel.toLocaleString()} (${hidden.toLocaleString()} hidden)` : `Retrieve (${sel.toLocaleString()})`;
 	btn.disabled = sel === 0 || !hasProject || retrieving || !!errorView || noOrg;
 	btn.title = !hasProject
 		? "Open an SFDX project (a folder with sfdx-project.json) to retrieve."
 		: sel === 0
 			? "Select components to retrieve"
-			: "Retrieve the selected components into the project (Ctrl/Cmd+Enter)";
+			: hidden > 0
+				? `${hidden.toLocaleString()} of the ${sel.toLocaleString()} selected components are hidden by the current filter. You will be asked whether to retrieve them too (Ctrl/Cmd+Enter).`
+				: "Retrieve the selected components into the project (Ctrl/Cmd+Enter)";
 	renderListed();
 }
 
@@ -368,6 +393,7 @@ function renderFacets(): void {
 			["not-local", "Not in project", facets.status[0]],
 			["local", "In project", facets.status[1]],
 			["changed", "Changed in org", facets.status[2]],
+			["partial", "Partly in project", facets.status[3]],
 		] as [string, string, number][]
 	)
 		.map(([v, l, c]) => facetRow("status", v, l, c, f.status.includes(v as never)))
@@ -545,7 +571,7 @@ function pairOf(i: number): { t: string; n: string } {
 	return { t: idx.comps[i].t, n: idx.comps[i].n };
 }
 
-function retrieveKeys(keys: string[]): void {
+function retrieveKeys(keys: string[], visible?: string[]): void {
 	if (!hasProject) {
 		toast("Open an SFDX project to retrieve.", "warn");
 		return;
@@ -558,11 +584,11 @@ function retrieveKeys(keys: string[]): void {
 	retrieving = true;
 	results = new Map();
 	renderTop();
-	post({ command: "retrieve", items: itemsOut });
+	post({ command: "retrieve", items: itemsOut, ...(visible ? { visible } : {}) });
 }
 
 function retrieveSelection(): void {
-	retrieveKeys([...selected]);
+	retrieveKeys([...selected], splitByVisibility(selected, visibleKeys()).visible);
 }
 
 function rowAction(act: string, i: number): void {
@@ -604,7 +630,7 @@ let menuRow = -1;
 function showMenu(i: number, x: number, y: number): void {
 	menuRow = i;
 	const key = keyAt(i);
-	const isLocal = (statusArr[i] ?? 0) !== 0;
+	const isLocal = [STATUS_LOCAL, STATUS_CHANGED].includes(statusArr[i] ?? 0);
 	const multi = selected.has(key) && selected.size > 1;
 	const entries: [string, string, boolean][] = [
 		[multi ? "retrieveSel" : "retrieve", multi ? `Retrieve selected (${selected.size})` : "Retrieve", hasProject],
@@ -714,6 +740,17 @@ function setupEvents(): void {
 		selected = new Set();
 		ui.filter.onlySelected = false;
 		recompute();
+		saveUi();
+	});
+	$("selHiddenShow").addEventListener("click", () => {
+		ui.filter = { ...DEFAULT_FILTER, onlySelected: true };
+		($("search") as HTMLInputElement).value = "";
+		recompute(true);
+		saveUi();
+	});
+	$("selHiddenClear").addEventListener("click", () => {
+		for (const k of hiddenSelected()) selected.delete(k);
+		afterSelectionChange();
 		saveUi();
 	});
 	$("selAll").addEventListener("click", toggleFiltered);
@@ -889,7 +926,7 @@ function setupEvents(): void {
 		const rowEl = (e.target as HTMLElement).closest<HTMLElement>(".row");
 		if (!rowEl) return;
 		const it = items[Number(rowEl.dataset.pos)];
-		if (typeof it === "number" && (statusArr[it] ?? 0) !== 0) rowAction("open", it);
+		if (typeof it === "number" && [STATUS_LOCAL, STATUS_CHANGED].includes(statusArr[it] ?? 0)) rowAction("open", it);
 	});
 	rowsEl.addEventListener("contextmenu", (e) => {
 		const rowEl = (e.target as HTMLElement).closest<HTMLElement>(".row");
@@ -1057,7 +1094,7 @@ function resetData(): void {
 	listedAt = 0;
 	pending = null;
 	errorView = null;
-	local = { keys: new Set(), retrieved: {}, known: false };
+	local = { keys: new Set(), partial: new Set(), retrieved: {}, known: false };
 	me = { ids: [], name: "" };
 	statusDirty = true;
 	results = new Map();
@@ -1171,7 +1208,7 @@ window.addEventListener("message", (ev) => {
 			recompute();
 			break;
 		case "local":
-			local = { keys: new Set<string>(m.keys), retrieved: m.retrieved ?? {}, known: true };
+			local = { keys: new Set<string>(m.keys), partial: new Set<string>(m.partial ?? []), retrieved: m.retrieved ?? {}, known: true };
 			hasProject = m.hasProject;
 			statusDirty = true;
 			recompute();
