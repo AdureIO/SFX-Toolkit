@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { isSalesforceProject } from "../utils/projectUtils";
+import { isWorkspaceUsable } from "../utils/projectUtils";
 import { getOrgListResult } from "../utils/orgListCache";
 
 export class OrgItem extends vscode.TreeItem {
@@ -98,7 +98,7 @@ export class OrgTreeProvider implements vscode.TreeDataProvider<OrgItem> {
 
   async getChildren(element?: OrgItem): Promise<OrgItem[]> {
     if (!element) {
-      if (!isSalesforceProject()) {
+      if (!isWorkspaceUsable()) {
         return [
           new OrgItem("Open an SFDX project", vscode.TreeItemCollapsibleState.None, null, "GROUP", "placeholder")
         ];

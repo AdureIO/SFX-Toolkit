@@ -21,7 +21,7 @@ import {
 	memoryTipMessage,
 } from "./utils/salesforceMemoryTips";
 import { forceApexRestart } from "./utils/sobjectStubSync";
-import { isSalesforceProject } from "./utils/projectUtils";
+import { isWorkspaceUsable } from "./utils/projectUtils";
 
 const CONFIG = "adure-sfx-toolkit";
 /** Jorje restarts create a new client (new middleware object): look for it this often. */
@@ -38,7 +38,7 @@ export function registerSalesforceCoexistence(context: vscode.ExtensionContext):
 		vscode.commands.registerCommand(COMMAND_OPTIMIZE, () => showMemoryTip(context, true)),
 	);
 	startJorjeSuppression(context);
-	if (isSalesforceProject()) {
+	if (isWorkspaceUsable()) {
 		const t = setTimeout(() => void showMemoryTip(context, false), 8000);
 		t.unref?.();
 		context.subscriptions.push({ dispose: () => clearTimeout(t) });

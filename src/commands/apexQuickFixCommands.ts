@@ -10,6 +10,8 @@
 import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
+import { isMdapiProject } from "../utils/projectUtils";
+import { showConvertHint } from "./convertMdapi";
 
 export const CMD_CREATE_FIELD_STUB = "adure-sfx-toolkit.apex.createFieldStub";
 
@@ -23,6 +25,10 @@ function insideWorkspace(file: string): boolean {
 export function registerApexQuickFixCommands(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(
 		vscode.commands.registerCommand(CMD_CREATE_FIELD_STUB, async (args?: { path?: string; content?: string }) => {
+			if (isMdapiProject()) {
+				void showConvertHint();
+				return;
+			}
 			const file = args?.path;
 			const content = args?.content;
 			if (typeof file !== "string" || typeof content !== "string" || !file.endsWith(".field-meta.xml") || !insideWorkspace(file)) {

@@ -16,7 +16,7 @@ const PATTERNS: RegExp[] = [
 	/[\\/]lwc[\\/].+\.(?:js|html)$/i, // **/lwc/**/*.{js,html}
 	/[\\/]aura[\\/].+\.(?:js|cmp|app|evt)$/i, // **/aura/**/*.{js,cmp,app,evt}
 	/\.(?:page|component)$/i, // **/*.{page,component}
-	/\.flow-meta\.xml$/i, // **/*.flow-meta.xml
+	/\.flow(?:-meta\.xml)?$/i, // **/*.flow-meta.xml (SFDX) and **/*.flow (MDAPI)
 ];
 
 /** True for a file path whose unsaved text the server's metadata scanners may use. */

@@ -44,6 +44,7 @@ describe("isMetadataBufferPath", () => {
 			"/w/force-app/main/default/pages/P.page",
 			"/w/force-app/main/default/pages/P.component",
 			"/w/force-app/main/default/flows/F.flow-meta.xml",
+			"/w/src/flows/F.flow",
 		]) assert.ok(isMetadataBufferPath(p), p);
 		for (const p of [
 			"/w/classes/A.cls",

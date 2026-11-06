@@ -19,7 +19,7 @@ import {
 import { registerSchemaHostHandlers } from "./schemaHost";
 import { SoqlSchemaProvider } from "./utils/soqlSchemaProvider";
 import { OrgMetadataCache } from "./utils/orgMetadataCache";
-import { isSalesforceProject } from "./utils/projectUtils";
+import { isWorkspaceUsable } from "./utils/projectUtils";
 import { shouldForwardDiagnostics } from "./utils/diagnosticsFilter";
 import { FileEventBatcher } from "./utils/fileEventBatcher";
 import { MetadataBufferSync, isMetadataBufferPath } from "./utils/metadataBufferSync";
@@ -76,7 +76,7 @@ function workspaceRootsKey(): string {
 export function startLanguageServer(context: vscode.ExtensionContext): void {
 	registerLifetime(context);
 	if (client) {
-		if (clientRootsKey !== workspaceRootsKey() || !isSalesforceProject()) {
+		if (clientRootsKey !== workspaceRootsKey() || !isWorkspaceUsable()) {
 			void restartLanguageServerForWorkspaceChange(context);
 		}
 		return;
@@ -90,11 +90,11 @@ export function startLanguageServer(context: vscode.ExtensionContext): void {
  * stop it when the workspace is no longer an SFDX project. Serialized, so rapid
  * folder changes can't interleave a stop with a start.
  */
-export function restartLanguageServerForWorkspaceChange(context: vscode.ExtensionContext): Promise<void> {
+export function restartLanguageServerForWorkspaceChange(context: vscode.ExtensionContext, force = false): Promise<void> {
 	transitions = transitions
 		.then(async () => {
-			const isProject = isSalesforceProject();
-			if (client && clientRootsKey === workspaceRootsKey() && isProject) return;
+			const isProject = isWorkspaceUsable();
+			if (!force && client && clientRootsKey === workspaceRootsKey() && isProject) return;
 			if (client || stopping) {
 				outputChannel.appendLine("languageClient: workspace folders changed — restarting ASFX language server.");
 				await stopLanguageServer();
@@ -164,8 +164,8 @@ function registerLifetime(context: vscode.ExtensionContext): void {
 
 function startClient(context: vscode.ExtensionContext): void {
 	if (client) return;
-	// Never start outside an SFDX project — mirrors how the extension's UI is hidden.
-	if (!isSalesforceProject()) return;
+	// Never start outside an SFDX/MDAPI project — mirrors how the extension's UI is hidden.
+	if (!isWorkspaceUsable()) return;
 	const enabled = vscode.workspace
 		.getConfiguration("adure-sfx-toolkit")
 		.get<boolean>("soql.enableCompletion", true);
@@ -345,7 +345,7 @@ function languageServerHeapMB(): number {
  */
 function watchApexSources(lc: LanguageClient): vscode.Disposable {
 	const watcher = vscode.workspace.createFileSystemWatcher(
-		"{**/*.cls,**/*.trigger,**/lwc/**/*.js,**/lwc/**/*.ts,**/aura/**/*.js,**/aura/**/*.cmp,**/aura/**/*.app,**/*.page,**/*.component,**/*.flow-meta.xml}",
+		"{**/*.cls,**/*.trigger,**/lwc/**/*.js,**/lwc/**/*.ts,**/aura/**/*.js,**/aura/**/*.cmp,**/aura/**/*.app,**/*.page,**/*.component,**/*.flow-meta.xml,**/*.flow}",
 	);
 	// Deduped by URI (last net change per file) — a huge branch switch coalesces instead
 	// of being truncated, so no file event is ever lost.

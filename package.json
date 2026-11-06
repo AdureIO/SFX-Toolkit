@@ -34,6 +34,7 @@
   ],
   "activationEvents": [
     "workspaceContains:sfdx-project.json",
+    "workspaceContains:src/package.xml",
     "onCustomEditor:adure-sfx-toolkit.permissionSetEditor",
     "onCustomEditor:adure-sfx-toolkit.scratchOrgDefEditor"
   ],
@@ -52,6 +53,10 @@
       {
         "command": "adure-sfx-toolkit.optimizeSalesforceMemory",
         "title": "ASFXT: Optimize Salesforce Extensions Memory"
+      },
+      {
+        "command": "adure-sfx-toolkit.convertMdapiToSfdx",
+        "title": "ASFXT: Convert MDAPI Project to SFDX Format"
       },
       {
         "command": "adure-sfx-toolkit.listLogs",
@@ -441,23 +446,23 @@
         {
           "id": "adure-sfx-toolkit.traces",
           "name": "Debug Traces",
-          "when": "adure-sfx-toolkit:isSalesforceProject",
+          "when": "adure-sfx-toolkit:isUsableProject",
           "visibility": "collapsed"
         },
         {
           "id": "adure-sfx-toolkit.orgs",
           "name": "Orgs",
-          "when": "adure-sfx-toolkit:isSalesforceProject"
+          "when": "adure-sfx-toolkit:isUsableProject"
         },
         {
           "id": "adure-sfx-toolkit.development",
           "name": "Development",
-          "when": "adure-sfx-toolkit:isSalesforceProject"
+          "when": "adure-sfx-toolkit:isUsableProject"
         },
         {
           "id": "adure-sfx-toolkit.snippets",
           "name": "Apex Snippets",
-          "when": "adure-sfx-toolkit:isSalesforceProject"
+          "when": "adure-sfx-toolkit:isUsableProject"
         }
       ],
       "adure-sfx-toolkit-workbench": [
@@ -465,10 +470,17 @@
           "type": "webview",
           "id": "adure-sfx-toolkit.apexWorkbench",
           "name": "ASFX Workbench",
-          "when": "adure-sfx-toolkit:isSalesforceProject"
+          "when": "adure-sfx-toolkit:isUsableProject"
         }
       ]
     },
+    "viewsWelcome": [
+      {
+        "view": "adure-sfx-toolkit.development",
+        "contents": "This is a legacy MDAPI project (src/package.xml). Org features work; deploy, retrieve, source tracking and local schema need SFDX format.\n[Convert to SFDX format](command:adure-sfx-toolkit.convertMdapiToSfdx)",
+        "when": "adure-sfx-toolkit:isMdapiProject"
+      }
+    ],
     "keybindings": [
       {
         "command": "adure-sfx-toolkit.executeAnonymous",
@@ -712,7 +724,7 @@
       "explorer/context": [
         {
           "command": "adure-sfx-toolkit.addToGitignore",
-          "when": "adure-sfx-toolkit:isSalesforceProject",
+          "when": "adure-sfx-toolkit:isUsableProject",
           "group": "7_modification@1"
         },
         {
@@ -722,6 +734,10 @@
         }
       ],
       "commandPalette": [
+        {
+          "command": "adure-sfx-toolkit.convertMdapiToSfdx",
+          "when": "adure-sfx-toolkit:isMdapiProject"
+        },
         {
           "command": "adure-sfx-toolkit.lwcGoToJs",
           "when": "false"

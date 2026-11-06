@@ -1,7 +1,7 @@
 import { AuthInfo } from "./authInfo";
 import { getToolingApiVersion } from "./constants";
 import { outputChannel } from "./outputChannel";
-import { isSalesforceProject } from "./projectUtils";
+import { isWorkspaceUsable } from "./projectUtils";
 import { DescribeStore, PROBE_INTERVAL_MS, AUTH_PROBE_INTERVAL_MS, SchemaUnavailableError } from "./describeStore";
 import { canonicalOrgKey } from "./orgKey";
 import { classifySchemaError, isAuthKind, reportSchemaFailure, reportSchemaSuccess, SchemaFailureKind } from "./schemaHealth";
@@ -210,7 +210,7 @@ class OrgMetadataCacheImpl {
 	 * probed again after PROBE_INTERVAL_MS (auth problems: AUTH_PROBE_INTERVAL_MS).
 	 */
 	async getObjectListStrict(org: string | null): Promise<string[]> {
-		if (!isSalesforceProject()) throw new SchemaUnavailableError("noCredentials", "Not an SFDX project.");
+		if (!isWorkspaceUsable()) throw new SchemaUnavailableError("noCredentials", "Not an SFDX project.");
 		const key = cacheKey(org);
 		const entry = this.getOrCreateOrgCache(key);
 		// Kept indefinitely once fetched — only Refresh Metadata / push-pull invalidation re-fetches.
@@ -285,7 +285,7 @@ class OrgMetadataCacheImpl {
 	 * Get describe (fields + childRelationships) for an sobject. Uses cache per org/sobject.
 	 */
 	async getDescribe(org: string | null, sobject: string): Promise<SObjectDescribe | null> {
-		if (!isSalesforceProject() || !sobject) return null;
+		if (!isWorkspaceUsable() || !sobject) return null;
 		// Source from the shared DescribeStore (the single per-org, ~10-min cache). We
 		// don't keep our own parsed copy — that would outlive the store's TTL and serve
 		// stale fields/relationships. Parsing a cached describe is cheap.
@@ -379,7 +379,7 @@ class OrgMetadataCacheImpl {
 	 * If background is true, run without awaiting (fire-and-forget).
 	 */
 	async refresh(org: string | null, options?: { background?: boolean }): Promise<void> {
-		if (!isSalesforceProject()) return;
+		if (!isWorkspaceUsable()) return;
 		const key = cacheKey(org);
 		const entry = this.getOrCreateOrgCache(key);
 		entry.sobjects = null;
@@ -436,7 +436,7 @@ class OrgMetadataCacheImpl {
 
 	/** Warm an org's object list in the background (canonical key — the same entry the LS reads). */
 	warmOrg(org: string | null): void {
-		if (!isSalesforceProject()) return;
+		if (!isWorkspaceUsable()) return;
 		this.getObjectList(org).catch(() => {});
 	}
 
@@ -445,7 +445,7 @@ class OrgMetadataCacheImpl {
 	 * the org), so the first completion on them is instant. Uses one composite/batch call.
 	 */
 	async warmCommonDescribes(org: string | null, names: string[] = ["Account", "Contact", "User"]): Promise<void> {
-		if (!isSalesforceProject()) return;
+		if (!isWorkspaceUsable()) return;
 		const list = await this.getObjectList(org);
 		if (!list.length) return;
 		const present = new Set(list);

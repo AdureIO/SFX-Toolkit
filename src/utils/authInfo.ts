@@ -2,7 +2,7 @@ import { runCommandArgs } from "./commandRunner";
 import { httpsGet, httpsDelete, httpsPost, httpsPatch, httpsGetRange, httpsGetEx, httpsPostEx, GetOptions, HttpResponse } from "./httpUtils";
 import { canonicalOrgKey, orgArgForKey } from "./orgKey";
 import { outputChannel } from "./outputChannel";
-import { isSalesforceProject } from "./projectUtils";
+import { isWorkspaceUsable } from "./projectUtils";
 
 /** Default: consider token expired after 55 minutes so we refresh before typical 2h OAuth expiry. */
 const AUTH_VALID_MS = 55 * 60 * 1000;
@@ -148,7 +148,7 @@ export class AuthInfo {
 	 * Concurrent calls for the same org share one fetch.
 	 */
 	public static async getAuthInfoForOrg(targetOrg: string | null): Promise<OrgAuth | null> {
-		if (!isSalesforceProject()) return null;
+		if (!isWorkspaceUsable()) return null;
 
 		const key = this.cacheKey(targetOrg);
 
@@ -186,7 +186,7 @@ export class AuthInfo {
 	 * Call when the deploy panel is shown or when the user selects an org. No-op if already cached or already fetching.
 	 */
 	public static warmAuthForOrg(targetOrg: string | null): void {
-		if (!isSalesforceProject()) return;
+		if (!isWorkspaceUsable()) return;
 		const key = this.cacheKey(targetOrg);
 		if (this.getValidFromCache(key)) return;
 		if (this.fetchLocks.has(key)) return;

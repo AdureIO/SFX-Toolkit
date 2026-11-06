@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { runCommand } from '../utils/commandRunner';
-import { isSalesforceProject } from '../utils/projectUtils';
+import { isWorkspaceUsable } from '../utils/projectUtils';
 import { Logger } from '../utils/outputChannel';
 
 export class TraceTreeProvider implements vscode.TreeDataProvider<TraceItem>, vscode.Disposable {
@@ -61,7 +61,7 @@ export class TraceTreeProvider implements vscode.TreeDataProvider<TraceItem>, vs
         if (element) {
             return [];
         }
-        if (!isSalesforceProject()) {
+        if (!isWorkspaceUsable()) {
             return [new TraceItem('Open an SFDX project', '', '', vscode.TreeItemCollapsibleState.None)];
         }
 

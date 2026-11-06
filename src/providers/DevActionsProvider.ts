@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { isSalesforceProject } from "../utils/projectUtils";
+import { isMdapiProject, isWorkspaceUsable, CONVERT_MDAPI_COMMAND } from "../utils/projectUtils";
 
 /** A collapsible section header that carries its own child action items. */
 class DevGroupItem extends vscode.TreeItem {
@@ -32,7 +32,7 @@ export class DevActionsProvider implements vscode.TreeDataProvider<vscode.TreeIt
 		if (element instanceof DevGroupItem) return element.children;
 		if (element) return [];
 
-		if (!isSalesforceProject()) {
+		if (!isWorkspaceUsable()) {
 			const item = new vscode.TreeItem("Open an SFDX project", vscode.TreeItemCollapsibleState.None);
 			item.tooltip = "Open a folder that contains sfdx-project.json to use Development actions.";
 			return [item];
@@ -40,7 +40,7 @@ export class DevActionsProvider implements vscode.TreeDataProvider<vscode.TreeIt
 
 		// Logical sections — the items keep their labels/commands/icons unchanged,
 		// they are only grouped together under collapsible headers.
-		return [
+		const groups: vscode.TreeItem[] = [
 			new DevGroupItem("Source", "repo", [
 				this.createItem("Push Source", "adure-sfx-toolkit.pushSource", "cloud-upload", "Deploy all source to default org"),
 				this.createItem("Push Source (Force)", "adure-sfx-toolkit.pushSourceForce", "alert", "Force push source (overwrite conflicts)"),
@@ -83,6 +83,17 @@ export class DevActionsProvider implements vscode.TreeDataProvider<vscode.TreeIt
 				this.createItem("Regenerate LWC Apex Typings", "adure-sfx-toolkit.generateLwcApexTypings", "symbol-interface", "Rewrite the @salesforce/apex typings from your Apex @AuraEnabled signatures (real parameter and return types instead of any)"),
 			]),
 		];
+		if (isMdapiProject()) {
+			// Legacy MDAPI project: org features work; Source / Deploy & Retrieve / Repair need SFDX format.
+			const convert = this.createItem(
+				"Convert to SFDX format…",
+				CONVERT_MDAPI_COMMAND,
+				"arrow-swap",
+				"MDAPI project (src/package.xml). Convert to unlock deploy, retrieve, source tracking and local schema."
+			);
+			return [convert, ...groups];
+		}
+		return groups;
 	}
 
 	private createItem(label: string, commandId: string, icon: string, tooltip: string): vscode.TreeItem {

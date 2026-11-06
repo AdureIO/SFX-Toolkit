@@ -9,7 +9,7 @@ import { getHighlightPatterns } from '../utils/apexLogHighlight';
 import { getSalesforceLogDirectory } from '../utils/logPaths';
 import { AuthInfo } from '../utils/authInfo';
 import { getToolingApiVersion } from '../utils/constants';
-import { isSalesforceProject } from '../utils/projectUtils';
+import { isWorkspaceUsable } from '../utils/projectUtils';
 import { getSoqlMarkers } from '../utils/soqlMarkers';
 import { parseSoqlError } from '../utils/soqlError';
 import { handleResultsTableMessage } from '../utils/resultsTableHost';
@@ -222,7 +222,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 					break;
 				case 'warmOrg': {
 					const org = (typeof data.org === 'string' && data.org) ? data.org : null;
-					if (isSalesforceProject()) AuthInfo.warmAuthForOrg(org);
+					if (isWorkspaceUsable()) AuthInfo.warmAuthForOrg(org);
 					// Point both workbench buffers' IntelliSense at the selected org (marks them
 					// ephemeral → no stub writes). The webview re-posts this on every org-list
 					// refresh; the server only gets a TARGETED refresh when the org changed.
@@ -330,7 +330,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 					if (typeof data.code === 'string') await this._bridge.persist(data.code);
 					break;
 				case 'execute': {
-					if (!isSalesforceProject()) { this._post('execResult', { success: false, error: 'Open an SFDX project to use this feature.' }); return; }
+					if (!isWorkspaceUsable()) { this._post('execResult', { success: false, error: 'Open an SFDX project to use this feature.' }); return; }
 					Telemetry.event('apexExecute', { surface: 'panel' });
 					this._post('execStarted', {});
 					const result = await executeAnonymousForPanel(data.code || '', data.org || undefined);

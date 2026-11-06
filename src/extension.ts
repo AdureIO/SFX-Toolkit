@@ -87,7 +87,17 @@ import { DataMigrationPanelProvider } from "./providers/DataMigrationPanelProvid
 import * as path from "path";
 import * as fs from "fs";
 import { startLanguageServer, stopLanguageServer, restartLanguageServerForWorkspaceChange } from "./languageClient";
-import { isSalesforceProject, updateSalesforceProjectContext, NOT_SFDX_PROJECT_MESSAGE } from "./utils/projectUtils";
+import {
+  isSalesforceProject,
+  isMdapiProject,
+  isWorkspaceUsable,
+  updateSalesforceProjectContext,
+  NOT_SFDX_PROJECT_MESSAGE,
+  CONVERT_MDAPI_COMMAND
+} from "./utils/projectUtils";
+import { decideCommandGate } from "./utils/commandScope";
+import { convertMdapiProject, registerMdapiUi, showConvertHint } from "./commands/convertMdapi";
+import { scheduleStubSync } from "./utils/sobjectStubSync";
 import { OrgMetadataCache } from "./utils/orgMetadataCache";
 import { AuthInfo } from "./utils/authInfo";
 import { getDeployDiagnosticCollection, registerDeployDiagnosticAutoClear, deployErrorsContentProvider } from "./utils/deployDiagnostics";
@@ -114,7 +124,7 @@ const COMMON_DESCRIBE_WARM_DELAY_MS = 8000;
  * cancels the deferred coverage query.
  */
 function warmProjectCaches(): vscode.Disposable {
-  if (!isSalesforceProject()) return new vscode.Disposable(() => undefined);
+  if (!isWorkspaceUsable()) return new vscode.Disposable(() => undefined);
   // All three resolve `null` to the canonical default-org key (its username) — the same
   // key the language server's requests use — so this warm-up is what the first
   // completion reads (no extra `sf org display` / describeGlobal).
@@ -124,13 +134,13 @@ function warmProjectCaches(): vscode.Disposable {
   let timer: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
     timer = undefined;
     // Explorer coverage badges — skipped when something (e.g. a default-org change) already loaded it.
-    if (isSalesforceProject() && apexCoverage.loadedAt === null) void apexCoverage.refresh().catch(() => undefined);
+    if (isWorkspaceUsable() && apexCoverage.loadedAt === null) void apexCoverage.refresh().catch(() => undefined);
   }, COVERAGE_WARM_DELAY_MS);
   // Low priority: pre-describe User/Account/Contact (one composite/batch call; usually
   // served from the persisted cache and just revalidated).
   let describeTimer: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
     describeTimer = undefined;
-    if (isSalesforceProject()) void OrgMetadataCache.warmCommonDescribes(null).catch(() => undefined);
+    if (isWorkspaceUsable()) void OrgMetadataCache.warmCommonDescribes(null).catch(() => undefined);
   }, COMMON_DESCRIBE_WARM_DELAY_MS);
   return new vscode.Disposable(() => {
     if (timer) clearTimeout(timer);
@@ -143,7 +153,7 @@ function warmProjectCaches(): vscode.Disposable {
 /** Identity of the open project: changes when the user switches project in the same window. */
 function currentProjectKey(): string {
   const folder = vscode.workspace.workspaceFolders?.[0];
-  return `${folder?.uri.toString() ?? ""}|${isSalesforceProject() ? "sfdx" : "-"}`;
+  return `${folder?.uri.toString() ?? ""}|${isSalesforceProject() ? "sfdx" : isMdapiProject() ? "mdapi" : "-"}`;
 }
 
 function updateLwcContext(editor: vscode.TextEditor | undefined): void {
@@ -190,8 +200,13 @@ function updateLwcContext(editor: vscode.TextEditor | undefined): void {
 function register(command: string, callback: (...args: any[]) => any, thisArg?: any): vscode.Disposable {
   return vscode.commands.registerCommand(command, async (...args: any[]) => {
     Logger.info(`Command triggered: ${command}`);
-    if (!isSalesforceProject()) {
+    const gate = decideCommandGate(command, { sfdx: isSalesforceProject(), mdapi: isMdapiProject() });
+    if (gate === "not-sfdx") {
       vscode.window.showInformationMessage(NOT_SFDX_PROJECT_MESSAGE);
+      return;
+    }
+    if (gate === "mdapi-hint") {
+      void showConvertHint();
       return;
     }
     const start = Date.now();
@@ -356,7 +371,7 @@ export function activate(context: vscode.ExtensionContext) {
       orgTreeProvider,
       orgTreeView,
       orgTreeView.onDidChangeVisibility((e) => {
-        if (e.visible && isSalesforceProject()) {
+        if (e.visible && isWorkspaceUsable()) {
           warmOrgListCache();
         }
       })
@@ -543,7 +558,7 @@ export function activate(context: vscode.ExtensionContext) {
       snippetsTreeView,
       new vscode.Disposable(disposeSnippetEvents),
       snippetsTreeView.onDidChangeVisibility((e) => {
-        if (e.visible && isSalesforceProject()) {
+        if (e.visible && isWorkspaceUsable()) {
           warmOrgListCache();
         }
       })
@@ -582,10 +597,10 @@ export function activate(context: vscode.ExtensionContext) {
     snippetQuickRunStatusBarItem.text = "$(play) Run Apex Snippet";
     snippetQuickRunStatusBarItem.tooltip = "Quick run an Apex snippet against the default org";
     snippetQuickRunStatusBarItem.command = "adure-sfx-toolkit.runSnippet";
-    if (isSalesforceProject()) snippetQuickRunStatusBarItem.show();
+    if (isWorkspaceUsable()) snippetQuickRunStatusBarItem.show();
     context.subscriptions.push(snippetQuickRunStatusBarItem);
     const updateSnippetStatusBar = () => {
-      if (isSalesforceProject()) snippetQuickRunStatusBarItem.show();
+      if (isWorkspaceUsable()) snippetQuickRunStatusBarItem.show();
       else snippetQuickRunStatusBarItem.hide();
     };
     updateSnippetStatusBar();
@@ -748,7 +763,7 @@ export function activate(context: vscode.ExtensionContext) {
         // Drop the old org's coverage first so its badges/line highlights never linger
         // (onDidChange also clears CoverageLineDecorator's per-class line cache).
         apexCoverage.clear();
-        if (isSalesforceProject()) void apexCoverage.refresh().catch(() => undefined);
+        if (isWorkspaceUsable()) void apexCoverage.refresh().catch(() => undefined);
       })
     );
 
@@ -756,10 +771,10 @@ export function activate(context: vscode.ExtensionContext) {
     // re-evaluates the SFDX context; a different project (first folder changed, or an SFDX
     // project appeared/disappeared) resets every project-scoped cache and re-roots watchers.
     let projectKey = currentProjectKey();
-    context.subscriptions.push(
-      vscode.workspace.onDidChangeWorkspaceFolders(() => {
+    const onProjectChanged = () => {
         updateSalesforceProjectContext();
         updateSnippetStatusBar();
+        refreshMdapiUi();
         devProvider.refresh();
 
         const nextKey = currentProjectKey();
@@ -790,7 +805,25 @@ export function activate(context: vscode.ExtensionContext) {
         );
 
         warmup = warmProjectCaches();
-      })
+    };
+    context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(onProjectChanged));
+
+    // MDAPI (legacy format) support: status bar hint, one-time notice, and the conversion command.
+    const refreshMdapiUi = registerMdapiUi(context);
+    context.subscriptions.push(
+      register(CONVERT_MDAPI_COMMAND, () =>
+        convertMdapiProject({
+          onConverted: () => {
+            // Same reset as a project switch (MDAPI -> SFDX changes the project key), then
+            // force the language server to re-root and the stub sync to run as on a normal SFDX start.
+            onProjectChanged();
+            void restartLanguageServerForWorkspaceChange(context, true).catch((e) =>
+              Logger.error(`Failed to restart SFX language server: ${e instanceof Error ? e.message : String(e)}`)
+            );
+            scheduleStubSync({ force: true });
+          }
+        })
+      )
     );
 
     Logger.info('Extension "adure-sfx-toolkit" activated successfully.');

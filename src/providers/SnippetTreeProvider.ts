@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { loadSnippets, ApexSnippet, onDidChangeSnippets, createSnippetsWatcher } from '../commands/apexSnippets';
-import { isSalesforceProject } from '../utils/projectUtils';
+import { isWorkspaceUsable } from '../utils/projectUtils';
 
 /** Tree item for one snippet in the Apex Snippets sidebar view. */
 export class SnippetItem extends vscode.TreeItem {
@@ -51,7 +51,7 @@ export class SnippetTreeProvider implements vscode.TreeDataProvider<SnippetItem>
     async getChildren(element?: SnippetItem): Promise<SnippetItem[]> {
         if (element) return [];
 
-        if (!isSalesforceProject()) {
+        if (!isWorkspaceUsable()) {
             return [new SnippetItem(
                 { name: 'Open an SFDX project', code: '' },
                 -1

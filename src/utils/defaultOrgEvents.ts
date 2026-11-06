@@ -4,7 +4,7 @@ import { resolveDefaultTargetOrgUsernameSync } from "./defaultOrg";
 import { setKnownTargetOrg, invalidateOrgListCache, refreshOrgListCache } from "./orgListCache";
 import { OrgMetadataCache } from "./orgMetadataCache";
 import { outputChannel } from "./outputChannel";
-import { isSalesforceProject, primaryProjectRoot } from "./projectUtils";
+import { isWorkspaceUsable, primaryProjectRoot } from "./projectUtils";
 import { invalidateOrgKeyCache } from "./orgKey";
 
 /**
@@ -136,6 +136,6 @@ export function resetDefaultOrgWatcher(): void {
 	createWatchers();
 	invalidateOrgKeyCache();
 	// Outside an SFDX project there is no default org to resolve (and no CLI to spawn).
-	if (isSalesforceProject()) void notifyDefaultOrgChanged();
+	if (isWorkspaceUsable()) void notifyDefaultOrgChanged();
 	else lastKnown = undefined;
 }

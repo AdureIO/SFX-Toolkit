@@ -410,6 +410,7 @@ export function metadataKindOf(file: string): MetadataKind | undefined {
 	if (/\/aura\/[^/]+\/[^/]+\.js$/i.test(f)) return "auraJs";
 	if (/\/aura\/[^/]+\/[^/]+\.(cmp|app)$/i.test(f)) return "auraCmp";
 	if (/\.(page|component)$/i.test(f)) return "vf";
-	if (/\.flow-meta\.xml$/i.test(f)) return "flow";
+	// SFDX source (`.flow-meta.xml`) and legacy MDAPI (`.flow`).
+	if (/\.flow(?:-meta\.xml)?$/i.test(f)) return "flow";
 	return undefined;
 }

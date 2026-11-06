@@ -4,7 +4,7 @@ import * as fs from "fs";
 import { executeAnonymousApex } from "./executeAnonymous";
 import { getCachedOrgList, getOrgListForPicker } from "../utils/orgListCache";
 import { Logger } from "../utils/outputChannel";
-import { isSalesforceProject } from "../utils/projectUtils";
+import { isWorkspaceUsable } from "../utils/projectUtils";
 
 const SNIPPETS_DIR_NAME = "apex-snippets";
 const LEGACY_SNIPPETS_FILE = ".vscode/apex-snippets.json";
@@ -179,7 +179,7 @@ export async function openSnippetEditor(snippet: ApexSnippet): Promise<void> {
 
 /** Entry point from Development view: show Run / Add / Edit / Delete. */
 export async function showSnippets(): Promise<void> {
-  if (!isSalesforceProject()) {
+  if (!isWorkspaceUsable()) {
     vscode.window.showInformationMessage(
       "Open an SFDX project (folder containing sfdx-project.json) to use Apex Snippets."
     );

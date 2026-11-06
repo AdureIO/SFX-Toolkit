@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { runCommandArgs } from "../utils/commandRunner";
 import { Logger } from "../utils/outputChannel";
-import { isSalesforceProject } from "../utils/projectUtils";
+import { isWorkspaceUsable } from "../utils/projectUtils";
 import { apexCoverage } from "../utils/apexCoverageService";
 import { getTestRunTimeout } from "../utils/constants";
 
@@ -84,7 +84,7 @@ export function registerApexTestController(context: vscode.ExtensionContext): vs
   async function discoverAll(): Promise<void> {
     controller.items.replace([]);
     fileToClassId.clear();
-    if (!isSalesforceProject()) return;
+    if (!isWorkspaceUsable()) return;
     let files: vscode.Uri[];
     try {
       files = await vscode.workspace.findFiles("**/classes/*.cls", IGNORED_GLOB, 5000);

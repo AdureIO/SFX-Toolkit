@@ -1,5 +1,6 @@
 import { runCommandArgs } from "./commandRunner";
 import { readTargetOrgFromSfdxConfig } from "./sfdxConfig";
+import { primaryProjectRoot } from "./projectUtils";
 
 export type OrgOption = { label: string; username: string };
 
@@ -54,10 +55,13 @@ export function getOrgByTarget(targetOrg?: string | null): OrgRecord | null {
   );
 }
 
-/** Current default target org from Salesforce CLI (not the cached isDefault flag). */
+/**
+ * Current default target org from Salesforce CLI (not the cached isDefault flag). Runs in the
+ * project folder; in an MDAPI project (no sfdx-project.json) the CLI resolves the global config.
+ */
 export async function getTargetOrgUsernameFromCli(): Promise<string | null> {
   try {
-    const result = await runCommandArgs("sf", ["config", "get", "target-org", "--json"]);
+    const result = await runCommandArgs("sf", ["config", "get", "target-org", "--json"], primaryProjectRoot());
     const parsed = JSON.parse(result);
     const value = parsed.result?.value;
     return typeof value === "string" && value.trim() ? value.trim() : null;

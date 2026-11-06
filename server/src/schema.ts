@@ -229,7 +229,8 @@ export class SchemaService {
         let d = dir;
         for (let i = 0; i < 100; i++) {
             try {
-                if (fs.existsSync(path.join(d, 'sfdx-project.json'))) {
+                // SFDX project root, or a legacy MDAPI project root (src/package.xml): one org context per project.
+                if (fs.existsSync(path.join(d, 'sfdx-project.json')) || fs.existsSync(path.join(d, 'src', 'package.xml'))) {
                     key = d;
                     break;
                 }

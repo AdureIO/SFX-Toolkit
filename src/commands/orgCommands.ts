@@ -7,7 +7,7 @@ import { AuthInfo } from "../utils/authInfo";
 import { Logger } from "../utils/outputChannel";
 import { notifyDefaultOrgChanged } from "../utils/defaultOrgEvents";
 import { invalidateOrgKeyCache } from "../utils/orgKey";
-import { primaryProjectRoot } from "../utils/projectUtils";
+import { primaryProjectRoot, isMdapiProject } from "../utils/projectUtils";
 import { NO_ORG_KEY, onLoginCompletedHealth } from "../utils/schemaHealth";
 
 /** Scratch org creation regularly exceeds the default 5-minute command timeout. */
@@ -36,6 +36,9 @@ export async function openOrg(item: OrgItem) {
 export async function setAsDefault(item: OrgItem) {
   if (!item.orgData || !item.orgData.username) return;
 
+  // An MDAPI project has no sfdx-project.json, so a local config cannot be written: use the global one.
+  const globalDefault = isMdapiProject();
+
   await vscode.window.withProgress(
     {
       location: vscode.ProgressLocation.Notification,
@@ -44,11 +47,17 @@ export async function setAsDefault(item: OrgItem) {
     },
     async (_progress, token) => {
       try {
-        await runCommandArgs("sf", ["config", "set", `target-org=${item.orgData.username}`], undefined, undefined, true, undefined, token);
+        const args = ["config", "set", `target-org=${item.orgData.username}`];
+        if (globalDefault) args.push("--global");
+        await runCommandArgs("sf", args, primaryProjectRoot(), undefined, true, undefined, token);
         // Invalidate default-org caches, refresh the org list, and notify listeners
         // (the workbenches realign their selected org). No-op if already this default.
         await notifyDefaultOrgChanged(item.orgData.username);
-        vscode.window.showInformationMessage(`Set ${item.label} as default org.`);
+        vscode.window.showInformationMessage(
+          globalDefault
+            ? `Set ${item.label} as default org (global: this MDAPI project has no local config, so it applies to all projects).`
+            : `Set ${item.label} as default org.`
+        );
         orgTreeProvider.refresh();
         vscode.commands.executeCommand("adure-sfx-toolkit.refreshTraces");
       } catch (e: any) {
@@ -70,7 +79,9 @@ export async function setAsDefaultDevHub(item: OrgItem) {
     },
     async (_progress, token) => {
       try {
-        await runCommandArgs("sf", ["config", "set", `target-dev-hub=${item.orgData.username}`], undefined, undefined, true, undefined, token);
+        const hubArgs = ["config", "set", `target-dev-hub=${item.orgData.username}`];
+        if (isMdapiProject()) hubArgs.push("--global"); // no sfdx-project.json to hold a local config
+        await runCommandArgs("sf", hubArgs, primaryProjectRoot(), undefined, true, undefined, token);
         AuthInfo.clearCache();
         vscode.window.showInformationMessage(`Set ${item.label} as default Dev Hub.`);
         orgTreeProvider.refresh();
