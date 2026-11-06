@@ -45,3 +45,6 @@ functions.md
 
 # docs/screenshots stays in the package: README.md references the images with relative
 # paths (docs/screenshots/*.png).
+
+# Internal research/design notes are not part of the extension package.
+docs/*.md
