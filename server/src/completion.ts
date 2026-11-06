@@ -1,30 +1,128 @@
 /**
  * Completion: SOQL (in .soql files and SOQL regions inside Apex) and org-aware Apex
- * completion (member access, `new`, constructor named args, annotations, catch types,
- * picklist values, type names, standard library, statement snippets).
+ * completion (member access on any expression, `new`, constructor named args,
+ * annotations, catch types, picklist values, locals/members/keywords/types at bare
+ * identifier positions, standard library, statement snippets).
+ *
+ * Apex items carry no documentation: it's built in completionItem/resolve from the
+ * item's small `data` record (see items.ts `lazy`).
  */
-import { CancellationToken, Connection, CompletionItem, CompletionItemKind, CompletionList, InsertTextFormat } from 'vscode-languageserver/node';
+import {
+    CancellationToken,
+    Connection,
+    CompletionItem,
+    CompletionItemKind,
+    CompletionList,
+    CompletionParams,
+    CompletionTriggerKind,
+    InsertTextFormat,
+} from 'vscode-languageserver/node';
 import type { TextDocument } from 'vscode-languageserver-textdocument';
+import { fileURLToPath } from 'url';
 import type { ServerContext } from './context';
-import { enclosingClass, resolveVarType, ApexMember, ApexIndex } from './apexSymbols';
+import type { ApexMember, ApexParseResult } from './apexSymbols';
+import type { ParseView } from './parseCache';
 import { WorkspaceIndex } from './workspaceIndex';
-import { STD_TYPES, stdTypeName, stdMembersFor, StdMember } from './apexStdlib';
-import { withSchemaDoc, sfxTag, applyNamespace, fieldItem, relItem, fieldSortTier, objectSortTier } from './items';
-import { soqlRegionAt, soqlCompletion } from './soql';
+import { STD_TYPES, StdMember, stdClass, stdConstructableTypes, stdNestedTypes } from './apexStdlib';
+import {
+    withSchemaDoc,
+    sfxTag,
+    applyNamespace,
+    fieldSortTier,
+    objectSortTier,
+    lazy,
+    lazyFieldItem,
+    lazyRelItem,
+    schemaDoc,
+    plainDoc,
+    fieldDocBody,
+    LazyData,
+} from './items';
+import * as soql from './soql';
 import { orCancelled, throwIfCancelled } from './cancel';
-import { baseTypeName, regexReceiverType, matchesMemberPrefix, nameMatchesNsOptional } from './textUtil';
+import { isApex, matchesMemberPrefix, nameMatchesNsOptional, stripLeadingNamespace } from './textUtil';
+import {
+    Resolver,
+    MemberEntry,
+    RValue,
+    receiverExprBefore,
+    splitGeneric,
+    isObjectName,
+    objectNames,
+    invalidateObjectNames,
+    mergeIndexes,
+    findDecl,
+} from './apexResolve';
+
+/** Type-name lists (bare identifiers, after `new`) are capped server-side; the client re-asks as you type. */
+export const TYPE_LIST_CAP = 200;
 
 export function register(connection: Connection, ctx: ServerContext): void {
     connection.onCompletion((params, token) => {
-        // Soft schema deadline (team B): schema waits stop after ~1.5 s and return what's
-        // ready; `budget.incomplete` then makes the client re-ask (served from cache).
+        // Soft deadline (schema.ts SchemaBudget): describes that outlive it mark the list
+        // incomplete instead of blocking; the budget is passed down as the token.
         const budget = ctx.schema.completionBudget(token);
         return orCancelled<CompletionList>({ isIncomplete: false, items: [] }, async () => {
-            const items = await complete(ctx, params.textDocument.uri, params.position, budget);
-            return { isIncomplete: budget.incomplete, items };
+            const res = await complete(ctx, params, budget);
+            const items = Array.isArray(res) ? res : res.items;
+            return { isIncomplete: budget.incomplete || (!Array.isArray(res) && res.isIncomplete), items };
         });
     });
+    connection.onCompletionResolve((item, token) => orCancelled<CompletionItem>(item, () => resolveCompletionItem(ctx, item, token)));
+
+    // Cross-file lookups read open buffers (unsaved edits) instead of disk.
+    WorkspaceIndex.setOpenDocProvider((file) => openDocIndex(ctx, file));
+    // Pre-load workspace types an open document references once its parse lands.
+    ctx.parses.onParsed((_uri, result) => prewarmReferencedTypes(result));
+    ctx.onSchemaRefresh((objects, info) => {
+        // A full refresh or a structural one (objects created/deleted) changes the object list.
+        if (!objects || info?.structural) invalidateObjectNames();
+    });
 }
+
+// ─── Open-buffer index provider / pre-warming ───────────────────────────────────
+
+const uriPathCache = new Map<string, string>();
+function uriToPath(uri: string): string | undefined {
+    let p = uriPathCache.get(uri);
+    if (p !== undefined) return p || undefined;
+    try {
+        p = uri.startsWith('file:') ? fileURLToPath(uri) : '';
+    } catch {
+        p = '';
+    }
+    if (uriPathCache.size > 500) uriPathCache.clear();
+    uriPathCache.set(uri, p);
+    return p || undefined;
+}
+
+function openDocIndex(ctx: ServerContext, file: string): ReturnType<typeof mergeIndexes> | undefined {
+    for (const d of ctx.documents.all()) {
+        if (!isApex(d.uri) || uriToPath(d.uri) !== file) continue;
+        const peek = ctx.parses.peek(d.uri);
+        if (!peek) return undefined;
+        return peek.good ? mergeIndexes([peek.latest.index, peek.good.index]) : mergeIndexes([peek.latest.index]);
+    }
+    return undefined;
+}
+
+function prewarmReferencedTypes(result: ApexParseResult): void {
+    const names = new Set<string>();
+    const own = new Set((result.index.typeDecls ?? []).map((d) => d.name.toLowerCase()));
+    const add = (t: string | undefined) => {
+        if (!t) return;
+        for (const m of t.match(/[A-Za-z_]\w*/g) ?? []) if (!own.has(m.toLowerCase())) names.add(m);
+    };
+    for (const d of result.index.varDecls) add(d.type);
+    for (const ms of result.index.types.values()) for (const m of ms) add(m.type);
+    for (const d of result.index.typeDecls ?? []) {
+        add(d.extendsType);
+        for (const i of d.implementsTypes) add(i);
+    }
+    WorkspaceIndex.prewarm(names);
+}
+
+// ─── Entry ──────────────────────────────────────────────────────────────────────
 
 /**
  * Completion reads the LAST completed parse (see ParseCache.forRead) for symbol/index
@@ -32,394 +130,182 @@ export function register(connection: Connection, ctx: ServerContext): void {
  * cursor always comes from the live document text. Cursor positions are mapped into
  * the parse's coordinates before scope lookups.
  */
-async function complete(
-    ctx: ServerContext,
-    uri: string,
-    position: { line: number; character: number },
-    token: CancellationToken,
-): Promise<CompletionItem[]> {
+async function complete(ctx: ServerContext, params: CompletionParams, token: CancellationToken): Promise<CompletionItem[] | CompletionList> {
     throwIfCancelled(token);
-    const params = { textDocument: { uri }, position };
+    const uri = params.textDocument.uri;
+    const position = params.position;
     const doc = ctx.documents.get(uri);
     if (!doc) return [];
 
-    let text: string;
-    let line: number;
-    let column: number;
-
     if (doc.languageId === 'soql') {
-        text = doc.getText();
         // soql-language-server expects 1-based line/column.
-        line = params.position.line + 1;
-        column = params.position.character + 1;
-    } else {
-        // Apex: inline [SELECT …] gets SOQL completion; otherwise try type-aware
-        // member completion. Member completion runs even when Apex features are
-        // gated off — its org-aware SObject field results are additive to the
-        // Salesforce extension (which can't resolve org fields for these). Bare
-        // (non-member) Apex completion is left to the other provider.
-        const offset = doc.offsetAt(params.position);
-        const region = soqlRegionAt(doc.getText(), offset);
-        if (region) {
-            // Apex bind variable inside inline SOQL: `:partial` → in-scope variables.
-            const bindLine = doc.getText().slice(doc.getText().lastIndexOf('\n', offset - 1) + 1, offset);
-            const bindM = /:\s*(\w*)$/.exec(bindLine);
-            if (bindM) {
-                const view = ctx.parses.forRead(doc);
-                const at = view.toParsePosition(params.position);
-                const p = bindM[1].toLowerCase();
-                const vars = inScopeVars(view.result.index, at.line, at.character).filter(
-                    (v) => !p || v.name.toLowerCase().startsWith(p),
-                );
-                return sfxTag(
-                    vars.map((v) =>
-                        withSchemaDoc(
-                            { label: v.name, kind: CompletionItemKind.Variable, labelDetails: { detail: ` : ${v.type}` }, sortText: '0_' + v.name },
-                            ['`' + v.name + ' : ' + v.type + '` — bind variable'],
-                        ),
-                    ),
-                );
-            }
-            text = region.snippet;
-            line = region.line;
-            column = region.column;
-        } else {
-            if (!ctx.settings.apexCompletion) return [];
-            const pick = await apexPicklistValueCompletion(ctx, doc, offset, token);
-            if (pick.length) return pick;
-            const ann = apexAnnotationCompletion(doc, offset);
-            if (ann.length) return ann;
-            const cat = apexCatchCompletion(doc, offset);
-            if (cat.length) return cat;
-            const ctorArgs = await apexConstructorArgCompletion(ctx, doc, offset, token);
-            if (ctorArgs.length) return ctorArgs;
-            const ctor = await apexNewCompletion(ctx, doc, offset, token);
-            if (ctor.length) return ctor;
-            const member = await apexMemberCompletion(ctx, doc, offset, params.position, token);
-            if (member.length) return member;
-            // Bare identifier position: SObject types + workspace user classes +
-            // Salesforce standard-library types/namespaces.
-            const out: CompletionItem[] = [];
-            const seen = new Set<string>();
-            for (const it of await apexTypeCompletion(ctx, doc, offset, token)) {
-                if (seen.has(String(it.label))) continue;
-                seen.add(String(it.label));
-                out.push(it);
-            }
-            for (const it of apexGlobalCompletion(doc, offset)) {
-                if (seen.has(String(it.label))) continue;
-                seen.add(String(it.label));
-                out.push(it);
-            }
-            return out;
-        }
+        return soql.soqlCompletion(ctx.schema, uri, doc.getText(), position.line + 1, position.character + 1, token);
     }
 
-    return soqlCompletion(ctx.schema, params.textDocument.uri, text, line, column, token);
-}
+    // Apex: inline [SELECT …] gets SOQL completion; otherwise Apex completion. Member
+    // completion runs even when Apex features are gated off — its org-aware SObject
+    // field results are additive to the Salesforce extension.
+    const full = doc.getText();
+    const offset = doc.offsetAt(position);
+    const region = soql.soqlRegionAt(full, offset);
+    if (region) {
+        const lineStart = full.lastIndexOf('\n', offset - 1) + 1;
+        const bindPartial = bindVariablePartial(full.slice(lineStart, offset));
+        if (bindPartial !== undefined) return bindVariableCompletion(ctx, doc, position, bindPartial);
+        return soql.soqlCompletion(ctx.schema, uri, region.snippet, region.line, region.column, token);
+    }
+    if (!ctx.settings.apexCompletion) return [];
 
-// ─── Apex member completion ─────────────────────────────────────────────────────
-
-const APEX_MEMBER_KIND: Record<ApexMember['kind'], CompletionItemKind> = {
-    method: CompletionItemKind.Method,
-    field: CompletionItemKind.Field,
-    property: CompletionItemKind.Property,
-    constructor: CompletionItemKind.Constructor,
-};
-
-function memberItem(owner: string, m: ApexMember): CompletionItem {
-    return withSchemaDoc(
-        {
-            label: m.name,
-            kind: APEX_MEMBER_KIND[m.kind],
-            labelDetails: { detail: m.detail ? ` : ${m.detail}` : undefined, description: owner },
-            sortText: m.name,
-        },
-        [`\`${owner}.${m.name}\`${m.detail ? ' : ' + m.detail : ''} _(${m.kind})_`],
-    );
-}
-
-// A constructor item for `new <Type>(…)`.
-function newTypeItem(typeName: string, tier: string): CompletionItem {
-    return withSchemaDoc(
-        {
-            label: typeName,
-            kind: CompletionItemKind.Constructor,
-            insertText: `${typeName}($0)`,
-            insertTextFormat: InsertTextFormat.Snippet,
-            labelDetails: { detail: '()' },
-            sortText: tier + '_' + typeName,
-        },
-        ['new `' + typeName + '()`'],
-    );
-}
-
-/** Apex primitives / value types that have no meaningful `new X()` constructor. */
-const NON_CONSTRUCTABLE = new Set(
-    ['string', 'integer', 'long', 'decimal', 'double', 'boolean', 'id', 'blob', 'date', 'datetime', 'time', 'object', 'void', 'sobject'],
-);
-
-/** A full `new Type()` expression item — includes the `new ` keyword (for the pre-`new` assignment position). */
-function newExprItem(typeName: string, tier: string): CompletionItem {
-    return withSchemaDoc(
-        {
-            label: `new ${typeName}()`,
-            kind: CompletionItemKind.Constructor,
-            insertText: `new ${typeName}($0)`,
-            insertTextFormat: InsertTextFormat.Snippet,
-            filterText: `new ${typeName}`,
-            labelDetails: { detail: '', description: 'construct' },
-            sortText: tier + '_' + typeName,
-        },
-        ['`new ' + typeName + '()`'],
-    );
-}
-
-/** Capture the declared/known type on an assignment LHS. `requireNew` matches after `new ` is typed. */
-function expectedAssignType(ctx: ServerContext, doc: TextDocument, lineUpToCursor: string, requireNew: boolean): string | undefined {
-    const tail = requireNew ? 'new\\s+[\\w.<>]*' : '(?:new\\s+[\\w.<>]*)?';
-    // `Type name = [new …]` — Type may carry (possibly nested) generics: List<String>, Map<Id, List<X>>.
-    const declared = new RegExp(`(?:^|[\\s({;,])([A-Za-z_][\\w.]*(?:\\s*<.*>)?)\\s+[A-Za-z_]\\w*\\s*=\\s*${tail}$`).exec(lineUpToCursor);
-    if (declared) return declared[1].trim();
-    // `existingVar = [new …]` — resolve the variable's type from the index.
-    const reassign = new RegExp(`(?:^|[\\s({;,])([A-Za-z_]\\w*)\\s*=\\s*${tail}$`).exec(lineUpToCursor);
-    if (reassign) return ctx.parses.forRead(doc).result.index.varTypes.get(reassign[1]);
-    return undefined;
+    const c = new ApexCompletion(ctx, doc, position, offset, token, params.context?.triggerKind === CompletionTriggerKind.Invoked || !params.context);
+    return c.run();
 }
 
 /**
- * Suggest constructor expressions in Apex. Two positions:
- *  1. Right after an assignment `Type a = |` (before `new` is typed) → offers `new Type()`
- *     first, with declared generics preserved (`List<String> a = ` → `new List<String>()`).
- *  2. After `new ` → the assigned type first, then constructable SObjects.
- * Returns [] when not in either position.
+ * `:partial` bind variable inside inline SOQL → the partial, else undefined. Date
+ * literals with a colon (`LAST_N_DAYS:5`, `NEXT_N_WEEKS:2`, `N_DAYS_AGO:3`) are not binds.
  */
-async function apexNewCompletion(ctx: ServerContext, doc: TextDocument, offset: number, token: CancellationToken): Promise<CompletionItem[]> {
-    const full = doc.getText();
-    const lineStart = full.lastIndexOf('\n', offset - 1) + 1;
-    const lineUpToCursor = full.slice(lineStart, offset);
+export function bindVariablePartial(lineUpToCursor: string): string | undefined {
+    const m = /:\s*(\w*)$/.exec(lineUpToCursor);
+    if (!m) return undefined;
+    const before = lineUpToCursor.slice(0, m.index);
+    if (/(?:^|[^\w])(?:\w+_)?N_\w+$/i.test(before)) return undefined;
+    return m[1];
+}
 
-    const afterNew = /(?:^|[\s({,=])new\s+[A-Za-z_0-9.<>]*$/.test(lineUpToCursor);
-    // Assignment RHS just opened (`… = |`), but not a comparison/compound op (`==`, `<=`, `+=`, …).
-    const assignOpen = /(?:^|[^=!<>+\-*/%&|^])=\s*$/.test(lineUpToCursor);
-
-    if (!afterNew && assignOpen) {
-        const expected = expectedAssignType(ctx, doc, lineUpToCursor, false);
-        if (!expected || NON_CONSTRUCTABLE.has(baseTypeName(expected).toLowerCase())) return [];
-        return sfxTag(applyNamespace([newExprItem(expected, '0')], await ctx.schema.projectNamespace(doc.uri, token)));
-    }
-
-    if (!afterNew) return [];
-
-    // After `new `: the assigned type first, then collection snippets, then SObjects.
-    const expected = expectedAssignType(ctx, doc, lineUpToCursor, true);
-    const items: CompletionItem[] = [];
-    if (expected) items.push(newTypeItem(expected, '0'));
-
-    // Generic collection constructors as snippets (`new List<Account>()`, Map, Set).
-    const collections: { label: string; insert: string; key: string }[] = [
-        { label: 'List<…>()', insert: 'List<${1:SObject}>()', key: 'List' },
-        { label: 'Map<…, …>()', insert: 'Map<${1:Id}, ${2:SObject}>()', key: 'Map' },
-        { label: 'Set<…>()', insert: 'Set<${1:Id}>()', key: 'Set' },
-    ];
-    for (const c of collections) {
-        items.push(
-            withSchemaDoc(
-                {
-                    label: c.label,
-                    kind: CompletionItemKind.Snippet,
-                    insertText: c.insert,
-                    insertTextFormat: InsertTextFormat.Snippet,
-                    filterText: c.key,
-                    detail: 'collection',
-                    sortText: '0a_' + c.key,
-                },
-                ['`new ' + c.label + '`'],
+async function bindVariableCompletion(
+    ctx: ServerContext,
+    doc: TextDocument,
+    position: { line: number; character: number },
+    partial: string,
+): Promise<CompletionItem[]> {
+    const r = new Resolver(ctx, doc, position, readViews(ctx, doc));
+    const p = partial.toLowerCase();
+    return r
+        .visibleVars()
+        .filter((v) => !p || v.name.toLowerCase().startsWith(p))
+        .map((v) =>
+            lazy(
+                { label: v.name, kind: CompletionItemKind.Variable, labelDetails: { detail: ` : ${v.type}` }, sortText: '0_' + v.name },
+                { k: 'v', x: 'bind variable' },
             ),
         );
-    }
-
-    const expectedBase = expected ? baseTypeName(expected) : '';
-    for (const name of await ctx.schema.objectList(doc.uri, token)) {
-        if (name === expectedBase) continue;
-        items.push(newTypeItem(name, objectSortTier(name) === '0' ? '1' : '2'));
-    }
-    return sfxTag(applyNamespace(items, await ctx.schema.projectNamespace(doc.uri, token)));
 }
 
-/**
- * Org-aware named-argument completion inside an SObject constructor —
- * `new Account(|)` / `new Account(Name = 'x', |)` — offers the object's fields as
- * `Field = ` from live schema (fields already supplied are filtered out). Only fires
- * for SObject types; user-class constructors fall through to other completion.
- */
-async function apexConstructorArgCompletion(
-    ctx: ServerContext,
-    doc: TextDocument,
-    offset: number,
-    token: CancellationToken,
-): Promise<CompletionItem[]> {
-    const full = doc.getText();
-    const lineStart = full.lastIndexOf('\n', offset - 1) + 1;
-    const lineUpToCursor = full.slice(lineStart, offset);
-    // `new Type(` with the cursor still inside the (unclosed) parens, no intervening generics.
-    const m = /\bnew\s+([A-Za-z_]\w*)\s*\(([^()]*)$/.exec(lineUpToCursor);
-    if (!m) return [];
-    const typeName = m[1];
-    const argsSoFar = m[2];
-    const lastSeg = argsSoFar.split(',').pop() ?? '';
-    if (lastSeg.includes('=')) return []; // typing a value, not a field name
-    const partial = (/([A-Za-z_]\w*)?$/.exec(lastSeg)?.[1] ?? '').toLowerCase();
-
-    const d = await ctx.schema.describe(doc.uri, baseTypeName(typeName), token);
-    if (!d) return [];
-    const used = new Set(
-        argsSoFar
-            .split(',')
-            .map((s) => s.split('=')[0].trim().toLowerCase())
-            .filter(Boolean),
-    );
-    const items = d.fields
-        .filter((f) => !used.has(f.name.toLowerCase()))
-        .filter((f) => !partial || matchesMemberPrefix(f.name.toLowerCase(), partial))
-        .map((f) => {
-            const item: CompletionItem = {
-                label: f.name,
-                kind: CompletionItemKind.Field,
-                insertText: `${f.name} = `,
-                labelDetails: { detail: ` : ${f.type}`, description: typeName },
-                sortText: fieldSortTier(f.name) + '_' + f.name,
-            };
-            return withSchemaDoc(item, ['```apex\n' + `${typeName}.${f.name} : ${f.type}` + '\n```', '_constructor argument_']);
-        });
-    return sfxTag(applyNamespace(items, await ctx.schema.projectNamespace(doc.uri, token)));
+function readViews(ctx: ServerContext, doc: TextDocument): ParseView[] {
+    const latest = ctx.parses.forRead(doc);
+    const good = ctx.parses.forReadGood(doc);
+    return good ? [latest, good] : [latest];
 }
 
-/**
- * Complete `receiver.partial` in Apex: resolve the receiver's type from the
- * document index (locals/params/fields, `this`) and list its members — either a
- * user type's members or, failing that, an SObject's fields from the org schema.
- */
-async function apexMemberCompletion(
-    ctx: ServerContext,
-    doc: TextDocument,
-    offset: number,
-    pos: { line: number; character: number },
-    token: CancellationToken,
-): Promise<CompletionItem[]> {
-    const full = doc.getText();
-    const lineStart = full.lastIndexOf('\n', offset - 1) + 1;
-    const lineUpToCursor = full.slice(lineStart, offset);
-    const m = /([A-Za-z_]\w*)\s*\.\s*(\w*)$/.exec(lineUpToCursor);
-    if (!m) return [];
-    const receiver = m[1];
-    const partial = m[2].toLowerCase();
+// ─── Request-context ids (resolve needs the document for org-schema docs) ───────
 
-    // Trigger context variables (`Trigger.new`, `Trigger.isInsert`, …), typed to the object.
-    if (receiver === 'Trigger') return triggerMembers(full, partial);
-
-    const view = ctx.parses.forRead(doc);
-    const { index } = view.result;
-    const at = view.toParsePosition(pos);
-
-    // Resolve the receiver to a type name. Fall back to a text scan when the parse
-    // index doesn't have it (common while mid-typing the member access).
-    let typeName: string | undefined;
-    const scopedType = resolveVarType(index, receiver, at.line, at.character);
-    if (receiver === 'this') {
-        typeName = enclosingClass(index, at.line, at.character);
-    } else if (scopedType) {
-        typeName = scopedType; // scope-aware: the declaration in *this* method wins
-    } else if (index.types.has(receiver)) {
-        typeName = receiver; // static-ish access on a known type
-    } else {
-        typeName = regexReceiverType(full, receiver) ?? receiver; // text fallback, else maybe an SObject name
-    }
-    if (!typeName) return [];
-    const base = baseTypeName(typeName);
-
-    let items: CompletionItem[] = [];
-    const userMembers = index.types.get(base);
-    const stdMembers = stdMembersFor(base);
-    // Cross-file user type defined in another workspace file (the common case in
-    // the Execute Apex panel and when referencing other classes).
-    const wsMembers = userMembers && userMembers.length ? undefined : WorkspaceIndex.findTypeMembers(base);
-    if (userMembers && userMembers.length) {
-        items = userMembers.map((mm) => memberItem(base, mm));
-    } else if (wsMembers && wsMembers.length) {
-        items = wsMembers.map((mm) => memberItem(base, mm));
-    } else if (stdMembers) {
-        // Static members of a Salesforce built-in namespace/type (System.debug…).
-        items = stdMembers.map((mm) => stdMemberItem(stdTypeName(base) ?? base, mm));
-    } else {
-        // An SObject instance (namespace resolved inside describe): offer its fields
-        // AND its parent relationships (`X__r`), same as the SOQL builder.
-        const d = await ctx.schema.describe(doc.uri, base, token);
-        if (d) {
-            for (const f of d.fields) {
-                items.push(fieldItem(base, f));
-                if (f.relationshipName) items.push(relItem(base, f));
-            }
-        }
-    }
-
-    // Namespace-optional prefix filter: a member typed `datasource__c` matches
-    // `sfy24__Datasource__c`, and typing the namespaced form matches too.
-    const filtered = partial ? items.filter((i) => matchesMemberPrefix(String(i.label), partial)) : items;
-    return sfxTag(applyNamespace(filtered, await ctx.schema.projectNamespace(doc.uri, token)));
+const contextUris = new Map<number, string>();
+let contextSeq = 0;
+let lastContext: { uri: string; id: number } | undefined;
+function contextId(uri: string): number {
+    if (lastContext && lastContext.uri === uri && contextUris.get(lastContext.id) === uri) return lastContext.id;
+    const id = ++contextSeq;
+    contextUris.set(id, uri);
+    while (contextUris.size > 64) contextUris.delete(contextUris.keys().next().value as number);
+    lastContext = { uri, id };
+    return id;
 }
 
-/**
- * SObject type-name completion in Apex type positions (variable declarations,
- * generics, casts, `return`, `instanceof`). This is what gives namespace-optional
- * matching for types in Apex — typing `Widget__c` matches the namespaced
- * object via filterText. Conservative: only fires with a >=2 char prefix and in a
- * plausible type position, and items are deprioritized so locals stay on top.
- */
-async function apexTypeCompletion(ctx: ServerContext, doc: TextDocument, offset: number, token: CancellationToken): Promise<CompletionItem[]> {
-    const full = doc.getText();
-    const lineStart = full.lastIndexOf('\n', offset - 1) + 1;
-    const lineUpToCursor = full.slice(lineStart, offset);
+// ─── Apex completion ────────────────────────────────────────────────────────────
 
-    // Plausible type positions ending in the partial type name being typed.
-    const typePos =
-        /(?:^\s*|[<(,]\s*|\breturn\s+|\binstanceof\s+)([A-Za-z_]\w*)$/.exec(lineUpToCursor);
-    if (!typePos) return [];
-    const partial = typePos[1];
-    if (partial.length < 2) return [];
+/** Apex primitives / value types that have no meaningful `new X()` constructor. */
+const NON_CONSTRUCTABLE = new Set([
+    'string', 'integer', 'long', 'decimal', 'double', 'boolean', 'id', 'blob', 'date', 'datetime', 'time', 'object', 'void', 'sobject',
+]);
 
-    const ns = await ctx.schema.projectNamespace(doc.uri, token);
-    const objs = await ctx.schema.objectList(doc.uri, token);
-    const items: CompletionItem[] = objs.map((name) =>
-        withSchemaDoc(
-            {
-                label: name,
-                kind: CompletionItemKind.Class,
-                labelDetails: { description: 'SObject' },
-                // Deprioritized (tier 5/6) so they never outrank locals/keywords.
-                sortText: (objectSortTier(name) === '0' ? '5_' : '6_') + name,
-            },
-            ['`' + name + '` — SObject'],
-        ),
-    );
-    return sfxTag(applyNamespace(items, ns));
+/** Keywords after which an identifier is NOT a newly declared name (so completion applies). */
+const EXPRESSION_KEYWORDS = new Set([
+    'return', 'new', 'else', 'throw', 'instanceof', 'extends', 'implements', 'when', 'static', 'final', 'public', 'private',
+    'protected', 'global', 'override', 'virtual', 'abstract', 'transient', 'testmethod', 'webservice', 'do', 'try', 'finally',
+    'insert', 'update', 'upsert', 'delete', 'undelete', 'merge', 'on', 'sharing', 'and', 'or', 'not', 'in', 'case',
+]);
+
+interface KeywordDef {
+    label: string;
+    insert?: string;
+    detail: string;
 }
+const APEX_KEYWORDS: KeywordDef[] = [
+    { label: 'if', insert: 'if (${1:condition}) {\n\t$0\n}', detail: 'if statement' },
+    { label: 'else', detail: 'else branch' },
+    { label: 'for', insert: 'for (${1:Type} ${2:item} : ${3:items}) {\n\t$0\n}', detail: 'for-each loop' },
+    { label: 'while', insert: 'while (${1:condition}) {\n\t$0\n}', detail: 'while loop' },
+    { label: 'do', insert: 'do {\n\t$0\n} while (${1:condition});', detail: 'do / while loop' },
+    { label: 'return', detail: 'return statement' },
+    { label: 'try', insert: 'try {\n\t$1\n} catch (${2:Exception} e) {\n\t$0\n}', detail: 'try / catch' },
+    { label: 'catch', detail: 'catch clause' },
+    { label: 'finally', detail: 'finally clause' },
+    { label: 'throw', detail: 'throw statement' },
+    { label: 'switch', insert: 'switch on ${1:value} {\n\twhen ${2:value} {\n\t\t$0\n\t}\n\twhen else {\n\t}\n}', detail: 'switch on' },
+    { label: 'when', detail: 'switch arm' },
+    { label: 'new', detail: 'constructor call' },
+    { label: 'insert', detail: 'DML insert' },
+    { label: 'update', detail: 'DML update' },
+    { label: 'upsert', detail: 'DML upsert' },
+    { label: 'delete', detail: 'DML delete' },
+    { label: 'undelete', detail: 'DML undelete' },
+    { label: 'merge', detail: 'DML merge' },
+    { label: 'break', detail: 'break' },
+    { label: 'continue', detail: 'continue' },
+    { label: 'this', detail: 'current instance' },
+    { label: 'super', detail: 'superclass' },
+    { label: 'null', detail: 'null literal' },
+    { label: 'true', detail: 'Boolean literal' },
+    { label: 'false', detail: 'Boolean literal' },
+    { label: 'instanceof', detail: 'type test' },
+    { label: 'public', detail: 'modifier' },
+    { label: 'private', detail: 'modifier' },
+    { label: 'protected', detail: 'modifier' },
+    { label: 'global', detail: 'modifier' },
+    { label: 'static', detail: 'modifier' },
+    { label: 'final', detail: 'modifier' },
+    { label: 'override', detail: 'modifier' },
+    { label: 'virtual', detail: 'modifier' },
+    { label: 'abstract', detail: 'modifier' },
+    { label: 'transient', detail: 'modifier' },
+    { label: 'with sharing', detail: 'sharing modifier' },
+    { label: 'without sharing', detail: 'sharing modifier' },
+    { label: 'inherited sharing', detail: 'sharing modifier' },
+    { label: 'class', detail: 'class declaration' },
+    { label: 'interface', detail: 'interface declaration' },
+    { label: 'enum', detail: 'enum declaration' },
+    { label: 'extends', detail: 'superclass' },
+    { label: 'implements', detail: 'interfaces' },
+    { label: 'void', detail: 'no return value' },
+];
 
-// A static member of a Salesforce built-in (e.g. `System.debug`).
-function stdMemberItem(owner: string, m: StdMember): CompletionItem {
-    const isMethod = m.kind === 'method';
-    return withSchemaDoc(
-        {
-            label: m.name,
-            kind: isMethod ? CompletionItemKind.Method : CompletionItemKind.Field,
-            insertText: isMethod ? `${m.name}($0)` : m.name,
-            insertTextFormat: isMethod ? InsertTextFormat.Snippet : InsertTextFormat.PlainText,
-            labelDetails: { detail: m.detail.replace(/^\S+\s+\S+/, '').trim() || undefined, description: owner },
-            sortText: '0_' + m.name,
-        },
-        ['`' + owner + '.' + m.detail + '`'],
-    );
-}
+// Common Apex statement snippets, triggered by typing their prefix (label).
+const APEX_SNIPPETS: { label: string; insert: string; detail: string }[] = [
+    { label: 'sysdebug', insert: 'System.debug(${1:msg});', detail: 'System.debug(…)' },
+    { label: 'soqlfor', insert: 'for (${1:SObject} ${2:record} : [SELECT ${3:Id} FROM ${1:SObject}${4: WHERE }]) {\n\t$0\n}', detail: 'SOQL for-loop' },
+    { label: 'forlist', insert: 'for (${1:Type} ${2:item} : ${3:items}) {\n\t$0\n}', detail: 'for-each loop' },
+    { label: 'ifelse', insert: 'if (${1:condition}) {\n\t$2\n} else {\n\t$0\n}', detail: 'if / else' },
+    { label: 'trycatch', insert: 'try {\n\t$1\n} catch (${2:Exception} e) {\n\t$0\n}', detail: 'try / catch' },
+    { label: 'testmethod', insert: '@IsTest\nstatic void ${1:testName}() {\n\t$0\n}', detail: 'test method' },
+    { label: 'auramethod', insert: "@AuraEnabled(cacheable=true)\npublic static ${1:Object} ${2:name}(${3}) {\n\t$0\n}", detail: 'cacheable AuraEnabled method' },
+    { label: 'assertequals', insert: "Assert.areEqual(${1:expected}, ${2:actual}, '${3:message}');", detail: 'Assert.areEqual(…)' },
+    { label: 'systemassert', insert: 'System.assertEquals(${1:expected}, ${2:actual});', detail: 'System.assertEquals(…)' },
+    { label: 'insertdml', insert: 'insert ${1:records};', detail: 'insert DML' },
+    { label: 'dbinsert', insert: 'Database.insert(${1:records}, ${2:false});', detail: 'Database.insert(…)' },
+    { label: 'batchable', insert: 'global Database.QueryLocator start(Database.BatchableContext bc) {\n\treturn Database.getQueryLocator([SELECT Id FROM ${1:SObject}]);\n}\n\nglobal void execute(Database.BatchableContext bc, List<${1:SObject}> scope) {\n\t$0\n}\n\nglobal void finish(Database.BatchableContext bc) {\n}', detail: 'Batchable methods — add: implements Database.Batchable<SObject>' },
+    { label: 'queueable', insert: 'public void execute(QueueableContext context) {\n\t$0\n}', detail: 'Queueable execute — add: implements Queueable' },
+    { label: 'schedulable', insert: 'global void execute(SchedulableContext sc) {\n\t$0\n}', detail: 'Schedulable execute — add: implements Schedulable' },
+    { label: 'trigger', insert: 'trigger ${1:Name} on ${2:SObject} (${3:before insert, after insert}) {\n\t$0\n}', detail: 'trigger declaration' },
+    { label: 'triggerhandler', insert: 'switch on Trigger.operationType {\n\twhen BEFORE_INSERT {\n\t\t$1\n\t}\n\twhen AFTER_INSERT {\n\t\t$2\n\t}\n\twhen BEFORE_UPDATE {\n\t\t$3\n\t}\n\twhen AFTER_UPDATE {\n\t\t$0\n\t}\n}', detail: 'trigger context routing' },
+];
+
+// Standard Apex exception types, offered inside `catch (…)`.
+const APEX_EXCEPTIONS = [
+    'Exception', 'DmlException', 'QueryException', 'CalloutException', 'NullPointerException',
+    'ListException', 'SObjectException', 'StringException', 'TypeException', 'MathException',
+    'JSONException', 'NoAccessException', 'NoDataFoundException', 'LimitException', 'AsyncException',
+    'SecurityException', 'InvalidParameterValueException', 'EmailException', 'SearchException', 'HandledException',
+];
 
 // Apex annotations offered after `@`. `snippet` (when present) fills in the common
 // arguments as tabstops; otherwise the bare annotation is inserted.
@@ -454,237 +340,632 @@ const APEX_ANNOTATIONS: AnnotationDef[] = [
     { name: 'HttpDelete', detail: 'REST DELETE', doc: 'Handles REST DELETE on the enclosing @RestResource.' },
 ];
 
-/** Completion after `@` — Apex annotations, with argument snippets where useful. */
-function apexAnnotationCompletion(doc: TextDocument, offset: number): CompletionItem[] {
-    const full = doc.getText();
-    const lineStart = full.lastIndexOf('\n', offset - 1) + 1;
-    const lineUpToCursor = full.slice(lineStart, offset);
-    const m = /@(\w*)$/.exec(lineUpToCursor);
-    if (!m) return [];
-    const partial = m[1].toLowerCase();
-    const items = APEX_ANNOTATIONS.filter((a) => !partial || a.name.toLowerCase().startsWith(partial)).map((a) => {
-        const snippet = a.snippet !== undefined;
-        // `@` is already typed and isn't a word char, so insert without it.
-        const item: CompletionItem = {
-            label: '@' + a.name,
-            kind: CompletionItemKind.Keyword,
-            insertText: a.snippet ?? a.name,
-            insertTextFormat: snippet ? InsertTextFormat.Snippet : InsertTextFormat.PlainText,
-            filterText: a.name.replace(/[^\w].*$/, ''), // match the typed word after `@`
-            detail: a.detail,
-            sortText: '0_' + a.name,
-        };
-        return withSchemaDoc(item, [a.doc]);
-    });
-    return sfxTag(items);
-}
-
-// Common Apex statement snippets, triggered by typing their prefix (label).
-const APEX_SNIPPETS: { label: string; insert: string; detail: string }[] = [
-    { label: 'sysdebug', insert: 'System.debug(${1:msg});', detail: 'System.debug(…)' },
-    { label: 'soqlfor', insert: 'for (${1:SObject} ${2:record} : [SELECT ${3:Id} FROM ${1:SObject}${4: WHERE }]) {\n\t$0\n}', detail: 'SOQL for-loop' },
-    { label: 'forlist', insert: 'for (${1:Type} ${2:item} : ${3:items}) {\n\t$0\n}', detail: 'for-each loop' },
-    { label: 'ifelse', insert: 'if (${1:condition}) {\n\t$2\n} else {\n\t$0\n}', detail: 'if / else' },
-    { label: 'trycatch', insert: 'try {\n\t$1\n} catch (${2:Exception} e) {\n\t$0\n}', detail: 'try / catch' },
-    { label: 'testmethod', insert: '@IsTest\nstatic void ${1:testName}() {\n\t$0\n}', detail: 'test method' },
-    { label: 'auramethod', insert: "@AuraEnabled(cacheable=true)\npublic static ${1:Object} ${2:name}(${3}) {\n\t$0\n}", detail: 'cacheable AuraEnabled method' },
-    { label: 'assertequals', insert: "Assert.areEqual(${1:expected}, ${2:actual}, '${3:message}');", detail: 'Assert.areEqual(…)' },
-    { label: 'systemassert', insert: 'System.assertEquals(${1:expected}, ${2:actual});', detail: 'System.assertEquals(…)' },
-    { label: 'insertdml', insert: 'insert ${1:records};', detail: 'insert DML' },
-    { label: 'dbinsert', insert: 'Database.insert(${1:records}, ${2:false});', detail: 'Database.insert(…)' },
-    { label: 'batchable', insert: 'global Database.QueryLocator start(Database.BatchableContext bc) {\n\treturn Database.getQueryLocator([SELECT Id FROM ${1:SObject}]);\n}\n\nglobal void execute(Database.BatchableContext bc, List<${1:SObject}> scope) {\n\t$0\n}\n\nglobal void finish(Database.BatchableContext bc) {\n}', detail: 'Batchable methods — add: implements Database.Batchable<SObject>' },
-    { label: 'queueable', insert: 'public void execute(QueueableContext context) {\n\t$0\n}', detail: 'Queueable execute — add: implements Queueable' },
-    { label: 'schedulable', insert: 'global void execute(SchedulableContext sc) {\n\t$0\n}', detail: 'Schedulable execute — add: implements Schedulable' },
-    { label: 'trigger', insert: 'trigger ${1:Name} on ${2:SObject} (${3:before insert, after insert}) {\n\t$0\n}', detail: 'trigger declaration' },
-    { label: 'triggerhandler', insert: 'switch on Trigger.operationType {\n\twhen BEFORE_INSERT {\n\t\t$1\n\t}\n\twhen AFTER_INSERT {\n\t\t$2\n\t}\n\twhen BEFORE_UPDATE {\n\t\t$3\n\t}\n\twhen AFTER_UPDATE {\n\t\t$0\n\t}\n}', detail: 'trigger context routing' },
-];
-
-// Standard Apex exception types, offered inside `catch (…)`.
-const APEX_EXCEPTIONS = [
-    'Exception', 'DmlException', 'QueryException', 'CalloutException', 'NullPointerException',
-    'ListException', 'SObjectException', 'StringException', 'TypeException', 'MathException',
-    'JSONException', 'NoAccessException', 'NoDataFoundException', 'LimitException', 'AsyncException',
-    'SecurityException', 'InvalidParameterValueException', 'EmailException', 'SearchException', 'HandledException',
-];
-
-/** Completion inside `catch (…)` — standard Apex exception types. */
-function apexCatchCompletion(doc: TextDocument, offset: number): CompletionItem[] {
-    const full = doc.getText();
-    const lineStart = full.lastIndexOf('\n', offset - 1) + 1;
-    const lineUpToCursor = full.slice(lineStart, offset);
-    const m = /\bcatch\s*\(\s*([A-Za-z_]\w*)?$/.exec(lineUpToCursor);
-    if (!m) return [];
-    const partial = (m[1] ?? '').toLowerCase();
-    return sfxTag(
-        APEX_EXCEPTIONS.filter((e) => !partial || e.toLowerCase().startsWith(partial)).map((e) =>
-            withSchemaDoc(
-                { label: e, kind: CompletionItemKind.Class, labelDetails: { description: 'exception' }, sortText: '0_' + e },
-                ['`' + e + '` — Apex exception type'],
-            ),
-        ),
-    );
-}
-
-/** Statement-snippet items for the bare-identifier position (filtered by the typed prefix). */
-function apexSnippetCompletion(partial: string): CompletionItem[] {
-    return APEX_SNIPPETS.filter((s) => !partial || s.label.startsWith(partial)).map((s) =>
-        withSchemaDoc(
-            {
-                label: s.label,
-                kind: CompletionItemKind.Snippet,
-                insertText: s.insert,
-                insertTextFormat: InsertTextFormat.Snippet,
-                detail: s.detail,
-                sortText: '5_' + s.label,
-            },
-            ['`' + s.detail + '` — snippet'],
-        ),
-    );
-}
-
-/** In-scope Apex variables/params/fields visible at a position (for SOQL bind completion). */
-function inScopeVars(index: ApexIndex, line: number, character: number): { name: string; type: string }[] {
-    const out: { name: string; type: string }[] = [];
-    const seen = new Set<string>();
-    for (const d of index.varDecls) {
-        const s = d.scope;
-        const within =
-            (line > s.start.line || (line === s.start.line && character >= s.start.character)) &&
-            (line < s.end.line || (line === s.end.line && character <= s.end.character));
-        if (!within || d.line > line) continue;
-        if (seen.has(d.name)) continue;
-        seen.add(d.name);
-        out.push({ name: d.name, type: d.type });
-    }
-    return out;
-}
-
-/** The SObject a trigger fires on, from `trigger X on Object (...)`. */
-function triggerObjectName(full: string): string {
-    return /\btrigger\s+\w+\s+on\s+([A-Za-z_]\w*)/i.exec(full)?.[1] ?? 'SObject';
-}
-
-/** `Trigger.` context members, typed to the trigger's SObject. */
-function triggerMembers(full: string, partial: string): CompletionItem[] {
-    const obj = triggerObjectName(full);
-    const members: { name: string; type: string }[] = [
-        { name: 'new', type: `List<${obj}>` },
-        { name: 'old', type: `List<${obj}>` },
-        { name: 'newMap', type: `Map<Id, ${obj}>` },
-        { name: 'oldMap', type: `Map<Id, ${obj}>` },
-        { name: 'size', type: 'Integer' },
-        { name: 'operationType', type: 'System.TriggerOperation' },
-        { name: 'isExecuting', type: 'Boolean' },
-        { name: 'isBefore', type: 'Boolean' },
-        { name: 'isAfter', type: 'Boolean' },
-        { name: 'isInsert', type: 'Boolean' },
-        { name: 'isUpdate', type: 'Boolean' },
-        { name: 'isDelete', type: 'Boolean' },
-        { name: 'isUndelete', type: 'Boolean' },
-    ];
-    return sfxTag(
-        members
-            .filter((mm) => !partial || mm.name.toLowerCase().startsWith(partial))
-            .map((mm) =>
-                withSchemaDoc(
-                    {
-                        label: mm.name,
-                        kind: CompletionItemKind.Field,
-                        labelDetails: { detail: ` : ${mm.type}`, description: 'Trigger' },
-                        sortText: '0_' + mm.name,
-                    },
-                    ['```apex\n' + `Trigger.${mm.name} : ${mm.type}` + '\n```'],
-                ),
-            ),
-    );
-}
-
-/** Picklist value completion inside a string literal RHS: `acc.Industry = '|'`. */
-async function apexPicklistValueCompletion(
-    ctx: ServerContext,
-    doc: TextDocument,
-    offset: number,
-    token: CancellationToken,
-): Promise<CompletionItem[]> {
-    const full = doc.getText();
-    const lineStart = full.lastIndexOf('\n', offset - 1) + 1;
-    const luc = full.slice(lineStart, offset);
-    const m = /([A-Za-z_]\w*)\s*\.\s*([A-Za-z_]\w*(?:__c)?)\s*(?:=|==|!=|<>)\s*'([^']*)$/.exec(luc);
-    if (!m) return [];
-    const receiver = m[1];
-    const field = m[2];
-    const partial = m[3].toLowerCase();
-    const view = ctx.parses.forRead(doc);
-    const pos = view.toParsePosition(doc.positionAt(offset));
-    const typeName = resolveVarType(view.result.index, receiver, pos.line, pos.character) ?? regexReceiverType(full, receiver) ?? receiver;
-    const d = await ctx.schema.describe(doc.uri, baseTypeName(typeName), token);
-    if (!d) return [];
-    const f = d.fields.find((x) => x.name.toLowerCase() === field.toLowerCase() || nameMatchesNsOptional(x.name, field));
-    if (!f || !f.picklistValues || !f.picklistValues.length) return [];
-    return sfxTag(
-        f.picklistValues
-            .filter((v) => !partial || v.toLowerCase().startsWith(partial))
-            .map((v) =>
-                withSchemaDoc(
-                    { label: v, kind: CompletionItemKind.EnumMember, insertText: v, detail: `${baseTypeName(typeName)}.${f.name}`, sortText: '0_' + v },
-                    ['`' + v + '` — picklist value'],
-                ),
-            ),
-    );
-}
-
 /**
- * Bare-identifier completion in Apex statement positions: workspace user classes
- * (so `MyService` completes) and Salesforce standard-library types/namespaces
- * (`System`, `Database`, `Math`, …). Skipped after a `.` (member access) and after
- * `new ` (handled by the constructor path). Deprioritized below locals/keywords.
+ * Typed-text filter for server-side filtered lists: a (namespace-optional) prefix, or a
+ * match starting at a word boundary (camelCase / `_`) followed by the rest as a
+ * subsequence — a superset of what the client's fuzzy matcher shows.
  */
-function apexGlobalCompletion(doc: TextDocument, offset: number): CompletionItem[] {
-    const full = doc.getText();
-    const lineStart = full.lastIndexOf('\n', offset - 1) + 1;
-    const lineUpToCursor = full.slice(lineStart, offset);
-    const m = /([A-Za-z_]\w*)$/.exec(lineUpToCursor);
-    if (!m) return [];
-    const before = lineUpToCursor.slice(0, m.index).trimEnd();
-    if (before.endsWith('.') || /\bnew$/.test(before)) return [];
-    const partial = m[1].toLowerCase();
+export function matchesTyped(label: string, partial: string): boolean {
+    if (!partial) return true;
+    const l = label.toLowerCase();
+    const p = partial.toLowerCase();
+    if (l.startsWith(p) || stripLeadingNamespace(l).startsWith(p)) return true;
+    for (let b = 1; b < label.length; b++) {
+        const c = label[b];
+        const prev = label[b - 1];
+        const boundary = prev === '_' || (c >= 'A' && c <= 'Z' && !(prev >= 'A' && prev <= 'Z'));
+        if (!boundary || l[b] !== p[0]) continue;
+        let j = 1;
+        for (let k = b + 1; k < l.length && j < p.length; k++) if (l[k] === p[j]) j++;
+        if (j === p.length) return true;
+    }
+    return false;
+}
 
-    const items: CompletionItem[] = [];
+/** Line-local check: is the cursor inside a `//` comment or a string literal? */
+function inCommentOrString(lineUpToCursor: string): boolean {
+    let inStr = false;
+    for (let i = 0; i < lineUpToCursor.length; i++) {
+        const ch = lineUpToCursor[i];
+        if (inStr) {
+            if (ch === '\\') i++;
+            else if (ch === "'") inStr = false;
+        } else if (ch === "'") inStr = true;
+        else if (ch === '/' && lineUpToCursor[i + 1] === '/') return true;
+    }
+    return inStr;
+}
 
-    // Workspace user classes/triggers.
-    for (const name of WorkspaceIndex.allTypeNames()) {
-        if (partial && !name.toLowerCase().startsWith(partial)) continue;
-        items.push(
-            withSchemaDoc(
-                {
-                    label: name,
-                    kind: CompletionItemKind.Class,
-                    labelDetails: { description: 'Apex class' },
-                    sortText: '3_' + name,
-                },
-                ['`' + name + '` — Apex class'],
-            ),
-        );
+const KIND_OF: Record<ApexMember['kind'], CompletionItemKind> = {
+    method: CompletionItemKind.Method,
+    field: CompletionItemKind.Field,
+    property: CompletionItemKind.Property,
+    constructor: CompletionItemKind.Constructor,
+    enumValue: CompletionItemKind.EnumMember,
+};
+
+/** A call item: `name($0)` (or `name()` without parameters), signature inline, return type right. */
+function callItem(name: string, params: string | undefined, returns: string | undefined, sortTier: string, data: LazyData): CompletionItem {
+    const hasParams = !!params && params.trim().length > 0;
+    return lazy(
+        {
+            label: name,
+            kind: CompletionItemKind.Method,
+            insertText: hasParams ? `${name}($0)` : `${name}()`,
+            insertTextFormat: hasParams ? InsertTextFormat.Snippet : InsertTextFormat.PlainText,
+            labelDetails: { detail: `(${params ?? ''})`, description: returns || 'void' },
+            sortText: sortTier + '_' + name,
+        },
+        data,
+    );
+}
+
+function userMemberItem(owner: string, m: ApexMember): CompletionItem {
+    if (m.kind === 'method') return callItem(m.name, m.params, m.type, '3', { k: 'am', o: owner, x: 'method' });
+    return lazy(
+        {
+            label: m.name,
+            kind: KIND_OF[m.kind],
+            labelDetails: m.kind === 'enumValue' ? { description: owner } : { detail: m.type ? ` : ${m.type}` : undefined, description: owner },
+            sortText: '0_' + m.name,
+        },
+        { k: 'am', o: owner, x: m.kind },
+    );
+}
+
+function stdMemberItem(owner: string, m: StdMember): CompletionItem {
+    if (m.kind === 'method') return callItem(m.name, m.params, m.returns, '3', { k: 'sm', o: owner });
+    const enumValue = m.static && m.returns === owner;
+    return lazy(
+        {
+            label: m.name,
+            kind: enumValue ? CompletionItemKind.EnumMember : CompletionItemKind.Field,
+            labelDetails: enumValue ? { description: owner } : { detail: m.returns ? ` : ${m.returns}` : undefined, description: owner },
+            sortText: '0_' + m.name,
+        },
+        { k: 'sm', o: owner },
+    );
+}
+
+function typeItem(name: string, description: string, sortTier: string, kind: CompletionItemKind = CompletionItemKind.Class): CompletionItem {
+    return lazy({ label: name, kind, labelDetails: { description }, sortText: sortTier + '_' + name }, { k: 'ty', x: description });
+}
+
+// A constructor item for `new <Type>(…)`.
+function newTypeItem(typeName: string, tier: string, description?: string): CompletionItem {
+    return lazy(
+        {
+            label: typeName,
+            kind: CompletionItemKind.Constructor,
+            insertText: `${typeName}($0)`,
+            insertTextFormat: InsertTextFormat.Snippet,
+            labelDetails: description ? { detail: '()', description } : { detail: '()' },
+            sortText: tier + '_' + typeName,
+        },
+        { k: 'ty', x: 'constructor' },
+    );
+}
+
+/** A full `new Type()` expression item — includes the `new ` keyword (for the pre-`new` assignment position). */
+function newExprItem(typeName: string, tier: string): CompletionItem {
+    return lazy(
+        {
+            label: `new ${typeName}()`,
+            kind: CompletionItemKind.Constructor,
+            insertText: `new ${typeName}($0)`,
+            insertTextFormat: InsertTextFormat.Snippet,
+            filterText: `new ${typeName}`,
+            labelDetails: { detail: '', description: 'construct' },
+            sortText: tier + '_' + typeName,
+        },
+        { k: 'ty', x: 'constructor' },
+    );
+}
+
+class ApexCompletion {
+    private readonly full: string;
+    private readonly lineUpToCursor: string;
+    private resolverInst: Resolver | undefined;
+    private nsPromise: Promise<string | null> | undefined;
+
+    constructor(
+        private readonly ctx: ServerContext,
+        private readonly doc: TextDocument,
+        private readonly position: { line: number; character: number },
+        private readonly offset: number,
+        private readonly token: CancellationToken,
+        /** Explicitly invoked (Ctrl+Space / typing a word) vs. a trigger character. */
+        private readonly invoked: boolean,
+    ) {
+        this.full = doc.getText();
+        const lineStart = this.full.lastIndexOf('\n', offset - 1) + 1;
+        this.lineUpToCursor = this.full.slice(lineStart, offset);
     }
 
-    // Salesforce standard library types & namespaces.
-    for (const name of STD_TYPES) {
-        if (partial && !name.toLowerCase().startsWith(partial)) continue;
-        items.push(
-            withSchemaDoc(
-                {
-                    label: name,
-                    kind: CompletionItemKind.Class,
-                    labelDetails: { description: 'System' },
-                    sortText: '4_' + name,
-                },
-                ['`' + name + '` — Salesforce system type'],
-            ),
-        );
+    private get resolver(): Resolver {
+        this.resolverInst ??= new Resolver(this.ctx, this.doc, this.position, readViews(this.ctx, this.doc), this.token);
+        return this.resolverInst;
     }
 
-    // Common Apex statement snippets (sysdebug, soqlfor, testmethod, …).
-    items.push(...apexSnippetCompletion(partial));
+    private ns(): Promise<string | null> {
+        this.nsPromise ??= this.ctx.schema.projectNamespace(this.doc.uri, this.token);
+        return this.nsPromise;
+    }
 
-    return sfxTag(items);
+    private async finish(items: CompletionItem[], isIncomplete = false): Promise<CompletionItem[] | CompletionList> {
+        applyNamespace(items, await this.ns());
+        return isIncomplete ? { isIncomplete: true, items } : items;
+    }
+
+    async run(): Promise<CompletionItem[] | CompletionList> {
+        const luc = this.lineUpToCursor;
+        // Trivial positions (space/newline/comma after nothing interesting) answer fast.
+        const pick = await this.picklistValues();
+        if (pick) return pick;
+        if (inCommentOrString(luc)) return [];
+        const ann = this.annotations();
+        if (ann) return ann;
+        const cat = this.catchTypes();
+        if (cat) return cat;
+        const ctorArgs = await this.constructorArgs();
+        if (ctorArgs) return ctorArgs;
+        const ctor = await this.newCompletion();
+        if (ctor) return ctor;
+        const member = await this.memberCompletion();
+        if (member) return member;
+        return this.bareCompletion();
+    }
+
+    // ── `acc.Industry = '|'` ──
+    private async picklistValues(): Promise<CompletionItem[] | undefined> {
+        const m = /\.\s*([A-Za-z_]\w*)\s*(?:=|==|!=|<>)\s*'([^']*)$/.exec(this.lineUpToCursor);
+        if (!m) return undefined;
+        const dot = this.offset - this.lineUpToCursor.length + m.index;
+        const expr = receiverExprBefore(this.full, dot);
+        if (!expr) return [];
+        const v = await this.resolver.exprValue(expr);
+        if (!v || v.static || v.t.k !== 'sobject') return [];
+        const owner = v.t.name;
+        const d = await this.resolver.describe(owner);
+        const f = d?.fields.find((x) => nameMatchesNsOptional(x.name, m[1]));
+        if (!f || !f.picklistValues || !f.picklistValues.length) return [];
+        const partial = m[2].toLowerCase();
+        return f.picklistValues
+            .filter((val) => !partial || val.toLowerCase().startsWith(partial))
+            .map((val) =>
+                lazy(
+                    { label: val, kind: CompletionItemKind.EnumMember, insertText: val, detail: `${owner}.${f.name}`, sortText: '0_' + val },
+                    { k: 'ev', x: 'picklist value' },
+                ),
+            );
+    }
+
+    // ── `@Annotation` ──
+    private annotations(): CompletionItem[] | undefined {
+        const m = /@(\w*)$/.exec(this.lineUpToCursor);
+        if (!m) return undefined;
+        const partial = m[1].toLowerCase();
+        const items = APEX_ANNOTATIONS.filter((a) => !partial || a.name.toLowerCase().startsWith(partial)).map((a) => {
+            const snippet = a.snippet !== undefined;
+            // `@` is already typed and isn't a word char, so insert without it.
+            const item: CompletionItem = {
+                label: '@' + a.name,
+                kind: CompletionItemKind.Keyword,
+                insertText: a.snippet ?? a.name,
+                insertTextFormat: snippet ? InsertTextFormat.Snippet : InsertTextFormat.PlainText,
+                filterText: a.name.replace(/[^\w].*$/, ''), // match the typed word after `@`
+                detail: a.detail,
+                sortText: '0_' + a.name,
+            };
+            return withSchemaDoc(item, [a.doc]);
+        });
+        return sfxTag(items);
+    }
+
+    // ── `catch (…)` ──
+    private catchTypes(): CompletionItem[] | undefined {
+        const m = /\bcatch\s*\(\s*([A-Za-z_]\w*)?$/.exec(this.lineUpToCursor);
+        if (!m) return undefined;
+        const partial = (m[1] ?? '').toLowerCase();
+        return APEX_EXCEPTIONS.filter((e) => !partial || e.toLowerCase().startsWith(partial)).map((e) => typeItem(e, 'exception', '0'));
+    }
+
+    // ── `new Account(Name = 'x', |)` ──
+    private async constructorArgs(): Promise<CompletionItem[] | CompletionList | undefined> {
+        // `new Type(` with the cursor still inside the (unclosed) parens, no intervening generics.
+        const m = /\bnew\s+([A-Za-z_]\w*)\s*\(([^()]*)$/.exec(this.lineUpToCursor);
+        if (!m) return undefined;
+        const typeName = m[1];
+        const argsSoFar = m[2];
+        const lastSeg = argsSoFar.split(',').pop() ?? '';
+        if (lastSeg.includes('=')) return undefined; // typing a value, not a field name
+        // Only SObjects take `Field = value` arguments; user classes / std types never describe.
+        if (findDecl(this.resolver.local, typeName) || WorkspaceIndex.hasType(typeName) || stdClass(typeName)) return undefined;
+        if (!(await isObjectName(this.ctx, this.doc.uri, typeName, this.token))) return undefined;
+        const d = await this.resolver.describe(typeName);
+        if (!d) return undefined;
+        const partial = (/([A-Za-z_]\w*)?$/.exec(lastSeg)?.[1] ?? '').toLowerCase();
+        const used = new Set(
+            argsSoFar
+                .split(',')
+                .map((s) => s.split('=')[0].trim().toLowerCase())
+                .filter(Boolean),
+        );
+        const c = contextId(this.doc.uri);
+        const items = d.fields
+            .filter((f) => !used.has(f.name.toLowerCase()))
+            .filter((f) => !partial || matchesMemberPrefix(f.name.toLowerCase(), partial))
+            .map((f) =>
+                lazy(
+                    {
+                        label: f.name,
+                        kind: CompletionItemKind.Field,
+                        insertText: `${f.name} = `,
+                        labelDetails: { detail: ` : ${f.type}`, description: typeName },
+                        sortText: fieldSortTier(f.name) + '_' + f.name,
+                    },
+                    { k: 'sf', o: typeName, c, x: 'constructor argument' },
+                ),
+            );
+        return this.finish(items);
+    }
+
+    // ── `Type a = |` and `new |` ──
+    private expectedAssignType(requireNew: boolean): string | undefined {
+        const tail = requireNew ? 'new\\s+[\\w.<>]*' : '(?:new\\s+[\\w.<>]*)?';
+        // `Type name = [new …]` — Type may carry (possibly nested) generics: List<String>, Map<Id, List<X>>.
+        const declared = new RegExp(`(?:^|[\\s({;,])([A-Za-z_][\\w.]*(?:\\s*<.*>)?(?:\\[\\])?)\\s+[A-Za-z_]\\w*\\s*=\\s*${tail}$`).exec(this.lineUpToCursor);
+        if (declared && !EXPRESSION_KEYWORDS.has(declared[1].toLowerCase())) return declared[1].trim();
+        // `existingVar = [new …]` — resolve the variable's type.
+        const reassign = new RegExp(`(?:^|[\\s({;,])([A-Za-z_]\\w*(?:\\.[A-Za-z_]\\w*)?)\\s*=\\s*${tail}$`).exec(this.lineUpToCursor);
+        if (reassign) {
+            const name = reassign[1];
+            if (name.startsWith('this.')) {
+                const field = name.slice(5);
+                for (const ms of this.resolver.local.types.values()) {
+                    const f = ms.find((x) => x.name.toLowerCase() === field.toLowerCase() && x.kind !== 'method');
+                    if (f?.type) return f.type;
+                }
+                return undefined;
+            }
+            if (name.includes('.')) return undefined;
+            return this.resolver.varType(name);
+        }
+        return undefined;
+    }
+
+    /** Whether `new <type>()` makes sense for a written type. */
+    private async constructable(type: string): Promise<boolean> {
+        const { base } = splitGeneric(type);
+        if (NON_CONSTRUCTABLE.has(base.toLowerCase())) return false;
+        const t = await this.resolver.typeByName(type);
+        if (!t) return false;
+        if (t.k === 'user') return t.decl.kind === 'class' && !t.decl.modifiers.includes('abstract');
+        if (t.k === 'std') return !!t.cls.constructable;
+        return t.k === 'sobject';
+    }
+
+    private async newCompletion(): Promise<CompletionItem[] | CompletionList | undefined> {
+        const luc = this.lineUpToCursor;
+        const afterNew = /(?:^|[^\w.])new\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\.?)?$/i.exec(luc);
+        // Assignment RHS just opened (`… = |`), but not a comparison/compound op (`==`, `<=`, `+=`, …).
+        const assignOpen = /(?:^|[^=!<>+\-*/%&|^])=\s*$/.test(luc);
+
+        if (!afterNew && assignOpen) {
+            // Only when the LHS type is known AND constructable — never a popup for every `x = `.
+            const expected = this.expectedAssignType(false);
+            if (!expected || !(await this.constructable(expected))) return [];
+            return this.finish([newExprItem(expected, '0')]);
+        }
+        if (!afterNew) return undefined;
+
+        const typed = afterNew[1] ?? '';
+        if (typed.includes('.')) return this.newQualified(typed);
+        const partial = typed;
+        const expected = this.expectedAssignType(true);
+        const items: CompletionItem[] = [];
+        const seen = new Set<string>();
+        const push = (it: CompletionItem) => {
+            const k = String(it.label).toLowerCase();
+            if (seen.has(k)) return;
+            seen.add(k);
+            items.push(it);
+        };
+        if (expected && !NON_CONSTRUCTABLE.has(splitGeneric(expected).base.toLowerCase())) push(newTypeItem(expected, '0'));
+
+        // Generic collection constructors as snippets (`new List<Account>()`, Map, Set).
+        const collections: { label: string; insert: string; key: string }[] = [
+            { label: 'List<…>()', insert: 'List<${1:SObject}>()', key: 'List' },
+            { label: 'Map<…, …>()', insert: 'Map<${1:Id}, ${2:SObject}>()', key: 'Map' },
+            { label: 'Set<…>()', insert: 'Set<${1:Id}>()', key: 'Set' },
+        ];
+        for (const c of collections) {
+            if (!matchesTyped(c.key, partial)) continue;
+            push(
+                lazy(
+                    {
+                        label: c.label,
+                        kind: CompletionItemKind.Snippet,
+                        insertText: c.insert,
+                        insertTextFormat: InsertTextFormat.Snippet,
+                        filterText: c.key,
+                        detail: 'collection',
+                        sortText: '0a_' + c.key,
+                    },
+                    { k: 'kw', x: 'collection constructor' },
+                ),
+            );
+        }
+        seen.add('list');
+        seen.add('map');
+        seen.add('set');
+
+        const candidates: CompletionItem[] = [];
+        // Same-file classes (not interfaces/enums/abstract).
+        for (const d of this.resolver.local.decls) {
+            if (d.kind !== 'class' || d.modifiers.includes('abstract')) continue;
+            const label = d.outer && !this.resolver.local.decls.some((x) => x.name === d.outer && !x.outer) ? `${d.outer}.${d.name}` : d.name;
+            if (matchesTyped(label, partial)) candidates.push(newTypeItem(label, '1', 'Apex class'));
+        }
+        for (const name of WorkspaceIndex.allTypeNames()) {
+            // Skip known enums / interfaces / abstract classes (unknown files are kept).
+            if (matchesTyped(name, partial) && WorkspaceIndex.constructableHint(name) !== false) candidates.push(newTypeItem(name, '2', 'Apex class'));
+        }
+        for (const name of stdConstructableTypes()) {
+            if (name.includes('.') || name === 'List' || name === 'Map' || name === 'Set') continue;
+            if (matchesTyped(name, partial)) candidates.push(newTypeItem(name, '3', 'System'));
+        }
+        const expectedBase = expected ? splitGeneric(expected).base.toLowerCase() : '';
+        for (const name of await objectNames(this.ctx, this.doc.uri, this.token)) {
+            if (name.toLowerCase() === expectedBase || !matchesTyped(name, partial)) continue;
+            candidates.push(newTypeItem(name, objectSortTier(name) === '0' ? '4' : '5', 'SObject'));
+        }
+        return this.capped(items, candidates, push);
+    }
+
+    /** `new Outer.|` / `new Database.|` → constructable nested types. */
+    private async newQualified(typed: string): Promise<CompletionItem[] | CompletionList> {
+        const dot = typed.lastIndexOf('.');
+        const outer = typed.slice(0, dot);
+        const items: CompletionItem[] = [];
+        const t = await this.resolver.typeByName(outer);
+        if (t && t.k === 'user') {
+            for (const d of t.ft.decls) if (d.outer === t.decl.name && d.kind === 'class' && !d.modifiers.includes('abstract')) items.push(newTypeItem(d.name, '0', t.decl.name));
+        } else {
+            for (const c of stdNestedTypes(outer)) if (c.constructable) items.push(newTypeItem(c.name.slice(outer.length + 1), '0', outer));
+        }
+        return this.finish(items);
+    }
+
+    /** Append prefix-filtered type candidates, capped (sorted by tier) — isIncomplete when capped. */
+    private async capped(items: CompletionItem[], candidates: CompletionItem[], push: (it: CompletionItem) => void): Promise<CompletionItem[] | CompletionList> {
+        let incomplete = false;
+        if (candidates.length > TYPE_LIST_CAP) {
+            candidates.sort((a, b) => (a.sortText ?? '').localeCompare(b.sortText ?? ''));
+            candidates.length = TYPE_LIST_CAP;
+            incomplete = true;
+        }
+        for (const c of candidates) push(c);
+        return this.finish(items, incomplete);
+    }
+
+    // ── `receiver.partial` ──
+    private async memberCompletion(): Promise<CompletionItem[] | CompletionList | undefined> {
+        const m = /\.\s*(\w*)$/.exec(this.lineUpToCursor);
+        if (!m) return undefined;
+        const dot = this.offset - this.lineUpToCursor.length + m.index;
+        if (/\d/.test(this.full[dot - 1] ?? '') && /(?:^|[^\w])\d+$/.test(this.full.slice(Math.max(0, dot - 20), dot))) return []; // `1.5`
+        const expr = receiverExprBefore(this.full, dot);
+        if (!expr) return [];
+        const v = await this.resolver.exprValue(expr);
+        if (!v) return [];
+        const entries = await this.resolver.members(v);
+        throwIfCancelled(this.token);
+        const partial = m[1];
+        const items: CompletionItem[] = [];
+        const c = contextId(this.doc.uri);
+        let objects = 0;
+        let incomplete = false;
+        for (const e of entries) {
+            if (e.src === 'object') {
+                // Schema.SObjectType.<object>: the org's whole object list — filter + cap.
+                if (!matchesTyped(e.name, partial)) continue;
+                if (++objects > TYPE_LIST_CAP) {
+                    incomplete = true;
+                    continue;
+                }
+            }
+            items.push(this.entryItem(e, c));
+        }
+        // Whole member list (small): the client's fuzzy matcher filters (`acc.city` → BillingCity).
+        return this.finish(items, incomplete);
+    }
+
+    private entryItem(e: MemberEntry, c: number): CompletionItem {
+        switch (e.src) {
+            case 'user':
+                return userMemberItem(e.owner, e.m);
+            case 'std':
+                return stdMemberItem(e.owner, e.m);
+            case 'field':
+                return lazyFieldItem(e.owner, e.f, c);
+            case 'rel':
+                return lazyRelItem(e.owner, e.f);
+            case 'child':
+                return lazy(
+                    {
+                        label: e.name,
+                        kind: CompletionItemKind.Field,
+                        labelDetails: { detail: ` → List<${e.child}>`, description: e.owner },
+                        sortText: '1_' + e.name,
+                    },
+                    { k: 'sc', o: e.owner, x: e.child },
+                );
+            case 'type': {
+                const kind = e.kind === 'enum' ? CompletionItemKind.Enum : e.kind === 'interface' ? CompletionItemKind.Interface : CompletionItemKind.Class;
+                const it = typeItem(e.name, e.owner, '4', kind);
+                it.commitCharacters = ['.'];
+                return it;
+            }
+            case 'object': {
+                const it = typeItem(e.name, 'SObject', objectSortTier(e.name) === '0' ? '0' : '1');
+                it.commitCharacters = ['.'];
+                return it;
+            }
+            case 'trigger':
+                return lazy(
+                    { label: e.name, kind: CompletionItemKind.Field, labelDetails: { detail: ` : ${e.type}`, description: 'Trigger' }, sortText: '0_' + e.name },
+                    { k: 'ev', o: 'Trigger', x: e.type },
+                );
+        }
+    }
+
+    // ── bare identifier: locals, members, keywords, types ──
+    private async bareCompletion(): Promise<CompletionItem[] | CompletionList> {
+        const luc = this.lineUpToCursor;
+        const wm = /([A-Za-z_]\w*)?$/.exec(luc);
+        const partial = wm?.[1] ?? '';
+        const before = luc.slice(0, luc.length - partial.length);
+        if (/\.\s*$/.test(before)) return [];
+        // A trigger character (space, `(`, `,`, newline) with nothing typed: stay quiet.
+        if (!partial && !this.invoked) return [];
+        if (/\d$/.test(before)) return [];
+        // Declaring a name (`Integer fo|`, `List<X> fo|`, `void fo|`): nothing to complete.
+        const prevTok = /([A-Za-z_]\w*|>|\])\s+$/.exec(before);
+        if (prevTok && (prevTok[1] === '>' || prevTok[1] === ']' || !EXPRESSION_KEYWORDS.has(prevTok[1].toLowerCase()))) return [];
+
+        const r = this.resolver;
+        const items: CompletionItem[] = [];
+        const seen = new Set<string>();
+        const push = (it: CompletionItem) => {
+            const k = String(it.label).toLowerCase();
+            if (seen.has(k)) return;
+            seen.add(k);
+            items.push(it);
+        };
+
+        // 0: locals / params.
+        const enc = await r.enclosing();
+        const staticCtx = r.inStaticContext();
+        const memberEntries = enc && enc.t.k === 'user' ? await r.userMembers(enc.t, staticCtx, { all: !staticCtx }) : [];
+        const memberNames = new Set(memberEntries.filter((e) => e.src === 'user').map((e) => (e as { m: ApexMember }).m.name.toLowerCase()));
+        for (const v of r.visibleVars()) {
+            if (memberNames.has(v.name.toLowerCase()) || !matchesTyped(v.name, partial)) continue;
+            push(lazy({ label: v.name, kind: CompletionItemKind.Variable, labelDetails: { detail: ` : ${v.type}` }, sortText: '0_' + v.name }, { k: 'v', x: 'local' }));
+        }
+        // 1: members of the enclosing class (statics only in a static method).
+        const typeEntries: MemberEntry[] = [];
+        for (const e of memberEntries) {
+            if (e.src === 'type') {
+                typeEntries.push(e);
+                continue;
+            }
+            if (e.src !== 'user' && e.src !== 'std') continue;
+            const label = e.m.name;
+            if (!matchesTyped(label, partial)) continue;
+            const it = e.src === 'user' ? userMemberItem(e.owner, e.m) : stdMemberItem(e.owner, e.m);
+            it.sortText = '1' + (it.sortText ?? '').slice(1);
+            push(it);
+        }
+        // 2: keywords + statement snippets.
+        for (const k of APEX_KEYWORDS) {
+            if (!matchesTyped(k.label, partial)) continue;
+            push(
+                lazy(
+                    k.insert
+                        ? { label: k.label, kind: CompletionItemKind.Keyword, insertText: k.insert, insertTextFormat: InsertTextFormat.Snippet, detail: k.detail, sortText: '2_' + k.label }
+                        : { label: k.label, kind: CompletionItemKind.Keyword, detail: k.detail, sortText: '2_' + k.label },
+                    { k: 'kw' },
+                ),
+            );
+        }
+        for (const s of APEX_SNIPPETS) {
+            if (partial && !s.label.startsWith(partial.toLowerCase())) continue;
+            push(lazy({ label: s.label, kind: CompletionItemKind.Snippet, insertText: s.insert, insertTextFormat: InsertTextFormat.Snippet, detail: s.detail, sortText: '2_' + s.label }, { k: 'kw', x: 'snippet' }));
+        }
+        // 3+: types — same-file, workspace, standard library, SObjects (filtered + capped).
+        const candidates: CompletionItem[] = [];
+        for (const d of r.local.decls) {
+            if (d.kind === 'trigger' || !matchesTyped(d.name, partial)) continue;
+            const kind = d.kind === 'enum' ? CompletionItemKind.Enum : d.kind === 'interface' ? CompletionItemKind.Interface : CompletionItemKind.Class;
+            candidates.push(typeItem(d.name, d.outer ? `${d.outer}.${d.name}` : 'Apex class', '3', kind));
+        }
+        for (const e of typeEntries) if (e.src === 'type' && matchesTyped(e.name, partial)) candidates.push(typeItem(e.name, e.owner, '3'));
+        for (const name of WorkspaceIndex.allTypeNames()) if (matchesTyped(name, partial)) candidates.push(typeItem(name, 'Apex class', '3'));
+        for (const name of STD_TYPES) if (matchesTyped(name, partial)) candidates.push(typeItem(name, 'System', '4'));
+        for (const name of await objectNames(this.ctx, this.doc.uri, this.token)) {
+            if (!matchesTyped(name, partial)) continue;
+            // Deprioritized (tier 5/6) so they never outrank locals/keywords.
+            candidates.push(typeItem(name, 'SObject', objectSortTier(name) === '0' ? '5' : '6'));
+        }
+        return this.capped(items, candidates, push);
+    }
+}
+
+// ─── completionItem/resolve ─────────────────────────────────────────────────────
+
+type SoqlResolver = (item: CompletionItem) => CompletionItem | Promise<CompletionItem>;
+const SOQL_RESOLVE_EXPORT: string = ['resolve', 'SoqlItem'].join('');
+
+/** Build the documentation popup of a lazily-documented item. */
+export async function resolveCompletionItem(ctx: ServerContext, item: CompletionItem, token?: CancellationToken): Promise<CompletionItem> {
+    if (item.documentation) return item;
+    const d = item.data as LazyData | undefined;
+    const label = String(item.label);
+    if (!d || typeof d !== 'object' || typeof d.k !== 'string') return sfxTag([item])[0];
+    const ld = item.labelDetails;
+    switch (d.k) {
+        case 'soql': {
+            // SOQL items (soql.ts) may resolve lazily too; plug in its resolver when present.
+            // Looked up dynamically: the export may not exist yet (team SOQL adds it).
+            const fn = (soql as unknown as Record<string, unknown>)[SOQL_RESOLVE_EXPORT] as SoqlResolver | undefined;
+            if (typeof fn === 'function') return fn(item);
+            break;
+        }
+        case 'sf': {
+            const uri = d.c !== undefined ? contextUris.get(d.c) : undefined;
+            const owner = d.o ?? '';
+            const desc = uri ? await ctx.schema.describe(uri, owner, token) : null;
+            const f = desc?.fields.find((x) => x.name === label);
+            const body = f ? fieldDocBody(owner, f) : ['```apex\n' + `${owner}.${label}${ld?.detail ?? ''}` + '\n```'];
+            if (d.x) body.push(`_${d.x}_`);
+            item.documentation = schemaDoc(body);
+            return item;
+        }
+        case 'sr':
+            item.documentation = schemaDoc([`\`${d.o}.${label}\` ${(ld?.detail ?? '').replace(/^\s*→\s*/, '→ **')}**`]);
+            return item;
+        case 'sc':
+            item.documentation = schemaDoc([`\`${d.o}.${label}\` → **List<${d.x}>** _(child relationship)_`]);
+            return item;
+        case 'am':
+        case 'sm': {
+            const owner = d.o ? d.o + '.' : '';
+            const sig =
+                item.kind === CompletionItemKind.Method
+                    ? `${ld?.description ?? 'void'} ${owner}${label}${ld?.detail ?? '()'}`
+                    : `${owner}${label}${ld?.detail ?? ''}`;
+            const what = d.k === 'am' ? (d.x === 'enumValue' ? 'enum value' : d.x ?? 'member') : 'Salesforce standard library';
+            item.documentation = schemaDoc(['```apex\n' + sig + '\n```', `_(${what})_`]);
+            return item;
+        }
+        case 'ty':
+            item.documentation = schemaDoc([`\`${label}\` — ${d.x ?? 'type'}`]);
+            return item;
+        case 'v':
+            item.documentation = schemaDoc(['`' + label + (ld?.detail ?? '') + '`' + (d.x ? ` — ${d.x}` : '')]);
+            return item;
+        case 'ev':
+            item.documentation = schemaDoc([`\`${d.o ? d.o + '.' : ''}${label}${d.x && d.o ? ' : ' + d.x : ''}\`${d.x && !d.o ? ' — ' + d.x : ''}`]);
+            return item;
+        case 'kw':
+            item.documentation = plainDoc([item.detail ? `\`${item.detail}\` — ${d.x ?? 'keyword'}` : `\`${label}\``]);
+            return item;
+    }
+    return sfxTag([item])[0];
+}
+
+/** Exposed for tests: the value type of a receiver expression at a position. */
+export async function receiverTypeAt(ctx: ServerContext, doc: TextDocument, position: { line: number; character: number }, expr: string): Promise<RValue | undefined> {
+    return new Resolver(ctx, doc, position, readViews(ctx, doc)).exprValue(expr);
 }

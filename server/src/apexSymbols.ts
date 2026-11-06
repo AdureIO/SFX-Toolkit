@@ -21,8 +21,23 @@ import {
 
 export interface ApexMember {
     name: string;
-    kind: 'method' | 'field' | 'property' | 'constructor';
+    kind: 'method' | 'field' | 'property' | 'constructor' | 'enumValue';
     detail?: string;
+    /** Declared type: field/property type, method return type, or the enum's own name for a constant. */
+    type?: string;
+    /** Methods: the formal parameter list as written, e.g. `String a, Integer b`. */
+    params?: string;
+    /** Declared `static` (enum constants count as static). */
+    static?: boolean;
+    /** Effective visibility (Apex default for members without a modifier is private). */
+    visibility?: 'private' | 'protected' | 'public' | 'global';
+}
+
+function visibilityOf(mods: string[]): ApexMember['visibility'] {
+    if (mods.includes('global')) return 'global';
+    if (mods.includes('public')) return 'public';
+    if (mods.includes('protected')) return 'protected';
+    return 'private';
 }
 
 /** A variable/param/field declaration with the scope it's visible in (for scope-aware resolution). */
@@ -180,10 +195,13 @@ class SymbolListener extends ApexParserBaseListener {
     private stack: DocumentSymbol[] = [];
     private typeNameStack: string[] = [];
     private typeDeclStack: ApexTypeDecl[] = [];
-    private methodScope: Range[] = []; // enclosing method/constructor ranges (for local/param scope)
+    // Innermost-last stack of local scopes: method/constructor bodies (params), blocks,
+    // `for` statements (loop variables), catch clauses and `when` arms. Apex locals are
+    // block-scoped, so a for-each variable or a local inside `if { }` must not leak out.
+    private methodScope: Range[] = [];
     private classScope: Range[] = [];  // enclosing class/interface/enum ranges (for field/property scope)
 
-    /** Scope a declaration is visible in: its method (locals/params) or class (members). */
+    /** Scope a declaration is visible in: its innermost block (locals/params) or class (members). */
     private scopeFor(kind: 'local' | 'member'): Range {
         if (kind === 'local' && this.methodScope.length) return this.methodScope[this.methodScope.length - 1];
         if (this.classScope.length) return this.classScope[this.classScope.length - 1];
@@ -274,8 +292,17 @@ class SymbolListener extends ApexParserBaseListener {
     private currentTypeDecl(): ApexTypeDecl | undefined {
         return this.typeDeclStack[this.typeDeclStack.length - 1];
     }
-    private addMemberDecl(name: string, kind: ApexMemberDecl['kind'], nameR: Range, range: Range, modCtx: any): void {
-        this.currentTypeDecl()?.members.push({ name, kind, nameRange: nameR, range, modifiers: this.modifiersOf(modCtx) });
+    private addMemberDecl(name: string, kind: ApexMemberDecl['kind'], nameR: Range, range: Range, modCtx: any): string[] {
+        const modifiers = this.modifiersOf(modCtx);
+        this.currentTypeDecl()?.members.push({ name, kind, nameRange: nameR, range, modifiers });
+        return modifiers;
+    }
+    /** Static/visibility flags for an ApexMember, from its declaration's modifiers. */
+    private flags(mods: string[]): { static?: boolean; visibility: ApexMember['visibility'] } {
+        const inInterface = this.currentTypeDecl()?.kind === 'interface';
+        const out: { static?: boolean; visibility: ApexMember['visibility'] } = { visibility: inInterface ? 'public' : visibilityOf(mods) };
+        if (mods.includes('static')) out.static = true;
+        return out;
     }
     private stripGenerics(t: string | undefined): string | undefined {
         if (!t) return undefined;
@@ -340,6 +367,39 @@ class SymbolListener extends ApexParserBaseListener {
     exitInterfaceDeclaration = () => this.popType();
     enterEnumDeclaration = (ctx: any) => this.pushType(ctx, SymbolKind.Enum);
     exitEnumDeclaration = () => this.popType();
+    // Enum constants: recorded as static members of the enum (`Status.ACTIVE`).
+    enterEnumConstants = (ctx: any) => {
+        const owner = this.currentTypeDecl();
+        if (!owner || owner.kind !== 'enum') return;
+        for (const id of (ctx.id_list?.() ?? []) as any[]) {
+            const name = this.text(id);
+            if (!name) continue;
+            this.currentMembers()?.push({ name, kind: 'enumValue', detail: owner.name, type: owner.name, static: true, visibility: 'public' });
+            this.recordDecl(name, id, id);
+        }
+    };
+    // Block-level local scopes (see methodScope).
+    private blockPushed: boolean[] = [];
+    enterBlock = (ctx: any) => {
+        const inside = this.methodScope.length > 0; // class-level initializer blocks declare no locals we track
+        this.blockPushed.push(inside);
+        if (inside) this.methodScope.push(ctxRange(ctx));
+    };
+    exitBlock = () => { if (this.blockPushed.pop()) this.methodScope.pop(); };
+    enterForStatement = (ctx: any) => { this.methodScope.push(ctxRange(ctx)); };
+    exitForStatement = () => { this.methodScope.pop(); };
+    enterWhenControl = (ctx: any) => { this.methodScope.push(ctxRange(ctx)); };
+    exitWhenControl = () => { this.methodScope.pop(); };
+    // `when Account a { … }` binds a typed local for the arm.
+    enterWhenValue = (ctx: any) => {
+        const type = this.text(ctx.typeRef?.());
+        const id = ctx.id?.();
+        const name = this.text(id);
+        if (type && name) {
+            this.addVar(name, type, id, 'local');
+            this.recordDecl(name, id, ctx);
+        }
+    };
     enterTriggerUnit = (ctx: any) => this.pushType(ctx, SymbolKind.Class);
     exitTriggerUnit = () => this.popType();
 
@@ -353,8 +413,8 @@ class SymbolListener extends ApexParserBaseListener {
         const sym = makeSymbol(name, SymbolKind.Method, range, sel);
         sym.detail = this.strings.s(`(${params.join(', ')}) : ${ret}`);
         this.container().push(sym);
-        this.currentMembers()?.push({ name, kind: 'method', detail: sym.detail });
-        this.addMemberDecl(name, 'method', sel, range, ctx);
+        const mods = this.addMemberDecl(name, 'method', sel, range, ctx);
+        this.currentMembers()?.push({ name, kind: 'method', detail: sym.detail, type: ret, params: this.strings.s(params.join(', ')), ...this.flags(mods) });
         this.recordDecl(name, ctx.id?.(), ctx, sel);
         const sigs = this.index.methods.get(name) ?? [];
         sigs.push(sig);
@@ -373,7 +433,7 @@ class SymbolListener extends ApexParserBaseListener {
         const sym = makeSymbol(name, SymbolKind.Method, range, sel);
         sym.detail = this.strings.s(`(${params.join(', ')}) : ${ret}`);
         this.container().push(sym);
-        this.currentMembers()?.push({ name, kind: 'method', detail: sym.detail });
+        this.currentMembers()?.push({ name, kind: 'method', detail: sym.detail, type: ret, params: this.strings.s(params.join(', ')), visibility: 'public' });
         this.addMemberDecl(name, 'method', sel, range, ctx);
         this.recordDecl(name, ctx.id?.(), ctx, sel);
         const sigs = this.index.methods.get(name) ?? [];
@@ -404,8 +464,8 @@ class SymbolListener extends ApexParserBaseListener {
             const sym = makeSymbol(name, SymbolKind.Field, ctxRange(d), sel);
             sym.detail = type;
             this.container().push(sym);
-            this.currentMembers()?.push({ name, kind: 'field', detail: type });
-            this.addMemberDecl(name, 'field', sel, ctxRange(d), ctx);
+            const mods = this.addMemberDecl(name, 'field', sel, ctxRange(d), ctx);
+            this.currentMembers()?.push({ name, kind: 'field', detail: type, type, ...this.flags(mods) });
             this.addVar(name, type, id, 'member');
             this.recordDecl(name, id, d, sel);
         }
@@ -417,8 +477,8 @@ class SymbolListener extends ApexParserBaseListener {
         const sym = makeSymbol(name, SymbolKind.Property, ctxRange(ctx), sel);
         sym.detail = type;
         this.container().push(sym);
-        this.currentMembers()?.push({ name, kind: 'property', detail: type });
-        this.addMemberDecl(name, 'property', sel, ctxRange(ctx), ctx);
+        const mods = this.addMemberDecl(name, 'property', sel, ctxRange(ctx), ctx);
+        this.currentMembers()?.push({ name, kind: 'property', detail: type, type, ...this.flags(mods) });
         this.addVar(name, type, ctx.id?.(), 'member');
         this.recordDecl(name, ctx.id?.(), ctx, sel);
     };
@@ -448,7 +508,9 @@ class SymbolListener extends ApexParserBaseListener {
             this.recordDecl(name, id, ctx);
         }
     };
+    exitCatchClause = () => { this.methodScope.pop(); };
     enterCatchClause = (ctx: any) => {
+        this.methodScope.push(ctxRange(ctx));
         const type = this.text(ctx.qualifiedName?.());
         const id = ctx.id?.();
         const name = this.text(id);
@@ -561,4 +623,32 @@ export function resolveVarType(index: ApexIndex, name: string, line: number, cha
         if (dSize < bSize || (dSize === bSize && d.line >= best.line)) best = d;
     }
     return best?.type ?? index.varTypes.get(name);
+}
+
+/** Like resolveVarType, but only scope-aware matches (no document-flat fallback). */
+export function resolveScopedVarType(index: ApexIndex, name: string, line: number, character: number): string | undefined {
+    const lc = name.toLowerCase();
+    let best: VarDecl | undefined;
+    for (const d of index.varDecls) {
+        if (d.name.length !== lc.length || d.name.toLowerCase() !== lc) continue;
+        if (d.line > line) continue;
+        if (!rangeContains(d.scope, line, character)) continue;
+        if (!best) { best = d; continue; }
+        const dSize = rangeSize(d.scope);
+        const bSize = rangeSize(best.scope);
+        if (dSize < bSize || (dSize === bSize && d.line >= best.line)) best = d;
+    }
+    return best?.type;
+}
+
+/** Every declaration visible at a position (innermost/latest first per name). */
+export function visibleVars(index: ApexIndex, line: number, character: number): VarDecl[] {
+    const best = new Map<string, VarDecl>();
+    for (const d of index.varDecls) {
+        if (d.line > line || !rangeContains(d.scope, line, character)) continue;
+        const k = d.name.toLowerCase();
+        const b = best.get(k);
+        if (!b || rangeSize(d.scope) < rangeSize(b.scope) || (rangeSize(d.scope) === rangeSize(b.scope) && d.line >= b.line)) best.set(k, d);
+    }
+    return [...best.values()];
 }

@@ -6,12 +6,12 @@ import { CancellationToken, Connection, Hover, MarkupKind } from 'vscode-languag
 import type { TextDocument } from 'vscode-languageserver-textdocument';
 import type { ServerContext } from './context';
 import type { HostDescribe, HostField } from './schema';
-import { enclosingClass } from './apexSymbols';
 import { WorkspaceIndex } from './workspaceIndex';
-import { stdTypeName, stdMembersFor } from './apexStdlib';
-import { soqlRegionAt, mainFromObject, relationshipSegmentsBeforeCursor } from './soql';
+import { stdTypeName } from './apexStdlib';
+import { soqlRegionAt, mainFromObject, relationshipSegmentsBeforeCursor, scopeObjectAt } from './soql';
 import { orCancelled, throwIfCancelled } from './cancel';
-import { isApex, wordSpanAt, receiverBefore, baseTypeName, regexReceiverType } from './textUtil';
+import { isApex, wordSpanAt } from './textUtil';
+import { MemberEntry, Resolver, receiverExprBefore } from './apexResolve';
 
 export function register(connection: Connection, ctx: ServerContext): void {
     connection.onHover((params, token) => orCancelled<Hover | null>(null, () => hoverAt(ctx, params, token)));
@@ -103,32 +103,22 @@ async function apexHover(
     // Read-only: the last completed parse is fine (cursor mapped into its coordinates).
     const view = ctx.parses.forRead(doc);
     const { index } = view.result;
-    const at = view.toParsePosition(pos);
 
-    const receiver = receiverBefore(text, start);
-    if (receiver) {
-        const typeName =
-            receiver === 'this'
-                ? enclosingClass(index, at.line, at.character)
-                : index.varTypes.get(receiver) ?? regexReceiverType(text, receiver) ?? receiver;
-        if (!typeName) return null;
-        const base = baseTypeName(typeName);
-        const member = index.types.get(base)?.find((m) => m.name === word);
-        if (member) return codeHover(`(${member.kind}) ${base}.${word}${member.detail ? ' : ' + member.detail : ''}`);
-        // Cross-file user type member.
-        const wsm = WorkspaceIndex.findTypeMembers(base)?.find((m) => m.name === word);
-        if (wsm) return codeHover(`(${wsm.kind}) ${base}.${word}${wsm.detail ? ' : ' + wsm.detail : ''}`);
-        // Salesforce standard-library member (System.debug, Database.query…).
-        const sm = stdMembersFor(base)?.find((m) => m.name.toLowerCase() === word.toLowerCase());
-        if (sm) return codeHover(`${stdTypeName(base) ?? base}.${sm.detail}`);
-        const d = await ctx.schema.describe(doc.uri, base, token);
-        if (d) {
-            const f = d.fields.find((x) => x.name.toLowerCase() === word.toLowerCase());
-            if (f) return fieldHover(base, f);
-            const r = d.fields.find((x) => x.relationshipName && x.relationshipName.toLowerCase() === word.toLowerCase());
-            if (r) return codeHover(`${base}.${r.relationshipName} → ${r.referenceTo?.join(' | ') || '?'}`);
-        }
-        return null;
+    // Member access: type the receiver expression (chains, calls, indexes, inheritance)
+    // with the completion resolver, so only real SObject types are ever described.
+    let dot = start - 1;
+    while (dot >= 0 && /\s/.test(text[dot])) dot--;
+    if (dot >= 0 && text[dot] === '.') {
+        const expr = receiverExprBefore(text, dot);
+        if (!expr) return null;
+        const good = ctx.parses.forReadGood(doc);
+        const resolver = new Resolver(ctx, doc, pos, good ? [view, good] : [view], token);
+        const v = await resolver.exprValue(expr);
+        throwIfCancelled(token);
+        if (!v) return null;
+        const lw = word.toLowerCase();
+        const hit = (await resolver.members(v)).find((e) => entryName(e)?.toLowerCase() === lw);
+        return hit ? memberHover(hit, resolver) : null;
     }
 
     const methods = index.methods.get(word);
@@ -145,6 +135,41 @@ async function apexHover(
     return null;
 }
 
+function entryName(e: MemberEntry): string | undefined {
+    switch (e.src) {
+        case 'user':
+        case 'std':
+            return e.m.name;
+        case 'field':
+            return e.f.name;
+        case 'rel':
+            return e.f.relationshipName;
+        default:
+            return e.name;
+    }
+}
+
+async function memberHover(e: MemberEntry, r: Resolver): Promise<Hover | null> {
+    switch (e.src) {
+        case 'user':
+            return codeHover(`(${e.m.kind}) ${e.owner}.${e.m.name}${e.m.detail ? ' : ' + e.m.detail : ''}`);
+        case 'std':
+            return codeHover(`${stdTypeName(e.owner) ?? e.owner}.${e.m.detail}`);
+        case 'field':
+            return fieldHover(e.owner, e.f);
+        case 'rel':
+            return codeHover(`${e.owner}.${e.f.relationshipName} → ${e.f.referenceTo?.join(' | ') || '?'}`);
+        case 'child':
+            return codeHover(`${e.owner}.${e.name} → List<${e.child}>`);
+        case 'type':
+            return codeHover(`type ${e.owner}.${e.name}`);
+        case 'object':
+            return objectHover(e.name, await r.describe(e.name));
+        case 'trigger':
+            return codeHover(`Trigger.${e.name} : ${e.type}`);
+    }
+}
+
 /** Hover for a SOQL field/object: resolve the word against the query's object. */
 async function soqlHover(
     ctx: ServerContext,
@@ -156,7 +181,8 @@ async function soqlHover(
     token: CancellationToken,
 ): Promise<Hover | null> {
     const segments = relationshipSegmentsBeforeCursor(soqlText, line, column);
-    const base = mainFromObject(soqlText);
+    // The innermost query's object (`(SELECT Name FROM Contacts)` → Contact), else the main FROM.
+    const base = (await scopeObjectAt(ctx.schema, docUri, soqlText, line, column, token)) ?? mainFromObject(soqlText);
     if (base && word.toLowerCase() === base.toLowerCase()) {
         return objectHover(base, await ctx.schema.describe(docUri, base, token), await ctx.schema.objectDescription(docUri, base, token));
     }

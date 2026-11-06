@@ -77,7 +77,8 @@ function capabilitiesFor(s: ServerSettings): ServerCapabilities {
             // that opens a value literal (picklist values in `WHERE Field = '|'`) and the
             // at-sign that opens an annotation.
             triggerCharacters: ['.', ' ', ',', '(', '\n', "'", '@'],
-            resolveProvider: false,
+            // Items carry a small `data` record; documentation is built on resolve.
+            resolveProvider: true,
         },
         // Hover is always on: SOQL field/object info needs no Apex gating;
         // Apex hover content is gated inside the handler.
@@ -134,6 +135,8 @@ connection.onInitialize((params): InitializeResult => {
 // Build the cross-file type index in the background (async walk, never blocks requests).
 connection.onInitialized(() => {
     void WorkspaceIndex.ready();
+    // Warm the Apex parser JIT and start the parse worker off the first request's path.
+    setImmediate(() => ctx.parses.warm());
 });
 
 // Keep the type index current: the client forwards `**/*.{cls,trigger}` file events
@@ -165,6 +168,7 @@ documents.onDidClose((e) => {
     // Drop every per-document cache entry so closed buffers don't accumulate.
     ctx.parses.drop(e.document.uri);
     ctx.schema.dropDocument(e.document.uri);
+    WorkspaceIndex.closeDoc(e.document.uri); // stray (outside-root / unsaved) files leave the type index
 });
 
 // Host → server: org/schema changed. Params `{ objects?, uris?, structural? }`:
