@@ -588,7 +588,7 @@ export function activate(context: vscode.ExtensionContext) {
     const addToGitignoreCmd = register("adure-sfx-toolkit.addToGitignore", (uri?: vscode.Uri) => addToGitignore(uri));
 
     // 19. Data Export / Import
-    const dataToolsCmd = register("adure-sfx-toolkit.dataTools", () => DataToolsPanelProvider.show());
+    const dataToolsCmd = register("adure-sfx-toolkit.dataTools", () => DataToolsPanelProvider.show(context.extensionUri));
 
     // 20. REST API Explorer
     const restExplorerCmd = register("adure-sfx-toolkit.restExplorer", () => RestExplorerPanelProvider.show());

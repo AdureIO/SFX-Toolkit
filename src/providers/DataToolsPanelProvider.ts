@@ -10,6 +10,8 @@ import { onDidChangeDefaultOrg } from "../utils/defaultOrgEvents";
 import { generateApexDataFactory, recommendedSelectFields, type RefMapping } from "../utils/apexDataFactory";
 import { extractSObjectFromQuery, queryAllRecords, sfRequest, resolveOrgToInfo, type OrgInfo } from "../utils/dataMigration";
 import { Telemetry } from "../utils/telemetry";
+import { createSoqlInputRouter, monacoBaseUri, monacoPanelCsp, monacoResourceRoot } from "./soqlInputBridge";
+import { monacoSoqlInputCss, monacoSoqlInputScript } from "../webview/monacoSoqlInput";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -216,7 +218,7 @@ export class DataToolsPanelProvider {
   /** Singleton: one panel (and one retained renderer) at most. */
   private static _panel: vscode.WebviewPanel | undefined;
 
-  public static async show(): Promise<void> {
+  public static async show(extensionUri: vscode.Uri): Promise<void> {
     const folder = vscode.workspace.workspaceFolders?.[0];
     if (!folder) { vscode.window.showErrorMessage("No workspace open."); return; }
     const workspaceRoot = folder.uri.fsPath;
@@ -227,9 +229,14 @@ export class DataToolsPanelProvider {
     }
 
     // retainContextWhenHidden kept: the form holds unsent user input (query, loaded import file, progress).
-    const panel = vscode.window.createWebviewPanel(DataToolsPanelProvider.viewType, "Data Export / Import", vscode.ViewColumn.One, { enableScripts: true, retainContextWhenHidden: true });
+    const panel = vscode.window.createWebviewPanel(DataToolsPanelProvider.viewType, "Data Export / Import", vscode.ViewColumn.One, {
+      enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [monacoResourceRoot(extensionUri)]
+    });
     DataToolsPanelProvider._panel = panel;
-    panel.webview.html = DataToolsPanelProvider.getHtml();
+    panel.webview.html = DataToolsPanelProvider.getHtml(panel.webview, extensionUri);
+    // Language-server completion / hover for the Monaco SOQL inputs (one virtual buffer;
+    // each request carries its input's org: Export → exp-org, Apex Factory → apex-org).
+    const soqlInput = createSoqlInputRouter(".vscode/soql-datatools-buffer.soql", panel.webview);
 
     // Realign the org selectors when the default org changes (extension command or external).
     const defaultOrgSub = onDidChangeDefaultOrg(async (username) => {
@@ -258,6 +265,7 @@ export class DataToolsPanelProvider {
       apexGenUpsert?: boolean;
       apexRefMappings?: RefMapping[];
     }) => {
+      if (await soqlInput.handle(msg)) return;
       if (msg.command === "panelReady") {
         const cached = getCachedOrgList();
         const orgs = cached ?? await refreshOrgListCache();
@@ -480,6 +488,7 @@ export class DataToolsPanelProvider {
     panel.onDidDispose(() => {
       messageListener.dispose();
       defaultOrgSub.dispose();
+      soqlInput.dispose();
       DataToolsPanelProvider._panel = undefined;
       // Release the parsed import file (can be large).
       DataToolsPanelProvider._lastFilePath = null;
@@ -489,12 +498,13 @@ export class DataToolsPanelProvider {
 
   // ─── HTML ──────────────────────────────────────────────────────────────────
 
-  private static getHtml(): string {
+  private static getHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
+    const monacoBase = monacoBaseUri(webview, extensionUri);
     return `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+  <meta http-equiv="Content-Security-Policy" content="${monacoPanelCsp(webview.cspSource)}">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     ::-webkit-scrollbar { width: 5px; height: 5px; }
@@ -577,6 +587,7 @@ export class DataToolsPanelProvider {
     .apex-field-block select, .apex-field-block input[type="text"] { padding: 5px 7px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); border-radius: 3px; font-size: 12px; font-family: inherit; outline: none; }
     .apex-field-block { display: flex; flex-direction: column; gap: 4px; }
     .apex-field-block .field-label { font-size: 10px; }
+${monacoSoqlInputCss()}
   </style>
 </head>
 <body>
@@ -600,8 +611,9 @@ export class DataToolsPanelProvider {
     <select id="exp-org"></select>
   </div>
   <div class="field-block">
-    <label class="field-label" for="exp-query">SOQL query</label>
-    <textarea id="exp-query" placeholder="SELECT Id, Name, Email FROM Contact WHERE CreatedDate = TODAY LIMIT 1000"></textarea>
+    <span class="field-label">SOQL query</span>
+    <div id="exp-query-editor" class="asfx-soql-input"></div>
+    <span class="hint">Completion and hover use the target org's schema. <b>Ctrl/Cmd+Enter</b> exports.</span>
   </div>
   <div class="field-block">
     <span class="field-label">Output format</span>
@@ -684,11 +696,16 @@ export class DataToolsPanelProvider {
   <div class="errors-list" id="errors-list"></div>
 </div>
 
+<script src="${monacoBase}/loader.js"></script>
+<script>${monacoSoqlInputScript()}</script>
 <script>
   var vsc = null;
   try { if (typeof acquireVsCodeApi !== 'undefined') vsc = acquireVsCodeApi(); } catch(e) {}
   function post(msg) { try { if (vsc) vsc.postMessage(msg); } catch(e) {} }
-  function safeGet(id) { return document.getElementById(id); }
+  // The SOQL query inputs are Monaco editors (created at the end of <body>); safeGet hands out
+  // their textarea-compatible wrappers so the code below keeps using .value / .focus().
+  var soqlInputs = {};
+  function safeGet(id) { return soqlInputs[id] || document.getElementById(id); }
   function escHtml(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
   var orgsData = [], currentHeaders = [], currentErrors = [];
@@ -800,6 +817,8 @@ export class DataToolsPanelProvider {
   window.addEventListener('message', function(ev) {
     var d = ev.data;
     if (!d || !d.command) return;
+    // Any input's handle() routes every SOQL-input message (they share one LS glue).
+    if (soqlInputs['exp-query'] && soqlInputs['exp-query'].handle(d)) return;
 
     if (d.command === 'init') {
       orgsData = d.orgs || [];
@@ -1020,9 +1039,8 @@ export class DataToolsPanelProvider {
     <select id="apex-org" onchange="triggerApexDescribe()"></select>
   </div>
   <div class="field-block">
-    <label class="field-label" for="apex-query">SOQL query</label>
-    <textarea id="apex-query" onblur="triggerApexDescribe()"
-      placeholder="SELECT Name, BillingCity, External_Id__c FROM Account WHERE IsActive__c = true"></textarea>
+    <span class="field-label">SOQL query</span>
+    <div id="apex-query-editor" class="asfx-soql-input"></div>
     <span class="hint">Fields will be auto-enriched with all createable fields from the describe result. SELECT list is rewritten automatically — just get the WHERE/ORDER/LIMIT right.</span>
   </div>
 
@@ -1068,6 +1086,18 @@ export class DataToolsPanelProvider {
     Records &gt; 200 auto-generate chunked DML loops.
   </div>
 </div>
+<script>
+  // Monaco SOQL inputs (same editor + LS completion/hover as the SOQL Builder), each pinned
+  // to its tab's org selector.
+  soqlInputs['exp-query'] = ASFXSoqlInput({ containerId: 'exp-query-editor', monacoBase: '${monacoBase}', post: post,
+    getOrg: function () { var s = document.getElementById('exp-org'); return (s && s.value) || ''; }, orgSelectId: 'exp-org',
+    placeholder: 'SELECT Id, Name, Email FROM Contact WHERE CreatedDate = TODAY LIMIT 1000', ariaLabel: 'Export SOQL query',
+    onRun: function () { doExport(); } });
+  soqlInputs['apex-query'] = ASFXSoqlInput({ containerId: 'apex-query-editor', monacoBase: '${monacoBase}', post: post,
+    getOrg: function () { var s = document.getElementById('apex-org'); return (s && s.value) || ''; }, orgSelectId: 'apex-org',
+    placeholder: 'SELECT Name, BillingCity, External_Id__c FROM Account WHERE IsActive__c = true', ariaLabel: 'Apex factory SOQL query',
+    onBlur: function () { triggerApexDescribe(); } });
+</script>
 </body>
 </html>`;
   }
