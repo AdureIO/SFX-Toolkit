@@ -253,7 +253,7 @@ export class DeployMetadataPanelProvider {
         }
         if (msg.command === "savePreset") {
           const workspaceUri = vscode.workspace.workspaceFolders?.[0]?.uri ?? folder.uri;
-          const deployType = (msg.deployType || "NoTestRun") as DeployTypeKey;
+          const deployType = (msg.deployType || "RunRelevantTests") as DeployTypeKey;
           const sourcePaths = Array.isArray(msg.sourcePaths) ? msg.sourcePaths : [];
           const testClassNames = Array.isArray(msg.testClassNames) ? msg.testClassNames : [];
           const targetOrg = msg.targetOrg || undefined;
@@ -980,7 +980,7 @@ export class DeployMetadataPanelProvider {
 				document.querySelectorAll('.path-check').forEach(function(cb) { if (norm(cb.getAttribute('data-path')) === p) found = true; });
 				if (!found) extraPaths.push(p);
 			});
-			var deployType = state.deployType || 'NoTestRun';
+			var deployType = state.deployType || 'RunRelevantTests';
 			var legacyValidate = false;
 			// Legacy: "ValidateOnly" used to be a test level — migrate it to the dry-run option.
 			if (deployType === 'ValidateOnly') { legacyValidate = true; deployType = 'NoTestRun'; }
@@ -1271,7 +1271,7 @@ export class DeployMetadataPanelProvider {
 
 		function getCurrentPresetState() {
 			var sourcePaths = getMinimalSourcePaths();
-			var deployType = (document.querySelector('input[name="testLevel"]:checked') || {}).value || 'NoTestRun';
+			var deployType = (document.querySelector('input[name="testLevel"]:checked') || {}).value || 'RunRelevantTests';
 			var testClassNames = deployType === 'RunSpecifiedTests' ? (function(){ var n=[]; document.querySelectorAll('.test-class:checked').forEach(function(c){ n.push(c.value); }); return n; })() : [];
 			var sel = safeGet('org-select');
 			return { sourcePaths: sourcePaths, deployType: deployType, testClassNames: testClassNames, targetOrg: sel && sel.value ? sel.value : undefined };
@@ -1464,7 +1464,7 @@ export class DeployMetadataPanelProvider {
 				});
 				if (!found) extraPaths.push(p);
 			});
-			var deployType = preset.deployType || 'NoTestRun';
+			var deployType = preset.deployType || 'RunRelevantTests';
 			var presetValidate = false;
 			if (deployType === 'ValidateOnly') { presetValidate = true; deployType = 'NoTestRun'; }
 			if (preset.validateOnly) presetValidate = true;
@@ -1912,7 +1912,7 @@ export class DeployMetadataPanelProvider {
 			var st = safeGet('deploy-status');
 			if (minimalPaths.length === 0) { if (st) st.textContent = 'Select at least one metadata path.'; return; }
 			var sourcePaths = expandToFilePathsForDeploy(minimalPaths);
-			var testLevel = (document.querySelector('input[name="testLevel"]:checked') || {}).value || 'NoTestRun';
+			var testLevel = (document.querySelector('input[name="testLevel"]:checked') || {}).value || 'RunRelevantTests';
 			var testClassNames = [];
 			if (testLevel === 'RunSpecifiedTests') {
 				document.querySelectorAll('.test-class:checked').forEach(function(cb) { testClassNames.push(cb.value); });
@@ -2077,7 +2077,7 @@ export class DeployMetadataPanelProvider {
 			orgsData = Array.isArray(data.orgs) ? data.orgs : [];
 			defaultOrgVal = (data.defaultOrg != null && data.defaultOrg !== '') ? String(data.defaultOrg) : '';
 			try {
-				var radio = document.querySelector('input[name="testLevel"][value="NoTestRun"]');
+				var radio = document.querySelector('input[name="testLevel"][value="RunRelevantTests"]');
 				if (radio) radio.checked = true;
 				renderOrgSelect();
 				renderTree();

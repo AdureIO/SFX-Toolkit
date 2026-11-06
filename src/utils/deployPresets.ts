@@ -73,7 +73,7 @@ export async function addPreset(workspaceRoot: vscode.Uri, preset: DeployPreset)
   const normalized: DeployPreset = {
     name: preset.name.trim(),
     sourcePaths: Array.isArray(preset.sourcePaths) ? preset.sourcePaths : [],
-    deployType: preset.deployType || "NoTestRun",
+    deployType: preset.deployType || "RunRelevantTests",
     testClassNames: Array.isArray(preset.testClassNames) ? preset.testClassNames : [],
     targetOrg: preset.targetOrg || undefined
   };
