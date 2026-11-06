@@ -46,8 +46,8 @@ export interface RefFixture {
 	anchors: Map<string, ExpLoc>;
 }
 
-const CLS = "force-app/main/default/classes";
-const TRG = "force-app/main/default/triggers";
+export const CLS = "force-app/main/default/classes";
+export const TRG = "force-app/main/default/triggers";
 const LWC = "force-app/main/default/lwc";
 const AURA = "force-app/main/default/aura";
 const PAGES = "force-app/main/default/pages";
@@ -130,6 +130,39 @@ public with sharing virtual class «C:decl,@C|AccountService» {
     }
     public void bump() {
         «ST:inherited|Status» = 'Premium';
+    }
+}
+`,
+	// Overloads that differ only in parameter types (OVS String / OVI Integer / OVA Account).
+	[`${CLS}/Overloads.cls`]: `public class Overloads {
+    public static String «OVS:decl,@OVS|convert»(String v) { return v; }
+    public static String «OVI:decl,@OVI|convert»(Integer v) { return 'i'; }
+    public static String «OVA:decl,@OVA|convert»(Account v) { return 'a'; }
+    public static Account makeAccount() { return null; }
+    public static String label() { return ''; }
+    public static Integer count() { return 1; }
+}
+`,
+	[`${CLS}/OverloadCaller.cls`]: `public class OverloadCaller {
+    private String fieldText = 'f';
+    public void go(String ps, Integer pi) {
+        Overloads.«OVS:literal,@OVS.literal|convert»('x');
+        Overloads.«OVI:literal,@OVI.literal|convert»(42);
+        Overloads.«OVA:new|convert»(new Account());
+        String ls = 'a';
+        Integer li = 1;
+        Account la = new Account();
+        Overloads.«OVS:local|convert»(ls);
+        Overloads.«OVI:local|convert»(li);
+        Overloads.«OVA:local,@OVA.local|convert»(la);
+        Overloads.«OVS:param|convert»(ps);
+        Overloads.«OVI:param|convert»(pi);
+        Overloads.«OVS:field|convert»(fieldText);
+        Overloads.«OVS:result|convert»(Overloads.label());
+        Overloads.«OVI:result|convert»(Overloads.count());
+        Overloads.«OVA:result|convert»(Overloads.makeAccount());
+        Overloads.«OVS:concat|convert»('a' + ps);
+        Overloads.«OVS:undetermined,OVI:undetermined,OVA:undetermined|convert»(Mystery.value());
     }
 }
 `,
@@ -368,7 +401,7 @@ const BUFFERS: Record<string, string> = {
 `,
 };
 
-function fillerSource(i: number, n: number, realEvery: number, bulk: number): string {
+export function fillerSource(i: number, n: number, realEvery: number, bulk: number): string {
 	const next = (i + 1) % n;
 	const j = (i + 7) % n;
 	const real = i % realEvery === Math.floor(realEvery / 2);
@@ -419,7 +452,7 @@ function fillerSource(i: number, n: number, realEvery: number, bulk: number): st
 
 const MARK = /«([^|»]*)\|([^»]*)»/g;
 
-function strip(file: string, src: string, fx: { expected: Map<string, ExpLoc[]>; negatives: Map<string, ExpLoc[]>; anchors: Map<string, ExpLoc> }): string {
+export function strip(file: string, src: string, fx: { expected: Map<string, ExpLoc[]>; negatives: Map<string, ExpLoc[]>; anchors: Map<string, ExpLoc> }): string {
 	const lines = src.split("\n");
 	const out: string[] = [];
 	lines.forEach((line, lineNo) => {
