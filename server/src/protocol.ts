@@ -15,6 +15,9 @@ export const REQ_OBJECT_INFO = 'sfx/objectInfo';   // ({ uri, sobject }) => { de
 export const NOTE_REFRESH = 'sfx/refreshSchema';
 export const NOTE_EPHEMERAL = 'sfx/ephemeralBuffers'; // docs that must never write stubs
 
+// Unsaved text of an open LWC/Aura/VF/Flow file: { uri, text: string | null } (null = use disk again).
+export const NOTE_METADATA_BUFFER = 'sfx/metadataBuffer';
+
 // Host → server requests (LWC / Aura / Visualforce navigation into Apex; see apexLinks.ts).
 export const REQ_APEX_DEFINITION = 'sfx/apexDefinition'; // ({ className, member?, prefer? }) => Location | null
 export const REQ_APEX_REFERENCES = 'sfx/apexReferences'; // ({ className, member?, prefer?, includeDeclaration? }) => Location[]
