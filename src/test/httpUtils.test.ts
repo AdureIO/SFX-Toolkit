@@ -2,7 +2,7 @@ import * as assert from "assert";
 import { EventEmitter } from "events";
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const https = require("https");
-import { httpsGetEx, httpsDelete, httpsPost, httpsPatch, isRetryableHttpError, isTransientSocketError, wrapNetworkError } from "../utils/httpUtils";
+import { httpsGetEx, httpsDelete, httpsPost, httpsPatch, isRetryableHttpError, isTransientSocketError, wrapNetworkError, clampTimeoutMs } from "../utils/httpUtils";
 import { deleteInBatches, collectionResults, CANCELLED_DELETE_MSG } from "../utils/soqlEditPure";
 
 type Step = { error?: { code?: string; message: string }; status?: number; body?: string };
@@ -154,5 +154,36 @@ describe("deleteInBatches", () => {
 		});
 		assert.strictEqual(res.filter((r) => r.error).length, 200);
 		assert.strictEqual(res.filter((r) => !r.error).length, 200);
+	});
+});
+
+describe("non-idempotent wording and timeouts", () => {
+	afterEach(() => {
+		https.request = origRequest;
+	});
+
+	it("POST/PATCH socket errors say the request may still have completed, never 'Try again'", async () => {
+		for (const fn of [() => httpsPost(URL_, "<x/>", {}), () => httpsPatch(URL_, "{}", {})]) {
+			script([{ error: { code: "ETIMEDOUT", message: "read ETIMEDOUT" } }]);
+			await assert.rejects(fn(), (e: any) => {
+				assert.match(e.message, /may still have completed on the server; check the result before re-running\./);
+				assert.ok(!/Try again/.test(e.message));
+				assert.strictEqual(e.code, "ETIMEDOUT");
+				assert.strictEqual(e.networkError, true);
+				return true;
+			});
+		}
+	});
+
+	it("GET/DELETE keep the 'Try again' wording", async () => {
+		script([{ error: { code: "ETIMEDOUT", message: "read ETIMEDOUT" } }]);
+		await assert.rejects(httpsDelete(URL_, "tok"), /Try again\./);
+		assert.ok(/Try again\./.test(wrapNetworkError(Object.assign(new Error("read ETIMEDOUT"), { code: "ETIMEDOUT" }), "h").message));
+	});
+
+	it("clampTimeoutMs: default 600000 when unset, minimum 30000 enforced", () => {
+		assert.strictEqual(clampTimeoutMs(undefined, 600000, 30000), 600000);
+		assert.strictEqual(clampTimeoutMs(1000, 600000, 30000), 30000);
+		assert.strictEqual(clampTimeoutMs(120000, 600000, 30000), 120000);
 	});
 });

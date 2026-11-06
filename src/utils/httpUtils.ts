@@ -74,6 +74,20 @@ export interface HttpError extends Error {
     networkError?: boolean;
 }
 
+/** Wording for failed POST/PATCH: they are never retried and the server may have processed them. */
+const UNKNOWN_OUTCOME_HINT = 'the connection dropped before the response arrived. The request may still have completed on the server; check the result before re-running.';
+const MAY_HAVE_COMPLETED = ' The request may still have completed on the server; check the result before re-running.';
+
+/** GET/DELETE are safe to repeat; everything else (POST/PATCH) is not. */
+function isIdempotentMethod(method: string): boolean {
+    return method === 'GET' || method === 'DELETE' || method === 'HEAD';
+}
+
+/** Clamp a configured timeout: non-numbers fall back to `def`, numbers below `min` are raised to it. */
+export function clampTimeoutMs(raw: unknown, def: number, min: number): number {
+    return typeof raw === 'number' && isFinite(raw) ? Math.max(min, raw) : def;
+}
+
 /** Socket-level error codes that indicate a stale/stalled connection rather than a server answer. */
 const TRANSIENT_SOCKET_CODES = new Set(['ECONNRESET', 'ETIMEDOUT', 'EPIPE', 'EAI_AGAIN']);
 
@@ -88,7 +102,7 @@ export function isTransientSocketError(e: any): boolean {
  * Wrap a raw socket error into a readable message naming the host, keeping the original
  * message in parentheses and `code` on the error so classification keeps working.
  */
-export function wrapNetworkError(e: any, host: string): HttpError {
+export function wrapNetworkError(e: any, host: string, idempotent = true): HttpError {
     const raw = String(e?.message ?? e);
     const code: string | undefined = typeof e?.code === 'string' ? e.code : /\b(ECONNRESET|ETIMEDOUT|EPIPE|EAI_AGAIN|ENOTFOUND|ECONNREFUSED|ENETUNREACH)\b/.exec(raw)?.[1];
     let hint: string;
@@ -97,6 +111,7 @@ export function wrapNetworkError(e: any, host: string): HttpError {
     else if (code === 'EAI_AGAIN' || code === 'ENOTFOUND') hint = 'the host name could not be resolved. Check your network connection.';
     else if (code === 'ECONNREFUSED' || code === 'ENETUNREACH') hint = 'the host could not be reached. Check your network connection.';
     else hint = 'the request did not complete. Try again.';
+    if (!idempotent) hint = UNKNOWN_OUTCOME_HINT;
     const w = httpError(`Network error talking to ${host} (${raw}) — ${hint}`) as HttpError;
     if (code) w.code = code;
     w.networkError = true;
@@ -217,7 +232,7 @@ function rawRequestOnce(opts: RawRequest, hops = 0, startedAt = Date.now()): Pro
                 res.on('data', (d) => chunks.push(d));
                 res.on('error', (e) => {
                     res.destroy();
-                    fail(wrapNetworkError(e, parsed.host));
+                    fail(wrapNetworkError(e, parsed.host, isIdempotentMethod(opts.method)));
                 });
                 res.on('aborted', () => {
                     const a = new Error(`Response aborted: ${opts.method} ${parsed.origin}${parsed.pathname}`) as HttpError;
@@ -243,17 +258,17 @@ function rawRequestOnce(opts: RawRequest, hops = 0, startedAt = Date.now()): Pro
 
         req.on('timeout', () => {
             req.destroy();
-            fail(httpError(`Request timed out after ${opts.timeout}ms: ${opts.method} ${opts.url}`, undefined, true));
+            fail(httpError(`Request timed out after ${opts.timeout}ms: ${opts.method} ${opts.url}${isIdempotentMethod(opts.method) ? '' : MAY_HAVE_COMPLETED}`, undefined, true));
         });
         req.on('error', (e) => {
             req.destroy();
-            fail(wrapNetworkError(e, parsed.host));
+            fail(wrapNetworkError(e, parsed.host, isIdempotentMethod(opts.method)));
         });
         if (opts.totalTimeoutMs !== undefined) {
             const remaining = Math.max(1, opts.totalTimeoutMs - (Date.now() - startedAt));
             totalTimer = setTimeout(() => {
                 req.destroy();
-                fail(httpError(`Request exceeded ${opts.totalTimeoutMs}ms: ${opts.method} ${parsed.origin}${parsed.pathname}`, undefined, true));
+                fail(httpError(`Request exceeded ${opts.totalTimeoutMs}ms: ${opts.method} ${parsed.origin}${parsed.pathname}${isIdempotentMethod(opts.method) ? '' : MAY_HAVE_COMPLETED}`, undefined, true));
             }, remaining);
             totalTimer.unref?.();
         }
