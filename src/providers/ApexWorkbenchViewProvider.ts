@@ -10,13 +10,12 @@ import { getSalesforceLogDirectory } from '../utils/logPaths';
 import { AuthInfo } from '../utils/authInfo';
 import { getToolingApiVersion } from '../utils/constants';
 import { isSalesforceProject } from '../utils/projectUtils';
-import { setBufferOrgOverride } from '../utils/bufferOrgOverride';
 import { getSoqlMarkers } from '../utils/soqlMarkers';
 import { parseSoqlError } from '../utils/soqlError';
 import { handleResultsTableMessage } from '../utils/resultsTableHost';
 import { resultsTableCss, resultsTableScript } from '../webview/resultsTableComponent';
-import { refreshLanguageServerSchema, setEphemeralBuffers } from '../languageClient';
-import { ApexBufferBridge } from './apexBufferBridge';
+import { ApexBufferBridge, BridgeRequest } from './apexBufferBridge';
+import { monacoLsBridgeScript, monacoQuickSuggestions, APEX_TRIGGER_CHARACTERS, SOQL_TRIGGER_CHARACTERS } from '../webview/monacoLsBridge';
 import { Telemetry } from '../utils/telemetry';
 import { onDidChangeDefaultOrg } from '../utils/defaultOrgEvents';
 
@@ -54,8 +53,9 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 	private _view?: vscode.WebviewView;
 	private _listener?: vscode.Disposable;
 	private _lastLog = '';
-	private readonly _bridge = new ApexBufferBridge(WORKBENCH_BUFFER);
-	private readonly _soqlBridge = new ApexBufferBridge(SOQL_BUFFER, 'soql');
+	/** Execute-tab buffer: virtual LS document; text persisted to WORKBENCH_BUFFER on change/blur. */
+	private readonly _bridge = new ApexBufferBridge(WORKBENCH_BUFFER, 'apex', true);
+	private readonly _soqlBridge = new ApexBufferBridge(SOQL_BUFFER, 'soql', true);
 	/** Cache of fetched log bodies (id → { text, unit }) so re-opening is instant. */
 	private readonly _bodyCache = new Map<string, { text: string; unit: string | null }>();
 	/** Live-log subscription for the Logs tab's current org (shared LiveLogService). */
@@ -220,15 +220,11 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 				case 'warmOrg': {
 					const org = (typeof data.org === 'string' && data.org) ? data.org : null;
 					if (isSalesforceProject()) AuthInfo.warmAuthForOrg(org);
-					// Point both workbench buffers' IntelliSense at the selected org and
-					// clear the server's schema cache so completion reflects it.
-					const apexUri = this._bridge.getBufferUri();
-					const soqlUri = this._soqlBridge.getBufferUri();
-					if (apexUri) setBufferOrgOverride(apexUri.fsPath, org);
-					if (soqlUri) setBufferOrgOverride(soqlUri.fsPath, org);
-					// Mark these buffers ephemeral so go-to-def never writes stubs for them.
-					setEphemeralBuffers([apexUri?.toString(), soqlUri?.toString()].filter((u): u is string => !!u));
-					refreshLanguageServerSchema();
+					// Point both workbench buffers' IntelliSense at the selected org (marks them
+					// ephemeral → no stub writes). The webview re-posts this on every org-list
+					// refresh; the server only gets a TARGETED refresh when the org changed.
+					this._bridge.setOrg(org);
+					this._soqlBridge.setOrg(org);
 					break;
 				}
 				// ── Logs ────────────────────────────────────────────────────────────
@@ -307,20 +303,28 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 				}
 				// ── Execute (editor bridge + run) ────────────────────────────────────
 				case 'getCompletions':
-					this._post('completionResult', { requestId: data.requestId, items: await this._bridge.completions(data.text || '', data.line || 0, data.character || 0) });
+					await this._postCompletions(this._bridge, data);
 					break;
 				case 'getHover':
-					this._post('hoverResult', { requestId: data.requestId, hover: await this._bridge.hover(data.text || '', data.line || 0, data.character || 0) });
+					await this._postHover(this._bridge, data);
+					break;
+				case 'resolveCompletion':
+					await this._postResolve(this._bridge, data);
+					break;
+				case 'cancelRequest':
+					// Request ids are unique per page, so cancelling on both bridges is safe.
+					if (typeof data.requestId === 'number') { this._bridge.cancel(data.requestId); this._soqlBridge.cancel(data.requestId); }
 					break;
 				case 'gotoDefinition': {
-					const inBuf = await this._bridge.gotoDefinition(data.text || '', data.line || 0, data.character || 0);
+					const inBuf = await this._bridge.gotoDefinition(ApexWorkbenchViewProvider._req(data));
 					// In-buffer target (a function/class declared in the same anonymous block):
 					// move the webview editor's cursor instead of opening the hidden doc.
 					if (inBuf) this._post('revealDefinition', { line: inBuf.line, character: inBuf.character });
 					break;
 				}
 				case 'contentChanged':
-					if (typeof data.code === 'string') await this._bridge.update(data.code);
+					// Debounced (500 ms) / blur: the only path that writes the buffer file.
+					if (typeof data.code === 'string') await this._bridge.persist(data.code);
 					break;
 				case 'execute': {
 					if (!isSalesforceProject()) { this._post('execResult', { success: false, error: 'Open an SFDX project to use this feature.' }); return; }
@@ -339,13 +343,16 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 					break;
 				// ── SOQL tab (editor bridge + run) ───────────────────────────────────
 				case 'getSoqlCompletions':
-					this._post('completionResult', { requestId: data.requestId, items: await this._soqlBridge.completions(data.text || '', data.line || 0, data.character || 0) });
+					await this._postCompletions(this._soqlBridge, data);
 					break;
 				case 'getSoqlHover':
-					this._post('hoverResult', { requestId: data.requestId, hover: await this._soqlBridge.hover(data.text || '', data.line || 0, data.character || 0) });
+					await this._postHover(this._soqlBridge, data);
+					break;
+				case 'resolveSoqlCompletion':
+					await this._postResolve(this._soqlBridge, data);
 					break;
 				case 'soqlChanged':
-					if (typeof data.query === 'string') await this._soqlBridge.update(data.query);
+					if (typeof data.query === 'string') await this._soqlBridge.persist(data.query);
 					break;
 				case 'runSoql': {
 					Telemetry.event('soqlExecute', { surface: 'workbench' });
@@ -365,6 +372,33 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 		this._viewDisposables.push(view.onDidDispose(() => {
 			if (this._view === view) this._releaseView();
 		}));
+	}
+
+	private static _req(data: any): BridgeRequest {
+		return {
+			requestId: typeof data.requestId === 'number' ? data.requestId : undefined,
+			text: typeof data.text === 'string' ? data.text : '',
+			line: data.line || 0,
+			character: data.character || 0,
+			triggerKind: typeof data.triggerKind === 'number' ? data.triggerKind : undefined,
+			triggerCharacter: typeof data.triggerCharacter === 'string' ? data.triggerCharacter : undefined,
+		};
+	}
+
+	private async _postCompletions(bridge: ApexBufferBridge, data: any): Promise<void> {
+		const res = await bridge.completions(ApexWorkbenchViewProvider._req(data));
+		this._post('completionResult', res
+			? { requestId: data.requestId, items: res.items, incomplete: res.incomplete, listId: res.listId }
+			: { requestId: data.requestId, dropped: true });
+	}
+
+	private async _postHover(bridge: ApexBufferBridge, data: any): Promise<void> {
+		this._post('hoverResult', { requestId: data.requestId, hover: await bridge.hover(ApexWorkbenchViewProvider._req(data)) });
+	}
+
+	private async _postResolve(bridge: ApexBufferBridge, data: any): Promise<void> {
+		const item = await bridge.resolveCompletion(data.listId, data.resolveId, typeof data.requestId === 'number' ? data.requestId : undefined);
+		this._post('resolveResult', { requestId: data.requestId, item });
 	}
 
 	/**
@@ -586,6 +620,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 
 <script src="${monacoBase}/loader.js"></script>
 <script>${resultsTableScript()}</script>
+<script>${monacoLsBridgeScript()}</script>
 <script>
 	const vscode = acquireVsCodeApi();
 	let initial = { highlightPatterns: [], code: '' };
@@ -686,10 +721,11 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 	listenBtn.onclick=loadLogs;
 
 	// ── execute editor ─────────────────────────────────────────────────────────
-	let editor=null, saveTimer=null, reqId=0; const pending={};
-	let busyCount=0; function setBusy(d){ busyCount=Math.max(0,busyCount+d); const b=document.getElementById('busy'); if(b) b.style.display=busyCount>0?'inline-flex':'none'; }
+	let editor=null, saveTimer=null;
+	// Language-server completion/hover glue (shared with the SOQL Builder panel).
+	const lsBridge=ASFXMonacoLs({ key:'type', post:function(m){ vscode.postMessage(m); }, busyId:'busy', cancel:'cancelRequest',
+		results:{ completion:'completionResult', hover:'hoverResult', resolve:'resolveResult' } });
 	let soqlEd=null, soqlTimer=null;
-	function mapKind(k){ const M=monaco.languages.CompletionItemKind; const T={0:M.Text,1:M.Method,2:M.Function,3:M.Constructor,4:M.Field,5:M.Variable,6:M.Class,7:M.Interface,8:M.Module,9:M.Property,10:M.Unit,11:M.Value,12:M.Enum,13:M.Keyword,14:M.Snippet,15:M.Color,16:M.File,17:M.Reference,18:M.Folder,19:M.EnumMember,20:M.Constant,21:M.Struct,22:M.Event,23:M.Operator,24:M.TypeParameter}; return T[k]!=null?T[k]:M.Text; }
 	require.config({ paths:{ vs:'${monacoBase}' } });
 	self.MonacoEnvironment={ getWorkerUrl:function(){ return URL.createObjectURL(new Blob(["self.MonacoEnvironment={baseUrl:'"+'${monacoBase}'+"/'};importScripts('"+'${monacoBase}'+"/base/worker/workerMain.js');"],{type:'text/javascript'})); } };
 	require(['vs/editor/editor.main'], function(){
@@ -701,10 +737,9 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 				comment:[[/[^*/]+/,'comment'],[/\\*\\//,'comment','@pop'],[/[*/]/,'comment']],
 				soql:[[/'(?:[^'\\\\]|\\\\.)*'/,'string'],[/\\]/,'string.soql','@pop'],[/[a-zA-Z_][\\w]*/,{cases:{'@keywords':'keyword','@default':'identifier'}}],[/./,'string.soql']] } });
 		monaco.languages.setLanguageConfiguration('apex',{ comments:{lineComment:'//',blockComment:['/*','*/']}, brackets:[['{','}'],['[',']'],['(',')']], autoClosingPairs:[{open:'{',close:'}'},{open:'[',close:']'},{open:'(',close:')'},{open:"'",close:"'"}] });
-		monaco.languages.registerHoverProvider('apex',{ provideHover:function(model,pos){ return new Promise(function(resolve){ const id=++reqId; pending[id]=function(h){ if(!h||!h.contents||!h.contents.length){resolve(null);return;} const w=model.getWordAtPosition(pos); const range=w?{startLineNumber:pos.lineNumber,endLineNumber:pos.lineNumber,startColumn:w.startColumn,endColumn:w.endColumn}:undefined; resolve({range:range,contents:h.contents.map(function(v){return{value:v};})}); }; setBusy(1); vscode.postMessage({type:'getHover',requestId:id,text:model.getValue(),line:pos.lineNumber-1,character:pos.column-1}); }); } });
-		monaco.languages.registerCompletionItemProvider('apex',{ triggerCharacters:['.',' ','(',',','_'], provideCompletionItems:function(model,pos){ return new Promise(function(resolve){ const id=++reqId; pending[id]=function(items){ const w=model.getWordUntilPosition(pos); const range={startLineNumber:pos.lineNumber,endLineNumber:pos.lineNumber,startColumn:w.startColumn,endColumn:w.endColumn}; resolve({suggestions:items.map(function(it){ return {label:it.label,kind:mapKind(it.kind),insertText:it.insertText||it.label,insertTextRules:it.isSnippet?monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet:undefined,detail:it.detail,documentation:it.documentation?{value:it.documentation}:undefined,sortText:it.sortText,filterText:it.filterText,range:range}; })}); }; setBusy(1); vscode.postMessage({type:'getCompletions',requestId:id,text:model.getValue(),line:pos.lineNumber-1,character:pos.column-1}); }); } });
+		lsBridge.register(monaco,'apex',{ completion:'getCompletions', hover:'getHover', resolve:'resolveCompletion', triggerCharacters:${JSON.stringify(APEX_TRIGGER_CHARACTERS)} });
 		const dark=document.body.classList.contains('vscode-dark')||document.body.classList.contains('vscode-high-contrast');
-		editor=monaco.editor.create(document.getElementById('editor'),{ value:initial.code||'', language:'apex', theme:dark?'vs-dark':'vs', automaticLayout:true, minimap:{enabled:false}, scrollBeyondLastLine:false, fontSize:13, tabSize:4, quickSuggestions:true, quickSuggestionsDelay:200, fixedOverflowWidgets:true });
+		editor=monaco.editor.create(document.getElementById('editor'),{ value:initial.code||'', language:'apex', theme:dark?'vs-dark':'vs', automaticLayout:true, minimap:{enabled:false}, scrollBeyondLastLine:false, fontSize:13, tabSize:4, quickSuggestions:${monacoQuickSuggestions('apex')}, quickSuggestionsDelay:200, fixedOverflowWidgets:true });
 		editor.onDidChangeModelContent(function(){ if(saveTimer) clearTimeout(saveTimer); saveTimer=setTimeout(function(){ vscode.postMessage({type:'contentChanged',code:editor.getValue()}); },500); });
 		editor.onMouseDown(function(e){ if((e.event.ctrlKey||e.event.metaKey)&&e.target&&e.target.position){ const p=e.target.position; vscode.postMessage({type:'gotoDefinition',text:editor.getValue(),line:p.lineNumber-1,character:p.column-1}); } });
 		// addAction (not addCommand) scopes the keybinding to THIS editor instance; with two
@@ -720,15 +755,16 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 		monaco.languages.setMonarchTokensProvider('soql',{ ignoreCase:true,
 			keywords:['SELECT','FROM','WHERE','LIMIT','OFFSET','ORDER','BY','GROUP','HAVING','AND','OR','NOT','LIKE','IN','INCLUDES','EXCLUDES','ASC','DESC','NULLS','FIRST','LAST','COUNT','COUNT_DISTINCT','AVG','MIN','MAX','SUM','TYPEOF','WHEN','THEN','ELSE','END','USING','SCOPE','FOR','VIEW','REFERENCE','UPDATE','TRACKING','NULL','TRUE','FALSE'],
 			tokenizer:{ root:[[/'(?:[^'\\\\]|\\\\.)*'/,'string'],[/\\b\\d+(\\.\\d+)?\\b/,'number'],[/[a-zA-Z_][\\w.]*/,{cases:{'@keywords':'keyword','@default':'identifier'}}]] } });
-		soqlEd=monaco.editor.create(document.getElementById('soqlEditor'),{ value:initial.soql||'SELECT Id, Name FROM Account ORDER BY CreatedDate DESC LIMIT 50', language:'soql', theme:dark?'vs-dark':'vs', automaticLayout:true, minimap:{enabled:false}, scrollBeyondLastLine:false, fontSize:13, quickSuggestions:true, quickSuggestionsDelay:200, fixedOverflowWidgets:true });
+		soqlEd=monaco.editor.create(document.getElementById('soqlEditor'),{ value:initial.soql||'SELECT Id, Name FROM Account ORDER BY CreatedDate DESC LIMIT 50', language:'soql', theme:dark?'vs-dark':'vs', automaticLayout:true, minimap:{enabled:false}, scrollBeyondLastLine:false, fontSize:13, quickSuggestions:${monacoQuickSuggestions('soql')}, quickSuggestionsDelay:200, fixedOverflowWidgets:true });
 		soqlEd.onDidChangeModelContent(function(){ if(soqlTimer) clearTimeout(soqlTimer); soqlTimer=setTimeout(function(){ vscode.postMessage({type:'soqlChanged',query:soqlEd.getValue()}); },500); });
 		soqlEd.onDidChangeModelContent(scheduleSoqlValidate);
 		scheduleSoqlValidate();
 		soqlEd.addAction({ id:'asfx.runSoql', label:'Run SOQL Query', keybindings:[monaco.KeyMod.CtrlCmd|monaco.KeyCode.Enter, monaco.KeyMod.WinCtrl|monaco.KeyCode.Enter], run:function(){ doRunSoql(); } });
-		monaco.languages.registerCompletionItemProvider('soql',{ triggerCharacters:['.',' ',',','('], provideCompletionItems:function(model,pos){ return new Promise(function(resolve){ const id=++reqId; pending[id]=function(items){ const w=model.getWordUntilPosition(pos); const range={startLineNumber:pos.lineNumber,endLineNumber:pos.lineNumber,startColumn:w.startColumn,endColumn:w.endColumn}; resolve({suggestions:items.map(function(it){ return {label:it.label,kind:mapKind(it.kind),insertText:it.insertText||it.label,insertTextRules:it.isSnippet?monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet:undefined,detail:it.detail,documentation:it.documentation?{value:it.documentation}:undefined,sortText:it.sortText,filterText:it.filterText,range:range}; })}); }; setBusy(1); vscode.postMessage({type:'getSoqlCompletions',requestId:id,text:model.getValue(),line:pos.lineNumber-1,character:pos.column-1}); }); } });
-		monaco.languages.registerHoverProvider('soql',{ provideHover:function(model,pos){ return new Promise(function(resolve){ const id=++reqId; pending[id]=function(h){ if(!h||!h.contents||!h.contents.length){resolve(null);return;} resolve({contents:h.contents.map(function(v){return{value:v};})}); }; setBusy(1); vscode.postMessage({type:'getSoqlHover',requestId:id,text:model.getValue(),line:pos.lineNumber-1,character:pos.column-1}); }); } });
+		lsBridge.register(monaco,'soql',{ completion:'getSoqlCompletions', hover:'getSoqlHover', resolve:'resolveSoqlCompletion', triggerCharacters:${JSON.stringify(SOQL_TRIGGER_CHARACTERS)} });
 	});
-	function flush(){ if(!editor) return; if(saveTimer){clearTimeout(saveTimer);saveTimer=null;} vscode.postMessage({type:'contentChanged',code:editor.getValue()}); }
+	function flush(){
+		if(soqlEd&&soqlTimer){ clearTimeout(soqlTimer); soqlTimer=null; vscode.postMessage({type:'soqlChanged',query:soqlEd.getValue()}); }
+		if(!editor) return; if(saveTimer){clearTimeout(saveTimer);saveTimer=null;} vscode.postMessage({type:'contentChanged',code:editor.getValue()}); }
 	window.addEventListener('blur', flush);
 	function doRun(){ vscode.postMessage({type:'execute', code:editor?editor.getValue():'', org:orgVal()||undefined}); }
 	// Manual line-comment toggle (fallback for Cmd/Ctrl+/ if Monaco's built-in action is unavailable).
@@ -780,8 +816,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 	// ── messages ────────────────────────────────────────────────────────────────
 	window.addEventListener('message', function(e){ const d=e.data; if(!d) return;
 		if(d.type && d.type.indexOf('rt:')===0){ soqlTable.handleMessage(d); return; }
-		if(d.type==='completionResult'){ setBusy(-1); const cb=pending[d.requestId]; if(cb){ delete pending[d.requestId]; cb(d.items||[]); } return; }
-		if(d.type==='hoverResult'){ setBusy(-1); const cb=pending[d.requestId]; if(cb){ delete pending[d.requestId]; cb(d.hover||null); } return; }
+		if(lsBridge.handle(d)) return;
 		if(d.type==='revealDefinition'){ if(editor){ const ln=(d.line||0)+1, col=(d.character||0)+1; editor.setPosition({lineNumber:ln,column:col}); editor.revealLineInCenter(ln); editor.focus(); } return; }
 		if(d.type==='soqlMarkers'){ if(soqlEd){ try{ monaco.editor.setModelMarkers(soqlEd.getModel(),'asfx-soql',(d.markers||[]).map(function(m){ return {severity:monaco.MarkerSeverity.Error,message:m.message,startLineNumber:m.line+1,startColumn:m.startCol+1,endLineNumber:m.line+1,endColumn:m.endCol+1}; })); }catch(e){} } return; }
 		if(d.type==='soqlStarted'){ const s=document.getElementById('soqlStatus'); s.className='muted'; s.style.color=''; s.textContent='Running…'; document.getElementById('soqlResults').innerHTML=''; return; }

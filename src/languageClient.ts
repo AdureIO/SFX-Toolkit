@@ -540,3 +540,128 @@ function startApexHealthMonitor(context: vscode.ExtensionContext): void {
 	schedule();
 	context.subscriptions.push({ dispose: stop });
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Direct LS requests + virtual documents (owned by the UI team — contract 6).
+//
+// The webview editors (ASFX Workbench Execute/SOQL tabs, SOQL Builder panel) talk
+// to OUR language server directly instead of going through
+// `vscode.execute*Provider`, which fans out to every registered provider (Jorje for
+// apex-anon buffers, the Salesforce SOQL extension for any scheme, …) — that
+// produced duplicate items and let the slowest provider set the latency.
+//
+// Their text lives in virtual documents on the `asfx-buffer:` scheme, synced with
+// synthetic didOpen/didChange/didClose notifications. Nothing is written to disk on
+// the completion path, so no save participants / didSave full parses per keystroke.
+// The URI's path is the (historic) buffer file path, so host lookups keyed by
+// fsPath — the workbench org override, sfdx-project / default-org resolution —
+// keep working unchanged. These documents are NOT VS Code TextDocuments, so the
+// client's documentSelector deliberately does not include the scheme (VS Code would
+// otherwise sync a second copy if anyone opened such a URI).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** URI scheme of the webview editors' in-memory buffers. */
+export const VIRTUAL_BUFFER_SCHEME = "asfx-buffer";
+
+interface VirtualDocState {
+	languageId: string;
+	version: number;
+	text: string;
+}
+
+const virtualDocs = new Map<string, VirtualDocState>();
+let stateHooked: LanguageClient | undefined;
+
+/**
+ * Re-announce open virtual documents after the server (re)started — it lost them.
+ * A REPLACED client (restartLanguageServerForWorkspaceChange) never saw them at all:
+ * forget them so the next sync sends a fresh didOpen instead of a didChange.
+ */
+function hookClientState(): void {
+	if (!client || stateHooked === client) return;
+	if (stateHooked) virtualDocs.clear();
+	stateHooked = client;
+	const c = client;
+	c.onDidChangeState((e) => {
+		if (e.newState !== State.Running || c !== client) return;
+		for (const [uri, d] of virtualDocs) {
+			void c.sendNotification("textDocument/didOpen", {
+				textDocument: { uri, languageId: d.languageId, version: d.version, text: d.text },
+			}).catch(() => {});
+		}
+	});
+}
+
+/** True when our language server is started (or starting) and can take requests. */
+export function isLanguageServerAvailable(): boolean {
+	if (!client) return false;
+	hookClientState();
+	return client.state === State.Running || client.state === State.Starting;
+}
+
+/** Server capabilities from the initialize result (undefined until initialized). */
+export function languageServerCapabilities(): Record<string, any> | undefined {
+	return (client?.initializeResult?.capabilities as Record<string, any> | undefined) ?? undefined;
+}
+
+/**
+ * Send a request straight to our language server (no provider fan-out). Resolves to
+ * undefined when the server isn't available, the request was cancelled, or it failed.
+ */
+export async function lsRequest<R>(method: string, params: unknown, token?: vscode.CancellationToken): Promise<R | undefined> {
+	if (!isLanguageServerAvailable() || !client) return undefined;
+	if (token?.isCancellationRequested) return undefined;
+	try {
+		return (await client.sendRequest(method, params, token)) as R;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Open (or replace the text of) a virtual document. Returns false when the server
+ * is not available — callers then fall back to a file-backed buffer.
+ */
+export async function syncVirtualDocument(uri: string, languageId: string, text: string): Promise<boolean> {
+	if (!isLanguageServerAvailable() || !client) return false;
+	const cur = virtualDocs.get(uri);
+	try {
+		if (!cur || cur.languageId !== languageId) {
+			if (cur) await client.sendNotification("textDocument/didClose", { textDocument: { uri } });
+			const state: VirtualDocState = { languageId, version: (cur?.version ?? 0) + 1, text };
+			virtualDocs.set(uri, state);
+			await client.sendNotification("textDocument/didOpen", {
+				textDocument: { uri, languageId, version: state.version, text },
+			});
+		} else if (cur.text !== text) {
+			cur.version++;
+			cur.text = text;
+			// A change without a range replaces the whole document (valid for any sync kind).
+			await client.sendNotification("textDocument/didChange", {
+				textDocument: { uri, version: cur.version },
+				contentChanges: [{ text }],
+			});
+		}
+		return true;
+	} catch {
+		virtualDocs.delete(uri); // resend a full didOpen next time
+		return false;
+	}
+}
+
+/** Close a virtual document (panel disposed). */
+export function closeVirtualDocument(uri: string): void {
+	if (!virtualDocs.delete(uri)) return;
+	if (!isLanguageServerAvailable() || !client) return;
+	void client.sendNotification("textDocument/didClose", { textDocument: { uri } }).catch(() => {});
+}
+
+/**
+ * Targeted schema refresh (contract 2): the server drops only the org context /
+ * caches for these document URIs — used when a webview buffer's org override
+ * changes, instead of a full NOTE_REFRESH that clears every open document.
+ */
+export function refreshLanguageServerSchemaFor(uris: string[]): void {
+	if (!uris.length) return;
+	void client?.sendNotification(NOTE_REFRESH, { uris }).catch(() => {});
+}
