@@ -591,11 +591,11 @@ export function activate(context: vscode.ExtensionContext) {
     const dataToolsCmd = register("adure-sfx-toolkit.dataTools", () => DataToolsPanelProvider.show(context.extensionUri));
 
     // 20. REST API Explorer
-    const restExplorerCmd = register("adure-sfx-toolkit.restExplorer", () => RestExplorerPanelProvider.show());
+    const restExplorerCmd = register("adure-sfx-toolkit.restExplorer", () => RestExplorerPanelProvider.show(context.extensionUri));
     context.subscriptions.push(
       vscode.window.registerWebviewPanelSerializer(RestExplorerPanelProvider.viewType, {
         async deserializeWebviewPanel(panel: vscode.WebviewPanel): Promise<void> {
-          await RestExplorerPanelProvider.revive(panel);
+          await RestExplorerPanelProvider.revive(panel, context.extensionUri);
         }
       })
     );

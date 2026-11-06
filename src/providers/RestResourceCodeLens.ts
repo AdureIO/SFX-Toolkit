@@ -53,7 +53,7 @@ export function registerRestResourceCodeLens(context: vscode.ExtensionContext): 
     context.subscriptions.push(
         vscode.languages.registerCodeLensProvider({ pattern: "**/*.cls" }, new RestResourceCodeLensProvider()),
         vscode.commands.registerCommand("adure-sfx-toolkit.testRestResource", (method: string, url: string) =>
-            RestExplorerPanelProvider.show({ method, url })
+            RestExplorerPanelProvider.show(context.extensionUri, { method, url })
         )
     );
 }

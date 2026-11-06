@@ -9,6 +9,8 @@ import { onDidChangeDefaultOrg } from "../utils/defaultOrgEvents";
 import { getToolingApiVersion } from "../utils/constants";
 import { scanApexRestResources } from "../utils/apexRestScanner";
 import { Telemetry } from "../utils/telemetry";
+import { createSoqlInputRouter, monacoBaseUri, monacoPanelCsp, monacoResourceRoot } from "./soqlInputBridge";
+import { monacoSoqlInputCss, monacoSoqlInputScript } from "../webview/monacoSoqlInput";
 
 /** Persisted UI state so the panel survives close/reopen and window reload. */
 export interface RestExplorerState {
@@ -124,7 +126,7 @@ export class RestExplorerPanelProvider {
   /** Singleton: CodeLens clicks / command invocations reuse the open explorer instead of opening new tabs. */
   private static _panel: vscode.WebviewPanel | undefined;
 
-  public static async show(prefill?: { method?: string; url?: string }): Promise<void> {
+  public static async show(extensionUri: vscode.Uri, prefill?: { method?: string; url?: string }): Promise<void> {
     const folder = vscode.workspace.workspaceFolders?.[0];
     if (!folder) { vscode.window.showErrorMessage("No workspace open."); return; }
 
@@ -140,22 +142,26 @@ export class RestExplorerPanelProvider {
       RestExplorerPanelProvider.viewType,
       "REST API Explorer",
       vscode.ViewColumn.One,
-      { enableScripts: true, retainContextWhenHidden: true }
+      { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [monacoResourceRoot(extensionUri)] }
     );
-    RestExplorerPanelProvider.attach(panel, folder.uri.fsPath);
+    RestExplorerPanelProvider.attach(panel, folder.uri.fsPath, extensionUri);
   }
 
   /** Re-attach to a panel restored by VS Code (window reload). */
-  public static async revive(panel: vscode.WebviewPanel): Promise<void> {
+  public static async revive(panel: vscode.WebviewPanel, extensionUri: vscode.Uri): Promise<void> {
     const folder = vscode.workspace.workspaceFolders?.[0];
-    RestExplorerPanelProvider.attach(panel, folder?.uri.fsPath ?? "");
+    // Restored panels keep their old options — make sure Monaco may load.
+    panel.webview.options = { enableScripts: true, localResourceRoots: [monacoResourceRoot(extensionUri)] };
+    RestExplorerPanelProvider.attach(panel, folder?.uri.fsPath ?? "", extensionUri);
   }
 
-  private static attach(panel: vscode.WebviewPanel, workspaceRoot: string): void {
+  private static attach(panel: vscode.WebviewPanel, workspaceRoot: string, extensionUri: vscode.Uri): void {
     // A restored panel arriving while another is open: keep just one.
     if (RestExplorerPanelProvider._panel && RestExplorerPanelProvider._panel !== panel) RestExplorerPanelProvider._panel.dispose();
     RestExplorerPanelProvider._panel = panel;
-    panel.webview.html = RestExplorerPanelProvider.getHtml();
+    panel.webview.html = RestExplorerPanelProvider.getHtml(panel.webview, extensionUri);
+    // Language-server completion / hover for the SOQL tab's Monaco editor (one virtual buffer).
+    const soqlInput = createSoqlInputRouter(".vscode/soql-rest-explorer-buffer.soql", panel.webview);
 
     // Realign the org selector when the default org changes (extension command or external).
     const defaultOrgSub = onDidChangeDefaultOrg(async (username) => {
@@ -178,6 +184,7 @@ export class RestExplorerPanelProvider {
       apiVersion?: string;
       state?: RestExplorerState;
     }) => {
+      if (await soqlInput.handle(msg)) return;
       if (msg.command === "panelReady") {
         const cached = getCachedOrgList();
         const orgs = cached ?? await refreshOrgListCache();
@@ -298,6 +305,7 @@ export class RestExplorerPanelProvider {
     panel.onDidDispose(() => {
       messageListener.dispose();
       defaultOrgSub.dispose();
+      soqlInput.dispose();
       if (RestExplorerPanelProvider._panel === panel) RestExplorerPanelProvider._panel = undefined;
       RestExplorerPanelProvider._pendingPrefill = undefined;
     });
@@ -305,12 +313,13 @@ export class RestExplorerPanelProvider {
 
   // ─── HTML ────────────────────────────────────────────────────────────────────
 
-  private static getHtml(): string {
+  private static getHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
+    const monacoBase = monacoBaseUri(webview, extensionUri);
     return `<!DOCTYPE html>
 <html>
 <head>
   <meta charset="UTF-8">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+  <meta http-equiv="Content-Security-Policy" content="${monacoPanelCsp(webview.cspSource)}">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     ::-webkit-scrollbar { width: 5px; height: 5px; }
@@ -420,6 +429,7 @@ export class RestExplorerPanelProvider {
     .mini-select { padding: 3px 6px; font-size: 11px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border); border-radius: 3px; outline: none; cursor: pointer; font-family: inherit; }
     .mini-select:focus { border-color: var(--vscode-focusBorder); }
     code { font-family: var(--vscode-editor-font-family, monospace); font-size: 0.92em; background: var(--vscode-textBlockQuote-background, rgba(128,128,128,0.12)); padding: 0 3px; border-radius: 2px; }
+${monacoSoqlInputCss()}
   </style>
 </head>
 <body>
@@ -478,10 +488,10 @@ export class RestExplorerPanelProvider {
         <button class="mini-tab" id="mtab-body-btn" onclick="switchMiniTab('body')">Body</button>
       </div>
       <div class="mini-tab-content" id="mtab-soql">
-        <textarea class="mono-area" id="soql-input" placeholder="SELECT Id, Name FROM Account LIMIT 10" rows="4" oninput="onConfigChange()"></textarea>
+        <div id="soql-input-editor" class="asfx-soql-input"></div>
         <div style="display:flex;gap:8px;align-items:center;margin-top:4px;">
           <button class="tpl-btn" style="width:auto;" onclick="runSoql()">⚡ Run query</button>
-          <span class="hint" style="margin:0;">Write SOQL here — it's URL-encoded into <code>/query?q=…</code> and sent. No need to edit the URL.</span>
+          <span class="hint" style="margin:0;">Write SOQL here (completion from the selected org; <b>Ctrl/Cmd+Enter</b> runs) — it's URL-encoded into <code>/query?q=…</code> and sent. No need to edit the URL.</span>
         </div>
       </div>
       <div class="mini-tab-content active" id="mtab-headers">
@@ -543,11 +553,20 @@ export class RestExplorerPanelProvider {
 
 </div>
 
+<script src="${monacoBase}/loader.js"></script>
+<script>${monacoSoqlInputScript()}</script>
 <script>
   var vsc = null;
   try { if (typeof acquireVsCodeApi !== 'undefined') vsc = acquireVsCodeApi(); } catch(e) {}
   function post(msg) { try { if (vsc) vsc.postMessage(msg); } catch(e) {} }
-  function safeGet(id) { return document.getElementById(id); }
+  // The SOQL tab is a Monaco editor (LS completion / hover, pinned to the request org);
+  // safeGet('soql-input') hands out its textarea-compatible wrapper (.value / .focus()).
+  var soqlInputs = {};
+  function safeGet(id) { return soqlInputs[id] || document.getElementById(id); }
+  soqlInputs['soql-input'] = ASFXSoqlInput({ containerId: 'soql-input-editor', monacoBase: '${monacoBase}', post: post,
+    getOrg: function () { var s = document.getElementById('req-org'); return (s && s.value) || ''; }, orgSelectId: 'req-org',
+    placeholder: 'SELECT Id, Name FROM Account LIMIT 10', ariaLabel: 'SOQL query',
+    onInput: function () { onConfigChange(); }, onRun: function () { runSoql(); } });
   function escHtml(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
   var orgsData = [], historyData = [], lastRespBody = '';
@@ -886,6 +905,7 @@ export class RestExplorerPanelProvider {
   window.addEventListener('message', function(ev) {
     var d = ev.data;
     if (!d || !d.command) return;
+    if (soqlInputs['soql-input'].handle(d)) return;
 
     var sendBtn = safeGet('send-btn');
 
