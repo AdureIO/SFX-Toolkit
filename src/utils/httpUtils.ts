@@ -1,4 +1,6 @@
 import * as https from 'https';
+import type { IncomingHttpHeaders } from 'http';
+import * as zlib from 'zlib';
 import { URL } from 'url';
 import { getHttpTimeout } from './constants';
 import { Logger } from './outputChannel';
@@ -34,19 +36,61 @@ interface RawRequest {
     url: string;
     headers: Record<string, string | number>;
     body?: Buffer;
+    /** Socket idle timeout (ms). */
     timeout: number;
     /** Max characters of the error body included in rejection messages. */
     errorSnippet: number;
     /** Follow 3xx redirects (only for bodiless requests). */
     followRedirects: boolean;
+    /** Ask for a gzip/deflate response (`Accept-Encoding`) and decompress it. */
+    gzip?: boolean;
+    /** Hard cap on the whole request (connect + all data, across redirects), unlike the idle `timeout`. */
+    totalTimeoutMs?: number;
+    /** Extra non-2xx statuses that resolve instead of rejecting (e.g. 304). */
+    acceptStatus?: number[];
+}
+
+/** Full response of a request: status, headers and the (decompressed) body. */
+export interface HttpResponse {
+    status: number;
+    headers: IncomingHttpHeaders;
+    body: string;
+}
+
+/** Error thrown for a failed request; `status` / `timedOut` let callers classify it. */
+export interface HttpError extends Error {
+    status?: number;
+    timedOut?: boolean;
+}
+
+function httpError(message: string, status?: number, timedOut?: boolean): HttpError {
+    const e = new Error(message) as HttpError;
+    if (status !== undefined) e.status = status;
+    if (timedOut) e.timedOut = true;
+    return e;
+}
+
+/** Decompress a response body per its Content-Encoding (identity when absent). */
+function decode(buf: Buffer, encoding: string | undefined, cb: (err: Error | null, out?: Buffer) => void): void {
+    const enc = (encoding || '').toLowerCase().trim();
+    if (!buf.length) cb(null, buf);
+    else if (enc === 'gzip' || enc === 'x-gzip') zlib.gunzip(buf, cb);
+    else if (enc === 'deflate') zlib.inflate(buf, (err, out) => (err ? zlib.inflateRaw(buf, cb) : cb(null, out)));
+    else if (enc === 'br') zlib.brotliDecompress(buf, cb);
+    else cb(null, buf);
+}
+
+function rawRequest(opts: RawRequest): Promise<string> {
+    return rawRequestEx(opts).then((r) => r.body);
 }
 
 /**
- * Single request core: enforces a timeout, destroys the socket/response on timeout
- * or error (no leaked sockets), drains redirect bodies, resolves relative Location
- * headers and strips Authorization when redirected to an untrusted host.
+ * Single request core: enforces an idle timeout (and optionally a total deadline),
+ * destroys the socket/response on timeout or error (no leaked sockets), drains
+ * redirect bodies, resolves relative Location headers, strips Authorization when
+ * redirected to an untrusted host, and decompresses gzip/deflate bodies.
  */
-function rawRequest(opts: RawRequest, hops = 0): Promise<string> {
+function rawRequestEx(opts: RawRequest, hops = 0, startedAt = Date.now()): Promise<HttpResponse> {
     return new Promise((resolve, reject) => {
         let parsed: URL;
         try {
@@ -61,19 +105,25 @@ function rawRequest(opts: RawRequest, hops = 0): Promise<string> {
         }
 
         let settled = false;
+        let totalTimer: NodeJS.Timeout | undefined;
         const fail = (e: Error) => {
             if (settled) return;
             settled = true;
+            if (totalTimer) clearTimeout(totalTimer);
             reject(e);
         };
-        const ok = (v: string) => {
+        const ok = (v: HttpResponse) => {
             if (settled) return;
             settled = true;
+            if (totalTimer) clearTimeout(totalTimer);
             resolve(v);
         };
 
         const headers: Record<string, string | number> = { ...opts.headers };
         if (opts.body) headers['Content-Length'] = opts.body.length;
+        if (opts.gzip && !Object.keys(headers).some((k) => k.toLowerCase() === 'accept-encoding')) {
+            headers['Accept-Encoding'] = 'gzip, deflate';
+        }
 
         const req = https.request(
             {
@@ -86,7 +136,7 @@ function rawRequest(opts: RawRequest, hops = 0): Promise<string> {
             },
             (res) => {
                 const status = res.statusCode ?? 0;
-                if (opts.followRedirects && status >= 300 && status < 400 && res.headers.location) {
+                if (opts.followRedirects && status >= 300 && status < 400 && status !== 304 && res.headers.location) {
                     // Drain the redirect body so the socket can be released.
                     res.resume();
                     if (hops >= MAX_REDIRECTS) {
@@ -107,11 +157,12 @@ function rawRequest(opts: RawRequest, hops = 0): Promise<string> {
                         }
                     }
                     settled = true;
-                    rawRequest({ ...opts, url: next.toString(), headers: nextHeaders }, hops + 1).then(resolve, reject);
+                    if (totalTimer) clearTimeout(totalTimer);
+                    rawRequestEx({ ...opts, url: next.toString(), headers: nextHeaders }, hops + 1, startedAt).then(resolve, reject);
                     return;
                 }
 
-                const chunks: any[] = [];
+                const chunks: Buffer[] = [];
                 res.on('data', (d) => chunks.push(d));
                 res.on('error', (e) => {
                     res.destroy();
@@ -119,24 +170,38 @@ function rawRequest(opts: RawRequest, hops = 0): Promise<string> {
                 });
                 res.on('aborted', () => fail(new Error(`Response aborted: ${opts.method} ${parsed.origin}${parsed.pathname}`)));
                 res.on('end', () => {
-                    const text = Buffer.concat(chunks).toString();
-                    if (status >= 200 && status < 300) {
-                        ok(text);
-                    } else {
-                        fail(new Error(`HTTP ${status}: ${text.slice(0, opts.errorSnippet)}`));
-                    }
+                    decode(Buffer.concat(chunks), res.headers['content-encoding'] as string | undefined, (err, buf) => {
+                        if (err || !buf) {
+                            fail(new Error(`Could not decode response (${res.headers['content-encoding']}): ${err?.message ?? 'empty'}`));
+                            return;
+                        }
+                        const text = buf.toString();
+                        if ((status >= 200 && status < 300) || opts.acceptStatus?.includes(status)) {
+                            ok({ status, headers: res.headers, body: text });
+                        } else {
+                            fail(httpError(`HTTP ${status}: ${text.slice(0, opts.errorSnippet)}`, status));
+                        }
+                    });
                 });
             }
         );
 
         req.on('timeout', () => {
             req.destroy();
-            fail(new Error(`Request timed out after ${opts.timeout}ms: ${opts.method} ${opts.url}`));
+            fail(httpError(`Request timed out after ${opts.timeout}ms: ${opts.method} ${opts.url}`, undefined, true));
         });
         req.on('error', (e) => {
             req.destroy();
             fail(e);
         });
+        if (opts.totalTimeoutMs !== undefined) {
+            const remaining = Math.max(1, opts.totalTimeoutMs - (Date.now() - startedAt));
+            totalTimer = setTimeout(() => {
+                req.destroy();
+                fail(httpError(`Request exceeded ${opts.totalTimeoutMs}ms: ${opts.method} ${parsed.origin}${parsed.pathname}`, undefined, true));
+            }, remaining);
+            totalTimer.unref?.();
+        }
         if (opts.body) req.write(opts.body);
         req.end();
     });
@@ -150,7 +215,24 @@ export function httpsRequest(method: string, url: string, token: string, timeout
         timeout: timeoutMs ?? getHttpTimeout(),
         errorSnippet: 500,
         followRedirects: true,
+        gzip: method === 'GET',
     });
+}
+
+/** Retry delay before attempt `attempt + 1` (exponential, capped at 5 s). */
+export function retryDelayMs(attempt: number): number {
+    return Math.min(1000 * Math.pow(2, attempt), 5000);
+}
+
+/**
+ * Whether a failed request is worth retrying: network errors, timeouts, 5xx and 429.
+ * Other 4xx (malformed query, bad field, auth, not found) never succeed on retry.
+ */
+export function isRetryableHttpError(e: any): boolean {
+    const fromMsg = String(e?.message ?? '').match(/HTTP (\d+)/)?.[1];
+    const status: number | undefined = typeof e?.status === 'number' ? e.status : fromMsg ? parseInt(fromMsg, 10) : undefined;
+    if (status === undefined) return true;
+    return status >= 500 || status === 429;
 }
 
 export async function httpsRequestWithRetry(
@@ -166,16 +248,11 @@ export async function httpsRequestWithRetry(
             return await httpsRequest(method, url, token, timeoutMs);
         } catch (e: any) {
             lastError = e;
-            const status = e.message?.match(/HTTP (\d+)/)?.[1];
-            const code = status ? parseInt(status, 10) : 0;
-            // 4xx client errors (malformed query, bad field, auth, not found) will never
-            // succeed on retry — fail fast instead of burning ~3s of backoff. Only 429
-            // (rate limit) is worth retrying among 4xx; 5xx and network errors still retry.
-            if (code >= 400 && code < 500 && code !== 429) {
+            if (!isRetryableHttpError(e)) {
                 throw e;
             }
             if (attempt < maxRetries) {
-                const delay = Math.min(1000 * Math.pow(2, attempt), 5000);
+                const delay = retryDelayMs(attempt);
                 Logger.warn(`HTTP ${method} failed (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms: ${e.message}`);
                 await new Promise(r => setTimeout(r, delay));
             }
@@ -186,6 +263,52 @@ export async function httpsRequestWithRetry(
 
 export function httpsGet(url: string, token: string): Promise<string> {
     return httpsRequestWithRetry('GET', url, token);
+}
+
+/** Options for {@link httpsGetEx}. */
+export interface GetOptions {
+    /** Extra request headers (e.g. If-Modified-Since). */
+    headers?: Record<string, string>;
+    /** Hard cap on the whole call including retries and backoff (default: none). */
+    totalTimeoutMs?: number;
+    /** Retries for network errors / timeouts / 5xx / 429 (default 2). */
+    maxRetries?: number;
+}
+
+/**
+ * Authenticated gzip GET returning status + headers. A 304 resolves (for
+ * If-Modified-Since revalidation). Transient failures are retried, but never
+ * past `totalTimeoutMs`, so a describe can't hang for a minute and a half.
+ */
+export async function httpsGetEx(url: string, token: string, opts: GetOptions = {}): Promise<HttpResponse> {
+    const maxRetries = opts.maxRetries ?? 2;
+    const deadline = opts.totalTimeoutMs !== undefined ? Date.now() + opts.totalTimeoutMs : undefined;
+    let lastError: Error | undefined;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        const remaining = deadline !== undefined ? deadline - Date.now() : undefined;
+        if (remaining !== undefined && remaining <= 0) break;
+        try {
+            return await rawRequestEx({
+                method: 'GET',
+                url,
+                headers: { Authorization: `Bearer ${token}`, ...(opts.headers ?? {}) },
+                timeout: remaining !== undefined ? Math.min(getHttpTimeout(), remaining) : getHttpTimeout(),
+                totalTimeoutMs: remaining,
+                errorSnippet: 500,
+                followRedirects: true,
+                gzip: true,
+                acceptStatus: [304],
+            });
+        } catch (e: any) {
+            lastError = e;
+            if (!isRetryableHttpError(e) || attempt >= maxRetries) throw e;
+            const delay = retryDelayMs(attempt);
+            if (deadline !== undefined && Date.now() + delay >= deadline) throw e;
+            Logger.warn(`HTTP GET failed (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms: ${e.message}`);
+            await new Promise((r) => setTimeout(r, delay));
+        }
+    }
+    throw lastError ?? httpError(`Request exceeded ${opts.totalTimeoutMs}ms: GET ${url}`, undefined, true);
 }
 
 /**
@@ -207,6 +330,29 @@ export function httpsPost(
         timeout: timeoutMs ?? getHttpTimeout(),
         errorSnippet: 1000,
         followRedirects: false,
+    });
+}
+
+/**
+ * POST returning status + headers, with a gzip response and an overall deadline.
+ * Used for REST composite/batch describes, whose responses are large. Not retried.
+ */
+export function httpsPostEx(
+    url: string,
+    body: string,
+    headers: Record<string, string>,
+    opts: { totalTimeoutMs?: number } = {}
+): Promise<HttpResponse> {
+    return rawRequestEx({
+        method: 'POST',
+        url,
+        headers,
+        body: Buffer.from(body, 'utf8'),
+        timeout: opts.totalTimeoutMs !== undefined ? Math.min(getHttpTimeout(), opts.totalTimeoutMs) : getHttpTimeout(),
+        totalTimeoutMs: opts.totalTimeoutMs,
+        errorSnippet: 1000,
+        followRedirects: false,
+        gzip: true,
     });
 }
 
@@ -239,6 +385,7 @@ export function httpsPatch(
 /**
  * GET only the first `maxBytes` of a resource via a Range request. Salesforce may
  * honor it (206 partial) or ignore it (200 full) — either is returned as-is.
+ * (No gzip: byte ranges of a compressed stream are meaningless to the caller.)
  */
 export function httpsGetRange(url: string, token: string, maxBytes: number): Promise<string> {
     return rawRequest({

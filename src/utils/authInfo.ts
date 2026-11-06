@@ -1,12 +1,17 @@
 import { runCommandArgs } from "./commandRunner";
-import { httpsGet, httpsDelete, httpsPost, httpsPatch, httpsGetRange } from "./httpUtils";
+import { httpsGet, httpsDelete, httpsPost, httpsPatch, httpsGetRange, httpsGetEx, httpsPostEx, GetOptions, HttpResponse } from "./httpUtils";
+import { canonicalOrgKey, orgArgForKey } from "./orgKey";
 import { outputChannel } from "./outputChannel";
 import { isSalesforceProject } from "./projectUtils";
 
 /** Default: consider token expired after 55 minutes so we refresh before typical 2h OAuth expiry. */
 const AUTH_VALID_MS = 55 * 60 * 1000;
 
-const CACHE_KEY_DEFAULT = "__default__";
+/**
+ * Cap on the `sf org display` spawn used for auth (the generic runner default is 5 min).
+ * A hung CLI must not block every describe behind it.
+ */
+export const AUTH_CLI_TIMEOUT_MS = 20_000;
 
 export interface OrgAuth {
 	accessToken: string;
@@ -63,8 +68,18 @@ export class AuthInfo {
 		this.generations.set(key, (this.generations.get(key) ?? 0) + 1);
 	}
 
+	/**
+	 * Single-flight token refresh per org: concurrent 401s share one CLI refresh.
+	 * Kept separate from fetchLocks so invalidateOrg() (which the refresh itself
+	 * calls) cannot drop it and let the next 401 spawn a second refresh.
+	 */
+	private static refreshLocks = new Map<string, Promise<void>>();
+	/** Per org: the access token most recently refreshed away from (late 401s with it skip the refresh). */
+	private static refreshedFrom = new Map<string, string>();
+
+	/** Canonical cache key (the username); alias, username and null-default share one entry. */
 	private static cacheKey(targetOrg: string | null): string {
-		return targetOrg === null || targetOrg === "" ? CACHE_KEY_DEFAULT : targetOrg;
+		return canonicalOrgKey(targetOrg);
 	}
 
 	/** Returns cached auth only if present and not expired. */
@@ -80,7 +95,7 @@ export class AuthInfo {
 
 	/** True if we have valid (non-expired) cached auth for the default org. */
 	public static hasValidCache(): boolean {
-		return this.getValidFromCache(CACHE_KEY_DEFAULT) !== null;
+		return this.getValidFromCache(this.cacheKey(null)) !== null;
 	}
 
 	/**
@@ -89,7 +104,7 @@ export class AuthInfo {
 	private static async fetchOrgAuth(targetOrg: string | null): Promise<OrgAuth | null> {
 		const args = ["org", "display", "--json"];
 		if (targetOrg) args.push("--target-org", targetOrg);
-		const result = await runCommandArgs("sf", args);
+		const result = await runCommandArgs("sf", args, undefined, undefined, true, AUTH_CLI_TIMEOUT_MS);
 		let parsed: any;
 		try {
 			parsed = JSON.parse(result);
@@ -143,7 +158,7 @@ export class AuthInfo {
 		let promise: Promise<OrgAuth | null>;
 		const doFetch = async (): Promise<OrgAuth | null> => {
 			try {
-				const auth = await this.fetchOrgAuth(targetOrg);
+				const auth = await this.fetchOrgAuth(orgArgForKey(key));
 				// Only cache when nothing invalidated this key while we were fetching;
 				// otherwise the caller still gets the result but it is not retained.
 				if (auth && this.genOf(key) === gen) {
@@ -182,6 +197,8 @@ export class AuthInfo {
 		this.cache.clear();
 		this.fetchLocks.clear();
 		this.generations.clear();
+		this.refreshLocks.clear();
+		this.refreshedFrom.clear();
 	}
 
 	/** Release everything (deactivate / workspace switch). Holds no timers. */
@@ -203,7 +220,28 @@ export class AuthInfo {
 	 * an INVALID_SESSION_ID / 401 from a call that does not go through withRetry.
 	 */
 	public static async refreshAuth(org: string | null): Promise<void> {
-		await this.forceCliAuthRefresh(org);
+		await this.refreshOnce(this.cacheKey(org), undefined);
+	}
+
+	/**
+	 * Refresh the token for `key` at most once per failure: joins a refresh in
+	 * flight, and skips it when `failedToken` was already refreshed away from (a
+	 * late 401 from a request that started before the previous refresh).
+	 */
+	private static refreshOnce(key: string, failedToken: string | undefined): Promise<void> {
+		const inflight = this.refreshLocks.get(key);
+		if (inflight) return inflight;
+		if (failedToken !== undefined) {
+			if (this.refreshedFrom.get(key) === failedToken) return Promise.resolve();
+			const current = this.getValidFromCache(key);
+			if (current && current.accessToken !== failedToken) return Promise.resolve();
+			this.refreshedFrom.set(key, failedToken);
+		}
+		const p: Promise<void> = this.forceCliAuthRefresh(key).finally(() => {
+			if (this.refreshLocks.get(key) === p) this.refreshLocks.delete(key);
+		});
+		this.refreshLocks.set(key, p);
+		return p;
 	}
 
 	/**
@@ -215,21 +253,22 @@ export class AuthInfo {
 	 * accessTokenExpiration timestamp. After this returns, `sf org display` will serve
 	 * the newly-written token.
 	 */
-	private static async forceCliAuthRefresh(org: string | null): Promise<void> {
+	private static async forceCliAuthRefresh(key: string): Promise<void> {
 		// Clear both cache and any in-flight dedup fetch so getAuthInfoForOrg always
 		// starts a fresh sf org display call after the CLI refresh completes.
-		this.invalidateOrg(org);
+		this.invalidateOrg(key);
+		const org = orgArgForKey(key);
 		const args = ["org", "display", "user", "--json"];
 		if (org) args.push("--target-org", org);
 		try {
-			await runCommandArgs("sf", args);
+			await runCommandArgs("sf", args, undefined, undefined, false, AUTH_CLI_TIMEOUT_MS);
 		} catch {
 			// Ignore — if the CLI refresh fails the subsequent getAuthInfoForOrg will
 			// also fail, which is handled by the caller.
 		}
 		// Evict whatever was written to cache during the CLI call so getAuthInfoForOrg
 		// re-reads the auth file with the token the CLI just refreshed.
-		this.invalidateOrg(org);
+		this.invalidateOrg(key);
 	}
 
 	/**
@@ -244,7 +283,8 @@ export class AuthInfo {
 		execute: (auth: OrgAuth) => Promise<T>
 	): Promise<{ result: T; auth: OrgAuth }> {
 		const NO_CREDS = "Could not get org credentials. Set a default org or select one and try again.";
-		let auth = await this.getAuthInfoForOrg(org);
+		const key = this.cacheKey(org);
+		let auth = await this.getAuthInfoForOrg(key);
 		if (!auth) throw new Error(NO_CREDS);
 		try {
 			const result = await execute(auth);
@@ -255,8 +295,9 @@ export class AuthInfo {
 			// 401: run a CLI command that makes a real authenticated API call so that
 			// @salesforce/core triggers its refresh-token flow and updates the auth store,
 			// then re-fetch the now-fresh token and retry.
-			await this.forceCliAuthRefresh(org);
-			auth = await this.getAuthInfoForOrg(org);
+			// Single-flight: concurrent 401s for this org share one CLI refresh.
+			await this.refreshOnce(key, auth.accessToken);
+			auth = await this.getAuthInfoForOrg(key);
 			if (!auth) throw new Error(NO_CREDS);
 
 			try {
@@ -265,12 +306,15 @@ export class AuthInfo {
 			} catch (retryErr: any) {
 				// Retry also failed — evict the bad token so the next call does not serve
 				// it from cache for the next 55 minutes.
-				this.invalidateOrg(org);
+				this.invalidateOrg(key);
 				if (/HTTP 401/i.test(String(retryErr?.message ?? ""))) {
-					throw new Error(
+					const target = orgArgForKey(key);
+					const err = new Error(
 						"Salesforce session expired or revoked. Re-authenticate your org: sf org login web" +
-							(org ? ` --target-org ${org}` : "")
-					);
+							(target ? ` --target-org ${target}` : "")
+					) as Error & { status?: number };
+					err.status = 401;
+					throw err;
 				}
 				throw retryErr;
 			}
@@ -289,6 +333,34 @@ export class AuthInfo {
 			httpsGet(buildUrl(a), a.accessToken)
 		);
 		return { body, auth };
+	}
+
+	/**
+	 * Authenticated gzip GET returning status + headers (304 resolves — for
+	 * If-Modified-Since revalidation). `opts.totalTimeoutMs` caps the HTTP time.
+	 * On 401, refreshes the token once (single-flight) and retries.
+	 */
+	public static async getEx(
+		org: string | null,
+		buildUrl: (auth: OrgAuth) => string,
+		opts: GetOptions = {}
+	): Promise<HttpResponse & { auth: OrgAuth }> {
+		const { result, auth } = await this.withRetry(org, (a) => httpsGetEx(buildUrl(a), a.accessToken, opts));
+		return { ...result, auth };
+	}
+
+	/** Authenticated JSON POST with gzip response, status + headers and an overall deadline. */
+	public static async postEx(
+		org: string | null,
+		buildUrl: (auth: OrgAuth) => string,
+		body: unknown,
+		opts: { totalTimeoutMs?: number } = {}
+	): Promise<HttpResponse & { auth: OrgAuth }> {
+		const payload = typeof body === "string" ? body : JSON.stringify(body);
+		const { result, auth } = await this.withRetry(org, (a) =>
+			httpsPostEx(buildUrl(a), payload, { Authorization: `Bearer ${a.accessToken}`, "Content-Type": "application/json" }, opts)
+		);
+		return { ...result, auth };
 	}
 
 	/** Authenticated ranged GET (first `maxBytes`). On 401, refreshes and retries once. */
