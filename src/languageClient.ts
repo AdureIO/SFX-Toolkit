@@ -24,6 +24,7 @@ import { canonicalOrgKey, orgArgForKey } from "./utils/orgKey";
 import { SchemaUnavailableError } from "./utils/describeStore";
 import { shouldForwardDiagnostics } from "./utils/diagnosticsFilter";
 import { FileEventBatcher } from "./utils/fileEventBatcher";
+import { ServerSettingsRestarter, Throttle, CONFIG_SECTION } from "./utils/serverSettingsRestart";
 import { onDidChangeProjectDefaultOrg } from "./utils/defaultOrgEvents";
 import { scheduleStubSync, cleanRestartApex, getInitialSyncState, disposeStubSync } from "./utils/sobjectStubSync";
 import { getBufferOrgOverride } from "./utils/bufferOrgOverride";
@@ -98,6 +99,32 @@ export function restartLanguageServerForWorkspaceChange(context: vscode.Extensio
 	return transitions;
 }
 
+/**
+ * Apply a settings change to the server: restart it (stop fully, then start with the
+ * new init options / heap cap) or just stop it. Goes through the same serialized
+ * `transitions` chain as workspace changes, so a stop is always awaited before a start.
+ */
+function applySettingsTransition(context: vscode.ExtensionContext, action: "restart" | "stop"): Promise<void> {
+	transitions = transitions
+		.then(async () => {
+			const wasRunning = !!client || !!stopping;
+			if (wasRunning) {
+				outputChannel.appendLine(`languageClient: settings changed — ${action === "stop" ? "stopping" : "restarting"} ASFX language server.`);
+				await stopLanguageServer();
+			}
+			if (action === "restart") {
+				startClient(context);
+				if (wasRunning && client && restartNotice.allow()) {
+					vscode.window.setStatusBarMessage("ASFX language server restarted (settings changed)", 5000);
+				}
+			}
+		})
+		.catch((e: any) => outputChannel.appendLine(`languageClient: restart after settings change failed: ${e?.message ?? e}`));
+	return transitions;
+}
+
+const restartNotice = new Throttle(30000);
+
 /** Once per activation: make sure everything we own is torn down with the extension. */
 function registerLifetime(context: vscode.ExtensionContext): void {
 	if (lifetimeRegistered) return;
@@ -109,6 +136,20 @@ function registerLifetime(context: vscode.ExtensionContext): void {
 			void stopLanguageServer();
 		},
 	});
+	// Init options and the heap cap are read once at process start: restart on change.
+	const restarter = new ServerSettingsRestarter({
+		snapshot: () => {
+			const cfg = vscode.workspace.getConfiguration(CONFIG_SECTION);
+			return {
+				mode: cfg.get<string>("apex.languageServer", "on"),
+				soqlCompletion: cfg.get<boolean>("soql.enableCompletion", true),
+				apexCompletion: cfg.get<boolean>("apex.enableCompletion", true),
+			};
+		},
+		restart: () => applySettingsTransition(context, "restart"),
+		stop: () => applySettingsTransition(context, "stop"),
+	});
+	context.subscriptions.push(restarter, vscode.workspace.onDidChangeConfiguration((e) => restarter.onConfigChange(e)));
 	// The Salesforce Apex LS watchdog is independent of our server's lifetime.
 	startApexHealthMonitor(context);
 	// Host commands used by the server's quick fixes (e.g. create a field stub file).
@@ -195,6 +236,8 @@ function startClient(context: vscode.ExtensionContext): void {
 	);
 	client = lc;
 	clientRootsKey = workspaceRootsKey();
+	// Before start(): the new process must receive the open virtual documents when it runs.
+	hookClientState();
 	const disposables: vscode.Disposable[] = [];
 	clientDisposables = disposables;
 
@@ -633,13 +676,13 @@ const virtualDocs = new Map<string, VirtualDocState>();
 let stateHooked: LanguageClient | undefined;
 
 /**
- * Re-announce open virtual documents after the server (re)started — it lost them.
- * A REPLACED client (restartLanguageServerForWorkspaceChange) never saw them at all:
- * forget them so the next sync sends a fresh didOpen instead of a didChange.
+ * Re-announce open virtual documents whenever a server (re)starts — it lost them. A
+ * REPLACED client (workspace or settings restart) has never seen them: they are kept
+ * and sent as didOpen when the new client reaches Running (hooked in startClient,
+ * before start(), so that transition is never missed).
  */
 function hookClientState(): void {
 	if (!client || stateHooked === client) return;
-	if (stateHooked) virtualDocs.clear();
 	stateHooked = client;
 	const c = client;
 	c.onDidChangeState((e) => {
