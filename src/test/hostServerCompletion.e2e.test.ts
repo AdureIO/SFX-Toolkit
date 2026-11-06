@@ -10,7 +10,7 @@
  * completion below needs the `User` / `Account` describe to travel host → server.
  * Requires `npm run compile` first (out/server.js).
  */
-import { setWorkspaceFolders } from "./helpers/vscodeStub";
+import { setWorkspaceFolders, vscodeStubState } from "./helpers/vscodeStub";
 import * as assert from "assert";
 import * as cp from "child_process";
 import * as fs from "fs";
@@ -25,7 +25,7 @@ import { registerSchemaHostHandlers } from "../schemaHost";
 import { DescribeStore } from "../utils/describeStore";
 import { OrgMetadataCache } from "../utils/orgMetadataCache";
 import { AuthInfo } from "../utils/authInfo";
-import { invalidateOrgKeyCache, setAliasFileForTests } from "../utils/orgKey";
+import { invalidateOrgKeyCache, setAliasFileForTests, getAliasFileForTests } from "../utils/orgKey";
 import { setSchemaHealthSink } from "../utils/schemaHealth";
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const rpc = require("vscode-jsonrpc/node");
@@ -331,7 +331,13 @@ for (const scenario of SCENARIOS)
 describe(`host → server completion (real host modules, real server, fake HTTP) — ${scenario.name}`, function () {
 	this.timeout(60000);
 
+	// Shared process-wide state other test files rely on (root hooks in orgCaches.test.ts): restore it.
+	let savedFolders: typeof vscodeStubState.workspaceFolders;
+	let savedAliasFile: string | undefined;
+
 	before(async () => {
+		savedFolders = vscodeStubState.workspaceFolders;
+		savedAliasFile = getAliasFileForTests();
 		fs.mkdirSync(classes, { recursive: true });
 		fs.mkdirSync(path.join(root, ".sfdx"), { recursive: true });
 		fs.writeFileSync(path.join(root, "sfdx-project.json"), JSON.stringify({ packageDirectories: [{ path: "force-app", default: true }], sourceApiVersion: "62.0" }));
@@ -398,8 +404,14 @@ describe(`host → server completion (real host modules, real server, fake HTTP)
 		try { conn?.dispose(); } catch { /* ignore */ }
 		try { child?.kill(); } catch { /* ignore */ }
 		DescribeStore.shutdown();
-		setAliasFileForTests(undefined);
+		setAliasFileForTests(savedAliasFile);
+		vscodeStubState.workspaceFolders = savedFolders;
 		DescribeStore.configurePersistence(undefined);
+		DescribeStore.setTransportForTests(undefined);
+		setSchemaHealthSink(undefined);
+		OrgMetadataCache.clearAll();
+		AuthInfo.clearCache();
+		invalidateOrgKeyCache();
 		(https as any).request = origRequest;
 		commandRunner.runCommandArgs = origRun;
 		try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }

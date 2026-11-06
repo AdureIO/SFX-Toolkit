@@ -46,6 +46,11 @@ function aliasFilePath(): string {
 	return aliasFileOverride ?? path.join(os.homedir(), ".sfdx", "alias.json");
 }
 
+/** Test hook: the alias file override currently in force (undefined = the default). */
+export function getAliasFileForTests(): string | undefined {
+	return aliasFileOverride;
+}
+
 /** Test hook: point the alias lookup at another file (undefined restores the default). */
 export function setAliasFileForTests(file: string | undefined): void {
 	aliasFileOverride = file;
