@@ -1,13 +1,30 @@
 import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
+import { SoqlSchemaProvider } from "../utils/soqlSchemaProvider";
+import { findSfdxProjectDir } from "../utils/projectUtils";
+import { resolveDefaultTargetOrgUsernameSync } from "../utils/defaultOrg";
+import {
+    ambientModuleNames,
+    labelInsert,
+    messageChannelFileBase,
+    messageChannelInsert,
+    parseSalesforceImport,
+    parseSchemaPath,
+    relationshipTarget,
+    schemaEntries,
+} from "./lwcImportItems";
 
 /**
  * LWC IntelliSense that complements the official LWC extension:
  *  • Completion for `@salesforce/*` imports — Apex classes/@AuraEnabled methods,
- *    custom labels, static resources, message channels (all from local metadata).
+ *    custom labels, static resources, message channels (all from local metadata),
+ *    and `@salesforce/schema/Object.Field` (incl. relationship spans) from the org.
  *  • Go-to-definition for label / resourceUrl / messageChannel imports.
  *  • A CodeLens on a component showing how many other components use `<c-…>`.
+ *
+ * Items TypeScript already offers from `.sfdx/typings/lwc` ambient module
+ * declarations are skipped (no duplicates).
  */
 
 function offsetToPosition(text: string, offset: number): vscode.Position {
@@ -71,17 +88,20 @@ function apexClassNames(): Promise<string[]> {
     });
 }
 
-async function auraEnabledMethods(cls: string): Promise<string[]> {
-    const files = await vscode.workspace.findFiles(`**/${cls}.cls`, EXCLUDE_GLOB, 1);
-    const text = files.length ? await readFile(files[0]) : undefined;
-    if (!text) return [];
-    const out = new Set<string>();
-    for (const am of text.matchAll(/@AuraEnabled\b/gi)) {
-        const after = text.slice(am.index ?? 0, (am.index ?? 0) + 400);
-        const mm = /\b(?:global|public)\b(?:\s+static)?\s+[\w.<>[\], ]+?\s+(\w+)\s*\(/.exec(after);
-        if (mm) out.add(mm[1]);
-    }
-    return [...out].sort();
+function auraEnabledMethods(cls: string): Promise<string[]> {
+    // Memoized like the other lookups: completion after `Class.` fires per keystroke.
+    return memo(`aura:${cls.toLowerCase()}`, async () => {
+        const files = await vscode.workspace.findFiles(`**/${cls}.cls`, EXCLUDE_GLOB, 1);
+        const text = files.length ? await readFile(files[0]) : undefined;
+        if (!text) return [];
+        const out = new Set<string>();
+        for (const am of text.matchAll(/@AuraEnabled\b/gi)) {
+            const after = text.slice(am.index ?? 0, (am.index ?? 0) + 400);
+            const mm = /\b(?:global|public)\b(?:\s+static)?\s+[\w.<>[\], ]+?\s+(\w+)\s*\(/.exec(after);
+            if (mm) out.add(mm[1]);
+        }
+        return [...out].sort();
+    });
 }
 
 function customLabels(): Promise<{ name: string; uri: vscode.Uri; offset: number }[]> {
@@ -106,7 +126,55 @@ function metadataNames(glob: string, suffix: string): Promise<string[]> {
     });
 }
 
+// ── TypeScript ambient modules (.sfdx/typings/lwc) — avoid duplicate items ─────
+
+const ambientCache = new Map<string, { mtimeMs: number; names: string[] }>();
+
+async function ambientNamesIn(file: string): Promise<string[]> {
+    try {
+        const st = await fs.promises.stat(file);
+        const hit = ambientCache.get(file);
+        if (hit && hit.mtimeMs === st.mtimeMs) return hit.names;
+        const names = ambientModuleNames(await fs.promises.readFile(file, "utf8"));
+        ambientCache.set(file, { mtimeMs: st.mtimeMs, names });
+        if (ambientCache.size > MAX_LOOKUP_ENTRIES) {
+            const oldest = ambientCache.keys().next().value;
+            if (oldest !== undefined) ambientCache.delete(oldest);
+        }
+        return names;
+    } catch {
+        return [];
+    }
+}
+
+/** Module specifiers TypeScript already completes for this `@salesforce/<kind>/…` import. */
+async function typedModules(doc: vscode.TextDocument, kind: string, partial: string): Promise<Set<string>> {
+    const root = findSfdxProjectDir(doc.uri.fsPath) ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const out = new Set<string>();
+    if (!root) return out;
+    const dir = path.join(root, ".sfdx", "typings", "lwc");
+    const files: string[] = [];
+    if (kind === "schema") {
+        const sp = parseSchemaPath(partial);
+        if (sp.object && !sp.relationships.length) files.push(path.join(dir, "sobjects", `${sp.object}.d.ts`));
+    } else if (kind === "apex") {
+        const cls = partial.split(".")[0];
+        if (cls && partial.includes(".")) files.push(path.join(dir, "apex", `${cls}.d.ts`));
+    } else {
+        try {
+            for (const f of await fs.promises.readdir(dir)) if (f.endsWith(".d.ts")) files.push(path.join(dir, f));
+        } catch {
+            /* no typings */
+        }
+    }
+    for (const f of files) for (const n of await ambientNamesIn(f)) out.add(n.toLowerCase());
+    return out;
+}
+
 // ── completion ────────────────────────────────────────────────────────────────
+
+/** Full module specifier (after `@salesforce/<kind>/`) per item, for the typings de-dupe. */
+const moduleOf = new WeakMap<vscode.CompletionItem, string>();
 
 function item(label: string, kind: vscode.CompletionItemKind, detail: string): vscode.CompletionItem {
     const it = new vscode.CompletionItem(label, kind);
@@ -114,38 +182,108 @@ function item(label: string, kind: vscode.CompletionItemKind, detail: string): v
     return it;
 }
 
+/** Org whose schema backs `@salesforce/schema/…` completion for this document. */
+function orgFor(doc: vscode.TextDocument): string | null {
+    try {
+        return resolveDefaultTargetOrgUsernameSync(findSfdxProjectDir(doc.uri.fsPath) ?? undefined) ?? null;
+    } catch {
+        return null;
+    }
+}
+
+async function schemaItems(doc: vscode.TextDocument, partial: string): Promise<vscode.CompletionItem[]> {
+    const org = orgFor(doc);
+    const sp = parseSchemaPath(partial);
+    if (!sp.object) {
+        const names = await SoqlSchemaProvider.getObjectList(org);
+        return names.map((n) => item(n, vscode.CompletionItemKind.Class, "SObject"));
+    }
+    let describe = await SoqlSchemaProvider.getDescribe(org, sp.object);
+    for (const rel of sp.relationships) {
+        const target = describe ? relationshipTarget(describe.fields, rel) : null;
+        describe = target ? await SoqlSchemaProvider.getDescribe(org, target) : null;
+        if (!describe) return [];
+    }
+    if (!describe) return [];
+    return schemaEntries(describe.fields).map((e) => {
+        const it = item(e.name, e.isRelationship ? vscode.CompletionItemKind.Reference : vscode.CompletionItemKind.Field, e.detail);
+        if (e.isRelationship) {
+            // Drill straight into the related object's fields.
+            it.insertText = `${e.name}.`;
+            it.command = { command: "editor.action.triggerSuggest", title: "" };
+            it.sortText = `1_${e.name}`;
+        } else {
+            it.sortText = `0_${e.name}`;
+        }
+        return it;
+    });
+}
+
 const importCompletion: vscode.CompletionItemProvider = {
     async provideCompletionItems(doc, position) {
         const line = doc.getText(new vscode.Range(position.line, 0, position.line, position.character));
-        const m = /@salesforce\/(\w+)\/([\w.]*)$/.exec(line);
-        if (!m) return undefined;
-        const kind = m[1];
-        const partial = m[2];
+        const ctx = parseSalesforceImport(line);
+        if (!ctx) return undefined;
+        const { kind, partial } = ctx;
+        let items: vscode.CompletionItem[];
         switch (kind) {
             case "apex": {
                 if (partial.includes(".")) {
                     const cls = partial.split(".")[0];
-                    return (await auraEnabledMethods(cls)).map((mth) => item(mth, vscode.CompletionItemKind.Method, `${cls}.${mth} (@AuraEnabled)`));
+                    items = (await auraEnabledMethods(cls)).map((mth) => {
+                        const it = item(mth, vscode.CompletionItemKind.Method, `${cls}.${mth} (@AuraEnabled)`);
+                        it.filterText = mth;
+                        moduleOf.set(it, `${cls}.${mth}`);
+                        return it;
+                    });
+                } else {
+                    items = (await apexClassNames()).map((c) => item(c, vscode.CompletionItemKind.Class, "Apex class"));
                 }
-                return (await apexClassNames()).map((c) => item(c, vscode.CompletionItemKind.Class, "Apex class"));
+                break;
             }
             case "label": {
-                const labels = await customLabels();
-                return labels.map((l) => item(l.name, vscode.CompletionItemKind.Constant, "Custom label"));
+                const range = new vscode.Range(position.translate(0, -partial.length), position);
+                items = (await customLabels()).map((l) => {
+                    const ins = labelInsert(l.name, partial);
+                    const it = item(l.name, vscode.CompletionItemKind.Constant, "Custom label");
+                    it.insertText = ins.insertText;
+                    it.filterText = ins.filterText;
+                    it.range = range;
+                    moduleOf.set(it, ins.insertText);
+                    return it;
+                });
+                break;
             }
             case "resourceUrl":
-                return (await metadataNames("**/staticresources/*.resource-meta.xml", ".resource-meta.xml")).map((n) =>
+                items = (await metadataNames("**/staticresources/*.resource-meta.xml", ".resource-meta.xml")).map((n) =>
                     item(n, vscode.CompletionItemKind.File, "Static resource"),
                 );
+                break;
             case "messageChannel":
-                return (await metadataNames("**/messageChannels/*.messageChannel-meta.xml", ".messageChannel-meta.xml")).map((n) =>
-                    item(n, vscode.CompletionItemKind.Event, "Lightning message channel"),
+                // The module name carries the `__c` suffix: @salesforce/messageChannel/Foo__c.
+                items = (await metadataNames("**/messageChannels/*.messageChannel-meta.xml", ".messageChannel-meta.xml")).map((n) =>
+                    item(messageChannelInsert(n), vscode.CompletionItemKind.Event, "Lightning message channel"),
                 );
+                break;
+            case "schema": {
+                items = await schemaItems(doc, partial);
+                const sp = parseSchemaPath(partial);
+                for (const it of items) moduleOf.set(it, sp.object ? [sp.object, ...sp.relationships, String(it.label)].join(".") : String(it.label));
+                break;
+            }
             default:
                 return undefined;
         }
+        // Skip what TypeScript already completes from the ambient typings.
+        const typed = await typedModules(doc, kind, partial);
+        if (!typed.size) return items;
+        return items.filter((it) => {
+            const mod = moduleOf.get(it) ?? String(it.label);
+            return !typed.has(`@salesforce/${kind}/${mod}`.toLowerCase());
+        });
     }
 };
+
 
 // ── definition (label / resourceUrl / messageChannel) ─────────────────────────
 
@@ -167,7 +305,7 @@ const importDefinition: vscode.DefinitionProvider = {
         }
         const globs: Record<string, string> = {
             resourceUrl: `**/staticresources/${ref}.resource-meta.xml`,
-            messageChannel: `**/messageChannels/${ref}.messageChannel-meta.xml`
+            messageChannel: `**/messageChannels/${messageChannelFileBase(ref)}.messageChannel-meta.xml`
         };
         const glob = globs[kind];
         if (!glob) return undefined;
