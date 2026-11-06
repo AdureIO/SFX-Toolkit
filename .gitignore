@@ -6,6 +6,9 @@ node_modules
 .vscode/anon-workbench-buffer.apex
 .vscode/workbench-soql-buffer.soql
 .vscode/soql-wb-buffer*.soql
+.vscode/soql-datatools-buffer.soql
+.vscode/soql-rest-explorer-buffer.soql
+.vscode/soql-migration-buffer.soql
 .DS_Store
 *.log
 
