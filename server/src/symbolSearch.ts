@@ -4,39 +4,58 @@
  *
  * Resolution (`resolveAt`) turns the identifier under the cursor into one of:
  *   local   — a local variable / parameter (confined to its declaring method)
- *   field   — a field or property of a workspace type (owner = declaring type)
- *   method  — a method of a workspace type (owner = nearest declaring type)
+ *   field   — a field, property or enum value of a workspace type (owner = declaring type)
+ *   method  — a method of a workspace type (owner = nearest declaring type; the overload
+ *             is picked by the call's argument count, or exactly when on a declaration)
  *   type    — a workspace class / interface / enum (top-level or inner)
  * or a rejection explaining why it isn't a workspace symbol (keyword, standard library,
  * org schema, unresolvable receiver…).
  *
- * The search (`findOccurrences`) then scans the current document (locals) or the
- * workspace (members/types): a cheap text prefilter, then each candidate file is
- * parsed (open documents: the exact `current` parse; other files: read from disk,
- * small LRU) and every case-insensitive whole-word occurrence is classified against
- * the target — receiver types (`x.name` with `x` declared as the owner or a subtype),
- * `this`/`super`, static `Type.member`, bare uses inside the owner's hierarchy,
- * shadowing locals, variable-vs-type positions, and constructor declarations.
- * Apex is case-insensitive, so matching ignores case; returned ranges are the exact
- * text spans.
+ * The search (`findOccurrences`) scans the declaring document (locals) or the whole
+ * workspace (members/types — never capped):
+ *   1. candidates from the token index (tokenIndex.ts: every .cls/.trigger + metadata
+ *      file, code tokens only) plus open buffers (unsaved text wins). A member can only
+ *      be reached from a file that declares a family type, names one, or names a
+ *      "producer" — a workspace member whose declared type mentions a family type
+ *      (`instance()`, `List<Svc> items`…) — so files that merely reuse the member name
+ *      on unrelated types are never parsed;
+ *   2. each candidate is parsed in the parse worker (open buffers: their exact current
+ *      version) and every case-insensitive whole-word occurrence in code is classified
+ *      against the target: receiver types (`x.name`, `this` / `super`, static
+ *      `Type.member`, `ns.Type.member`, and full expression chains such as
+ *      `a.b().c()[0].name` typed with the expression resolver, apexResolve.ts), bare uses
+ *      inside the owner's hierarchy, shadowing locals, variable-vs-type positions,
+ *      constructor declarations, overload arity, enum values in `when` clauses;
+ *   3. Salesforce metadata that refers to the symbol by name (metadataRefs.ts): LWC
+ *      imports + call sites, Aura `c.method`, Visualforce, Flows, `Type.forName`.
+ * Methods use their "family" (the override / implementation slot: base declarations
+ * and every override) — like Java language servers, an override and its base method are
+ * the same symbol for references and rename.
  *
- * Mode `references` also keeps occurrences whose receiver can't be resolved (e.g.
- * `getFoo().name`) — inclusive, like the old text search; mode `rename` drops them so
- * a rename never edits code it can't prove refers to the symbol.
+ * Mode `references` keeps occurrences whose receiver can't be typed at all (e.g. a
+ * receiver of a type outside this workspace's knowledge) — inclusive; receivers typed to
+ * a different (workspace, standard or SObject) type are always excluded. Mode `rename`
+ * drops every occurrence it can't prove refers to the symbol.
  */
-import type { CancellationToken, Range } from 'vscode-languageserver/node';
-import type { TextDocument } from 'vscode-languageserver-textdocument';
+import { CancellationToken, LSPErrorCodes, Range, ResponseError } from 'vscode-languageserver/node';
+import { TextDocument } from 'vscode-languageserver-textdocument';
 import * as fs from 'fs';
 import { fileURLToPath, pathToFileURL } from 'url';
 import type { ServerContext } from './context';
-import { parseApex, ApexIndex, ApexMemberDecl, ApexTypeDecl, VarDecl } from './apexSymbols';
+import type { ApexIndex, ApexMemberDecl, ApexParseResult, ApexTypeDecl, VarDecl } from './apexSymbols';
 import { WorkspaceIndex, TypeGraph, TypeNode, isIgnoredPath } from './workspaceIndex';
 import { blankNonCode } from '../../src/utils/apexReferences';
+import { typeForNameRefs, classNameMatches } from '../../src/utils/sfMetadataRefs';
 import { stdTypeName, stdMembersFor } from './apexStdlib';
 import { stubbedObjectNames } from './sobjectStub';
 import { throwIfCancelled } from './cancel';
 import { baseTypeName, isApex } from './textUtil';
 import { lruGet, lruSet } from './caches';
+import { ParseWorker } from './parseWorkerClient';
+import { TokenIndex } from './tokenIndex';
+import { Resolver, receiverExprBefore } from './apexResolve';
+import type { ParseView } from './parseCache';
+import { metadataOccurrences } from './metadataRefs';
 
 // ─── Apex words ─────────────────────────────────────────────────────────────────
 
@@ -80,9 +99,11 @@ export interface FileModel {
     /** typeDecl.range objects — a VarDecl whose scope is one of these is a field. */
     typeScopes: Set<Range>;
     lineStarts: number[];
+    /** Document version for open buffers (undefined for files read from disk). */
+    version?: number;
 }
 
-function makeModel(path: string, uri: string, text: string, index: ApexIndex): FileModel {
+function makeModel(path: string, uri: string, text: string, index: ApexIndex, version?: number): FileModel {
     const lineStarts = [0];
     for (let i = text.indexOf('\n'); i !== -1; i = text.indexOf('\n', i + 1)) lineStarts.push(i + 1);
     const typeDecls = index.typeDecls ?? [];
@@ -95,6 +116,7 @@ function makeModel(path: string, uri: string, text: string, index: ApexIndex): F
         typeDecls,
         typeScopes: new Set(typeDecls.map((t) => t.range)),
         lineStarts,
+        version,
     };
 }
 
@@ -113,7 +135,7 @@ export function positionOf(m: FileModel, offset: number): { line: number; charac
     return { line: lo, character: offset - m.lineStarts[lo] };
 }
 
-function pathOfUri(uri: string): string {
+export function pathOfUri(uri: string): string {
     if (!uri.startsWith('file:')) return uri;
     try {
         return fileURLToPath(uri);
@@ -122,13 +144,37 @@ function pathOfUri(uri: string): string {
     }
 }
 
-/** Parsed closed files (path → mtime + model), shared across requests. */
-const MAX_CLOSED_MODELS = 30;
+/**
+ * Parsed closed files (path → mtime + model), shared across requests (LRU). Capped by
+ * count and by total text size (a model holds the text, its blanked copy and the parse
+ * index — roughly 6× the text in memory).
+ */
+const MAX_CLOSED_MODELS = 800;
+const MAX_CLOSED_CHARS = 12_000_000;
 const closedModels = new Map<string, { mtime: number; model: FileModel }>();
+let closedChars = 0;
+
+function cacheClosed(path: string, mtime: number, model: FileModel): void {
+    const prev = closedModels.get(path);
+    if (prev) closedChars -= prev.model.text.length;
+    lruSet(closedModels, path, { mtime, model }, Number.MAX_SAFE_INTEGER);
+    closedChars += model.text.length;
+    while (closedModels.size > 1 && (closedModels.size > MAX_CLOSED_MODELS || closedChars > MAX_CLOSED_CHARS)) {
+        const [k, v] = closedModels.entries().next().value as [string, { model: FileModel }];
+        closedModels.delete(k);
+        closedChars -= v.model.text.length;
+    }
+}
 
 /** Release the closed-file model cache (call on shutdown). */
 export function clearSearchCaches(): void {
     closedModels.clear();
+    closedChars = 0;
+}
+
+/** Thrown when an open document changed while a request computed exact ranges for it. */
+export function contentModified(): ResponseError<void> {
+    return new ResponseError(LSPErrorCodes.ContentModified, 'The document changed while the request was computed.');
 }
 
 /**
@@ -139,6 +185,8 @@ export class SearchSession {
     readonly openByPath = new Map<string, TextDocument>();
     private graphP: Promise<TypeGraph> | undefined;
     private models = new Map<string, FileModel>();
+    private nsP: Promise<string | null> | undefined;
+    private docs = new Map<string, TextDocument>();
 
     constructor(readonly ctx: ServerContext, readonly token?: CancellationToken) {
         for (const d of ctx.documents.all()) {
@@ -159,17 +207,38 @@ export class SearchSession {
         return this.graphP;
     }
 
-    /** Model of an open document (exact current parse). */
-    modelForDoc(doc: TextDocument): FileModel {
-        const p = pathOfUri(doc.uri);
-        const hit = this.models.get(p);
-        if (hit) return hit;
-        const m = makeModel(p, doc.uri, doc.getText(), this.ctx.parses.current(doc).index);
-        this.models.set(p, m);
-        return m;
+    /** The project namespace (sfdx-project.json via the host), or null. Asked once per request. */
+    namespace(): Promise<string | null> {
+        if (!this.nsP) {
+            const any = this.openByPath.values().next().value as TextDocument | undefined;
+            const uri = any?.uri ?? pathToFileURL(WorkspaceIndex.allFiles()[0] ?? '/').href;
+            this.nsP = this.ctx.schema.projectNamespace(uri, this.token).catch(() => null);
+        }
+        return this.nsP;
     }
 
-    /** Model of any Apex file: the open buffer if open, else the file on disk (async read). */
+    /**
+     * Model of an open document: its exact CURRENT version, parsed in the worker. If the
+     * document changes while we wait, parse again (ranges must line up with the text).
+     */
+    async modelForDoc(doc: TextDocument): Promise<FileModel> {
+        const p = pathOfUri(doc.uri);
+        const hit = this.models.get(p);
+        if (hit && hit.version === doc.version) return hit;
+        for (let attempt = 0; attempt < 3; attempt++) {
+            const version = doc.version;
+            const text = doc.getText();
+            const parse = await this.ctx.parses.currentAsync(doc);
+            this.check();
+            if (doc.version !== version) continue;
+            const m = makeModel(p, doc.uri, text, parse.index, version);
+            this.models.set(p, m);
+            return m;
+        }
+        throw contentModified();
+    }
+
+    /** Model of any Apex file: the open buffer if open, else the file on disk (parsed in the worker). */
     async load(path: string): Promise<FileModel | undefined> {
         const open = this.openByPath.get(path);
         if (open) return this.modelForDoc(open);
@@ -184,12 +253,15 @@ export class SearchSession {
             }
             const text = await fs.promises.readFile(path, 'utf8');
             this.check();
-            const m = makeModel(path, pathToFileURL(path).href, text, parseApex(text).index);
-            lruSet(closedModels, path, { mtime: st.mtimeMs, model: m }, MAX_CLOSED_MODELS);
+            const parse = await ParseWorker.parseText(text);
+            this.check();
+            const m = makeModel(path, pathToFileURL(path).href, text, parse.index);
+            cacheClosed(path, st.mtimeMs, m);
             this.models.set(path, m);
             return m;
         } catch (e) {
             this.check();
+            if (e instanceof ResponseError) throw e;
             return undefined;
         }
     }
@@ -210,6 +282,18 @@ export class SearchSession {
     /** URI to report for a file (the open document's own URI when open). */
     uriOf(path: string): string {
         return this.openByPath.get(path)?.uri ?? (path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path) ? pathToFileURL(path).href : path);
+    }
+
+    /** A TextDocument view of a model (for the expression resolver). */
+    docOf(m: FileModel): TextDocument {
+        const open = this.openByPath.get(m.path);
+        if (open && open.version === m.version) return open;
+        let d = this.docs.get(m.path);
+        if (!d || d.getText() !== m.text) {
+            d = TextDocument.create(m.uri, 'apex', 0, m.text);
+            this.docs.set(m.path, d);
+        }
+        return d;
     }
 
     /** The parse declaration of a graph node. */
@@ -245,6 +329,10 @@ function size(r: Range): number {
     return (r.end.line - r.start.line) * 100_000 + (r.end.character - r.start.character);
 }
 
+function at(r: Range, p: { line: number; character: number }): boolean {
+    return r.start.line === p.line && r.start.character === p.character;
+}
+
 /** Enclosing type declarations at a position, innermost first. */
 export function enclosingTypes(m: FileModel, line: number, ch: number): ApexTypeDecl[] {
     return m.typeDecls.filter((t) => contains(t.range, line, ch)).sort((a, b) => size(a.range) - size(b.range));
@@ -278,27 +366,59 @@ function isFieldDecl(m: FileModel, d: VarDecl): boolean {
     return m.typeScopes.has(d.scope);
 }
 
-/** Receiver of `<recv>.name` ending just before `start` (in blanked code). */
-type Receiver = { kind: 'none' } | { kind: 'ident'; name: string } | { kind: 'complex' };
+/** Receiver of `<recv>.name` ending just before `start` (in blanked code); `dot` = offset of the `.`. */
+type Receiver = { kind: 'none' } | { kind: 'ident'; name: string; dot: number } | { kind: 'complex'; dot: number };
 
 function receiverAt(code: string, start: number): Receiver {
     let i = start - 1;
     while (i >= 0 && /\s/.test(code[i])) i--;
     if (code[i] !== '.') return { kind: 'none' };
+    const dot = i;
     i--;
     while (i >= 0 && /\s/.test(code[i])) i--;
     const end = i + 1;
     while (i >= 0 && /\w/.test(code[i])) i--;
     const name = code.slice(i + 1, end);
-    if (!/^[A-Za-z_]\w*$/.test(name)) return { kind: 'complex' };
+    if (!/^[A-Za-z_]\w*$/.test(name)) return { kind: 'complex', dot };
     let j = i;
     while (j >= 0 && /\s/.test(code[j])) j--;
-    if (code[j] === '.') return { kind: 'complex' }; // a.b.name — chain
-    return { kind: 'ident', name };
+    if (code[j] === '.') return { kind: 'complex', dot }; // a.b.name — chain
+    return { kind: 'ident', name, dot };
 }
 
 function followedByCall(code: string, end: number): boolean {
     return /^\s*\(/.test(code.slice(end, end + 200));
+}
+
+/**
+ * Number of arguments of the call whose name ends at `end` (`name(a, b)` → 2), or
+ * undefined when the parens can't be matched. Generic `<…>` (written without a space
+ * before `<`) and nested brackets don't split arguments.
+ */
+export function callArity(code: string, end: number): number | undefined {
+    let i = end;
+    while (i < code.length && /\s/.test(code[i])) i++;
+    if (code[i] !== '(') return undefined;
+    let depth = 0;
+    let angle = 0;
+    let commas = 0;
+    let any = false;
+    for (i++; i < code.length; i++) {
+        const c = code[i];
+        if (c === '(' || c === '[' || c === '{') depth++;
+        else if (c === ')' || c === ']' || c === '}') {
+            if (depth === 0) {
+                if (c !== ')') return undefined;
+                return any ? commas + 1 : 0;
+            }
+            depth--;
+        } else if (c === '<' && /\w/.test(code[i - 1] ?? '')) angle++;
+        else if (c === '>' && angle > 0) angle--;
+        else if (c === ',' && depth === 0 && angle === 0) commas++;
+        else if (c === ';') return undefined;
+        if (!/\s/.test(c)) any = true;
+    }
+    return undefined;
 }
 
 function precededByNew(code: string, start: number): boolean {
@@ -326,7 +446,68 @@ export function isTypePosition(code: string, start: number, end: number): boolea
     return false;
 }
 
+/** `when A, B {` — an identifier in a switch `when` value list (enum values are written bare there). */
+function inWhenClause(code: string, start: number): boolean {
+    const lineBefore = code.slice(code.lastIndexOf('\n', start - 1) + 1, start);
+    return /\bwhen\s+(?:[A-Za-z_]\w*\s*,\s*)*$/i.test(lineBefore);
+}
+
 const SCHEMA_SUFFIX = /__(c|r|mdt|e|x|b|share|history|feed|kav|ka|changeevent)$/i;
+
+// ─── Receiver typing (expression chains) ────────────────────────────────────────
+
+/**
+ * Drop a leading namespace qualifier: `myns.AccountService.x` → `AccountService.x`, when
+ * the first segment is no variable / type in scope, is the project namespace (or the
+ * namespace is unknown), and the next segment is a workspace type.
+ */
+async function stripNamespace(s: SearchSession, g: TypeGraph, m: FileModel, expr: string, pos: { line: number; character: number }): Promise<string> {
+    const mm = /^\s*([A-Za-z_]\w*)\s*\.\s*([A-Za-z_]\w*)/.exec(expr);
+    if (!mm) return expr;
+    if (!isNamespaceQualifier(m, g, mm[1], mm[2], pos)) return expr;
+    const ns = await s.namespace();
+    if (ns && ns.toLowerCase() !== mm[1].toLowerCase()) return expr;
+    return expr.slice(expr.indexOf('.', mm.index + mm[1].length) + 1).trimStart();
+}
+
+function isNamespaceQualifier(m: FileModel, g: TypeGraph, first: string, next: string, pos: { line: number; character: number }): boolean {
+    const lc = first.toLowerCase();
+    if (lc === 'this' || lc === 'super' || APEX_RESERVED.has(lc)) return false;
+    if (varAt(m, first, pos.line, pos.character)) return false;
+    if (g.resolve(first, m.path)) return false;
+    if (stdTypeName(first) || stdMembersFor(first)) return false;
+    return !!g.resolve(next, m.path);
+}
+
+/**
+ * The workspace type of the receiver expression ending at `dot` (`a.b().c[0]` in
+ * `a.b().c[0].name`): a node, `'external'` when it resolves to a standard / SObject /
+ * non-workspace type, or undefined when it can't be typed.
+ */
+async function typeOfReceiver(
+    s: SearchSession,
+    g: TypeGraph,
+    m: FileModel,
+    dot: number,
+    pos: { line: number; character: number },
+): Promise<TypeNode | 'external' | undefined> {
+    let expr = receiverExprBefore(m.text, dot);
+    if (!expr) return undefined;
+    expr = await stripNamespace(s, g, m, expr, pos);
+    const view: ParseView = { result: { index: m.index } as ApexParseResult, stale: false, toParsePosition: (p) => p };
+    let v;
+    try {
+        v = await new Resolver(s.ctx, s.docOf(m), pos, [view], s.token).exprValue(expr);
+    } catch (e) {
+        s.check();
+        return undefined;
+    }
+    s.check();
+    if (!v) return undefined;
+    if (v.t.k !== 'user') return 'external';
+    const qn = v.t.decl.outer ? `${v.t.decl.outer}.${v.t.decl.name}` : v.t.decl.name;
+    return g.find(v.t.ft.file, qn) ?? g.resolve(qn, m.path) ?? undefined;
+}
 
 // ─── Resolution ─────────────────────────────────────────────────────────────────
 
@@ -354,23 +535,40 @@ function isFieldKind(k: ApexMemberDecl['kind']): boolean {
     return k === 'field' || k === 'property';
 }
 
+/** Among same-named methods, the one whose arity matches the call (else the first). */
+function pickOverload(list: ApexMemberDecl[], arity: number | undefined): ApexMemberDecl | undefined {
+    if (arity !== undefined) {
+        const exact = list.find((x) => x.arity === arity);
+        if (exact) return exact;
+    }
+    return list[0];
+}
+
 /** First type in [start, ...ancestors] declaring a member `name` of the wanted kind. */
 async function findMemberOwner(
     s: SearchSession,
     start: TypeNode,
     name: string,
     want: 'method' | 'field',
+    arity?: number,
 ): Promise<{ owner: TypeNode; member: ApexMemberDecl } | undefined> {
     const g = await s.graph();
     const lc = name.toLowerCase();
+    let fallback: { owner: TypeNode; member: ApexMemberDecl } | undefined;
     for (const t of [start, ...g.ancestors(start)]) {
         s.check();
-        const m = (await s.membersOf(t)).find(
+        const list = (await s.membersOf(t)).filter(
             (x) => x.name.toLowerCase() === lc && (want === 'method' ? isMethodKind(x.kind) : isFieldKind(x.kind)),
         );
-        if (m) return { owner: t, member: m };
+        if (!list.length) continue;
+        if (want === 'method' && arity !== undefined && !list.some((x) => x.arity === arity)) {
+            fallback ??= { owner: t, member: list[0] };
+            continue; // an overload with this arity may be inherited
+        }
+        const member = want === 'method' ? pickOverload(list, arity) : list[0];
+        if (member) return { owner: t, member };
     }
-    return undefined;
+    return fallback;
 }
 
 /** Graph node for a type declared in a model. */
@@ -384,8 +582,8 @@ export async function resolveAt(
     doc: TextDocument,
     pos: { line: number; character: number },
 ): Promise<Resolution | undefined> {
-    const m = s.modelForDoc(doc);
-    const offset = doc.offsetAt(pos);
+    const m = await s.modelForDoc(doc);
+    const offset = offsetOf(m, pos.line, pos.character);
     // Word under the cursor (in blanked code: nothing inside comments/strings resolves).
     let start = offset;
     let end = offset;
@@ -412,20 +610,53 @@ export async function resolveAt(
     }
     const g = await s.graph();
     s.check();
+
+    // ── On a declaration name: exactly that declaration (overloads stay apart) ──
+    for (const t of m.typeDecls) {
+        if (at(t.nameRange, sp)) {
+            const n = await nodeOf(s, m, t);
+            if (n) return out({ kind: 'type', name: t.name, node: n });
+        }
+        const member = t.members.find((x) => at(x.nameRange, sp) && x.name.toLowerCase() === lc);
+        if (!member) continue;
+        const n = await nodeOf(s, m, t);
+        if (!n) break;
+        if (member.kind === 'constructor') return out({ kind: 'type', name: t.name, node: n });
+        return out({ kind: isMethodKind(member.kind) ? 'method' : 'field', name: member.name, owner: n, member });
+    }
+
     const call = followedByCall(m.code, end);
+    const arity = call ? callArity(m.code, end) : undefined;
     const recv = receiverAt(m.code, start);
     const notWorkspace = (what?: string): Resolution => {
         if (SCHEMA_SUFFIX.test(word) || stubbedObjectNames().has(lc)) return out(undefined, `'${word}' is part of the org schema (SObject/field) and can't be renamed here.`);
         if (stdTypeName(word)) return out(undefined, `'${word}' is a standard Apex type.`);
         return out(undefined, what ?? `'${word}' is not declared in this workspace.`);
     };
+    const memberOf = async (nodes: TypeNode[]): Promise<Resolution> => {
+        const want = call ? 'method' : 'field';
+        for (const n of nodes) {
+            const hit = await findMemberOwner(s, n, word, want, arity);
+            if (hit) return out({ kind: want, name: hit.member.name, owner: hit.owner, member: hit.member });
+        }
+        // A static access of an inner type: `Outer.Inner`.
+        if (!call) for (const n of nodes) {
+            const inner = g.resolve(`${n.qname}.${word}`, m.path);
+            if (inner) return out({ kind: 'type', name: inner.header.name, node: inner });
+        }
+        return out(undefined, `'${word}' is not declared in ${nodes.map((n) => n.qname).join(', ')} or its workspace supertypes.`);
+    };
 
-    // ── Receiver-qualified: this.x / super.x / var.x / Type.x ──
-    if (recv.kind === 'complex') return out(undefined, `Can't resolve the expression before '.${word}'.`);
+    // ── Receiver-qualified: this.x / super.x / var.x / Type.x / ns.Type / expr.x ──
+    if (recv.kind === 'complex') {
+        const t = await typeOfReceiver(s, g, m, recv.dot, sp);
+        if (t && t !== 'external') return memberOf([t]);
+        if (t === 'external') return notWorkspace(`'${word}' is a member of a type that is not declared in this workspace.`);
+        return out(undefined, `Can't resolve the expression before '.${word}'.`);
+    }
     if (recv.kind === 'ident') {
         const r = recv.name;
         const rlc = r.toLowerCase();
-        const want = call ? 'method' : 'field';
         let startNodes: TypeNode[] = [];
         if (rlc === 'this' || rlc === 'super') {
             const enc = enclosingTypes(m, sp.line, sp.character)[0];
@@ -446,25 +677,29 @@ export async function resolveAt(
             } else {
                 const tn = g.resolve(r, m.path);
                 if (tn) {
-                    // Outer.Inner → the inner type.
                     // Outer.Inner → the inner type (unless it's a static method call of that name).
                     const inner = g.resolve(`${tn.qname}.${word}`, m.path);
                     if (inner && (!call || !(await findMemberOwner(s, tn, word, 'method')))) {
                         return out({ kind: 'type', name: inner.header.name, node: inner });
                     }
                     startNodes = [tn];
+                } else if (!call && isNamespaceQualifier(m, g, r, word, sp)) {
+                    // `ns.Type` — the type itself.
+                    const ns = await s.namespace();
+                    const tn2 = g.resolve(word, m.path);
+                    if (tn2 && (!ns || ns.toLowerCase() === rlc)) return out({ kind: 'type', name: tn2.header.name, node: tn2 });
+                    return notWorkspace(`Can't resolve '${r}' to a workspace type.`);
                 } else if (stdTypeName(r) || stdMembersFor(r)) {
                     return out(undefined, `'${r}.${word}' is part of the Apex standard library.`);
                 } else {
+                    // An inherited field / something the expression resolver knows.
+                    const t = await typeOfReceiver(s, g, m, recv.dot, sp);
+                    if (t && t !== 'external') return memberOf([t]);
                     return notWorkspace(`Can't resolve '${r}' to a workspace type.`);
                 }
             }
         }
-        for (const n of startNodes) {
-            const hit = await findMemberOwner(s, n, word, want);
-            if (hit) return out({ kind: want, name: hit.member.name, owner: hit.owner, member: hit.member });
-        }
-        return out(undefined, `'${word}' is not declared in ${startNodes.map((n) => n.qname).join(', ')} or its workspace supertypes.`);
+        return memberOf(startNodes);
     }
 
     // ── Bare identifier ──
@@ -481,18 +716,10 @@ export async function resolveAt(
         }
     }
     if (call && !isNew) {
-        // Constructor declaration `public Foo(…)` → the type.
-        for (const t of encl) {
-            const ctor = t.members.find((x) => x.kind === 'constructor' && x.nameRange.start.line === sp.line && x.nameRange.start.character === sp.character);
-            if (ctor && t.name.toLowerCase() === lc) {
-                const n = await nodeOf(s, m, t);
-                if (n) return out({ kind: 'type', name: t.name, node: n });
-            }
-        }
         for (const t of encl) {
             const n = await nodeOf(s, m, t);
             if (!n) continue;
-            const hit = await findMemberOwner(s, n, word, 'method');
+            const hit = await findMemberOwner(s, n, word, 'method', arity);
             if (hit) return out({ kind: 'method', name: hit.member.name, owner: hit.owner, member: hit.member });
         }
         if (stdTypeName(word) || stdMembersFor(word)) return notWorkspace();
@@ -501,27 +728,53 @@ export async function resolveAt(
     // A type: declared in this file (inner types first), else workspace.
     const tn = g.resolve(word, m.path);
     if (tn) return out({ kind: 'type', name: tn.header.name, node: tn });
-    // An inherited field used bare inside a subclass.
+    // An inherited field used bare inside a subclass / an enum value in a `when` clause.
     for (const t of encl) {
         const n = await nodeOf(s, m, t);
         if (!n) continue;
         const hit = await findMemberOwner(s, n, word, 'field');
         if (hit) return out({ kind: 'field', name: hit.member.name, owner: hit.owner, member: hit.member });
     }
+    if (inWhenClause(m.code, start)) {
+        // `when HIGH` — an enum value of an enum declared in this file.
+        for (const t of m.typeDecls) {
+            if (t.kind !== 'enum') continue;
+            const member = t.members.find((x) => x.modifiers.includes('enumvalue') && x.name.toLowerCase() === lc);
+            const n = member && (await nodeOf(s, m, t));
+            if (member && n) return out({ kind: 'field', name: member.name, owner: n, member });
+        }
+    }
     return notWorkspace();
 }
 
 // ─── Occurrence search ──────────────────────────────────────────────────────────
 
+/**
+ * How an occurrence refers to the symbol (metadata occurrences only; Apex code
+ * occurrences have no role). Rename uses it to decide what text to write.
+ */
+export type OccurrenceRole =
+    | 'typeforname' // Type.forName('Cls') string in Apex
+    | 'lwc-class' // class segment of an @salesforce/apex import
+    | 'lwc-spec' // method segment of an @salesforce/apex import
+    | 'lwc-use' // the import's local binding / its call sites (not renamed)
+    | 'aura-controller' // controller="Cls"
+    | 'aura-action' // 'c.method'
+    | 'vf-controller' // controller= / extensions=
+    | 'vf' // {!name} for a member of the same name
+    | 'vf-getter' // {!foo} for getFoo()
+    | 'vf-setter' // {!foo} for setFoo(x)
+    | 'flow-class' // <apexClass> / <actionName> as a class reference
+    | 'flow-invocable'; // <actionName> as a reference to the @InvocableMethod (it names the class)
+
 export interface Occurrence {
     path: string;
     uri: string;
     range: Range;
+    role?: OccurrenceRole;
 }
 
 export type SearchMode = 'references' | 'rename';
-
-const MAX_SCAN_FILES = 2000;
 
 /** The method "family": every type whose `name` method is the same virtual slot. */
 async function methodFamily(s: SearchSession, owner: TypeNode, name: string): Promise<Set<TypeNode>> {
@@ -537,6 +790,17 @@ async function methodFamily(s: SearchSession, owner: TypeNode, name: string): Pr
         for (const d of g.descendants(r)) fam.add(d);
     }
     return fam;
+}
+
+/** The type family a member symbol lives in (method: override slot; field: owner + subtypes). */
+export async function symbolFamily(s: SearchSession, sym: Exclude<ResolvedSymbol, { kind: 'local' }>): Promise<Set<TypeNode>> {
+    const g = await s.graph();
+    if (sym.kind === 'type') return new Set([sym.node]);
+    if (sym.kind === 'method') {
+        if (sym.member.modifiers.includes('static')) return new Set([sym.owner, ...g.descendants(sym.owner)]);
+        return methodFamily(s, sym.owner, sym.name);
+    }
+    return new Set([sym.owner, ...g.descendants(sym.owner)]);
 }
 
 /** Overrides of / implementations of a method in subtypes (for go-to-implementation). */
@@ -588,52 +852,155 @@ export async function renameRestriction(s: SearchSession, sym: ResolvedSymbol): 
     return undefined;
 }
 
+const isFsPath = (f: string) => f.startsWith('/') || /^[A-Za-z]:[\\/]/.test(f);
+const wordRe = (n: string) => new RegExp(`(?<![\\w])${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w])`, 'i');
+
+/**
+ * Candidate files for a member / type search: open buffers containing the name, plus
+ * indexed files whose CODE contains it — for members only those that can reach the
+ * family (declare / name a family type or a producer member). Declaring files first.
+ */
+async function candidateFiles(s: SearchSession, sym: Exclude<ResolvedSymbol, { kind: 'local' }>, family: Set<TypeNode>): Promise<string[]> {
+    await TokenIndex.ensure(s.token);
+    s.check();
+    const lc = sym.name.toLowerCase();
+    const familyFiles = new Set([...family].map((t) => t.file));
+    const out: string[] = [];
+    const seen = new Set<string>();
+    const add = (f: string) => {
+        if (seen.has(f)) return;
+        seen.add(f);
+        if (isFsPath(f) && isIgnoredPath(f)) return;
+        out.push(f);
+    };
+    const open = s.openByPath;
+    const re = wordRe(lc);
+    // Open buffers decide by their own (unsaved) text.
+    const openHas = (f: string, token: RegExp) => token.test(blankNonCode(open.get(f)!.getText()));
+    for (const f of familyFiles) add(f);
+    if (sym.kind === 'type') {
+        for (const f of TokenIndex.lookup(lc)) if (!open.has(f) && /\.(cls|trigger)$/i.test(f)) add(f);
+        for (const f of TokenIndex.lookup(`'${lc}`)) if (!open.has(f)) add(f);
+        for (const f of open.keys()) {
+            const t = open.get(f)!.getText();
+            if (re.test(blankNonCode(t)) || (/forName/i.test(t) && typeForNameRefs(t).some((r) => r.name.toLowerCase() === lc))) add(f);
+        }
+        return out;
+    }
+    // Family type names + producers (members whose declared type mentions a family type).
+    const famNames = new Set<string>();
+    for (const t of family) {
+        famNames.add(t.header.name.toLowerCase());
+        if (t.header.outer) famNames.add(t.header.outer.toLowerCase());
+    }
+    const mentionFiles = new Set<string>();
+    for (const n of famNames) for (const f of TokenIndex.lookup(n)) if (!open.has(f)) mentionFiles.add(f);
+    const famRes = [...famNames].map((n) => wordRe(n));
+    for (const f of open.keys()) if (famRes.some((r) => openHas(f, r))) mentionFiles.add(f);
+    const producers = new Set<string>();
+    const mention = [...mentionFiles];
+    for (let i = 0; i < mention.length; i += 16) {
+        s.check();
+        // The full model (worker parse, cached): these files are almost always candidates too.
+        const typeMaps = await Promise.all(mention.slice(i, i + 16).map((f) => s.load(f).then((m) => m?.index.types)));
+        for (const types of typeMaps) for (const members of types?.values() ?? []) {
+            for (const mem of members) {
+                if (!mem.type || mem.kind === 'constructor' || mem.kind === 'enumValue') continue;
+                if (famRes.some((r) => r.test(mem.type!))) producers.add(mem.name.toLowerCase());
+            }
+        }
+    }
+    const viaProducer = new Set<string>();
+    for (const p of producers) {
+        for (const f of TokenIndex.lookup(p)) if (!open.has(f)) viaProducer.add(f);
+        const pr = wordRe(p);
+        for (const f of open.keys()) if (openHas(f, pr)) viaProducer.add(f);
+    }
+    for (const f of mentionFiles) if (open.has(f) ? openHas(f, re) : TokenIndex.has(f, lc)) add(f);
+    // Files that reach the family only through a producer: parse them only if an occurrence's
+    // receiver expression actually goes through one (`x.svc.name`, `instance().name`) —
+    // bare / `this` uses outside the family and receivers naming no producer can't be hits.
+    let n = 0;
+    for (const f of viaProducer) {
+        if (seen.has(f)) continue;
+        if (!(open.has(f) ? openHas(f, re) : TokenIndex.has(f, lc))) continue;
+        if (++n % 25 === 0) await new Promise<void>((r) => setImmediate(r));
+        s.check();
+        const text = await s.textOf(f);
+        if (text !== undefined && receiverThroughProducer(blankNonCode(text), lc, producers)) add(f);
+    }
+    return out;
+}
+
+/** Whether some `….name` occurrence in code has a receiver expression mentioning a producer. */
+function receiverThroughProducer(code: string, lcName: string, producers: Set<string>): boolean {
+    const re = new RegExp(`(?<![\\w])${lcName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w])`, 'gi');
+    for (const mm of code.matchAll(re)) {
+        let i = (mm.index ?? 0) - 1;
+        while (i >= 0 && /\s/.test(code[i])) i--;
+        if (code[i] !== '.') continue;
+        const expr = receiverExprBefore(code, i);
+        if (!expr) return true; // can't tell — parse it
+        for (const t of expr.matchAll(/[A-Za-z_]\w*/g)) if (producers.has(t[0].toLowerCase())) return true;
+    }
+    return false;
+}
+
 /**
  * Every occurrence of the resolved symbol. Locals: the declaring document only.
- * Members/types: all workspace Apex files (open buffers preferred), capped and
- * cancellable, yielding between files.
+ * Members/types: all workspace Apex files that can refer to it (open buffers
+ * preferred), plus Salesforce metadata references. Cancellable, yields between files.
  */
 export async function findOccurrences(s: SearchSession, sym: ResolvedSymbol, mode: SearchMode): Promise<Occurrence[]> {
     if (sym.kind === 'local') return localOccurrences(sym.model, sym.decl);
 
     const g = await s.graph();
-    const lc = sym.name.toLowerCase();
-    let family: Set<TypeNode>;
-    if (sym.kind === 'type') family = new Set([sym.node]);
-    else if (sym.kind === 'method') family = await methodFamily(s, sym.owner, sym.name);
-    else family = new Set([sym.owner, ...g.descendants(sym.owner)]);
-    const familyFiles = new Set([...family].map((t) => t.file));
-    const familyNames = [...new Set([...family].flatMap((t) => [t.header.name.toLowerCase(), ...(t.header.outer ? [t.header.outer.toLowerCase()] : [])]))];
-
-    // Candidate files: every indexed file + open Apex buffers (deduped), declaring files first.
-    const files: string[] = [];
-    const seen = new Set<string>();
-    for (const f of [...familyFiles, ...s.openByPath.keys(), ...WorkspaceIndex.allFiles()]) {
-        if (seen.has(f)) continue;
-        seen.add(f);
-        if (f.startsWith('/') || /^[A-Za-z]:[\\/]/.test(f)) {
-            if (isIgnoredPath(f)) continue;
-        }
-        files.push(f);
-    }
+    const family = await symbolFamily(s, sym);
+    const files = await candidateFiles(s, sym, family);
+    const arities = sym.kind === 'method' ? await familyArities(s, family, sym.name) : undefined;
 
     const out: Occurrence[] = [];
-    let scanned = 0;
-    for (const f of files) {
+    // Parse candidates a few ahead (the worker queues them); classify in order. Every load
+    // promise gets a handler at once so a cancellation never leaves a rejection unhandled.
+    const AHEAD = 16;
+    const loads: Promise<{ m?: FileModel; e?: unknown }>[] = [];
+    const start = (i: number) => {
+        if (i < files.length && !loads[i]) loads[i] = s.load(files[i]).then((m) => ({ m }), (e) => ({ e }));
+    };
+    for (let i = 0; i < Math.min(AHEAD, files.length); i++) start(i);
+    for (let i = 0; i < files.length; i++) {
+        start(i + AHEAD);
+        const r = await loads[i];
+        if (r.e) {
+            // Drain the rest quietly, then surface the cancellation / content change.
+            void Promise.all(loads.slice(i + 1));
+            throw r.e;
+        }
         s.check();
-        if (scanned++ >= MAX_SCAN_FILES) break;
-        if (scanned % 10 === 0) await new Promise<void>((r) => setImmediate(r));
-        const text = await s.textOf(f);
-        if (text === undefined) continue;
-        const tl = text.toLowerCase();
-        if (!tl.includes(lc)) continue; // cheap reject
-        // A member can only be reached from a file that declares a family type or names one
-        // (a typed receiver / static access) — unless references mode keeps unresolved receivers.
-        if (sym.kind !== 'type' && mode === 'rename' && !familyFiles.has(f) && !familyNames.some((n) => tl.includes(n))) continue;
-        const m = await s.load(f);
+        if (i % 10 === 9) await new Promise<void>((res) => setImmediate(res));
+        const m = r.m;
         if (!m) continue;
-        for (const r of classifyFile(m, g, sym, family, mode)) out.push({ path: m.path, uri: s.uriOf(m.path), range: r });
+        for (const o of await classifyFile(s, m, g, sym, family, mode, arities)) out.push({ path: m.path, uri: s.uriOf(m.path), ...o });
     }
+    for (const o of await metadataOccurrences(s, sym, family)) out.push(o);
+    return dedupeOccurrences(out);
+}
+
+function dedupeOccurrences(list: Occurrence[]): Occurrence[] {
+    const seen = new Set<string>();
+    return list.filter((o) => {
+        const k = `${o.uri}:${o.range.start.line}:${o.range.start.character}:${o.range.end.character}`;
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+    });
+}
+
+/** Arities declared for `name` across a method family (overload filtering). */
+async function familyArities(s: SearchSession, family: Set<TypeNode>, name: string): Promise<Set<number>> {
+    const lc = name.toLowerCase();
+    const out = new Set<number>();
+    for (const t of family) for (const x of await s.membersOf(t)) if (isMethodKind(x.kind) && x.name.toLowerCase() === lc && x.arity !== undefined) out.add(x.arity);
     return out;
 }
 
@@ -668,26 +1035,53 @@ function localOccurrences(m: FileModel, decl: VarDecl): Occurrence[] {
 }
 
 /** Classify every occurrence of the symbol's name in one file. */
-function classifyFile(m: FileModel, g: TypeGraph, sym: Exclude<ResolvedSymbol, { kind: 'local' }>, family: Set<TypeNode>, mode: SearchMode): Range[] {
-    const out: Range[] = [];
+async function classifyFile(
+    s: SearchSession,
+    m: FileModel,
+    g: TypeGraph,
+    sym: Exclude<ResolvedSymbol, { kind: 'local' }>,
+    family: Set<TypeNode>,
+    mode: SearchMode,
+    arities?: Set<number>,
+): Promise<{ range: Range; role?: OccurrenceRole }[]> {
+    const out: { range: Range; role?: OccurrenceRole }[] = [];
     const nodeFor = (t: ApexTypeDecl | undefined) => (t ? g.find(m.path, qnameOf(t)) : undefined);
     const inFamily = (n: TypeNode | undefined) => !!n && family.has(n);
-    /** Does a receiver identifier denote a family type (typed variable / static type)? undefined = unresolved. */
-    const receiverInFamily = (r: string, line: number, ch: number): boolean | undefined => {
-        const rlc = r.toLowerCase();
-        const encl = enclosingTypes(m, line, ch);
-        if (rlc === 'this') return inFamily(nodeFor(encl[0]));
-        if (rlc === 'super') {
-            const n = nodeFor(encl[0]);
-            return !!n && g.supertypes(n).some((x) => family.has(x));
+    const lcName = sym.name.toLowerCase();
+    /** Does the receiver before `dot` denote a family type? undefined = can't be typed. */
+    const receiverInFamily = async (recv: Exclude<Receiver, { kind: 'none' }>, line: number, ch: number): Promise<boolean | undefined> => {
+        if (recv.kind === 'ident') {
+            const rlc = recv.name.toLowerCase();
+            const encl = enclosingTypes(m, line, ch);
+            if (rlc === 'this') return inFamily(nodeFor(encl[0]));
+            if (rlc === 'super') {
+                const n = nodeFor(encl[0]);
+                return !!n && g.supertypes(n).some((x) => family.has(x));
+            }
+            const v = varAt(m, recv.name, line, ch);
+            if (v) {
+                const tn = g.resolve(baseTypeName(v.type), m.path);
+                return tn ? family.has(tn) : false;
+            }
+            const tn = g.resolve(recv.name, m.path);
+            if (tn) return family.has(tn);
+            if (stdTypeName(recv.name) || stdMembersFor(recv.name)) return false;
         }
-        const v = varAt(m, r, line, ch);
-        if (v) {
-            const tn = g.resolve(baseTypeName(v.type), m.path);
-            return tn ? family.has(tn) : false;
+        const t = await typeOfReceiver(s, g, m, recv.dot, { line, character: ch });
+        if (t === 'external') return false;
+        return t ? family.has(t) : undefined;
+    };
+    /** Exclude same-named overloads with a different arity (declarations and calls). */
+    const arityOk = (a: number | undefined): boolean => {
+        if (sym.kind !== 'method' || a === undefined || sym.member.arity === undefined) return true;
+        if (a === sym.member.arity) return true;
+        return !arities?.has(a); // an arity no family overload declares: keep (can't tell)
+    };
+    const memberDeclAt = (p: { line: number; character: number }) => {
+        for (const t of m.typeDecls) {
+            const x = t.members.find((mm) => at(mm.nameRange, p));
+            if (x) return { t, x };
         }
-        const tn = g.resolve(r, m.path);
-        if (tn) return family.has(tn);
         return undefined;
     };
 
@@ -701,7 +1095,11 @@ function classifyFile(m: FileModel, g: TypeGraph, sym: Exclude<ResolvedSymbol, {
         if (sym.kind === 'type') {
             const node = sym.node;
             if (recv.kind === 'ident') {
-                hit = !!node.header.outer && recv.name.toLowerCase() === node.header.outer.toLowerCase();
+                if (node.header.outer) hit = recv.name.toLowerCase() === node.header.outer.toLowerCase();
+                else if (isNamespaceQualifier(m, g, recv.name, sym.name, p) && g.resolve(sym.name, m.path) === node) {
+                    const ns = await s.namespace();
+                    hit = !ns || ns.toLowerCase() === recv.name.toLowerCase();
+                }
             } else if (recv.kind === 'none') {
                 if (g.resolve(m.code.slice(w.start, w.end), m.path) !== node) hit = false;
                 else {
@@ -712,44 +1110,54 @@ function classifyFile(m: FileModel, g: TypeGraph, sym: Exclude<ResolvedSymbol, {
                     else if (call && !isNew) {
                         hit = m.typeDecls.some(
                             (t) =>
-                                t.name.toLowerCase() === sym.name.toLowerCase() &&
-                                t.members.some((x) => x.kind === 'constructor' && x.nameRange.start.line === p.line && x.nameRange.start.character === p.character),
+                                t.name.toLowerCase() === lcName &&
+                                t.members.some((x) => x.kind === 'constructor' && at(x.nameRange, p)),
                         );
                     } else {
                         // Not a same-named member declaration (method/field names never collide with type refs here).
-                        hit = !m.typeDecls.some((t) =>
-                            t.members.some((x) => x.kind !== 'constructor' && x.nameRange.start.line === p.line && x.nameRange.start.character === p.character),
-                        );
+                        hit = !m.typeDecls.some((t) => t.members.some((x) => x.kind !== 'constructor' && at(x.nameRange, p)));
                     }
                 }
             }
         } else if (sym.kind === 'method') {
             if (!call || isNew) hit = false;
-            else if (recv.kind === 'complex') hit = mode === 'references';
-            else if (recv.kind === 'ident') {
-                const r = receiverInFamily(recv.name, p.line, p.character);
+            else if (!arityOk(callArity(m.code, w.end))) hit = false;
+            else if (recv.kind !== 'none') {
+                const r = await receiverInFamily(recv, p.line, p.character);
                 hit = r === undefined ? mode === 'references' : r;
             } else {
-                // Bare call / declaration: inside a family type (innermost→outer: inner classes may call outer statics).
-                hit = enclosingTypes(m, p.line, p.character).some((t) => inFamily(nodeFor(t)));
+                const d = memberDeclAt(p);
+                if (d) {
+                    // A declaration: one of the family's (same arity) declarations.
+                    hit = isMethodKind(d.x.kind) && inFamily(nodeFor(d.t)) && arityOk(d.x.arity);
+                } else {
+                    // Bare call: inside a family type (innermost→outer: inner classes may call outer statics).
+                    hit = enclosingTypes(m, p.line, p.character).some((t) => inFamily(nodeFor(t)));
+                }
             }
         } else {
-            // field / property
+            // field / property / enum value
+            const enumValue = sym.member.modifiers.includes('enumvalue');
             if (call) hit = false;
-            else if (recv.kind === 'complex') hit = mode === 'references';
-            else if (recv.kind === 'ident') {
-                const r = receiverInFamily(recv.name, p.line, p.character);
+            else if (recv.kind !== 'none') {
+                const r = await receiverInFamily(recv, p.line, p.character);
                 hit = r === undefined ? mode === 'references' : r;
             } else if (isTypePosition(m.code, w.start, w.end)) {
                 hit = false;
             } else {
+                const d = memberDeclAt(p);
                 const v = varAt(m, sym.name, p.line, p.character);
-                if (v) {
+                if (d) {
+                    hit = isFieldKind(d.x.kind) && nodeFor(d.t) === sym.owner;
+                } else if (v) {
                     if (!isFieldDecl(m, v)) hit = false; // shadowed by a local/param
                     else {
                         const owner = nodeFor(m.typeDecls.find((t) => t.range === v.scope));
                         hit = owner === sym.owner;
                     }
+                } else if (enumValue && inWhenClause(m.code, w.start)) {
+                    // `when HIGH` — the switch's enum is the one declaring the value, if it's reachable here.
+                    hit = m.path === sym.owner.file || (await reachesType(s, m, sym.owner));
                 } else {
                     // Inherited field used bare inside a subclass.
                     const n = nodeFor(enclosingTypes(m, p.line, p.character)[0]);
@@ -757,9 +1165,22 @@ function classifyFile(m: FileModel, g: TypeGraph, sym: Exclude<ResolvedSymbol, {
                 }
             }
         }
-        if (hit) out.push(toRange(m, w.start, w.end));
+        if (hit) out.push({ range: toRange(m, w.start, w.end) });
+    }
+
+    // `Type.forName('Cls')` strings.
+    if (sym.kind === 'type' && !sym.node.header.outer && /forName/i.test(m.text)) {
+        const ns = await s.namespace();
+        for (const r of typeForNameRefs(m.text)) {
+            if (classNameMatches(r.name, r.ns, sym.name, ns)) out.push({ range: toRange(m, r.start, r.end), role: 'typeforname' });
+        }
     }
     return out;
+}
+
+/** Whether a file mentions a type by name (cheap reachability check for bare enum values). */
+async function reachesType(s: SearchSession, m: FileModel, t: TypeNode): Promise<boolean> {
+    return wordRe(t.header.outer ?? t.header.name).test(m.code);
 }
 
 /** Location helper: the declaration name range of a resolved symbol. */
@@ -777,4 +1198,30 @@ export function declarationOf(s: SearchSession, sym: ResolvedSymbol): Occurrence
 
 export function sameRange(a: Range, b: Range): boolean {
     return a.start.line === b.start.line && a.start.character === b.start.character && a.end.line === b.end.line && a.end.character === b.end.character;
+}
+
+/**
+ * Resolve a workspace Apex class (and optionally one of its members) by name — for
+ * metadata navigation (LWC / Aura / Visualforce → Apex). Case-insensitive; a member
+ * prefers an `@AuraEnabled` declaration (LWC/Aura can only call those), else the first.
+ */
+export async function resolveByName(
+    s: SearchSession,
+    className: string,
+    member?: string,
+    prefer?: 'aura' | 'invocable',
+): Promise<ResolvedSymbol | undefined> {
+    const g = await s.graph();
+    const node = g.resolve(className);
+    if (!node) return undefined;
+    if (!member) return { kind: 'type', name: node.header.name, node };
+    const lc = member.toLowerCase();
+    for (const t of [node, ...g.ancestors(node)]) {
+        const list = (await s.membersOf(t)).filter((x) => x.name.toLowerCase() === lc && x.kind !== 'constructor');
+        if (!list.length) continue;
+        const tag = prefer === 'aura' ? '@auraenabled' : prefer === 'invocable' ? '@invocablemethod' : undefined;
+        const best = (tag && list.find((x) => x.modifiers.includes(tag))) || list.find((x) => isMethodKind(x.kind)) || list[0];
+        return { kind: isMethodKind(best.kind) ? 'method' : 'field', name: best.name, owner: t, member: best };
+    }
+    return undefined;
 }

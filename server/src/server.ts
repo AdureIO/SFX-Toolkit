@@ -43,6 +43,7 @@ import { createServerContext, ServerSettings } from './context';
 import { NOTE_REFRESH, NOTE_EPHEMERAL } from './protocol';
 import { isApex } from './textUtil';
 import { WorkspaceIndex } from './workspaceIndex';
+import { TokenIndex } from './tokenIndex';
 import { setStubRoot, clearStubs, invalidateStubbedNames } from './sobjectStub';
 import * as completion from './completion';
 import * as hover from './hover';
@@ -56,6 +57,7 @@ import * as diagnostics from './diagnostics';
 import * as codeActions from './codeActions';
 import * as semanticTokens from './semanticTokens';
 import * as schemaPrefetch from './schemaPrefetch';
+import * as apexLinks from './apexLinks';
 
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments(TextDocument);
@@ -134,7 +136,12 @@ connection.onInitialize((params): InitializeResult => {
 
 // Build the cross-file type index in the background (async walk, never blocks requests).
 connection.onInitialized(() => {
-    void WorkspaceIndex.ready();
+    TokenIndex.attach();
+    // The reference token index (every Apex + metadata file) builds right after the scan,
+    // so the first Find References / rename doesn't pay for reading the workspace.
+    void WorkspaceIndex.ready().then(() => {
+        if (ctx.settings.apexFeatures) void TokenIndex.ensure().catch(() => undefined);
+    });
     // Warm the Apex parser JIT and start the parse worker off the first request's path.
     setImmediate(() => ctx.parses.warm());
 });
@@ -204,6 +211,7 @@ diagnostics.register(connection, ctx);
 codeActions.register(connection, ctx);
 navigation.register(connection, ctx);
 semanticTokens.register(connection, ctx);
+apexLinks.register(connection, ctx);
 // ── add new feature registrations above this line ──
 
 // ─── Lifetime ─────────────────────────────────────────────────────────────────
@@ -216,6 +224,7 @@ ctx.onRelease(() => {
     clearStubs();
     invalidateStubbedNames();
     WorkspaceIndex.clear();
+    TokenIndex.clear();
 });
 connection.onShutdown(() => {
     ctx.releaseAll();
