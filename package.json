@@ -51,7 +51,7 @@
     "commands": [
       {
         "command": "adure-sfx-toolkit.optimizeSalesforceMemory",
-        "title": "ASFX: Optimize Salesforce extensions memory"
+        "title": "ASFXT: Optimize Salesforce Extensions Memory"
       },
       {
         "command": "adure-sfx-toolkit.listLogs",
