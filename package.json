@@ -984,6 +984,12 @@
           "maximum": 120000,
           "description": "HTTP request timeout in milliseconds."
         },
+        "adure-sfx-toolkit.apex.executeAnonymousTimeoutMs": {
+          "type": "number",
+          "default": 600000,
+          "minimum": 30000,
+          "description": "Timeout in milliseconds for Execute Anonymous Apex requests (default 10 minutes). Long-running DML can exceed the general HTTP timeout; the server keeps executing even if the client gives up, so a timeout means the outcome is unknown."
+        },
         "adure-sfx-toolkit.warnOnProductionOrg": {
           "type": "boolean",
           "default": true,

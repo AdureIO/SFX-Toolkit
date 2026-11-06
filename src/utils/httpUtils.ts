@@ -48,6 +48,13 @@ interface RawRequest {
     totalTimeoutMs?: number;
     /** Extra non-2xx statuses that resolve instead of rejecting (e.g. 304). */
     acceptStatus?: number[];
+    /**
+     * Idempotent request: on a transient socket error (stalled/reset keep-alive socket) retry
+     * once immediately on a fresh connection. Never set for POST/PATCH (not idempotent).
+     */
+    retryTransient?: boolean;
+    /** Use a brand-new, non-pooled connection (`agent: false`) instead of a possibly stale keep-alive socket. */
+    freshSocket?: boolean;
 }
 
 /** Full response of a request: status, headers and the (decompressed) body. */
@@ -61,6 +68,54 @@ export interface HttpResponse {
 export interface HttpError extends Error {
     status?: number;
     timedOut?: boolean;
+    /** Node/OS socket error code (ETIMEDOUT, ECONNRESET, ...), preserved when the error is wrapped. */
+    code?: string;
+    /** True when this is a wrapped socket-level failure (no HTTP response was received). */
+    networkError?: boolean;
+}
+
+/** Wording for failed POST/PATCH: they are never retried and the server may have processed them. */
+const UNKNOWN_OUTCOME_HINT = 'the connection dropped before the response arrived. The request may still have completed on the server; check the result before re-running.';
+const MAY_HAVE_COMPLETED = ' The request may still have completed on the server; check the result before re-running.';
+
+/** GET/DELETE are safe to repeat; everything else (POST/PATCH) is not. */
+function isIdempotentMethod(method: string): boolean {
+    return method === 'GET' || method === 'DELETE' || method === 'HEAD';
+}
+
+/** Clamp a configured timeout: non-numbers fall back to `def`, numbers below `min` are raised to it. */
+export function clampTimeoutMs(raw: unknown, def: number, min: number): number {
+    return typeof raw === 'number' && isFinite(raw) ? Math.max(min, raw) : def;
+}
+
+/** Socket-level error codes that indicate a stale/stalled connection rather than a server answer. */
+const TRANSIENT_SOCKET_CODES = new Set(['ECONNRESET', 'ETIMEDOUT', 'EPIPE', 'EAI_AGAIN']);
+
+/** Whether `e` is a transient socket error (reset/stalled/broken pipe/DNS hiccup), wrapped or raw. */
+export function isTransientSocketError(e: any): boolean {
+    if (!e) return false;
+    if (typeof e.code === 'string' && TRANSIENT_SOCKET_CODES.has(e.code)) return true;
+    return /socket hang up|\b(ECONNRESET|ETIMEDOUT|EPIPE|EAI_AGAIN)\b/.test(String(e.message ?? ''));
+}
+
+/**
+ * Wrap a raw socket error into a readable message naming the host, keeping the original
+ * message in parentheses and `code` on the error so classification keeps working.
+ */
+export function wrapNetworkError(e: any, host: string, idempotent = true): HttpError {
+    const raw = String(e?.message ?? e);
+    const code: string | undefined = typeof e?.code === 'string' ? e.code : /\b(ECONNRESET|ETIMEDOUT|EPIPE|EAI_AGAIN|ENOTFOUND|ECONNREFUSED|ENETUNREACH)\b/.exec(raw)?.[1];
+    let hint: string;
+    if (code === 'ETIMEDOUT') hint = 'the connection stalled; the org may be busy. Try again.';
+    else if (code === 'ECONNRESET' || code === 'EPIPE' || /socket hang up/.test(raw)) hint = 'the connection was reset. Try again.';
+    else if (code === 'EAI_AGAIN' || code === 'ENOTFOUND') hint = 'the host name could not be resolved. Check your network connection.';
+    else if (code === 'ECONNREFUSED' || code === 'ENETUNREACH') hint = 'the host could not be reached. Check your network connection.';
+    else hint = 'the request did not complete. Try again.';
+    if (!idempotent) hint = UNKNOWN_OUTCOME_HINT;
+    const w = httpError(`Network error talking to ${host} (${raw}) — ${hint}`) as HttpError;
+    if (code) w.code = code;
+    w.networkError = true;
+    return w;
 }
 
 function httpError(message: string, status?: number, timedOut?: boolean): HttpError {
@@ -91,6 +146,16 @@ function rawRequest(opts: RawRequest): Promise<string> {
  * redirected to an untrusted host, and decompresses gzip/deflate bodies.
  */
 function rawRequestEx(opts: RawRequest, hops = 0, startedAt = Date.now()): Promise<HttpResponse> {
+    if (!opts.retryTransient) return rawRequestOnce(opts, hops, startedAt);
+    return rawRequestOnce(opts, hops, startedAt).catch((e: any) => {
+        const outOfTime = opts.totalTimeoutMs !== undefined && Date.now() - startedAt >= opts.totalTimeoutMs;
+        if (!isTransientSocketError(e) || outOfTime) throw e;
+        Logger.warn(`HTTP ${opts.method} hit a socket error, retrying once on a fresh connection: ${e.message}`);
+        return rawRequestOnce({ ...opts, freshSocket: true }, 0, startedAt);
+    });
+}
+
+function rawRequestOnce(opts: RawRequest, hops = 0, startedAt = Date.now()): Promise<HttpResponse> {
     return new Promise((resolve, reject) => {
         let parsed: URL;
         try {
@@ -133,6 +198,7 @@ function rawRequestEx(opts: RawRequest, hops = 0, startedAt = Date.now()): Promi
                 method: opts.method,
                 headers,
                 timeout: opts.timeout,
+                ...(opts.freshSocket ? { agent: false } : {}),
             },
             (res) => {
                 const status = res.statusCode ?? 0;
@@ -158,7 +224,7 @@ function rawRequestEx(opts: RawRequest, hops = 0, startedAt = Date.now()): Promi
                     }
                     settled = true;
                     if (totalTimer) clearTimeout(totalTimer);
-                    rawRequestEx({ ...opts, url: next.toString(), headers: nextHeaders }, hops + 1, startedAt).then(resolve, reject);
+                    rawRequestOnce({ ...opts, url: next.toString(), headers: nextHeaders }, hops + 1, startedAt).then(resolve, reject);
                     return;
                 }
 
@@ -166,9 +232,13 @@ function rawRequestEx(opts: RawRequest, hops = 0, startedAt = Date.now()): Promi
                 res.on('data', (d) => chunks.push(d));
                 res.on('error', (e) => {
                     res.destroy();
-                    fail(e);
+                    fail(wrapNetworkError(e, parsed.host, isIdempotentMethod(opts.method)));
                 });
-                res.on('aborted', () => fail(new Error(`Response aborted: ${opts.method} ${parsed.origin}${parsed.pathname}`)));
+                res.on('aborted', () => {
+                    const a = new Error(`Response aborted: ${opts.method} ${parsed.origin}${parsed.pathname}`) as HttpError;
+                    a.code = 'ECONNRESET';
+                    fail(a);
+                });
                 res.on('end', () => {
                     decode(Buffer.concat(chunks), res.headers['content-encoding'] as string | undefined, (err, buf) => {
                         if (err || !buf) {
@@ -188,17 +258,17 @@ function rawRequestEx(opts: RawRequest, hops = 0, startedAt = Date.now()): Promi
 
         req.on('timeout', () => {
             req.destroy();
-            fail(httpError(`Request timed out after ${opts.timeout}ms: ${opts.method} ${opts.url}`, undefined, true));
+            fail(httpError(`Request timed out after ${opts.timeout}ms: ${opts.method} ${opts.url}${isIdempotentMethod(opts.method) ? '' : MAY_HAVE_COMPLETED}`, undefined, true));
         });
         req.on('error', (e) => {
             req.destroy();
-            fail(e);
+            fail(wrapNetworkError(e, parsed.host, isIdempotentMethod(opts.method)));
         });
         if (opts.totalTimeoutMs !== undefined) {
             const remaining = Math.max(1, opts.totalTimeoutMs - (Date.now() - startedAt));
             totalTimer = setTimeout(() => {
                 req.destroy();
-                fail(httpError(`Request exceeded ${opts.totalTimeoutMs}ms: ${opts.method} ${parsed.origin}${parsed.pathname}`, undefined, true));
+                fail(httpError(`Request exceeded ${opts.totalTimeoutMs}ms: ${opts.method} ${parsed.origin}${parsed.pathname}${isIdempotentMethod(opts.method) ? '' : MAY_HAVE_COMPLETED}`, undefined, true));
             }, remaining);
             totalTimer.unref?.();
         }
@@ -216,6 +286,7 @@ export function httpsRequest(method: string, url: string, token: string, timeout
         errorSnippet: 500,
         followRedirects: true,
         gzip: method === 'GET',
+        retryTransient: method === 'GET' || method === 'DELETE',
     });
 }
 
@@ -298,6 +369,7 @@ export async function httpsGetEx(url: string, token: string, opts: GetOptions = 
                 followRedirects: true,
                 gzip: true,
                 acceptStatus: [304],
+                retryTransient: true,
             });
         } catch (e: any) {
             lastError = e;
@@ -395,5 +467,6 @@ export function httpsGetRange(url: string, token: string, maxBytes: number): Pro
         timeout: getHttpTimeout(),
         errorSnippet: 300,
         followRedirects: true,
+        retryTransient: true,
     });
 }

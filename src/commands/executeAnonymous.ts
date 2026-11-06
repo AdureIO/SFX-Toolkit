@@ -5,7 +5,7 @@ import { confirmProductionOrgOperation } from "../utils/orgSafety";
 export type { OrgOption };
 import { AuthInfo } from "../utils/authInfo";
 import { Telemetry } from "../utils/telemetry";
-import { getToolingApiVersion } from "../utils/constants";
+import { getToolingApiVersion, getExecuteAnonymousTimeout } from "../utils/constants";
 import { httpsPost } from "../utils/httpUtils";
 import { ApexWorkbenchViewProvider } from "../providers/ApexWorkbenchViewProvider";
 
@@ -103,7 +103,7 @@ async function soapExecuteAnonymous(org: string | null, code: string): Promise<{
     return httpsPost(endpoint, buildSoapEnvelope(auth.accessToken, code), {
       "Content-Type": "text/xml; charset=UTF-8",
       SOAPAction: '""',
-    });
+    }, getExecuteAnonymousTimeout());
   };
   let body: string;
   try {
@@ -160,7 +160,10 @@ export async function executeAnonymousForPanel(
     }
     return { success: true, compiled: true, log };
   } catch (e: any) {
-    return { success: false, compiled: false, errorMessage: e?.message || e?.stderr || String(e) };
+    const msg = e?.message || e?.stderr || String(e);
+    // A network failure or timeout after the request was sent: the server may still be executing.
+    const unknown = e?.networkError || e?.timedOut;
+    return { success: false, compiled: false, errorMessage: unknown ? `Outcome unknown — ${msg}` : msg };
   }
 }
 

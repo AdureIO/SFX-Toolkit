@@ -11,7 +11,7 @@ import { DescribeStore } from "./describeStore";
 import { AuthInfo } from "./authInfo";
 import { getToolingApiVersion } from "./constants";
 import { outputChannel } from "./outputChannel";
-import { nameFieldOf, buildLookupSoql } from "./soqlEditPure";
+import { nameFieldOf, buildLookupSoql, errorText, collectionResults, deleteInBatches, COLLECTION_BATCH, type RecordResult, type DeleteOptions } from "./soqlEditPure";
 
 export { nameFieldOf, buildLookupSoql } from "./soqlEditPure";
 
@@ -90,29 +90,7 @@ export async function resolveNames(org: string | null, refObject: string, ids: s
 }
 
 export interface RecordChange { id: string; sobjectType: string; fields: Record<string, unknown> }
-export interface RecordResult { id: string; error?: string }
-
-/** sObject Collections take at most 200 records per request. */
-const COLLECTION_BATCH = 200;
-
-function errorText(e: any): string {
-	let msg = e?.message ?? String(e);
-	const m = /HTTP \d+: (.+)$/s.exec(msg);
-	if (m) { try { const j = JSON.parse(m[1]); msg = Array.isArray(j) ? j.map((x) => x.message).join("; ") : (j.message || m[1]); } catch { msg = m[1]; } }
-	return msg;
-}
-
-/** Map a Collections response (array of {id, success, errors}) back onto the requested ids, in order. */
-function collectionResults(ids: string[], body: string): RecordResult[] {
-	let rows: any[] = [];
-	try { rows = JSON.parse(body); } catch { /* fall through: treat as all ok */ }
-	return ids.map((id, i) => {
-		const r = Array.isArray(rows) ? rows[i] : undefined;
-		if (!r || r.success !== false) return { id };
-		const err = (r.errors ?? []).map((x: any) => (x.fields?.length ? `${x.message} (${x.fields.join(", ")})` : x.message)).join("; ");
-		return { id, error: err || "Failed." };
-	});
-}
+export type { RecordResult, DeleteOptions } from "./soqlEditPure";
 
 /**
  * Apply field updates via the sObject Collections API (allOrNone=false, 200 per request) —
@@ -139,25 +117,22 @@ export async function saveRecords(org: string | null, changes: RecordChange[]): 
 	return results;
 }
 
-/** Delete records by id via the sObject Collections API (allOrNone=false, 200 per request). */
-export async function deleteRecords(org: string | null, ids: string[]): Promise<RecordResult[]> {
+/**
+ * Delete records by id via the sObject Collections API (allOrNone=false, 200 per request, sequential).
+ * Reports progress per batch and honours cancellation between batches (remaining ids come back as
+ * "Cancelled — not deleted."). Socket stalls are retried once on a fresh connection by the HTTP layer;
+ * re-deleting an already-deleted id (ENTITY_IS_DELETED) counts as deleted.
+ */
+export async function deleteRecords(org: string | null, ids: string[], opts: DeleteOptions = {}): Promise<RecordResult[]> {
 	const version = getToolingApiVersion();
-	const valid = ids.filter((id) => /^[a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?$/.test(id));
-	const results: RecordResult[] = ids.filter((id) => !valid.includes(id)).map((id) => ({ id, error: "Invalid record id." }));
-	for (let i = 0; i < valid.length; i += COLLECTION_BATCH) {
-		const batch = valid.slice(i, i + COLLECTION_BATCH);
-		try {
-			const body = await AuthInfo.deleteWithBody(
-				org,
-				(a) => `${a.instanceUrl.replace(/\/$/, "")}/services/data/${version}/composite/sobjects?allOrNone=false&ids=${batch.join(",")}`
-			);
-			results.push(...collectionResults(batch, body));
-		} catch (e: any) {
-			const msg = errorText(e);
-			results.push(...batch.map((id) => ({ id, error: msg })));
-		}
-	}
-	return results;
+	return deleteInBatches(
+		ids,
+		(batch) => AuthInfo.deleteWithBody(
+			org,
+			(a) => `${a.instanceUrl.replace(/\/$/, "")}/services/data/${version}/composite/sobjects?allOrNone=false&ids=${batch.join(",")}`
+		),
+		opts
+	);
 }
 
 /** Object-level permissions for the bulk actions (from the cached describe). */
