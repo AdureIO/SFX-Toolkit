@@ -142,9 +142,13 @@ export interface PanelExecResult {
  * no TraceFlag): a single request returns the result and the debug log inline —
  * matching the speed and behavior of the Salesforce "Execute Anonymous" button.
  */
-export async function executeAnonymousForPanel(code: string, targetOrg?: string): Promise<PanelExecResult> {
+export async function executeAnonymousForPanel(
+  code: string,
+  targetOrg?: string,
+  opts?: { confirmed?: boolean }
+): Promise<PanelExecResult> {
   if (!code || !code.trim()) return { success: false, compiled: false, errorMessage: "No code to execute." };
-  if (!(await confirmProductionOrgOperation("execute anonymous Apex against", targetOrg))) {
+  if (!opts?.confirmed && !(await confirmProductionOrgOperation("execute anonymous Apex against", targetOrg))) {
     return { success: false, compiled: false, errorMessage: "Cancelled." };
   }
   const org = targetOrg || null;
@@ -220,9 +224,24 @@ export { warmOrgListCache, refreshOrgListCache };
  * Never opens the debug log as a separate editor tab/file: the workbench's own "Open log" button
  * is the sole, explicit opt-in for that.
  */
+/**
+ * Run with a progress notification so a run started outside the workbench (palette, rerun,
+ * snippet) is visibly in progress — otherwise nothing happens until the result toast. The
+ * production-org prompt comes first so it isn't stacked under the progress notification.
+ */
+async function executeWithProgress(code: string, targetOrg: string | undefined, label: string): Promise<PanelExecResult> {
+  if (!(await confirmProductionOrgOperation("execute anonymous Apex against", targetOrg))) {
+    return { success: false, compiled: false, errorMessage: "Cancelled." };
+  }
+  return vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: `${label}${targetOrg ? ` (${targetOrg})` : ""}…`, cancellable: false },
+    () => executeAnonymousForPanel(code, targetOrg, { confirmed: true })
+  );
+}
+
 async function runAndShowInWorkbench(code: string, targetOrg?: string): Promise<ExecuteAnonymousResult> {
   Telemetry.event("apexExecute", { surface: "command" });
-  const result = await executeAnonymousForPanel(code, targetOrg);
+  const result = await executeWithProgress(code, targetOrg, "Executing anonymous Apex");
   if (result.errorMessage === "Cancelled.") {
     return { success: false, errorMessage: result.errorMessage };
   }
@@ -246,7 +265,7 @@ async function runAndShowInWorkbench(code: string, targetOrg?: string): Promise<
  */
 export async function executeAnonymousApex(
   code: string,
-  options?: { targetOrg?: string }
+  options?: { targetOrg?: string; name?: string }
 ): Promise<ExecuteAnonymousResult> {
   if (!code || !code.trim()) {
     const msg = "No code to execute.";
@@ -255,14 +274,18 @@ export async function executeAnonymousApex(
   }
   lastAnonymousContent = code;
   Telemetry.event("apexExecute", { surface: "command" });
-  const result = await executeAnonymousForPanel(code, options?.targetOrg);
+  const result = await executeWithProgress(
+    code,
+    options?.targetOrg,
+    options?.name ? `Running snippet "${options.name}"` : "Running snippet"
+  );
   if (result.errorMessage === "Cancelled.") {
     return { success: false, errorMessage: result.errorMessage };
   }
 
   if (result.success) {
     ApexWorkbenchViewProvider.pushExecResultSilently({ success: true, log: result.log });
-    vscode.window.showInformationMessage("Snippet executed successfully.", "Open log").then((pick) => {
+    vscode.window.showInformationMessage(options?.name ? `Snippet "${options.name}" executed successfully.` : "Snippet executed successfully.", "Open log").then((pick) => {
       if (pick === "Open log") void ApexWorkbenchViewProvider.reveal();
     });
     return { success: true };

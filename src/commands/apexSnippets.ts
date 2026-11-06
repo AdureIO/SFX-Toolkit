@@ -290,7 +290,7 @@ export async function runSnippetFromTree(snippet: ApexSnippet): Promise<void> {
   }
 
   const codeToRun = currentSnippetCode(snippet);
-  const result = await executeAnonymousApex(codeToRun, { targetOrg });
+  const result = await executeAnonymousApex(codeToRun, { targetOrg, name: snippet.name });
   if (!result.success) {
     Logger.error(`Snippet "${snippet.name || "unnamed"}" failed`);
   }
@@ -326,7 +326,7 @@ export async function runSnippet(snippet?: ApexSnippet | { code?: string; name?:
   }
 
   const codeToRun = currentSnippetCode(snippet);
-  const result = await executeAnonymousApex(codeToRun);
+  const result = await executeAnonymousApex(codeToRun, { name: snippet.name });
   if (!result.success) {
     Logger.error(`Snippet "${snippet.name || "unnamed"}" failed`);
   }
