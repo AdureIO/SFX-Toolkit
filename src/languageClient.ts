@@ -15,12 +15,15 @@ import {
 	State,
 	DidChangeWatchedFilesNotification,
 	FileChangeType,
-	FileEvent,
+	ResponseError,
 } from "vscode-languageclient/node";
 import { SoqlSchemaProvider } from "./utils/soqlSchemaProvider";
 import { OrgMetadataCache } from "./utils/orgMetadataCache";
 import { findSfdxProjectDir, isSalesforceProject } from "./utils/projectUtils";
-import { resolveDefaultTargetOrgUsernameSync } from "./utils/defaultOrg";
+import { canonicalOrgKey, orgArgForKey } from "./utils/orgKey";
+import { SchemaUnavailableError } from "./utils/describeStore";
+import { FileEventBatcher } from "./utils/fileEventBatcher";
+import { onDidChangeProjectDefaultOrg } from "./utils/defaultOrgEvents";
 import { scheduleStubSync, cleanRestartApex, getInitialSyncState, disposeStubSync } from "./utils/sobjectStubSync";
 import { getBufferOrgOverride } from "./utils/bufferOrgOverride";
 import { outputChannel } from "./utils/outputChannel";
@@ -28,6 +31,7 @@ import { registerApexQuickFixCommands } from "./commands/apexQuickFixCommands";
 
 const REQ_OBJECT_LIST = "sfx/objectList";
 const REQ_DESCRIBE = "sfx/describe";
+const REQ_DESCRIBE_MANY = "sfx/describeMany";
 const REQ_PROJECT_INFO = "sfx/projectInfo";
 const REQ_OBJECT_INFO = "sfx/objectInfo";
 const NOTE_REFRESH = "sfx/refreshSchema";
@@ -197,29 +201,39 @@ function startClient(context: vscode.ExtensionContext): void {
 	const disposables: vscode.Disposable[] = [];
 	clientDisposables = disposables;
 
-	// Resolve which org a request's document belongs to. Walks up to the nearest
-	// sfdx-project.json so nested sub-projects (e.g. billing/force-app/...) use their
-	// own default org instead of always the workspace root's. Null = default org.
+	// Resolve which org a request's document belongs to, as the CANONICAL org key
+	// (username) — the same key the warm-up, push/pull invalidation and every host
+	// cache use. Walks up to the nearest sfdx-project.json so nested sub-projects
+	// (e.g. billing/force-app/...) use their own default org. Null = no org resolvable
+	// (the CLI's global default).
+	const projectDirCache = new Map<string, string | null>();
 	const orgForUri = (uri?: string): string | null => {
-		if (!uri) return null;
 		try {
+			if (!uri) return orgArgForKey(canonicalOrgKey(null));
 			const fsPath = vscode.Uri.parse(uri).fsPath;
 			// A webview buffer (ASFX Workbench) may pin its IntelliSense to a chosen org.
 			const ov = getBufferOrgOverride(fsPath);
-			if (ov.has) return ov.org;
-			const projectDir = findSfdxProjectDir(fsPath) ?? undefined;
-			return resolveDefaultTargetOrgUsernameSync(projectDir) ?? null;
+			if (ov.has) return orgArgForKey(canonicalOrgKey(ov.org));
+			const dir = path.dirname(fsPath);
+			let projectDir = projectDirCache.get(dir);
+			if (projectDir === undefined) {
+				projectDir = findSfdxProjectDir(fsPath);
+				if (projectDirCache.size > 2000) projectDirCache.clear();
+				projectDirCache.set(dir, projectDir);
+			}
+			return orgArgForKey(canonicalOrgKey(null, projectDir ?? undefined));
 		} catch {
 			return null;
 		}
 	};
 
+	/** Transient host failures reject the request (the server must not negative-cache them). */
+	const unavailable = (e: unknown): ResponseError<void> =>
+		new ResponseError(-32803 /* RequestFailed */, `schema unavailable: ${(e as any)?.message ?? e}`);
+
 	lc.onRequest(REQ_OBJECT_LIST, async (params: { uri?: string }) => {
 		try {
-			const org = orgForUri(params?.uri);
-			const list = await SoqlSchemaProvider.getObjectList(org);
-			outputChannel.appendLine(`languageClient: objectList org=${org ?? "default"} → ${list.length} objects`);
-			return list;
+			return await SoqlSchemaProvider.getObjectList(orgForUri(params?.uri));
 		} catch (e: any) {
 			outputChannel.appendLine(`languageClient: objectList failed: ${e?.message ?? e}`);
 			return [];
@@ -228,10 +242,25 @@ function startClient(context: vscode.ExtensionContext): void {
 
 	lc.onRequest(REQ_DESCRIBE, async (params: { uri?: string; sobject: string }) => {
 		try {
-			return await SoqlSchemaProvider.getDescribe(orgForUri(params?.uri), params?.sobject);
+			return await SoqlSchemaProvider.getDescribeStrict(orgForUri(params?.uri), params?.sobject);
 		} catch (e: any) {
+			if (e instanceof SchemaUnavailableError) throw unavailable(e);
 			outputChannel.appendLine(`languageClient: describe failed: ${e?.message ?? e}`);
 			return null;
+		}
+	});
+
+	// Batched describes (contract 3): same Describe shape as REQ_DESCRIBE, same order as
+	// `names`, null = not an SObject. Misses go out as REST composite/batch (<=25 each)
+	// through the shared DescribeStore cache. Rejects when the org can't answer.
+	lc.onRequest(REQ_DESCRIBE_MANY, async (params: { names?: string[]; uri?: string }) => {
+		const names = Array.isArray(params?.names) ? params.names.slice(0, 500) : [];
+		try {
+			return await SoqlSchemaProvider.getDescribeMany(orgForUri(params?.uri), names, { strict: true });
+		} catch (e: any) {
+			if (e instanceof SchemaUnavailableError) throw unavailable(e);
+			outputChannel.appendLine(`languageClient: describeMany failed: ${e?.message ?? e}`);
+			return names.map(() => null);
 		}
 	});
 
@@ -272,22 +301,44 @@ function startClient(context: vscode.ExtensionContext): void {
 
 	// When the org switches or metadata is refreshed, drop the host-side describe
 	// cache and tell the server to drop its own.
-	const unsubscribe = OrgMetadataCache.onChange((_org, change) => {
-		// Tell the server to drop its cached schema — only the touched objects when targeted.
-		const objects = change && change.objects.length ? change.objects : undefined;
-		if (lc.isRunning()) void lc.sendNotification(NOTE_REFRESH, objects ? { objects } : undefined).catch(() => {});
-		if (objects) {
-			// Targeted: a push/pull touched only these objects' schema. The affected
-			// describes were already dropped; regenerate just those stubs — not the org.
-			scheduleStubSync({ only: objects });
-		} else {
-			// Full invalidation (org switch / manual refresh): don't trust any stub.
-			SoqlSchemaProvider.invalidateAll();
-			scheduleStubSync({ force: true });
+	const unsubscribe = OrgMetadataCache.onChange((org, change) => {
+		if (change) {
+			// Targeted: a push/pull touched only these objects' schema (their describes are
+			// already dropped), and `structural` = objects were added/removed, so the server
+			// must also drop its object list (contract 2).
+			const objects = change.objects.length ? change.objects : undefined;
+			const params: { objects?: string[]; structural?: boolean } = {};
+			if (objects) params.objects = objects;
+			if (change.structural) params.structural = true;
+			if (lc.isRunning() && (objects || change.structural)) void lc.sendNotification(NOTE_REFRESH, params).catch(() => {});
+			// Regenerate just those stubs — not the org.
+			if (objects) scheduleStubSync({ only: objects });
+			return;
 		}
+		// Full invalidation (org switch / manual refresh). The emitting cache already dropped
+		// that org's describes; only the admin descriptions live here.
+		SoqlSchemaProvider.invalidateDescriptions(org);
+		projectDirCache.clear();
+		if (lc.isRunning()) void lc.sendNotification(NOTE_REFRESH).catch(() => {});
+		// Don't trust any stub.
+		scheduleStubSync({ force: true });
 	});
 
 	disposables.push({ dispose: unsubscribe });
+
+	// A nested project's own default org changed: drop only its documents' org context.
+	disposables.push(
+		onDidChangeProjectDefaultOrg((projectDir) => {
+			projectDirCache.clear();
+			const prefix = projectDir.replace(/[\\/]+$/, "") + path.sep;
+			const uris = vscode.workspace.textDocuments
+				.filter((d) => d.uri.scheme === "file" && d.uri.fsPath.startsWith(prefix))
+				.map((d) => d.uri.toString());
+			if (lc.isRunning()) {
+				void lc.sendNotification(NOTE_REFRESH, uris.length ? { uris } : undefined).catch(() => {});
+			}
+		})
+	);
 
 	// Keep the server's Apex type index current (new / deleted classes). Events are
 	// filtered here — the stub sync writes thousands of `.cls` files under `.sfdx` that
@@ -324,19 +375,19 @@ function languageServerHeapMB(): number {
 /** Forward relevant `.cls`/`.trigger` create/change/delete events to the server (batched). */
 function watchApexSources(lc: LanguageClient): vscode.Disposable {
 	const watcher = vscode.workspace.createFileSystemWatcher("**/*.{cls,trigger}");
-	let pending: FileEvent[] = [];
+	// Deduped by URI (last net change per file) — a huge branch switch coalesces instead
+	// of being truncated, so no file event is ever lost.
+	const pending = new FileEventBatcher();
 	let flushTimer: NodeJS.Timeout | undefined;
 	const flush = () => {
 		flushTimer = undefined;
-		const changes = pending;
-		pending = [];
+		const changes = pending.drain().map((c) => ({ uri: c.uri, type: c.type as FileChangeType }));
 		if (!changes.length || !lc.isRunning()) return;
 		void lc.sendNotification(DidChangeWatchedFilesNotification.type, { changes }).catch(() => {});
 	};
 	const queue = (uri: vscode.Uri, type: FileChangeType) => {
 		if (uri.scheme !== "file" || GENERATED_PATH.test(uri.fsPath)) return;
-		pending.push({ uri: uri.toString(), type });
-		if (pending.length > 5000) pending = pending.slice(-5000); // backstop for a huge checkout
+		pending.add(uri.toString(), type);
 		if (!flushTimer) flushTimer = setTimeout(flush, 500);
 	};
 	const subs = [
@@ -349,7 +400,7 @@ function watchApexSources(lc: LanguageClient): vscode.Disposable {
 		dispose: () => {
 			if (flushTimer) clearTimeout(flushTimer);
 			flushTimer = undefined;
-			pending = [];
+			pending.clear();
 			for (const d of subs) d.dispose();
 		},
 	};

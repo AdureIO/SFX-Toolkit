@@ -434,14 +434,14 @@ async function pushSourceHelper(force: boolean) {
           // actually changed objects/fields — a plain Apex push refreshes nothing.
           if (state.fallbackUsed) {
             // No structured component list from the CLI text path → refresh fully to be safe.
-            OrgMetadataCache.invalidate(null);
-            OrgMetadataCache.warmDefaultOrg();
+            OrgMetadataCache.invalidate(targetUser);
+            OrgMetadataCache.warmOrg(targetUser);
           } else {
             const { objects, structural } = affectedSchemaObjects(state.components);
             if (objects.length) {
               Logger.info(`Push changed schema for: ${objects.join(", ")}${structural ? " (structural)" : ""}. Refreshing those stubs.`);
-              OrgMetadataCache.invalidateSObjects(null, objects, structural);
-              if (structural) OrgMetadataCache.warmDefaultOrg();
+              OrgMetadataCache.invalidateSObjects(targetUser, objects, structural);
+              if (structural) OrgMetadataCache.warmOrg(targetUser);
             }
           }
 
@@ -537,14 +537,14 @@ async function pullSourceHelper(force: boolean) {
         const components = parseRetrievedComponents(result);
         if (!components) {
           // Couldn't read the retrieve result → refresh fully to be safe.
-          OrgMetadataCache.invalidate(null);
-          OrgMetadataCache.warmDefaultOrg();
+          OrgMetadataCache.invalidate(defaultOrg?.username ?? null);
+          OrgMetadataCache.warmOrg(defaultOrg?.username ?? null);
         } else {
           const { objects, structural } = affectedSchemaObjects(components);
           if (objects.length) {
             Logger.info(`Pull changed schema for: ${objects.join(", ")}${structural ? " (structural)" : ""}. Refreshing those stubs.`);
-            OrgMetadataCache.invalidateSObjects(null, objects, structural);
-            if (structural) OrgMetadataCache.warmDefaultOrg();
+            OrgMetadataCache.invalidateSObjects(defaultOrg?.username ?? null, objects, structural);
+            if (structural) OrgMetadataCache.warmOrg(defaultOrg?.username ?? null);
           }
           // else: no schema changes retrieved → no stub/describe refresh
         }
@@ -620,8 +620,8 @@ export async function deployCurrentFile() {
         // Only refresh stubs if the deployed file is object/field schema.
         const schema = schemaObjectFromPath(filePath);
         if (schema) {
-          OrgMetadataCache.invalidateSObjects(null, [schema.object], schema.structural);
-          if (schema.structural) OrgMetadataCache.warmDefaultOrg();
+          OrgMetadataCache.invalidateSObjects(targetUser, [schema.object], schema.structural);
+          if (schema.structural) OrgMetadataCache.warmOrg(targetUser);
         }
         Telemetry.event("deployFile", { status: "succeeded" });
         reportSuccess({
@@ -677,8 +677,8 @@ export async function retrieveCurrentFile() {
         // Only refresh stubs if the retrieved file is object/field schema.
         const schema = schemaObjectFromPath(filePath);
         if (schema) {
-          OrgMetadataCache.invalidateSObjects(null, [schema.object], schema.structural);
-          if (schema.structural) OrgMetadataCache.warmDefaultOrg();
+          OrgMetadataCache.invalidateSObjects(defaultOrg?.username ?? null, [schema.object], schema.structural);
+          if (schema.structural) OrgMetadataCache.warmOrg(defaultOrg?.username ?? null);
         }
         Telemetry.event("retrieveFile", { status: "succeeded" });
         reportSuccess({ operation: "Retrieve", org, summary: "File retrieved successfully.", handle: operationHandle });

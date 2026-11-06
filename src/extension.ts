@@ -99,9 +99,12 @@ import { killAllChildProcesses } from "./utils/commandRunner";
 import { LiveLogService } from "./utils/liveLogService";
 import { SoqlSchemaProvider } from "./utils/soqlSchemaProvider";
 import { DescribeStore } from "./utils/describeStore";
+import { registerSchemaHealthUi } from "./utils/schemaHealthUi";
 
 /** Delay before the (CLI-backed) coverage query at startup, so it doesn't compete with activation. */
 const COVERAGE_WARM_DELAY_MS = 5000;
+/** Delay before pre-describing a few common objects (low priority, after activation settled). */
+const COMMON_DESCRIBE_WARM_DELAY_MS = 8000;
 
 /**
  * Pre-fetch what most features need (default-org auth, org list, sObject list, coverage),
@@ -111,6 +114,9 @@ const COVERAGE_WARM_DELAY_MS = 5000;
  */
 function warmProjectCaches(): vscode.Disposable {
   if (!isSalesforceProject()) return new vscode.Disposable(() => undefined);
+  // All three resolve `null` to the canonical default-org key (its username) — the same
+  // key the language server's requests use — so this warm-up is what the first
+  // completion reads (no extra `sf org display` / describeGlobal).
   AuthInfo.warmAuthForOrg(null);
   warmOrgListCache();
   OrgMetadataCache.warmDefaultOrg(); // pre-load sobject list for SOQL completion
@@ -119,9 +125,17 @@ function warmProjectCaches(): vscode.Disposable {
     // Explorer coverage badges — skipped when something (e.g. a default-org change) already loaded it.
     if (isSalesforceProject() && apexCoverage.loadedAt === null) void apexCoverage.refresh().catch(() => undefined);
   }, COVERAGE_WARM_DELAY_MS);
+  // Low priority: pre-describe User/Account/Contact (one composite/batch call; usually
+  // served from the persisted cache and just revalidated).
+  let describeTimer: ReturnType<typeof setTimeout> | undefined = setTimeout(() => {
+    describeTimer = undefined;
+    if (isSalesforceProject()) void OrgMetadataCache.warmCommonDescribes(null).catch(() => undefined);
+  }, COMMON_DESCRIBE_WARM_DELAY_MS);
   return new vscode.Disposable(() => {
     if (timer) clearTimeout(timer);
     timer = undefined;
+    if (describeTimer) clearTimeout(describeTimer);
+    describeTimer = undefined;
   });
 }
 
@@ -196,6 +210,16 @@ function register(command: string, callback: (...args: any[]) => any, thisArg?: 
 export function activate(context: vscode.ExtensionContext) {
   registerOutputChannels(context);
   Logger.info('Extension "adure-sfx-toolkit" is starting activation...');
+
+  // Persistent trimmed describe cache (per org id + API version) — lets completion use
+  // the last session's schema right after a reload while it is revalidated in background.
+  try {
+    DescribeStore.configurePersistence(path.join(context.globalStorageUri.fsPath, "describe-cache"));
+  } catch (e) {
+    Logger.error("Describe disk cache unavailable", e);
+  }
+  // Schema problems (expired session, unreachable org): one status bar item + one warning.
+  registerSchemaHealthUi(context);
 
   // Warm the default-org auth token (and the other project caches) first — the initial
   // fetches shell out to the CLI, so kicking them off here runs them concurrently with the
@@ -808,7 +832,8 @@ export function deactivate(): Thenable<void> | undefined {
   teardownStep("stop live log polling", () => LiveLogService.disposeAll());
   teardownStep("dispose auth cache", () => AuthInfo.disposeAll());
   teardownStep("dispose SOQL schema cache", () => SoqlSchemaProvider.disposeAll());
-  teardownStep("dispose describe store", () => DescribeStore.disposeAll());
+  // Flushes pending disk-cache writes synchronously and leaves no timers behind.
+  teardownStep("dispose describe store", () => DescribeStore.shutdown());
   teardownStep("dispose metadata cache", () => OrgMetadataCache.disposeAll());
   teardownStep("close org health", () => OrgHealthProvider.dispose());
   teardownStep("dispose deploy history", () => disposeDeployHistory());
