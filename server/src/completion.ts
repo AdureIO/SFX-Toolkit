@@ -152,7 +152,7 @@ async function complete(ctx: ServerContext, params: CompletionParams, token: Can
         const lineStart = full.lastIndexOf('\n', offset - 1) + 1;
         const bindPartial = bindVariablePartial(full.slice(lineStart, offset));
         if (bindPartial !== undefined) return bindVariableCompletion(ctx, doc, position, bindPartial);
-        return soql.soqlCompletion(ctx.schema, uri, region.snippet, region.line, region.column, token);
+        return soql.soqlCompletion(ctx.schema, uri, region.snippet, region.line, region.column, token, doc.positionAt(region.contentStart));
     }
     if (!ctx.settings.apexCompletion) return [];
 

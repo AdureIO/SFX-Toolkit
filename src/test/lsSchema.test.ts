@@ -500,6 +500,65 @@ describe("LS schema: SOQL correctness", function () {
     assert.ok(single.includes("Username"), "single-target lookup still resolves to User");
   });
 
+  it("offers a TYPEOF item after `What.` that replaces the whole token (soql file, inline Apex, subquery)", async () => {
+    const find = (res: any) => itemsOf(res).find((i: any) => String(i.label).startsWith("TYPEOF What"));
+    const range = (r: any) => [r.start.line, r.start.character, r.end.line, r.end.character];
+
+    // .soql file
+    const soql = await completeAt(h, nextName(), "SELECT Id, What.| FROM Task");
+    const item = find(soql);
+    assert.ok(item, "TYPEOF item after What.");
+    assert.equal(item.label, "TYPEOF What …");
+    assert.equal(item.kind, 15, "Snippet kind");
+    assert.equal(item.insertTextFormat, 2);
+    assert.deepEqual(range(item.textEdit.range), [0, 11, 0, 16]);
+    assert.equal(item.textEdit.newText, "TYPEOF What WHEN ${1:Account} THEN ${2:Id, Name} ${3:WHEN ${4:Opportunity} THEN ${5:Id, Name}} ELSE ${6:Id} END");
+    assert.ok(labelsOf(soql).includes("Name") && labelsOf(soql).includes("Type"), "Name fields are still offered");
+    const first = [...itemsOf(soql)].sort((a: any, b: any) => ((a.sortText ?? a.label) < (b.sortText ?? b.label) ? -1 : 1))[0];
+    assert.equal(first, itemsOf(soql).find((i: any) => i.label === item.label), "sorts first");
+
+    // other polymorphic lookup: the first two targets, in order
+    const own = itemsOf(await completeAt(h, nextName(), "SELECT Owner.| FROM Case")).find((i: any) => i.label === "TYPEOF Owner …");
+    assert.ok(own);
+    assert.match(own.textEdit.newText, /^TYPEOF Owner WHEN \$\{1:Group\} THEN \$\{2:Id, Name\} \$\{3:WHEN \$\{4:User\} THEN/);
+
+    // multi-line .soql: range on the cursor's line
+    const ml = find(await completeAt(h, nextName(), "SELECT Id,\n  What.|\nFROM Task"));
+    assert.deepEqual(range(ml.textEdit.range), [1, 2, 1, 7]);
+
+    // inline Apex on a line with leading code
+    const apex = find(await completeAt(h, nextName("cls"), "public class A {\n  void m() {\n    List<Task> ts = [SELECT Id, What.| FROM Task];\n  }\n}"));
+    assert.ok(apex, "TYPEOF item in inline SOQL");
+    const lineLen = "    List<Task> ts = [SELECT Id, What.".length;
+    assert.deepEqual(range(apex.textEdit.range), [2, lineLen - 5, 2, lineLen]);
+
+    // inline Apex query spanning lines: range on the later line is relative to the line start
+    const apex2 = find(await completeAt(h, nextName("cls"), "class A { void m() { x = [SELECT Id,\n    What.| FROM Task]; } }"));
+    assert.ok(apex2);
+    assert.deepEqual(range(apex2.textEdit.range), [1, 4, 1, 9]);
+
+    // child subquery SELECT list
+    const sub = itemsOf(await completeAt(h, nextName(), "SELECT Id, (SELECT Owner.| FROM Cases) FROM Account")).find((i: any) => i.label === "TYPEOF Owner …");
+    assert.ok(sub, "TYPEOF item in a subquery SELECT list");
+    assert.deepEqual(range(sub.textEdit.range), [0, 19, 0, 25]);
+  });
+
+  it("does not offer the TYPEOF-after-dot item outside a SELECT field list or for non-polymorphic lookups", async () => {
+    const has = (res: any) => itemsOf(res).some((i: any) => String(i.label).startsWith("TYPEOF "));
+    assert.ok(!has(await completeAt(h, nextName(), "SELECT Id FROM Task WHERE What.|")), "WHERE");
+    assert.ok(!has(await completeAt(h, nextName(), "SELECT Id FROM Task ORDER BY What.|")), "ORDER BY");
+    assert.ok(!has(await completeAt(h, nextName(), "SELECT Id FROM Task GROUP BY What.|")), "GROUP BY");
+    assert.ok(!has(await completeAt(h, nextName(), "SELECT Id FROM Case WHERE AccountId IN (SELECT Id FROM Task WHERE What.|)")), "subquery WHERE");
+    assert.ok(!has(await completeAt(h, nextName(), "SELECT toLabel(What.|) FROM Task")), "inside a function call");
+    assert.ok(!has(await completeAt(h, nextName(), "SELECT Id, Account.| FROM Opportunity")), "non-polymorphic Account.");
+    assert.ok(!has(await completeAt(h, nextName(), "SELECT Owner.| FROM Account")), "single-target Owner");
+    assert.ok(!has(await completeAt(h, nextName(), "SELECT Account.Owner.| FROM Contact")), "nested path");
+    // the plain field-list TYPEOF snippet is unchanged
+    const ty = itemsOf(await completeAt(h, nextName(), "SELECT Id, | FROM Task")).find((i: any) => i.label === "TYPEOF What");
+    assert.ok(ty);
+    assert.match(ty.insertText, /TYPEOF What WHEN \$\{1\|Account,Opportunity\|\} THEN/);
+  });
+
   it("TYPEOF: WHEN offers the targets, THEN offers that type's fields", async () => {
     const when = labelsOf(await completeAt(h, nextName(), "SELECT TYPEOF What WHEN | FROM Task"));
     assert.deepStrictEqual(when.sort(), ["Account", "Opportunity"]);

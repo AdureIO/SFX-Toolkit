@@ -5,7 +5,7 @@
  * `completionsFor` to get completion candidates + placeholder items, then expand the
  * placeholders against the connected org's schema.
  */
-import { CancellationToken, CompletionItem, CompletionItemKind, InsertTextFormat } from 'vscode-languageserver/node';
+import { CancellationToken, CompletionItem, CompletionItemKind, InsertTextFormat, Range, TextEdit } from 'vscode-languageserver/node';
 import { completionsFor } from '@salesforce/soql-language-server/lib/completion';
 import { budgetOf, findRelationship } from './schema';
 import type { SchemaService, HostDescribe, HostField } from './schema';
@@ -467,6 +467,58 @@ function polymorphicFields(owner: string, rel: string, targets: string[]): Compl
     return items;
 }
 
+/** Escape text for use inside a snippet placeholder (`$`, `}` and `\` are special). */
+function snippetEscape(t: string): string {
+    return t.replace(/[$}\\]/g, '\\$&');
+}
+
+/**
+ * `TYPEOF What …` item offered right after `What.` in a SELECT field list. It replaces the
+ * whole `What.` token (`range`, in document coordinates) with a full TYPEOF snippet whose
+ * first two WHEN targets are prefilled from the lookup's referenceTo.
+ */
+function typeofAfterDotItem(owner: string, rel: string, targets: string[], range: Range, typed: string): CompletionItem {
+    const [t1, t2] = targets.map(snippetEscape);
+    const r = snippetEscape(rel);
+    const snippet = `TYPEOF ${r} WHEN \${1:${t1}} THEN \${2:Id, Name} \${3:WHEN \${4:${t2}} THEN \${5:Id, Name}} ELSE \${6:Id} END`;
+    return withSchemaDoc(
+        {
+            label: `TYPEOF ${rel} …`,
+            kind: CompletionItemKind.Snippet,
+            labelDetails: { detail: ` → ${targets.join(' | ')}`, description: owner },
+            insertTextFormat: InsertTextFormat.Snippet,
+            textEdit: TextEdit.replace(range, snippet),
+            // Keep it visible while the user types `What.Na` — the client filters against this.
+            filterText: typed,
+            sortText: '!TYPEOF' + rel,
+        },
+        [`Polymorphic \`${owner}.${rel}\` → **${targets.join(' | ')}**`, 'Replaces `' + typed + '` with a `TYPEOF` clause.'],
+    );
+}
+
+/**
+ * Whether the cursor (end of `upto`, the text of the innermost scope) sits in the SELECT field
+ * list of a main/subquery scope, outside parentheses and strings — the only place TYPEOF is valid.
+ */
+function inSelectFieldList(upto: string): boolean {
+    if (!/^\s*SELECT\b/i.test(upto)) return false;
+    let depth = 0;
+    let inStr = false;
+    for (let i = 0; i < upto.length; i++) {
+        const ch = upto[i];
+        if (inStr) {
+            if (ch === '\\') i++;
+            else if (ch === "'") inStr = false;
+            continue;
+        }
+        if (ch === "'") inStr = true;
+        else if (ch === '(') depth++;
+        else if (ch === ')') depth--;
+        else if (depth === 0 && (ch === 'F' || ch === 'f') && !/\w/.test(upto[i - 1] ?? ' ') && /^from\b/i.test(upto.slice(i, i + 5))) return false;
+    }
+    return depth === 0 && !inStr;
+}
+
 type PathTarget = { object: string } | { poly: string[]; owner: string; rel: string } | null;
 
 /** Walk a relationship path from `base`, stopping at a polymorphic final hop. */
@@ -632,6 +684,9 @@ async function expand(
  * `line`/`column` are 1-based positions within `text`. Pass a SchemaBudget (see
  * SchemaService.completionBudget) as `token` to get the soft deadline + capped object
  * lists; its `incomplete` flag then tells whether the result is partial.
+ * `origin` is the 0-based document position of `text`'s first character (default 0:0, right
+ * for a .soql file); it maps snippet positions back to the document for text edits that span
+ * the typed token, e.g. the `TYPEOF What …` item after `What.`.
  */
 export async function soqlCompletion(
     schema: SchemaService,
@@ -640,6 +695,7 @@ export async function soqlCompletion(
     line: number,
     column: number,
     token?: CancellationToken,
+    origin: { line: number; character: number } = { line: 0, character: 0 },
 ): Promise<CompletionItem[]> {
     const ns = await schema.projectNamespace(docUri, token);
     const offset = offsetOf(text, line, column);
@@ -683,7 +739,22 @@ export async function soqlCompletion(
         if (!scopeObject) return [];
         const target = await resolvePath(schema, docUri, scopeObject, relSegments, token);
         if (!target) return [];
-        if ('poly' in target) return done(polymorphicFields(target.owner, target.rel, target.poly));
+        if ('poly' in target) {
+            const items = polymorphicFields(target.owner, target.rel, target.poly);
+            // TYPEOF is only valid on a direct polymorphic lookup of the query's object, in a SELECT list.
+            const tok = relSegments.length === 1 && scope.kind !== 'semi' ? /([A-Za-z_]\w*)\s*\.\s*\w*$/.exec(upto) : null;
+            if (tok && !tok[0].includes('\n') && inSelectFieldList(upto) && /(?:\bSELECT(?:\s+DISTINCT)?|,)\s*$/i.test(upto.slice(0, tok.index))) {
+                // Snippet position of the token → document position (only the snippet's first line is offset).
+                const sp = posInSnippet(text, offset - tok[0].length);
+                const ep = posInSnippet(text, offset);
+                const toDoc = (p: { line: number; column: number }) => ({
+                    line: origin.line + p.line - 1,
+                    character: (p.line === 1 ? origin.character : 0) + p.column - 1,
+                });
+                items.unshift(typeofAfterDotItem(target.owner, target.rel, target.poly, Range.create(toDoc(sp), toDoc(ep)), tok[0]));
+            }
+            return done(items);
+        }
         const d = target.object === 'Name' ? NAME_DESCRIBE : await schema.describe(docUri, target.object, token);
         return d ? done(fieldsAndRels(target.object, d, {})) : [];
     }
