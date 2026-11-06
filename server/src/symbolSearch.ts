@@ -723,6 +723,12 @@ export interface Resolution {
     word: string;
     symbol?: ResolvedSymbol;
     rejection?: Rejection;
+    /**
+     * Set with a rejection when the receiver resolved to a workspace type but the member
+     * isn't declared on it or its supertypes. Only Go to Definition uses it (fallback to
+     * the class); references / rename keep treating the case as unresolved.
+     */
+    receiverType?: TypeNode;
 }
 
 function isMethodKind(k: ApexMemberDecl['kind']): boolean {
@@ -860,7 +866,9 @@ export async function resolveAt(
             const inner = g.resolve(`${n.qname}.${word}`, m.path);
             if (inner) return out({ kind: 'type', name: inner.header.name, node: inner });
         }
-        return out(undefined, `'${word}' is not declared in ${nodes.map((n) => n.qname).join(', ')} or its workspace supertypes.`);
+        const miss = out(undefined, `'${word}' is not declared in ${nodes.map((n) => n.qname).join(', ')} or its workspace supertypes.`);
+        miss.receiverType = nodes[0];
+        return miss;
     };
 
     // ── Receiver-qualified: this.x / super.x / var.x / Type.x / ns.Type / expr.x ──

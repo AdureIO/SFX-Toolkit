@@ -115,6 +115,7 @@ function categoryOf(anchor: string): string {
 		in: "inner classes",
 		e: "enums",
 		o: "overloads (count and argument types)",
+		f: "missing member: falls back to the receiver's class",
 		q: "SOQL binds / string concatenation",
 		b: "unsaved edits in an open target",
 		se: "syntax error elsewhere in the file",
