@@ -32,7 +32,7 @@ import {
   pullSourceForce,
   resetSourceTracking
 } from "./commands/devCommands";
-import { deployToDefaultOrg, retrieveFromDefaultOrg } from "./commands/sourceTransfer";
+import { deployToDefaultOrg, retrieveFromDefaultOrg, updateProjectFromOrg } from "./commands/sourceTransfer";
 import { validateApexFile, registerValidateOnSave } from "./commands/validateApex";
 import { PermissionSetEditorProvider } from "./editors/PermissionSetEditorProvider";
 import { ScratchOrgDefEditorProvider } from "./editors/ScratchOrgDefEditorProvider";
@@ -441,6 +441,7 @@ export function activate(context: vscode.ExtensionContext) {
     const pullForceCmd = register("adure-sfx-toolkit.pullSourceForce", pullSourceForce);
     const deployFileCmd = register("adure-sfx-toolkit.deployCurrentFile", deployToDefaultOrg);
     const retrieveFileCmd = register("adure-sfx-toolkit.retrieveCurrentFile", retrieveFromDefaultOrg);
+    const updateProjectCmd = register("adure-sfx-toolkit.updateProjectFromOrg", updateProjectFromOrg);
     const resetTrackingCmd = register("adure-sfx-toolkit.resetSourceTracking", resetSourceTracking);
     const validateApexCmd = register("adure-sfx-toolkit.validateApexFile", () => validateApexFile());
     registerValidateOnSave(context);
@@ -717,6 +718,7 @@ export function activate(context: vscode.ExtensionContext) {
       pullForceCmd,
       deployFileCmd,
       retrieveFileCmd,
+      updateProjectCmd,
       resetTrackingCmd,
       validateApexCmd,
       lwcApexTypingsCmd,

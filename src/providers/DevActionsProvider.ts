@@ -50,8 +50,10 @@ export class DevActionsProvider implements vscode.TreeDataProvider<vscode.TreeIt
 			]),
 			new DevGroupItem("Deploy & Retrieve", "package", [
 				this.createItem("Deploy Metadata", "adure-sfx-toolkit.deployMetadata", "package", "Deploy all or selected metadata with test options (Run All, Specified, Validate, No tests)"),
-				this.createItem("Deploy Active File", "adure-sfx-toolkit.deployCurrentFile", "file-code", "Deploy the currently open file"),
-				this.createItem("Retrieve Active File", "adure-sfx-toolkit.retrieveCurrentFile", "reply", "Retrieve the currently open file"),
+				this.createItem("Deploy to Default Org", "adure-sfx-toolkit.deployCurrentFile", "file-code", "Deploy the open file (right-click files or folders in the Explorer for more)"),
+				this.createItem("Retrieve from Default Org", "adure-sfx-toolkit.retrieveCurrentFile", "reply", "Retrieve the open file (right-click files or folders in the Explorer for more)"),
+				this.createItem("Update Project from Org", "adure-sfx-toolkit.updateProjectFromOrg", "sync", "Retrieve every component in the project's package directories from the default org"),
+				this.createItem("Org Browser", "adure-sfx-toolkit.openOrgBrowser", "library", "Browse all components in an org and retrieve them"),
 				this.createItem("Compare with Org", "adure-sfx-toolkit.metadataDiff", "diff", "Compare local file against org version"),
 			]),
 			new DevGroupItem("Test", "beaker", [

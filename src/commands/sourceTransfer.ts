@@ -29,6 +29,8 @@ import { findSfdxProjectDir } from "../utils/projectUtils";
 import { confirmOverwrite, revertOpenEditors } from "../utils/retrieveSafety";
 import { retrieveComponents } from "../utils/retrieveEngine";
 import { isSameOrUnder } from "../utils/retrieveSafetyPure";
+import { knownProjectDirs } from "../utils/schemaHealthMonitor";
+import { buildUpdateSummary, resolvePackageDirPaths } from "../utils/updateProjectPure";
 import { buildDeployStartArgs, planSelection, type SelectionPlan } from "../utils/sourceSelection";
 
 /** Menu arguments: `(clickedUri, allSelectedUris)`; the palette passes nothing. */
@@ -242,4 +244,98 @@ export async function retrieveFromDefaultOrg(uri?: vscode.Uri, uris?: vscode.Uri
 			reportError({ operation: "Retrieve", error: e, org: defaultOrg?.displayName, handle: operationHandle });
 		}
 	});
+}
+
+export async function updateProjectFromOrg(): Promise<void> {
+	const defaultOrg = getDefaultOrgSync() ?? (await getDefaultOrg());
+	if (!defaultOrg?.username) {
+		vscode.window.showErrorMessage("No default org set. Set a default org (ASFXT: Set as Default Org) and try again.");
+		return;
+	}
+	const targetUser = defaultOrg.username;
+	const orgLabel = defaultOrg.displayName ?? targetUser;
+
+	let projects = knownProjectDirs();
+	if (projects.length === 0) {
+		vscode.window.showErrorMessage("No SFDX project found in the workspace.");
+		return;
+	}
+	if (projects.length > 1) {
+		const picked = await vscode.window.showQuickPick(
+			projects.map((p) => ({ label: path.basename(p), description: p, picked: true, dir: p })),
+			{ canPickMany: true, placeHolder: "Projects to update from the org" }
+		);
+		if (!picked || picked.length === 0) return;
+		projects = picked.map((p) => p.dir);
+	}
+	const groups = projects
+		.map((projectDir) => ({
+			projectDir,
+			paths: resolvePackageDirPaths(projectDir, getPackageDirectories(projectDir), (p) => fs.existsSync(p)),
+		}))
+		.filter((g) => g.paths.length > 0);
+	if (groups.length === 0) {
+		vscode.window.showErrorMessage("No package directories found to update.");
+		return;
+	}
+	const paths = groups.flatMap((g) => g.paths);
+	const dirList = paths.map((p) => path.basename(p)).join(", ");
+
+	const confirm = await vscode.window.showWarningMessage(
+		`Update project from ${orgLabel}?`,
+		{
+			modal: true,
+			detail: `Every component in ${dirList} is retrieved and overwrites the local version. Components that only exist in the org are not added.`,
+		},
+		"Update"
+	);
+	if (confirm !== "Update") return;
+	if (!(await confirmOverwrite(paths, "Update from org"))) return;
+
+	const operationHandle = OperationPanelProvider.beginOperation("Retrieve", defaultOrg.displayName);
+	await vscode.window.withProgress(
+		{ location: vscode.ProgressLocation.Notification, title: `Updating project from ${orgLabel}…`, cancellable: true },
+		async (progress, token) => {
+			try {
+				let retrieved = 0;
+				const failed: { fullName: string; error: string }[] = [];
+				for (const group of groups) {
+					let last = 0;
+					const res = await retrieveComponents({
+						org: targetUser,
+						sourcePaths: group.paths,
+						projectDir: group.projectDir,
+						token,
+						onProgress: (done, total) => {
+							if (total > 0) progress.report({ increment: ((done - last) / total) * (100 / groups.length) });
+							last = done;
+						},
+					});
+					retrieved += res.retrieved.length;
+					failed.push(...res.failed);
+				}
+				await revertOpenEditors(paths);
+				Telemetry.event("updateProjectFromOrg", { status: failed.length ? "partial" : "succeeded" });
+				const summary = buildUpdateSummary(orgLabel, retrieved, failed);
+				if (failed.length === 0) {
+					reportSuccess({ operation: "Retrieve", org: defaultOrg.displayName, summary: summary.text, handle: operationHandle });
+					return;
+				}
+				operationHandle.dispose();
+				DeployLog.line(`Update from org had ${failed.length} failure(s):\n${failed.map((f) => `${f.fullName}: ${f.error}`).join("\n")}`);
+				const pick = await vscode.window.showWarningMessage(summary.text, "Show details");
+				if (pick === "Show details") DeployLog.show();
+			} catch (e: any) {
+				if (e?.cancelled) {
+					Logger.info("Update from org cancelled by user.");
+					Telemetry.event("updateProjectFromOrg", { status: "cancelled" });
+					await revertOpenEditors(paths);
+					operationHandle.dispose();
+					return;
+				}
+				Telemetry.event("updateProjectFromOrg", { status: "failed" });
+				reportError({ operation: "Retrieve", error: e, org: defaultOrg.displayName, handle: operationHandle });
+			}
+		}
+	);
 }

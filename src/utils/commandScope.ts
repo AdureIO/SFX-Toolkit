@@ -85,6 +85,7 @@ const SOURCE: string[] = [
 	"pullSourceForce",
 	"deployCurrentFile",
 	"retrieveCurrentFile",
+	"updateProjectFromOrg",
 	"validateApexFile",
 	"resetSourceTracking",
 	"repairLwcJsconfig",

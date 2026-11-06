@@ -194,6 +194,11 @@
         "title": "ASFXT: Retrieve from Default Org"
       },
       {
+        "command": "adure-sfx-toolkit.updateProjectFromOrg",
+        "title": "ASFXT: Update Project from Org",
+        "icon": "$(sync)"
+      },
+      {
         "command": "adure-sfx-toolkit.validateApexFile",
         "title": "ASFXT: Validate Apex Against Org",
         "icon": "$(check-all)"
@@ -783,6 +788,10 @@
         }
       ],
       "commandPalette": [
+        {
+          "command": "adure-sfx-toolkit.updateProjectFromOrg",
+          "when": "adure-sfx-toolkit:isSalesforceProject"
+        },
         {
           "command": "adure-sfx-toolkit.convertMdapiToSfdx",
           "when": "adure-sfx-toolkit:isMdapiProject"
