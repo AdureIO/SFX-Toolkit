@@ -131,3 +131,92 @@ export function fieldsAndRels(owner: string, d: HostDescribe, c: any): Completio
     }
     return out;
 }
+
+// ─── Lazy documentation (completionItem/resolve) ────────────────────────────────
+//
+// Apex completion items are sent WITHOUT documentation: each carries a small `data`
+// record (`k` = kind, plus what the resolver needs) and the markdown popup is built in
+// completionItem/resolve (see completion.ts `resolveCompletionItem`). Eager markdown was
+// about a third of every completion payload.
+
+/** Kinds routed by completionItem/resolve. `soql` is reserved for SOQL items (soql.ts). */
+export type LazyKind =
+    | 'sf' // SObject field (o = object; c = request context → document uri)
+    | 'sr' // SObject parent relationship
+    | 'sc' // SObject child relationship
+    | 'am' // user (Apex) member
+    | 'sm' // standard-library member
+    | 'ty' // type name (user / standard / SObject)
+    | 'kw' // keyword / snippet
+    | 'v' // variable
+    | 'ev' // trigger context variable / misc value
+    | 'soql';
+
+export interface LazyData {
+    k: LazyKind;
+    /** Owner (object / type) name. */
+    o?: string;
+    /** Request-context id (see completion.ts) for resolves that need the document. */
+    c?: number;
+    /** Kind-specific extra (member kind, type description…). */
+    x?: string;
+}
+
+/** Attach lazy-documentation data to an item (no documentation is sent eagerly). */
+export function lazy(item: CompletionItem, data: LazyData): CompletionItem {
+    item.data = data;
+    return item;
+}
+
+/** Wrap a resolved popup body with the provenance footer. */
+export function schemaDoc(body: string[]): { kind: typeof MarkupKind.Markdown; value: string } {
+    return md([...body, ASFX_SCHEMA_FOOTER].join('\n\n'));
+}
+export function plainDoc(body: string[]): { kind: typeof MarkupKind.Markdown; value: string } {
+    return md([...body, ASFX_PLAIN_FOOTER].join('\n\n'));
+}
+
+/** The popup body of an SObject field (same content the eager `fieldItem` sends). */
+export function fieldDocBody(owner: string, f: HostField): string[] {
+    const sizeSuffix = f.length ? ` (${f.length})` : '';
+    const body = ['```apex\n' + `${owner}.${f.name} : ${f.type}${sizeSuffix}` + '\n```'];
+    if (f.label && f.label !== f.name) body.push(`**${f.label}**`);
+    if (f.helpText) body.push(f.helpText);
+    if (f.picklistValues && f.picklistValues.length) {
+        const shown = f.picklistValues.slice(0, 12).join(', ');
+        const more = f.picklistValues.length > 12 ? `, … (+${f.picklistValues.length - 12})` : '';
+        body.push(`_Values:_ ${shown}${more}`);
+    }
+    if (f.nillable === false) body.push('_Required_');
+    return body;
+}
+
+/** A lazily-documented SObject field item. */
+export function lazyFieldItem(owner: string, f: HostField, c: number): CompletionItem {
+    return lazy(
+        {
+            label: f.name,
+            kind: CompletionItemKind.Field,
+            labelDetails: { detail: ` : ${f.type}`, description: owner },
+            sortText: fieldSortTier(f.name) + '_' + f.name,
+        },
+        { k: 'sf', o: owner, c },
+    );
+}
+
+/** A lazily-documented parent-relationship item (commits on `.` to keep traversing). */
+export function lazyRelItem(owner: string, f: HostField): CompletionItem {
+    const targets = f.referenceTo && f.referenceTo.length ? f.referenceTo : [];
+    const typeStr = targets.length ? targets.join(' | ') : '(relationship)';
+    return lazy(
+        {
+            label: f.relationshipName as string,
+            kind: CompletionItemKind.Class,
+            detail: `${typeStr} ${owner}.${f.relationshipName}`,
+            labelDetails: { detail: ` → ${typeStr}`, description: owner },
+            sortText: '1_' + f.relationshipName,
+            commitCharacters: ['.'],
+        },
+        { k: 'sr', o: owner },
+    );
+}
