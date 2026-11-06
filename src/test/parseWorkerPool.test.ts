@@ -170,6 +170,67 @@ describe("parse worker pool", function () {
 	});
 });
 
+describe("parse worker pool: size", function () {
+	let dir2: string;
+	let m: any;
+	let saved: string | undefined;
+	before(() => {
+		dir2 = fs.mkdtempSync(path.join(os.tmpdir(), "asfx-poolsize-"));
+		const prev = dir;
+		dir = dir2;
+		m = loadModule();
+		dir = prev;
+	});
+	after(() => fs.rmSync(dir2, { recursive: true, force: true }));
+	beforeEach(() => {
+		saved = process.env.ASFX_PARSE_WORKERS;
+		delete process.env.ASFX_PARSE_WORKERS;
+	});
+	afterEach(() => {
+		if (saved === undefined) delete process.env.ASFX_PARSE_WORKERS;
+		else process.env.ASFX_PARSE_WORKERS = saved;
+		m.ParseWorker.configure(undefined);
+	});
+
+	it("defaults to 1 without env or option", () => {
+		assert.strictEqual(m.poolSize(), 1);
+		assert.strictEqual(m.poolSize(undefined), 1);
+	});
+	it("the option sets the size, clamped to 1..4", () => {
+		assert.strictEqual(m.poolSize(3), 3);
+		assert.strictEqual(m.poolSize(4), 4);
+		assert.strictEqual(m.poolSize(9), 4);
+		assert.strictEqual(m.poolSize(0), 1);
+		assert.strictEqual(m.poolSize(-2), 1);
+		assert.strictEqual(m.poolSize(2.7), 2);
+		assert.strictEqual(m.poolSize(NaN), 1);
+	});
+	it("the env var overrides the option", () => {
+		process.env.ASFX_PARSE_WORKERS = "6";
+		assert.strictEqual(m.poolSize(2), 6);
+		process.env.ASFX_PARSE_WORKERS = "99";
+		assert.strictEqual(m.poolSize(2), 16);
+	});
+	it("a size-1 pool never grows and keeps its only worker", async () => {
+		const p = m.ParseWorker;
+		p.terminate();
+		p.workerPath = path.join(dir2, "worker.js");
+		p.maxWorkers = undefined;
+		p.idleMs = 100;
+		p.disabled = false;
+		p.crashes = 0;
+		p.configure(1);
+		await Promise.all(Array.from({ length: 6 }, (_, i) => p.parseText(`SLOW:20 ${i}`, "background")));
+		assert.strictEqual(p.stats.workers, 1);
+		await sleep(400);
+		assert.strictEqual(p.stats.workers, 1, "last worker is kept");
+		p.configure(3);
+		await Promise.all(Array.from({ length: 9 }, (_, i) => p.parseText(`SLOW:30 ${i}`, "background")));
+		assert.strictEqual(p.stats.workers, 3, "configured size is used");
+		p.terminate();
+	});
+});
+
 describe("parse worker pool: server shutdown", function () {
 	it("the server exits within 1 s of shutdown/exit with 3 workers busy", async function () {
 		this.timeout(60000);

@@ -55,7 +55,7 @@ describe("ServerSettingsRestarter", () => {
 	});
 
 	it("every key read at start is relevant", () => {
-		for (const k of ["apex.languageServer", "apex.enableCompletion", "apex.validateSemantics", "apex.semanticHighlighting", "apex.languageServerMaxMemoryMB", "soql.enableCompletion"]) {
+		for (const k of ["apex.languageServer", "apex.enableCompletion", "apex.validateSemantics", "apex.semanticHighlighting", "apex.languageServerMaxMemoryMB", "apex.languageServerParseWorkers", "soql.enableCompletion"]) {
 			assert.ok(affectsServerRestart(evt(`adure-sfx-toolkit.${k}`)), k);
 		}
 	});

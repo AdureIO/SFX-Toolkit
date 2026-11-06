@@ -204,6 +204,12 @@ function startClient(context: vscode.ExtensionContext): void {
 		.getConfiguration("adure-sfx-toolkit")
 		.get<boolean>("apex.semanticHighlighting", true);
 
+	// Parse worker pool size (1..4); each extra worker costs ~100 MB.
+	const parseWorkers = Math.max(
+		1,
+		Math.min(4, Math.floor(vscode.workspace.getConfiguration("adure-sfx-toolkit").get<number>("apex.languageServerParseWorkers", 1) || 1)),
+	);
+
 	const clientOptions: LanguageClientOptions = {
 		documentSelector: [
 			{ scheme: "file", language: "soql" },
@@ -218,7 +224,7 @@ function startClient(context: vscode.ExtensionContext): void {
 			{ scheme: "file", pattern: "**/*.cls" },
 			{ scheme: "file", pattern: "**/*.trigger" },
 		],
-		initializationOptions: { apexFeatures, apexCompletion, apexValidateSchema, apexSemanticHighlighting },
+		initializationOptions: { apexFeatures, apexCompletion, apexValidateSchema, apexSemanticHighlighting, parseWorkers },
 		outputChannel,
 		middleware: {
 			// Virtual workbench buffers must not show up in the Problems panel: clear any

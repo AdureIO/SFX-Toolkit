@@ -3,8 +3,9 @@
  *
  * A small lazily-grown pool of worker threads shared by the parse cache (background
  * parses of open documents) and the workspace index / symbol search (cross-file
- * lookups). Pool size is `min(4, cores) - 1` (at least 1; env `ASFX_PARSE_WORKERS`
- * overrides). The first worker starts on the first parse; another is started only
+ * lookups). Pool size is 1 by default; the setting `apex.languageServerParseWorkers`
+ * (initializationOptions `parseWorkers`, 1..4) raises it, and env `ASFX_PARSE_WORKERS`
+ * (capped at 16) wins over both. The first worker starts on the first parse; another is started only
  * when a job has to wait behind busy workers (outstanding work > 1), and extra workers are
  * terminated after IDLE_MS without work. Every worker is `unref()`ed so none keeps the
  * process alive, and `terminate()` (release/shutdown) stops them all.
@@ -24,7 +25,6 @@
  * to the remaining / a fresh worker.
  */
 import * as fs from 'fs';
-import * as os from 'os';
 import * as path from 'path';
 import { Worker } from 'worker_threads';
 import { parseApex, ApexParseResult, ApexIndex } from './apexSymbols';
@@ -32,17 +32,21 @@ import { parseApex, ApexParseResult, ApexIndex } from './apexSymbols';
 export const WORKER_FILE = 'serverParseWorker.js';
 const MAX_CRASHES = 3;
 const MAX_POOL = 4;
+const DEFAULT_POOL = 1;
 const IDLE_MS = 30_000;
 
 /** `interactive`: the user is waiting (open document); `background`: bulk / speculative parses. */
 export type ParsePriority = 'interactive' | 'background';
 
-/** Number of workers the pool may grow to. */
-export function poolSize(): number {
+/**
+ * Number of workers the pool may grow to: env `ASFX_PARSE_WORKERS` (1..16) wins, then the
+ * configured option (clamped to 1..4), then 1.
+ */
+export function poolSize(option?: number): number {
     const env = Number(process.env.ASFX_PARSE_WORKERS);
-    if (Number.isFinite(env) && env >= 1) return Math.min(16, Math.floor(env));
-    const cores = (os as { availableParallelism?: () => number }).availableParallelism?.() ?? os.cpus().length;
-    return Math.max(1, Math.min(MAX_POOL, cores) - 1);
+    if (process.env.ASFX_PARSE_WORKERS && Number.isFinite(env) && env >= 1) return Math.min(16, Math.floor(env));
+    if (typeof option === 'number' && Number.isFinite(option)) return Math.max(1, Math.min(MAX_POOL, Math.floor(option)));
+    return DEFAULT_POOL;
 }
 
 /** The slice of a parse that cross-file lookups need. */
@@ -78,8 +82,15 @@ class ParseWorkerClient {
     workerPath = path.join(__dirname, WORKER_FILE);
     /** Idle time after which workers beyond the first are terminated (tests shorten it). */
     idleMs = IDLE_MS;
-    /** Pool size cap; undefined = poolSize() (env / cores). */
+    /** Pool size cap; undefined = poolSize(configured) (env / option / default). */
     maxWorkers: number | undefined;
+    /** Size from the client setting (initializationOptions.parseWorkers). */
+    configured: number | undefined;
+
+    /** Apply the client setting (the env var still wins). */
+    configure(workers: unknown): void {
+        this.configured = typeof workers === 'number' ? workers : undefined;
+    }
 
     /** Start the first worker now (it warms its parser JIT on start). No-op when unavailable. */
     warm(): void {
@@ -160,7 +171,7 @@ class ParseWorkerClient {
             if (!queued) return;
             let slot = this.slots.find((s) => !s.job);
             if (!slot) {
-                const cap = this.maxWorkers ?? poolSize();
+                const cap = this.maxWorkers ?? poolSize(this.configured);
                 if (this.slots.length < cap) slot = this.spawn(); // every worker busy and a job waiting: outstanding work > 1
                 if (!slot) {
                     if (this.slots.length === 0) this.failQueued(new Error('no worker'));

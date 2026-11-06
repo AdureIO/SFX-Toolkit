@@ -59,6 +59,7 @@ import * as codeActions from './codeActions';
 import * as semanticTokens from './semanticTokens';
 import * as schemaPrefetch from './schemaPrefetch';
 import * as apexLinks from './apexLinks';
+import { ParseWorker } from './parseWorkerClient';
 
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments(TextDocument);
@@ -109,6 +110,7 @@ function capabilitiesFor(s: ServerSettings): ServerCapabilities {
 connection.onInitialize((params): InitializeResult => {
     const opts = params.initializationOptions || {};
     codeActions.noteClientCapabilities(params.capabilities);
+    ParseWorker.configure(opts.parseWorkers);
     ctx.settings.apexFeatures = !!opts.apexFeatures;
     ctx.settings.apexCompletion = opts.apexCompletion !== false;
     ctx.settings.apexValidateSchema = opts.apexValidateSchema !== false;

@@ -16,6 +16,7 @@ export const RESTART_KEYS = [
 	"apex.validateSemantics",
 	"apex.semanticHighlighting",
 	"apex.languageServerMaxMemoryMB",
+	"apex.languageServerParseWorkers",
 	"soql.enableCompletion",
 ] as const;
 

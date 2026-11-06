@@ -889,6 +889,13 @@
           "maximum": 8192,
           "markdownDescription": "Heap cap (V8 `--max-old-space-size`, in MB) for the ASFX language server process. Bounds its memory in very large projects; raise it only if the server runs out of memory. Takes effect when the language server (re)starts."
         },
+        "adure-sfx-toolkit.apex.languageServerParseWorkers": {
+          "type": "integer",
+          "default": 1,
+          "minimum": 1,
+          "maximum": 4,
+          "markdownDescription": "Number of background worker threads the ASFX language server uses to parse Apex files for cross-file features such as Find References. Each extra worker costs about **+100 MB** of memory in exchange for faster cold reference searches on large workspaces. The default of 1 keeps memory minimal. Takes effect when the language server (re)starts."
+        },
         "adure-sfx-toolkit.apex.semanticHighlighting": {
           "type": "boolean",
           "default": true,
