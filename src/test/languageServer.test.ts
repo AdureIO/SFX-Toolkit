@@ -475,7 +475,12 @@ describe("Apex language features", () => {
     const src = "public class C {\n  void m() {\n    Helper.\n  }\n}\n";
     const labels = labelsOf(await complete(src, 2, 11, "apex"));
     assert.ok(labels.includes("greet"), "expected static method greet");
-    assert.ok(labels.includes("counter") && labels.includes("label"), "expected fields/properties");
+    // `Helper.` is static access: instance fields/properties are not offered there…
+    assert.ok(!labels.includes("counter") && !labels.includes("label"), `no instance members on the type: ${labels.join(",")}`);
+    // …but on an instance they are.
+    const inst = "public class C {\n  void m() {\n    Helper h = new Helper();\n    h.\n  }\n}\n";
+    const il = labelsOf(await complete(inst, 3, 6, "apex"));
+    assert.ok(il.includes("counter") && il.includes("label"), `expected fields/properties: ${il.join(",")}`);
   });
 
   it("completes Salesforce standard-library types and namespaces in a statement position", async () => {
