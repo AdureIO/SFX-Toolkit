@@ -73,6 +73,7 @@ const ORG: string[] = [
 	"openApexTests",
 	"showOutput",
 	"revealOperationPanel",
+	"openOrgBrowser",
 ];
 
 const SOURCE: string[] = [
