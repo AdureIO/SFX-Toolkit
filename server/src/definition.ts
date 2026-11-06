@@ -57,7 +57,7 @@ async function stubLocation(
     const d = await ctx.schema.describe(docUri, sobject, token);
     if (!d) return null;
     throwIfCancelled(token); // getStub may write a stub file — not for a cancelled request
-    const info = getStub(sobject, d);
+    const info = await getStub(sobject, d);
     if (!info) return null;
     const line = field ? info.fieldLines.get(field.toLowerCase()) ?? info.classLine : info.classLine;
     return { uri: info.uri, range: Range.create(line, 0, line, 200) };

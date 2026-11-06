@@ -40,6 +40,10 @@ let rootDir: string | null = null;
 // only the recently navigated ones are worth keeping).
 const cache = new Map<string, StubInfo>();
 const MAX_STUB_CACHE = 200;
+// Concurrent lookups of the same object share one read/write. Cleared on settle.
+const inFlight = new Map<string, Promise<StubInfo | null>>();
+// Bumped by clearStubs/setStubRoot so an in-flight load can't resurrect a cleared entry.
+let cacheGeneration = 0;
 
 function remember(sobject: string, info: StubInfo): void {
     cache.delete(sobject);
@@ -83,6 +87,8 @@ export function setStubRoot(dir: string | null): void {
     rootDir = dir;
     stubbedNames = null;
     cache.clear(); // locations belong to the previous root
+    inFlight.clear();
+    cacheGeneration++;
     // Remove the legacy custom stub dir from earlier versions (now unified into
     // .sfdx/tools/sobjects so the Salesforce LS and AI read the same files).
     if (dir) {
@@ -95,9 +101,12 @@ export function setStubRoot(dir: string | null): void {
 }
 /** Drop cached stub locations — all of them, or just the given objects (targeted push/pull). */
 export function clearStubs(objects?: string[]): void {
-    if (!objects) { cache.clear(); return; }
+    // Any clear invalidates in-flight loads (they could carry pre-clear content).
+    cacheGeneration++;
+    if (!objects) { cache.clear(); inFlight.clear(); return; }
     const lower = new Set(objects.map((o) => o.toLowerCase()));
     for (const k of [...cache.keys()]) if (lower.has(k.toLowerCase())) cache.delete(k);
+    for (const k of [...inFlight.keys()]) if (lower.has(k.toLowerCase())) inFlight.delete(k);
 }
 
 function isCustomObject(name: string): boolean {
@@ -181,22 +190,42 @@ function generate(sobject: string, d: StubDescribe): { content: string; classLin
     return { content: lines.join('\n') + '\n', classLine, fieldLines };
 }
 
-export function getStub(sobject: string, d: StubDescribe): StubInfo | null {
+/**
+ * Resolve (reading or generating) the stub for `sobject`. Async so a missing stub is
+ * never written on the server's main thread synchronously; concurrent lookups for the
+ * same object share one in-flight promise (one read/write).
+ */
+export function getStub(sobject: string, d: StubDescribe): Promise<StubInfo | null> {
     const cached = cache.get(sobject);
     if (cached) {
         remember(sobject, cached); // refresh LRU position
-        return cached;
+        return Promise.resolve(cached);
     }
+    const pending = inFlight.get(sobject);
+    if (pending) return pending;
+    const p = loadStub(sobject, d).finally(() => {
+        if (inFlight.get(sobject) === p) inFlight.delete(sobject);
+    });
+    inFlight.set(sobject, p);
+    return p;
+}
 
+async function loadStub(sobject: string, d: StubDescribe): Promise<StubInfo | null> {
+    const gen0 = cacheGeneration;
+    // A clearStubs()/setStubRoot() that lands while we await must not be undone by
+    // re-adding this (possibly stale) entry to the cache.
+    const store = (info: StubInfo): void => {
+        if (gen0 === cacheGeneration) remember(sobject, info);
+    };
     const file = stubFilePath(sobject);
 
     // Prefer the existing file (background sync / Salesforce) so navigation matches
     // what's on disk; read its line numbers directly.
     try {
-        const existing = fs.readFileSync(file, 'utf8');
+        const existing = await fs.promises.readFile(file, 'utf8');
         const parsed = parseStub(existing);
         const info: StubInfo = { uri: pathToFileURL(file).href, classLine: parsed.classLine, fieldLines: parsed.fieldLines };
-        remember(sobject, info);
+        store(info);
         return info;
     } catch {
         /* not generated yet — create it below */
@@ -204,12 +233,12 @@ export function getStub(sobject: string, d: StubDescribe): StubInfo | null {
 
     const gen = generate(sobject, d);
     try {
-        fs.mkdirSync(path.dirname(file), { recursive: true });
-        fs.writeFileSync(file, gen.content, 'utf8');
+        await fs.promises.mkdir(path.dirname(file), { recursive: true });
+        await fs.promises.writeFile(file, gen.content, 'utf8');
     } catch {
         return null;
     }
     const info: StubInfo = { uri: pathToFileURL(file).href, classLine: gen.classLine, fieldLines: gen.fieldLines };
-    remember(sobject, info);
+    store(info);
     return info;
 }
