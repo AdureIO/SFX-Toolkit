@@ -174,6 +174,11 @@ const SOURCES: Record<string, string> = {
         an.«@c.over2si.o13|over»('a', 2);
         an.«@c.over2si.o14|over»(str, n);
         an.«@c.pickS.o15|pick»(Mystery.value());
+        // member missing on a resolved workspace receiver: falls back to the receiver's class
+        local.«@c.dog.f1|noSuchMethod»();
+        Animal.«@c.animal.f2|noSuchStatic»();
+        h.«@c.hget.ch99|getDog»().«@c.dog.f3|noSuchInChain»();
+        Integer nf = local.«@c.dog.f4|noSuchField»;
         // SOQL binds and string concatenation
         List<Account> accs = [SELECT Id FROM Account WHERE Name = :local.«@c.aname.q1|name» LIMIT :h.«@c.hget.q2|getDog»().«@c.aage.q3|Age»];
         String msg = 'Dog ' + local.«@c.dspeak.q4|speak»() + ' says ' + h.«@c.hdog.q5|dog».«@c.bark.q6|bark»();

@@ -122,6 +122,11 @@ async function apexDefinition(
             }
             const d = declarationOf(session, sym);
             if (d) return Location.create(d.uri, d.range);
+        } else if (res?.receiverType) {
+            // The receiver is a workspace class but has no such member (typo, half-typed, only in a
+            // not-yet-indexed file): land on the class rather than nowhere.
+            const d = declarationOf(session, { kind: 'type', name: res.receiverType.header.name, node: res.receiverType });
+            if (d) return Location.create(d.uri, d.range);
         }
     }
 
