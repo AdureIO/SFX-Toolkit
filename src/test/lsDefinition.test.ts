@@ -247,7 +247,7 @@ describe("definition: overloads that differ in generic type arguments", function
 	});
 	after(() => stopServer(s));
 
-	const SYMS = ["GLS", "GLI", "GMA", "GMS", "GQA", "GQC"];
+	const SYMS = ["GLS", "GLI", "GMA", "GMS", "GQA", "GQC", "GSO", "GPA", "GPS"];
 
 	it("every proven call lands on the overload with exactly that parameterised type", async () => {
 		const wrong: string[] = [];

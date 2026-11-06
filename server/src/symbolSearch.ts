@@ -571,6 +571,37 @@ export function paramTypesOf(m: FileModel, member: ApexMemberDecl): string[] {
 const NUMERIC_RANK: Record<string, number> = { integer: 1, long: 2, double: 3, decimal: 3 };
 const PRIMITIVES = new Set(['integer', 'long', 'double', 'decimal', 'boolean']);
 
+const SCALARS = new Set(['string', 'id', 'integer', 'long', 'double', 'decimal', 'boolean', 'date', 'datetime', 'time', 'blob']);
+
+/** Score of one collection element (or Map value) type: exact, subtype / SObject / Object only. */
+function elementScore(a: string, p: string, isSub: (a: string, p: string) => boolean): number {
+    if (a === p) return 4;
+    if (p === 'object') return 1;
+    if (a.includes('<') || p.includes('<')) return argScore(a, p, isSub);
+    if (SCALARS.has(a) || SCALARS.has(p)) return -1;
+    return argScore(a, p, isSub);
+}
+
+/**
+ * Same collection type, different (or unknown) generic arguments. Collections are covariant
+ * in their elements / Map values (subtype, SObject, Object), Map keys must match exactly.
+ * Scores in (1, 3]: below an exact match, above an `Object` parameter; a bare `list`
+ * argument (element type unknown) ties every signature at 3.
+ */
+function genericScore(arg: string, param: string, base: string, isSub: (a: string, p: string) => boolean): number {
+    if (base === arg || base === param) return 3;
+    const aa = splitGeneric(arg).args;
+    const pa = splitGeneric(param).args;
+    if (aa.length !== pa.length) return -1;
+    let sum = 0;
+    for (let i = 0; i < aa.length; i++) {
+        const sc = base === 'map' && i === 0 ? (aa[i] === pa[i] ? 4 : -1) : elementScore(aa[i], pa[i], isSub);
+        if (sc < 0) return -1;
+        sum += sc;
+    }
+    return 1 + (sum / aa.length / 4) * 2;
+}
+
 /** Compatibility score of passing an `arg` to a `param` (negative = not callable). */
 function argScore(arg: ArgType, param: string, isSub: (a: string, p: string) => boolean): number {
     if (arg === undefined) return 0;
@@ -578,11 +609,7 @@ function argScore(arg: ArgType, param: string, isSub: (a: string, p: string) => 
     if (arg === param) return 4;
     const ab = rawType(arg);
     const pb = rawType(param);
-    if (ab === pb && (ab !== arg || pb !== param)) {
-        // Generic arguments are invariant: two known, different argument lists don't match;
-        // when the argument's own are unknown (bare `list`) the signatures stay tied.
-        return ab === arg || pb === param ? 3 : -1;
-    }
+    if (ab === pb && (ab !== arg || pb !== param)) return genericScore(arg, param, ab, isSub);
     if (ab === 'null') return PRIMITIVES.has(pb) ? -1 : 1;
     const ra = NUMERIC_RANK[ab];
     const rp = NUMERIC_RANK[pb];
