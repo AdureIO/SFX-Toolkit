@@ -53,7 +53,7 @@ import { baseTypeName, isApex } from './textUtil';
 import { lruGet, lruSet } from './caches';
 import { ParseWorker } from './parseWorkerClient';
 import { TokenIndex } from './tokenIndex';
-import { Resolver, receiverExprBefore } from './apexResolve';
+import { Resolver, receiverExprBefore, splitGeneric, typeLabel } from './apexResolve';
 import type { ParseView } from './parseCache';
 import { metadataOccurrences } from './metadataRefs';
 
@@ -522,14 +522,21 @@ async function typeOfReceiver(
 
 // ─── Overload selection by argument types ───────────────────────────────────────
 
-/** Lower-cased simple type name of an argument / parameter (`undefined` = not determinable). */
+/**
+ * Normalised type of an argument / parameter (`undefined` = not determinable): lower-case,
+ * whitespace-free, qualifiers dropped, `X[]` is `List<X>`, generic arguments kept
+ * (`map<id,account>`). A bare `list` means the element type is unknown.
+ */
 export type ArgType = string | undefined;
 
 function normType(t: string): string {
-    const x = t.trim();
-    if (/\[\s*\]$/.test(x)) return 'list';
-    return (x.replace(/<[\s\S]*$/, '').split('.').pop() ?? '').trim().toLowerCase();
+    const { base, args } = splitGeneric(t.trim());
+    const name = (base.split('.').pop() ?? '').trim().toLowerCase();
+    return args.length ? `${name}<${args.map(normType).join(',')}>` : name;
 }
+
+/** The type without its generic arguments (`list<string>` gives `list`). */
+const rawType = (t: string): string => t.replace(/<[\s\S]*$/, '');
 
 /** Normalised parameter types of a method / constructor declaration (read from the file text). */
 export function paramTypesOf(m: FileModel, member: ApexMemberDecl): string[] {
@@ -569,13 +576,20 @@ function argScore(arg: ArgType, param: string, isSub: (a: string, p: string) => 
     if (arg === undefined) return 0;
     if (param === 'object') return 1;
     if (arg === param) return 4;
-    if (arg === 'null') return PRIMITIVES.has(param) ? -1 : 1;
-    const ra = NUMERIC_RANK[arg];
-    const rp = NUMERIC_RANK[param];
+    const ab = rawType(arg);
+    const pb = rawType(param);
+    if (ab === pb && (ab !== arg || pb !== param)) {
+        // Generic arguments are invariant: two known, different argument lists don't match;
+        // when the argument's own are unknown (bare `list`) the signatures stay tied.
+        return ab === arg || pb === param ? 3 : -1;
+    }
+    if (ab === 'null') return PRIMITIVES.has(pb) ? -1 : 1;
+    const ra = NUMERIC_RANK[ab];
+    const rp = NUMERIC_RANK[pb];
     if (ra && rp) return rp >= ra ? 3 - 0.1 * (rp - ra) : -1;
-    if ((arg === 'string' && param === 'id') || (arg === 'id' && param === 'string')) return 2;
-    if (isSub(arg, param)) return 3;
-    if (param === 'sobject' && !PRIMITIVES.has(arg) && arg !== 'string' && arg !== 'list' && arg !== 'set' && arg !== 'map') return 2;
+    if ((ab === 'string' && pb === 'id') || (ab === 'id' && pb === 'string')) return 2;
+    if (isSub(ab, pb)) return 3;
+    if (pb === 'sobject' && !PRIMITIVES.has(ab) && ab !== 'string' && ab !== 'list' && ab !== 'set' && ab !== 'map') return 2;
     return -1;
 }
 
@@ -615,6 +629,52 @@ export function chooseOverload<T extends { params: string[] }>(
     return { picks, sure: pickSigs.size === 1 && (allKnown || compatSigs.size === 1) };
 }
 
+/** Index just past the bracket group opening at `e[i]` (`(`, `[`, `{`, `<`), or -1. */
+function groupEnd(e: string, i: number): number {
+    const close: Record<string, string> = { '(': ')', '[': ']', '{': '}', '<': '>' };
+    const open = e[i];
+    let depth = 0;
+    for (let k = i; k < e.length; k++) {
+        if (e[k] === "'") {
+            for (k++; k < e.length && e[k] !== "'"; k++) if (e[k] === '\\') k++;
+        } else if (e[k] === open) depth++;
+        else if (e[k] === close[open] && --depth === 0) return k + 1;
+    }
+    return -1;
+}
+
+/** `new List<Integer>()`, `new Map<Id, Account>{...}`, `new String[]{...}` / `new Account[5]`: the full type. */
+function newExprType(e: string): ArgType {
+    const head = /^new\s+([A-Za-z_][\w.]*)\s*([<[])/.exec(e);
+    if (!head) return undefined;
+    const name = head[1];
+    let i = head[0].length - 1;
+    const end = groupEnd(e, i);
+    if (end < 0) return undefined;
+    const type = head[2] === '<' ? `${name}${e.slice(i, end)}` : `${name}[]`;
+    i = end;
+    while (/\s/.test(e[i] ?? '')) i++;
+    // Only a bare construction: what follows the type is the argument / initialiser group.
+    if (e[i] !== '(' && e[i] !== '{' && e[i] !== '[') return undefined;
+    return groupEnd(e, i) === e.length ? normType(type) : undefined;
+}
+
+/** An inline `[SELECT ... FROM Obj ...]` gives `list<obj>` (`count()`: integer, aggregates: AggregateResult). */
+function soqlQueryType(e: string): ArgType {
+    if (!/^\[\s*select\b/i.test(e) || groupEnd(e, 0) !== e.length) return undefined;
+    let q = e.slice(1, -1);
+    for (let prev = ''; prev !== q; ) {
+        prev = q;
+        q = q.replace(/\(\s*select\b[^()]*\)/gi, ' ');
+    }
+    const from = /\bfrom\s+([A-Za-z_][\w.]*)/i.exec(q);
+    if (!from) return undefined;
+    const list = q.slice(0, from.index);
+    if (/^\s*select\s+count\s*\(\s*\)\s*$/i.test(list)) return 'integer';
+    if (/\b(count|count_distinct|sum|avg|min|max)\s*\(/i.test(list)) return 'list<aggregateresult>';
+    return `list<${(from[1].split('.').pop() ?? '').toLowerCase()}>`;
+}
+
 /** The value type of an argument expression, or undefined. */
 async function argTypeOf(s: SearchSession, m: FileModel, expr: string, pos: { line: number; character: number }): Promise<ArgType> {
     const e = expr.trim();
@@ -631,6 +691,8 @@ async function argTypeOf(s: SearchSession, m: FileModel, expr: string, pos: { li
         const v = varAt(m, e, pos.line, pos.character);
         if (v) return normType(v.type);
     }
+    const literal = newExprType(e) ?? soqlQueryType(e);
+    if (literal) return literal;
     const view: ParseView = { result: { index: m.index } as ApexParseResult, stale: false, toParsePosition: (p) => p };
     try {
         const v = await new Resolver(s.ctx, s.docOf(m), pos, [view], s.token).exprValue(e);
@@ -639,7 +701,7 @@ async function argTypeOf(s: SearchSession, m: FileModel, expr: string, pos: { li
             case 'user':
                 return v.t.decl.name.toLowerCase();
             case 'std':
-                return v.t.cls.name.toLowerCase();
+                return normType(typeLabel(v.t));
             case 'sobject':
                 return v.t.name.toLowerCase();
             default:

@@ -141,6 +141,15 @@ public with sharing virtual class «C:decl,@C|AccountService» {
     public static Account makeAccount() { return null; }
     public static String label() { return ''; }
     public static Integer count() { return 1; }
+    // Overloads that differ only in generic arguments. Apex treats String[] and List<String>
+    // as one type, so GLS stands for both spellings.
+    public static String «GLS:decl,@GLS|gen»(String[] v) { return 'ls'; }
+    public static String «GLI:decl,@GLI|gen»(List<Integer> v) { return 'li'; }
+    public static String «GMA:decl,@GMA|gen»(Map<Id, Account> v) { return 'ma'; }
+    public static String «GMS:decl,@GMS|gen»(Map<String,Account> v) { return 'ms'; }
+    public static String «GQA:decl,@GQA|genq»(List<Account> v) { return 'qa'; }
+    public static String «GQC:decl,@GQC|genq»(List<Contact> v) { return 'qc'; }
+    public static List<String> names() { return null; }
 }
 `,
 	[`${CLS}/OverloadCaller.cls`]: `public class OverloadCaller {
@@ -163,6 +172,27 @@ public with sharing virtual class «C:decl,@C|AccountService» {
         Overloads.«OVA:result|convert»(Overloads.makeAccount());
         Overloads.«OVS:concat|convert»('a' + ps);
         Overloads.«OVS:undetermined,OVI:undetermined,OVA:undetermined|convert»(Mystery.value());
+    }
+    private List<Integer> fieldInts = new List<Integer>();
+    public void generics(List<String> pls, Map<Id, Account> pmi, Map<String, Account> pms, Account[] pacc) {
+        List<Integer> lli = new List<Integer>();
+        List<Account> lacc = [SELECT Id FROM Account];
+        Overloads.«GLS:param|gen»(pls);
+        Overloads.«GLI:local,@GLI.local|gen»(lli);
+        Overloads.«GLI:field|gen»(fieldInts);
+        Overloads.«GLI:new|gen»(new List<Integer>());
+        Overloads.«GLS:array-literal|gen»(new String[]{'a'});
+        Overloads.«GLS:list-literal|gen»(new List<String>{'a', 'b'});
+        Overloads.«GLS:result|gen»(Overloads.names());
+        Overloads.«GMA:param|gen»(pmi);
+        Overloads.«GMS:param|gen»(pms);
+        Overloads.«GMA:new|gen»(new Map<Id,Account>());
+        Overloads.«GQA:soql|genq»([SELECT Id FROM Account WHERE Name != null]);
+        Overloads.«GQC:soql|genq»([SELECT Id, (SELECT Id FROM Cases) FROM Contact]);
+        Overloads.«GQA:local|genq»(lacc);
+        Overloads.«GQA:array-param|genq»(pacc);
+        Overloads.«GLS:undetermined,GLI:undetermined,GMA:undetermined,GMS:undetermined|gen»(Mystery.value());
+        Overloads.«GQA:undetermined,GQC:undetermined|genq»(Mystery.value());
     }
 }
 `,

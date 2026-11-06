@@ -16,7 +16,7 @@ import * as os from "os";
 import * as path from "path";
 import * as fs from "fs";
 import { pathToFileURL, fileURLToPath } from "url";
-import { writeRefFixture, RefFixture, ExpLoc } from "./helpers/refWorkspace";
+import { writeRefFixture, buildRefFixture, RefFixture, ExpLoc } from "./helpers/refWorkspace";
 import { buildDefFixture, targetOf } from "./helpers/defWorkspace";
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const rpc = require("vscode-jsonrpc/node");
@@ -237,3 +237,56 @@ describe("definition: 2000-class workspace", function () {
 		assert.ok(p95 < 50, `warm p95 ${p95} ms`);
 	});
 });
+
+describe("definition: overloads that differ in generic type arguments", function () {
+	this.timeout(60000);
+	let s: Server;
+	before(async function () {
+		this.timeout(60000);
+		s = await startServer(buildRefFixture());
+	});
+	after(() => stopServer(s));
+
+	const SYMS = ["GLS", "GLI", "GMA", "GMS", "GQA", "GQC"];
+
+	it("every proven call lands on the overload with exactly that parameterised type", async () => {
+		const wrong: string[] = [];
+		let checked = 0;
+		for (const sym of SYMS) {
+			const decl = s.fx.anchors.get(sym)!;
+			for (const use of s.fx.expected.get(sym)!.filter((e) => e.cat !== "decl" && e.cat !== "undetermined")) {
+				const { got } = await defAtLoc(s, use);
+				checked++;
+				if (!(got.length === 1 && sameAs(got[0], { ...decl, cat: "decl" }))) wrong.push(`${sym}:${use.cat} -> ${got.map(fmt).join(",") || "none"}`);
+			}
+		}
+		assert.ok(checked >= 13, `checked ${checked} calls`);
+		assert.deepStrictEqual(wrong, []);
+	});
+
+	it("an argument whose generic arguments are unknown takes the first declared overload", async () => {
+		const first = s.fx.anchors.get("GLS")!;
+		const use = s.fx.expected.get("GLS")!.find((e) => e.cat === "undetermined")!;
+		const { got } = await defAtLoc(s, use);
+		assert.ok(got.length === 1 && sameAs(got[0], { ...first, cat: "decl" }), got.map(fmt).join(","));
+		const firstQ = s.fx.anchors.get("GQA")!;
+		const q = await defAtLoc(s, s.fx.expected.get("GQA")!.find((e) => e.cat === "undetermined")!);
+		assert.ok(q.got.length === 1 && sameAs(q.got[0], { ...firstQ, cat: "decl" }));
+	});
+});
+
+/** Go to definition at the start (+1) of an expected-reference span. */
+async function defAtLoc(s: Server, loc: ExpLoc): Promise<{ got: Got[] }> {
+	await open(s, loc.file);
+	const res = await s.conn.sendRequest("textDocument/definition", {
+		textDocument: { uri: uriOf(s, loc.file) },
+		position: { line: loc.line, character: loc.character + 1 },
+	});
+	const list: any[] = res == null ? [] : Array.isArray(res) ? res : [res];
+	return {
+		got: list.map((l) => {
+			const range = l.range ?? l.targetSelectionRange;
+			return { file: relOf(s, l.uri ?? l.targetUri), line: range.start.line, character: range.start.character, length: range.end.character - range.start.character };
+		}),
+	};
+}
