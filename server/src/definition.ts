@@ -8,7 +8,7 @@ import type { ServerContext } from './context';
 import { enclosingClass } from './apexSymbols';
 import { WorkspaceIndex } from './workspaceIndex';
 import { getStub } from './sobjectStub';
-import { soqlRegionAt, mainFromObject, relationshipSegmentsBeforeCursor } from './soql';
+import { soqlRegionAt, mainFromObject, relationshipSegmentsBeforeCursor, scopeObjectAt } from './soql';
 import { orCancelled, throwIfCancelled } from './cancel';
 import { isApex, wordSpanAt, receiverBefore, baseTypeName } from './textUtil';
 
@@ -73,7 +73,8 @@ async function soqlDefinition(
     word: string,
     token: CancellationToken,
 ): Promise<Location | null> {
-    const base = mainFromObject(soqlText);
+    // The innermost query's object (`(SELECT Name FROM Contacts)` → Contact), else the main FROM.
+    const base = (await scopeObjectAt(ctx.schema, docUri, soqlText, line, col, token)) ?? mainFromObject(soqlText);
     if (!base) return null;
     if (word.toLowerCase() === base.toLowerCase()) return stubLocation(ctx, docUri, base, null, token);
     const segs = relationshipSegmentsBeforeCursor(soqlText, line, col);
