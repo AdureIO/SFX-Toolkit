@@ -345,4 +345,13 @@ export class AuthInfo {
 	): Promise<void> {
 		await this.withRetry(org, (a) => httpsDelete(buildUrl(a), a.accessToken));
 	}
+
+	/** Authenticated DELETE that returns the response text (e.g. sObject Collections results). */
+	public static async deleteWithBody(
+		org: string | null,
+		buildUrl: (auth: OrgAuth) => string
+	): Promise<string> {
+		const { result } = await this.withRetry(org, (a) => httpsDelete(buildUrl(a), a.accessToken));
+		return result;
+	}
 }

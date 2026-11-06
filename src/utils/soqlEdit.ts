@@ -16,6 +16,8 @@ import { nameFieldOf, buildLookupSoql } from "./soqlEditPure";
 export { nameFieldOf, buildLookupSoql } from "./soqlEditPure";
 
 export interface FieldMeta {
+	/** Exact-case API name (the map is keyed lower-case). */
+	name?: string;
 	type: string; // string|boolean|int|double|currency|percent|date|datetime|picklist|multipicklist|reference|...
 	updateable: boolean;
 	picklistValues?: string[];
@@ -29,6 +31,7 @@ export async function fieldMetaFor(org: string | null, sobject: string): Promise
 	const out: Record<string, FieldMeta> = {};
 	for (const f of raw.fields ?? []) {
 		out[String(f.name).toLowerCase()] = {
+			name: String(f.name),
 			type: f.type || "string",
 			updateable: !!f.updateable && !f.calculated,
 			picklistValues: Array.isArray(f.picklistValues)
@@ -87,25 +90,78 @@ export async function resolveNames(org: string | null, refObject: string, ids: s
 }
 
 export interface RecordChange { id: string; sobjectType: string; fields: Record<string, unknown> }
+export interface RecordResult { id: string; error?: string }
 
-/** Apply field updates to records via the REST API. Returns per-record errors. */
-export async function saveRecords(org: string | null, changes: RecordChange[]): Promise<{ id: string; error?: string }[]> {
+/** sObject Collections take at most 200 records per request. */
+const COLLECTION_BATCH = 200;
+
+function errorText(e: any): string {
+	let msg = e?.message ?? String(e);
+	const m = /HTTP \d+: (.+)$/s.exec(msg);
+	if (m) { try { const j = JSON.parse(m[1]); msg = Array.isArray(j) ? j.map((x) => x.message).join("; ") : (j.message || m[1]); } catch { msg = m[1]; } }
+	return msg;
+}
+
+/** Map a Collections response (array of {id, success, errors}) back onto the requested ids, in order. */
+function collectionResults(ids: string[], body: string): RecordResult[] {
+	let rows: any[] = [];
+	try { rows = JSON.parse(body); } catch { /* fall through: treat as all ok */ }
+	return ids.map((id, i) => {
+		const r = Array.isArray(rows) ? rows[i] : undefined;
+		if (!r || r.success !== false) return { id };
+		const err = (r.errors ?? []).map((x: any) => (x.fields?.length ? `${x.message} (${x.fields.join(", ")})` : x.message)).join("; ");
+		return { id, error: err || "Failed." };
+	});
+}
+
+/**
+ * Apply field updates via the sObject Collections API (allOrNone=false, 200 per request) —
+ * one round-trip per 200 rows instead of one per record, so bulk edits stay fast.
+ */
+export async function saveRecords(org: string | null, changes: RecordChange[]): Promise<RecordResult[]> {
 	const version = getToolingApiVersion();
-	const results: { id: string; error?: string }[] = [];
-	for (const ch of changes) {
+	const results: RecordResult[] = [];
+	for (let i = 0; i < changes.length; i += COLLECTION_BATCH) {
+		const batch = changes.slice(i, i + COLLECTION_BATCH);
+		const ids = batch.map((c) => c.id);
 		try {
-			await AuthInfo.post(
+			const body = await AuthInfo.patch(
 				org,
-				(a) => `${a.instanceUrl.replace(/\/$/, "")}/services/data/${version}/sobjects/${ch.sobjectType}/${ch.id}?_HttpMethod=PATCH`,
-				ch.fields
+				(a) => `${a.instanceUrl.replace(/\/$/, "")}/services/data/${version}/composite/sobjects`,
+				{ allOrNone: false, records: batch.map((c) => ({ attributes: { type: c.sobjectType }, id: c.id, ...c.fields })) }
 			);
-			results.push({ id: ch.id });
+			results.push(...collectionResults(ids, body));
 		} catch (e: any) {
-			let msg = e?.message ?? String(e);
-			const m = /HTTP \d+: (.+)$/s.exec(msg);
-			if (m) { try { const j = JSON.parse(m[1]); msg = Array.isArray(j) ? j.map((x) => x.message).join("; ") : (j.message || m[1]); } catch { msg = m[1]; } }
-			results.push({ id: ch.id, error: msg });
+			const msg = errorText(e);
+			results.push(...ids.map((id) => ({ id, error: msg })));
 		}
 	}
 	return results;
+}
+
+/** Delete records by id via the sObject Collections API (allOrNone=false, 200 per request). */
+export async function deleteRecords(org: string | null, ids: string[]): Promise<RecordResult[]> {
+	const version = getToolingApiVersion();
+	const valid = ids.filter((id) => /^[a-zA-Z0-9]{15}(?:[a-zA-Z0-9]{3})?$/.test(id));
+	const results: RecordResult[] = ids.filter((id) => !valid.includes(id)).map((id) => ({ id, error: "Invalid record id." }));
+	for (let i = 0; i < valid.length; i += COLLECTION_BATCH) {
+		const batch = valid.slice(i, i + COLLECTION_BATCH);
+		try {
+			const body = await AuthInfo.deleteWithBody(
+				org,
+				(a) => `${a.instanceUrl.replace(/\/$/, "")}/services/data/${version}/composite/sobjects?allOrNone=false&ids=${batch.join(",")}`
+			);
+			results.push(...collectionResults(batch, body));
+		} catch (e: any) {
+			const msg = errorText(e);
+			results.push(...batch.map((id) => ({ id, error: msg })));
+		}
+	}
+	return results;
+}
+
+/** Object-level permissions for the bulk actions (from the cached describe). */
+export async function objectMetaFor(org: string | null, sobject: string): Promise<{ deletable: boolean; updateable: boolean }> {
+	const raw = await DescribeStore.getRaw(org, sobject);
+	return { deletable: !!raw?.deletable, updateable: !!raw?.updateable };
 }

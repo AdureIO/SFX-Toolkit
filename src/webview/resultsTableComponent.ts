@@ -11,6 +11,11 @@
  * child-subquery rows and selected related (parent) records can all be edited and
  * saved in one pass. Save/Discard render into the host-provided `controls` element
  * (so they sit in the existing results header, not an extra bar).
+ *
+ * Bulk row actions: top-level rows get a checkbox (shift-click selects a range). With
+ * rows selected the controls offer "Set field…" (one value for every selected row —
+ * staged as normal unsaved changes, saved with Save) and Delete (rt:delete, confirmed
+ * by the host). Rows are identified by Id, or by attributes.url when Id wasn't queried.
  */
 
 export function resultsTableCss(): string {
@@ -51,7 +56,20 @@ export function resultsTableCss(): string {
 	.rt-lookup-list div.rt-opt:last-child { border-bottom:none; }
 	.rt-lookup-list div.rt-opt:hover { background:var(--vscode-list-hoverBackground); }
 	.rt-lookup-list .rt-opt-id { font-family:var(--vscode-editor-font-family, monospace); opacity:.65; font-size:11px; }
-	.rt-lookup-list .rt-opt-name { font-weight:600; }`;
+	.rt-lookup-list .rt-opt-name { font-weight:600; }
+	table.rt th.rt-chk, table.rt td.rt-chk { width:22px; min-width:22px; padding:3px 4px; text-align:center; }
+	table.rt td.rt-chk input, table.rt th.rt-chk input { width:auto; margin:0; cursor:pointer; }
+	table.rt tr.rt-selrow > td { background:var(--vscode-list-inactiveSelectionBackground, rgba(90,140,220,0.18)) !important; }
+	.rt-selinfo { font-size:11px; opacity:.85; white-space:nowrap; }
+	.rt-bulk { background:var(--vscode-button-secondaryBackground); color:var(--vscode-button-secondaryForeground); }
+	.rt-del { background:var(--vscode-inputValidation-errorBackground, #5a1d1d); color:var(--vscode-errorForeground, #f48771); border:1px solid var(--vscode-inputValidation-errorBorder, transparent) !important; }
+	.rt-pop { position:fixed; z-index:9998; width:300px; padding:10px; background:var(--vscode-editorWidget-background, var(--vscode-dropdown-background)); color:var(--vscode-foreground); border:1px solid var(--vscode-editorWidget-border, rgba(128,128,128,0.4)); border-radius:6px; box-shadow:0 4px 14px rgba(0,0,0,0.4); font-size:12px; }
+	.rt-pop label { display:block; margin:0 0 3px; opacity:.8; font-size:11px; }
+	.rt-pop select, .rt-pop input { width:100%; box-sizing:border-box; font:inherit; padding:3px 5px; margin-bottom:8px; background:var(--vscode-input-background); color:var(--vscode-input-foreground); border:1px solid var(--vscode-input-border, rgba(128,128,128,0.4)); border-radius:2px; }
+	.rt-pop .rt-pop-hint { font-size:11px; opacity:.7; margin:-4px 0 8px; }
+	.rt-pop .rt-pop-btns { display:flex; justify-content:flex-end; gap:6px; }
+	.rt-pop button { font-size:11px; padding:3px 10px; border:none; border-radius:4px; cursor:pointer; }
+	.rt-pop .rt-lookup-list { position:static; max-height:150px; margin:-6px 0 8px; box-shadow:none; }`;
 }
 
 export function resultsTableScript(): string {
@@ -59,11 +77,13 @@ export function resultsTableScript(): string {
 	window.ASFXResults = function (opts) {
 		var mount = opts.mount, controls = opts.controls, post = opts.post, getOrg = opts.getOrg, onRefresh = opts.onRefresh;
 		var records = [], columns = [], meta = {}, rootType = '', changes = {}, lookupSeq = 0, lookupCbs = {}, saveErrors = [], nameById = {}, namesRequested = {}, saveOk = false;
+		var objMeta = {}, selected = {}, lastSelIdx = -1, deleting = false, pop = null;
 		function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 		function subRecords(v){ return (v && typeof v==='object' && Array.isArray(v.records)) ? v.records : null; }
 		function isRelObj(v){ return v && typeof v==='object' && v.attributes && !Array.isArray(v.records); }
 		function typeOf(r){ return r && r.attributes && r.attributes.type; }
-		function idOf(r){ return r && (r.Id || r.id); }
+		// Id, or (when Id wasn't selected) the record id at the end of attributes.url.
+		function idOf(r){ if(!r) return null; if(r.Id || r.id) return r.Id || r.id; var u=r.attributes && r.attributes.url; var last=u ? String(u).split('/').pop() : ''; return /^[a-zA-Z0-9]{15}([a-zA-Z0-9]{3})?$/.test(last) ? last : null; }
 		function deriveColumns(recs){ var seen={}, cols=[]; recs.forEach(function(r){ Object.keys(r||{}).forEach(function(k){ if(k!=='attributes' && !seen[k]){ seen[k]=1; cols.push(k); } }); }); return cols; }
 		function fmeta(type, field){ var m=meta[type]; return m && m[String(field).toLowerCase()]; }
 		function dirtyCount(){ var n=0; for(var id in changes){ n+=Object.keys(changes[id].fields).length; } return n; }
@@ -71,7 +91,7 @@ export function resultsTableScript(): string {
 
 		function collectTypes(recs, set){ recs.forEach(function(r){ var t=typeOf(r); if(t) set[t]=1; Object.keys(r||{}).forEach(function(k){ if(k==='attributes') return; var v=r[k]; var sub=subRecords(v); if(sub) collectTypes(sub,set); else if(isRelObj(v)){ var pt=typeOf(v); if(pt) set[pt]=1; } }); }); }
 
-		function setData(recs){ records=recs||[]; rootType=typeOf(records[0])||''; columns=deriveColumns(records); changes={}; saveErrors=[]; nameById={}; namesRequested={}; render();
+		function setData(recs){ closePop(); records=recs||[]; rootType=typeOf(records[0])||''; columns=deriveColumns(records); changes={}; saveErrors=[]; nameById={}; namesRequested={}; selected={}; lastSelIdx=-1; deleting=false; render();
 			var set={}; collectTypes(records, set); post({ type:'rt:colMeta', org:getOrg(), sobjects:Object.keys(set) }); }
 
 		function displayValue(v){ if(v==null) return ''; if(typeof v==='object') return ''; return String(v); }
@@ -112,13 +132,21 @@ export function resultsTableScript(): string {
 			var dc=dirtyCount(); var html='';
 			if(onRefresh) html += '<button class="rt-refresh rt-iconbtn" title="Refresh results">↻</button>';
 			if(dc) html += '<span class="rt-badge" title="'+dc+' unsaved change(s)">'+dc+'</span><button class="rt-save rt-iconbtn" title="Save changes">💾</button><button class="rt-discard rt-iconbtn" title="Discard changes">✕</button>';
-			if(saveErrors.length) html += '<span class="rt-err">'+esc(saveErrors.join(' · '))+'</span>';
+			var sc=selCount();
+			if(sc){ html += '<span class="rt-selinfo">'+sc+' selected</span>';
+				if(bulkFields().length) html += '<button class="rt-bulk" title="Set one field to the same value on every selected row">Set field…</button>';
+				if(canDelete()) html += '<button class="rt-del" title="Delete the selected records"'+(deleting?' disabled':'')+'>'+(deleting?'Deleting…':'Delete')+'</button>';
+				html += '<button class="rt-discard rt-iconbtn rt-clearsel" title="Clear selection">☐</button>'; }
+			if(saveErrors.length) html += '<span class="rt-err">'+esc(saveErrors.slice(0,3).join(' · '))+(saveErrors.length>3?' (+'+(saveErrors.length-3)+' more)':'')+'</span>';
 			else if(saveOk) html += '<span class="rt-ok" title="Changes saved">✓</span>';
 			controls.className = 'rt-ctl'+(html?' on':'');
 			controls.innerHTML = html;
 			var rf=controls.querySelector('.rt-refresh'); if(rf) rf.onclick=function(){ saveOk=false; onRefresh(); };
 			var s=controls.querySelector('.rt-save'); if(s) s.onclick=save;
-			var d=controls.querySelector('.rt-discard'); if(d) d.onclick=function(){ changes={}; saveErrors=[]; render(); };
+			var d=controls.querySelector('.rt-discard:not(.rt-clearsel)'); if(d) d.onclick=function(){ changes={}; saveErrors=[]; render(); };
+			var cs=controls.querySelector('.rt-clearsel'); if(cs) cs.onclick=function(){ selected={}; lastSelIdx=-1; closePop(); render(); };
+			var bk=controls.querySelector('.rt-bulk'); if(bk) bk.onclick=function(){ openBulkPop(bk); };
+			var dl=controls.querySelector('.rt-del'); if(dl) dl.onclick=deleteSelected;
 		}
 
 		function scalarTd(r, c){ var v=r[c]; var rid=idOf(r); var fm=fmeta(rootType, c); var editable = rid && fm && fm.updateable && c.indexOf('.')===-1;
@@ -131,11 +159,13 @@ export function resultsTableScript(): string {
 			if(!records.length){ mount.innerHTML='<div style="padding:8px;opacity:.6">No rows.</div>'; return; }
 			// Preserve scroll position across re-renders (an edit rebuilds the table; without this it jumps to top-left).
 			var prev=mount.querySelector('.rt-scroll'); var sl=prev?prev.scrollLeft:0, st=prev?prev.scrollTop:0;
-			var html='<div class="rt-scroll"><table class="rt"><thead><tr><th class="rt-num">#</th>'+columns.map(function(c){return '<th>'+esc(c)+'</th>';}).join('')+'</tr></thead><tbody>';
-			for(var i=0;i<records.length;i++){ var r=records[i];
-				html+='<tr><td class="rt-num">'+(i+1)+'</td>'+columns.map(function(c){ var v=r[c]; var sub=subRecords(v); if(sub) return '<td class="rt-sub">'+cellHtml(r,c)+'</td>'; if(isRelObj(v)) return '<td>'+cellHtml(r,c)+'</td>'; return scalarTd(r,c); }).join('')+'</tr>'; }
+			var selectable=isSelectable();
+			var html='<div class="rt-scroll"><table class="rt"><thead><tr>'+(selectable?'<th class="rt-chk"><input type="checkbox" class="rt-selall" title="Select all rows"></th>':'')+'<th class="rt-num">#</th>'+columns.map(function(c){return '<th>'+esc(c)+'</th>';}).join('')+'</tr></thead><tbody>';
+			for(var i=0;i<records.length;i++){ var r=records[i]; var rid=idOf(r); var on=!!(rid && selected[rid]);
+				html+='<tr'+(on?' class="rt-selrow"':'')+'>'+(selectable?'<td class="rt-chk">'+(rid?'<input type="checkbox" class="rt-sel" data-idx="'+i+'"'+(on?' checked':'')+'>':'')+'</td>':'')+'<td class="rt-num">'+(i+1)+'</td>'+columns.map(function(c){ var v=r[c]; var sub=subRecords(v); if(sub) return '<td class="rt-sub">'+cellHtml(r,c)+'</td>'; if(isRelObj(v)) return '<td>'+cellHtml(r,c)+'</td>'; return scalarTd(r,c); }).join('')+'</tr>'; }
 			mount.innerHTML=html+'</tbody></table></div>';
 			mount.querySelectorAll('.rt-edit').forEach(function(el){ el.ondblclick=function(e){ e.stopPropagation(); beginEdit(el); }; });
+			if(selectable) wireSelection();
 			// Safety net: auto table-layout can under-size a cell holding a nested table, clipping it.
 			// Force each subquery column to at least its nested table's real width so the row widens and scrolls.
 			mount.querySelectorAll('td.rt-sub').forEach(function(td){ var nt=td.querySelector('.rt-nested'); if(nt){ var w=nt.scrollWidth; if(w) td.style.minWidth=(w+6)+'px'; } });
@@ -146,6 +176,84 @@ export function resultsTableScript(): string {
 			if(now){ now.scrollLeft=sl; now.scrollTop=st; }
 			requestNames();
 		}
+
+		// ── Row selection ─────────────────────────────────────────────────────────
+		function isSelectable(){ return !!rootType && records.some(function(r){ return !!idOf(r); }); }
+		function selCount(){ return Object.keys(selected).length; }
+		function selectedIds(){ return Object.keys(selected); }
+		function canDelete(){ var om=objMeta[rootType]; return !om || om.deletable !== false; }
+		function wireSelection(){
+			var all=mount.querySelector('.rt-selall'); var boxes=mount.querySelectorAll('.rt-sel'); var n=selCount();
+			if(all){ all.checked = n>0 && n===boxes.length; all.indeterminate = n>0 && n<boxes.length;
+				all.onclick=function(){ var on=all.checked; selected={}; if(on) records.forEach(function(r){ var id=idOf(r); if(id) selected[id]=1; }); lastSelIdx=-1; render(); }; }
+			boxes.forEach(function(b){ b.onclick=function(e){ var idx=+b.getAttribute('data-idx'); var on=b.checked;
+				// Shift-click: apply this box's new state to the whole range since the last click.
+				var from = (e.shiftKey && lastSelIdx>=0) ? Math.min(lastSelIdx, idx) : idx, to = (e.shiftKey && lastSelIdx>=0) ? Math.max(lastSelIdx, idx) : idx;
+				for(var i=from;i<=to;i++){ var id=idOf(records[i]); if(!id) continue; if(on) selected[id]=1; else delete selected[id]; }
+				lastSelIdx=idx; render(); }; });
+		}
+
+		// ── Bulk "set field" ──────────────────────────────────────────────────────
+		// Updateable scalar fields of the root object: queried columns first, then the rest A–Z.
+		function bulkFields(){ var m=meta[rootType]; if(!m) return [];
+			var out=[], seen={};
+			columns.forEach(function(c){ var l=c.toLowerCase(); if(m[l] && m[l].updateable && c.indexOf('.')===-1){ out.push(c); seen[l]=1; } });
+			Object.keys(m).sort().forEach(function(l){ if(!seen[l] && m[l].updateable) out.push(m[l].name || l); });
+			return out; }
+		function closePop(){ if(pop && pop.parentNode) pop.parentNode.removeChild(pop); pop=null; document.removeEventListener('mousedown', popOutside, true); }
+		function popOutside(e){ if(pop && !pop.contains(e.target) && !(e.target.closest && e.target.closest('.rt-bulk'))) closePop(); }
+		function openBulkPop(anchor){ if(pop){ closePop(); return; }
+			var fields=bulkFields(); if(!fields.length) return;
+			pop=document.createElement('div'); pop.className='rt-pop';
+			pop.innerHTML='<label>Field</label><select class="rt-pop-field"></select><label>Value</label><div class="rt-pop-val"></div><div class="rt-pop-hint"></div>'
+				+'<div class="rt-pop-btns"><button class="rt-discard rt-pop-cancel">Cancel</button><button class="rt-save rt-pop-apply">Apply to '+selCount()+' row'+(selCount()===1?'':'s')+'</button></div>';
+			var fsel=pop.querySelector('.rt-pop-field'); fields.forEach(function(f){ var o=document.createElement('option'); o.value=f; o.textContent=f; fsel.appendChild(o); });
+			var valBox=pop.querySelector('.rt-pop-val'), hint=pop.querySelector('.rt-pop-hint'); var getVal=function(){ return null; };
+			function build(){ var fm=fmeta(rootType, fsel.value)||{type:'string'}; valBox.innerHTML=''; getVal=valueEditor(valBox, fm);
+				hint.textContent = 'Type: '+fm.type+'. Leave empty to clear the field. Changes are staged — press 💾 to save.'; }
+			fsel.onchange=build; build();
+			pop.querySelector('.rt-pop-cancel').onclick=closePop;
+			pop.querySelector('.rt-pop-apply').onclick=function(){ applyBulk(fsel.value, getVal()); closePop(); };
+			document.body.appendChild(pop);
+			var r=anchor.getBoundingClientRect(); var left=Math.max(4, Math.min(r.left, window.innerWidth-308)); pop.style.left=left+'px'; pop.style.top=(r.bottom+4)+'px';
+			setTimeout(function(){ document.addEventListener('mousedown', popOutside, true); }, 0);
+			var first=valBox.querySelector('input,select'); if(first) first.focus(); }
+		// Type-aware value input for the bulk popover; returns a getter for the typed value (null = clear).
+		function valueEditor(box, fm){
+			if(fm.type==='boolean'){ var b=mkSelect(['true','false'], 'true'); box.appendChild(b); return function(){ return b.value==='true'; }; }
+			if((fm.type==='picklist'||fm.type==='multipicklist') && fm.picklistValues){ var p=mkSelect([''].concat(fm.picklistValues), ''); box.appendChild(p); return function(){ return p.value||null; }; }
+			if(fm.type==='reference' && fm.referenceTo && fm.referenceTo.length){ return lookupEditor(box, fm.referenceTo[0]); }
+			var input=document.createElement('input');
+			var num=(fm.type==='int'||fm.type==='double'||fm.type==='currency'||fm.type==='percent'||fm.type==='long');
+			input.type = num?'number':(fm.type==='date'?'date':(fm.type==='datetime'?'datetime-local':'text'));
+			box.appendChild(input);
+			input.onkeydown=function(e){ if(e.key==='Enter'){ var ap=pop&&pop.querySelector('.rt-pop-apply'); if(ap) ap.click(); } else if(e.key==='Escape') closePop(); };
+			return function(){ var v=input.value; if(v==='') return null; return num?Number(v):v; }; }
+		function lookupEditor(box, refObject){ var chosen=null, t=null;
+			var input=document.createElement('input'); input.placeholder='Search '+refObject+'… (or paste an Id)'; box.appendChild(input);
+			var list=document.createElement('div'); list.className='rt-lookup-list'; list.style.display='none'; box.appendChild(list);
+			input.oninput=function(){ chosen=null; if(t) clearTimeout(t); var q=input.value.trim(); if(!q){ list.style.display='none'; return; }
+				t=setTimeout(function(){ var rid=++lookupSeq; lookupCbs[rid]=function(hits){
+					list.innerHTML=hits.length ? hits.map(function(h){ return '<div class="rt-opt" data-id="'+esc(h.id)+'" data-name="'+esc(h.name)+'"><div class="rt-opt-id">'+esc(h.id)+'</div><div class="rt-opt-name">'+esc(h.name)+'</div></div>'; }).join('') : '<div class="rt-opt" style="opacity:.6">No matches</div>';
+					list.style.display='block';
+					list.querySelectorAll('div[data-id]').forEach(function(o){ o.onmousedown=function(ev){ ev.preventDefault(); chosen=o.getAttribute('data-id'); nameById[chosen]=o.getAttribute('data-name'); input.value=o.getAttribute('data-name')+' ('+chosen+')'; list.style.display='none'; }; }); };
+					post({ type:'rt:lookup', org:getOrg(), requestId:rid, refObject:refObject, query:q }); }, 250); };
+			return function(){ if(chosen) return chosen; var v=input.value.trim(); if(!v) return null; return /^[a-zA-Z0-9]{15}([a-zA-Z0-9]{3})?$/.test(v) ? v : null; }; }
+		function applyBulk(field, val){ var ids=selectedIds(); if(!ids.length || !field) return;
+			var isCol=columns.some(function(c){ return c.toLowerCase()===field.toLowerCase(); });
+			if(!isCol) columns.push(field); // show the staged value even when the field wasn't queried
+			ids.forEach(function(id){ if(isCol){ if(normVal(val)===normVal(rawValue(id, field))){ if(changes[id]){ delete changes[id].fields[field]; if(!Object.keys(changes[id].fields).length) delete changes[id]; } } else setChange(id, rootType, field, val); }
+				else setChange(id, rootType, field, val); });
+			saveOk=false; render(); }
+
+		// ── Bulk delete (the host confirms, deletes in batches of 200, reports per row) ──
+		function deleteSelected(){ var ids=selectedIds(); if(!ids.length || deleting) return; deleting=true; saveErrors=[]; renderControls();
+			post({ type:'rt:delete', org:getOrg(), sobjectType:rootType, ids:ids }); }
+		function onDeleteDone(msg){ deleting=false; if(msg.cancelled){ renderControls(); return; }
+			var gone={}; saveErrors=[]; (msg.results||[]).forEach(function(rr){ if(rr.error) saveErrors.push(rr.id+': '+rr.error); else gone[rr.id]=1; });
+			records=records.filter(function(r){ return !gone[idOf(r)]; });
+			Object.keys(gone).forEach(function(id){ delete selected[id]; delete changes[id]; });
+			lastSelIdx=-1; render(); }
 
 		function setChange(id, type, field, val){ if(!changes[id]) changes[id]={ type:type, fields:{} }; changes[id].fields[field]=val; }
 		function normVal(v){ return v==null ? '' : String(v); }
@@ -193,17 +301,18 @@ export function resultsTableScript(): string {
 		function rawValue(id, field){ var r=findRecDeep(id); if(!r) return ''; var v=r[field]; return (typeof v==='object')?'':v; }
 
 		function save(){ saveErrors=[]; var payload=[]; for(var id in changes){ if(Object.keys(changes[id].fields).length) payload.push({ id:id, sobjectType:changes[id].type, fields:changes[id].fields }); } if(!payload.length) return; post({ type:'rt:save', org:getOrg(), changes:payload }); }
-		function onSaveDone(results){ saveErrors=[]; (results||[]).forEach(function(rr){ if(rr.error) saveErrors.push(rr.id+': '+rr.error); else delete changes[rr.id]; });
+		function onSaveDone(results, cancelled){ if(cancelled){ renderControls(); return; } saveErrors=[]; (results||[]).forEach(function(rr){ if(rr.error) saveErrors.push(rr.id+': '+rr.error); else delete changes[rr.id]; });
 			if(!saveErrors.length){ saveOk=true; setTimeout(function(){ saveOk=false; renderControls(); }, 4000);
 				// Reload from the org so cells show the persisted values (otherwise they'd revert to the stale originals).
 				if(onRefresh){ onRefresh(); return; } }
 			render(); }
 
-		function handleMessage(msg){ if(msg.type==='rt:colMeta'){ meta=msg.meta||{}; render(); }
+		function handleMessage(msg){ if(msg.type==='rt:colMeta'){ meta=msg.meta||{}; objMeta=msg.objMeta||{}; render(); }
 			else if(msg.type==='rt:lookupResult'){ var cb=lookupCbs[msg.requestId]; if(cb){ delete lookupCbs[msg.requestId]; cb(msg.hits||[]); } }
 			else if(msg.type==='rt:names'){ var nm=msg.names||{}; var got=false; for(var k in nm){ nameById[k]=nm[k]; got=true; } if(got) render(); }
-			else if(msg.type==='rt:saveDone'){ onSaveDone(msg.results); } }
+			else if(msg.type==='rt:saveDone'){ onSaveDone(msg.results, msg.cancelled); }
+			else if(msg.type==='rt:deleteDone'){ onDeleteDone(msg); } }
 
-		return { setData:setData, handleMessage:handleMessage, hasChanges:function(){ return dirtyCount()>0; } };
+		return { setData:setData, handleMessage:handleMessage, hasChanges:function(){ return dirtyCount()>0; }, selectedCount:selCount };
 	};`;
 }
