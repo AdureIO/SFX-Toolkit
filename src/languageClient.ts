@@ -46,8 +46,6 @@ const GENERATED_PATH = /[\\/](?:\.sfdx|\.sf|node_modules)[\\/]/;
 let client: LanguageClient | undefined;
 /** Workspace folders the running client was started for (detects project switches). */
 let clientRootsKey: string | undefined;
-/** Whether the running server provides org-aware Apex completion (see ApexCompletionProvider). */
-let clientApexCompletion = false;
 /** Resolves once the current client has started (or failed to). */
 let clientStarted: Promise<void> | undefined;
 /** Per-client listeners/watchers — disposed when that client stops (restart-safe). */
@@ -58,15 +56,6 @@ let lifetimeRegistered = false;
 
 function workspaceRootsKey(): string {
 	return (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.toString()).join("|");
-}
-
-/**
- * True while our language server is (being) started with Apex completion enabled.
- * The standalone ApexCompletionProvider steps aside then, so items aren't duplicated.
- */
-export function isLanguageServerApexCompletionActive(): boolean {
-	if (!client || !clientApexCompletion) return false;
-	return client.state === State.Running || client.state === State.Starting;
 }
 
 /**
@@ -197,7 +186,6 @@ function startClient(context: vscode.ExtensionContext): void {
 	);
 	client = lc;
 	clientRootsKey = workspaceRootsKey();
-	clientApexCompletion = apexCompletion;
 	const disposables: vscode.Disposable[] = [];
 	clientDisposables = disposables;
 
@@ -419,7 +407,6 @@ export function stopLanguageServer(): Promise<void> | undefined {
 	const started = clientStarted;
 	client = undefined;
 	clientRootsKey = undefined;
-	clientApexCompletion = false;
 	clientStarted = undefined;
 	for (const d of clientDisposables.splice(0)) {
 		try {
