@@ -16,12 +16,12 @@
  * files that mention the class (and member) by name are read. Overloads: LWC / Aura only
  * reach the `@AuraEnabled` overload, so another overload never lists them.
  */
-import * as fs from 'fs';
 import * as path from 'path';
 import { pathToFileURL } from 'url';
 import type { Range } from 'vscode-languageserver/node';
 import { WorkspaceIndex, TypeNode } from './workspaceIndex';
 import { TokenIndex } from './tokenIndex';
+import { MetadataOverlay } from './metadataOverlay';
 import type { Occurrence, OccurrenceRole, ResolvedSymbol, SearchSession } from './symbolSearch';
 import {
     auraActionRefs,
@@ -43,12 +43,9 @@ import {
 
 type MemberSym = Extract<ResolvedSymbol, { kind: 'method' | 'field' }>;
 
-async function read(file: string): Promise<string | undefined> {
-    try {
-        return await fs.promises.readFile(file, 'utf8');
-    } catch {
-        return undefined;
-    }
+/** Metadata text: the host's unsaved buffer (MetadataOverlay) when open and dirty, else disk. */
+function read(file: string): Promise<string | undefined> {
+    return MetadataOverlay.read(file);
 }
 
 /** Indexed metadata files of a kind containing every token. */

@@ -11,14 +11,16 @@
  * Built asynchronously on first use (batched reads, yielding between batches; the type
  * headers of each Apex file are primed from the same read), and kept current by the
  * WorkspaceIndex change events (watched files + saves): a changed file is only marked
- * dirty and re-read on the next lookup. Open (possibly unsaved) buffers are NOT taken
- * from here — callers check open documents' text directly.
+ * dirty and re-read on the next lookup. Open (possibly unsaved) Apex buffers are NOT taken
+ * from here — callers check open documents' text directly; unsaved metadata buffers
+ * come from the MetadataOverlay (`sfx/metadataBuffer`).
  */
 import * as fs from 'fs';
 import { WorkspaceIndex } from './workspaceIndex';
 import { blankNonCode } from '../../src/utils/apexReferences';
 import { typeForNameRefs } from '../../src/utils/sfMetadataRefs';
 import { throwIfCancelled } from './cancel';
+import { MetadataOverlay } from './metadataOverlay';
 import type { CancellationToken } from 'vscode-languageserver/node';
 
 const APEX_FILE = /\.(cls|trigger)$/i;
@@ -149,7 +151,7 @@ class TokenIndexImpl {
         for (let i = 0; i < files.length; i += BATCH) {
             if (gen !== this.generation) return;
             const batch = files.slice(i, i + BATCH);
-            const texts = await Promise.all(batch.map((f) => fs.promises.readFile(f, 'utf8').catch(() => undefined)));
+            const texts = await Promise.all(batch.map((f) => MetadataOverlay.get(f) ?? fs.promises.readFile(f, 'utf8').catch(() => undefined)));
             if (gen !== this.generation) return;
             for (let k = 0; k < batch.length; k++) {
                 const f = batch[k];

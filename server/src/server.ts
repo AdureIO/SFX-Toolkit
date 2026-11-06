@@ -40,7 +40,8 @@ import {
 import { fileURLToPath } from 'url';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { createServerContext, ServerSettings } from './context';
-import { NOTE_REFRESH, NOTE_EPHEMERAL } from './protocol';
+import { NOTE_REFRESH, NOTE_EPHEMERAL, NOTE_METADATA_BUFFER } from './protocol';
+import { MetadataOverlay } from './metadataOverlay';
 import { isApex } from './textUtil';
 import { WorkspaceIndex } from './workspaceIndex';
 import { TokenIndex } from './tokenIndex';
@@ -199,6 +200,11 @@ connection.onNotification(NOTE_EPHEMERAL, (params: { uris?: string[] }) => {
     for (const u of params?.uris ?? []) ctx.ephemeralDocs.add(u);
 });
 
+// Unsaved LWC / Aura / VF / Flow text for the metadata reference scanners (see metadataOverlay.ts).
+connection.onNotification(NOTE_METADATA_BUFFER, (params: { uri?: string; text?: string | null }) => {
+    if (typeof params?.uri === 'string') MetadataOverlay.set(params.uri, params.text);
+});
+
 // ── FEATURE REGISTRATION (one call per feature module; add new ones at the end) ──
 completion.register(connection, ctx);
 hover.register(connection, ctx);
@@ -225,6 +231,7 @@ ctx.onRelease(() => {
     invalidateStubbedNames();
     WorkspaceIndex.clear();
     TokenIndex.clear();
+    MetadataOverlay.clear();
 });
 connection.onShutdown(() => {
     ctx.releaseAll();

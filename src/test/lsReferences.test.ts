@@ -351,3 +351,50 @@ describe("references: latency (2000-class workspace)", function () {
 		}
 	});
 });
+
+// ─── unsaved metadata buffers (sfx/metadataBuffer) ──────────────────────────────
+
+describe("references: unsaved LWC buffers (sfx/metadataBuffer)", function () {
+	this.timeout(60000);
+	let s: Server;
+	const LWC_REL = "force-app/main/default/lwc/otherList/otherList.js";
+	const OVERLAY_TEXT =
+		"import { LightningElement } from 'lwc';\n" +
+		"import fetchIt from '@salesforce/apex/AccountService.getAccounts';\n" +
+		"export default class OtherList extends LightningElement {\n" +
+		"    go() { return fetchIt({ max: 1 }); }\n" +
+		"}\n";
+	const note = (rel: string, text: string | null) => s.conn.sendNotification("sfx/metadataBuffer", { uri: uriOf(s, rel), text });
+	const inLwc = async () => (await refsAt(s, "GA")).got.filter((g) => g.file === LWC_REL);
+
+	before(async () => {
+		s = await startServer(buildRefFixture());
+	});
+	after(() => stopServer(s));
+
+	it("an unsaved call to an @AuraEnabled method is a reference; null brings the disk version back", async () => {
+		assert.strictEqual((await inLwc()).length, 0, "the disk version does not use AccountService");
+		await note(LWC_REL, OVERLAY_TEXT);
+		const hits = await inLwc();
+		assert.deepStrictEqual(
+			hits.map((h) => [h.line, h.length]).sort(),
+			[[1, "fetchIt".length], [1, "getAccounts".length], [3, "fetchIt".length]].sort(),
+			"import binding + specifier + the call through the binding",
+		);
+		await note(LWC_REL, null);
+		assert.strictEqual((await inLwc()).length, 0, "back to disk");
+	});
+
+	it("the overlay is bounded: oldest entries are evicted and oversized text is ignored", async () => {
+		await note(LWC_REL, OVERLAY_TEXT);
+		assert.strictEqual((await inLwc()).length, 3);
+		// 200 newer entries push the first one out (max 200).
+		for (let i = 0; i < 200; i++) await note(`force-app/main/default/lwc/filler${i}/filler${i}.js`, `// filler ${i}\n`);
+		assert.strictEqual((await inLwc()).length, 0, "evicted entry falls back to disk");
+		// > 2 MB is not kept.
+		await note(LWC_REL, OVERLAY_TEXT + "// " + "x".repeat(2 * 1024 * 1024 + 10));
+		assert.strictEqual((await inLwc()).length, 0, "oversized buffer ignored");
+		await note(LWC_REL, OVERLAY_TEXT);
+		assert.strictEqual((await inLwc()).length, 3, "a normal one still works afterwards");
+	});
+});

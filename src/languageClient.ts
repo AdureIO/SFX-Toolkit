@@ -24,6 +24,8 @@ import { canonicalOrgKey, orgArgForKey } from "./utils/orgKey";
 import { SchemaUnavailableError } from "./utils/describeStore";
 import { shouldForwardDiagnostics } from "./utils/diagnosticsFilter";
 import { FileEventBatcher } from "./utils/fileEventBatcher";
+import { MetadataBufferSync, isMetadataBufferPath } from "./utils/metadataBufferSync";
+import { ServerSettingsRestarter, Throttle, CONFIG_SECTION } from "./utils/serverSettingsRestart";
 import { onDidChangeProjectDefaultOrg } from "./utils/defaultOrgEvents";
 import { scheduleStubSync, cleanRestartApex, getInitialSyncState, disposeStubSync } from "./utils/sobjectStubSync";
 import { getBufferOrgOverride } from "./utils/bufferOrgOverride";
@@ -37,6 +39,7 @@ const REQ_PROJECT_INFO = "sfx/projectInfo";
 const REQ_OBJECT_INFO = "sfx/objectInfo";
 const NOTE_REFRESH = "sfx/refreshSchema";
 const NOTE_EPHEMERAL = "sfx/ephemeralBuffers";
+const NOTE_METADATA_BUFFER = "sfx/metadataBuffer";
 
 // How long a graceful shutdown/exit handshake may take before we kill the process.
 const STOP_TIMEOUT_MS = 2000;
@@ -98,6 +101,32 @@ export function restartLanguageServerForWorkspaceChange(context: vscode.Extensio
 	return transitions;
 }
 
+/**
+ * Apply a settings change to the server: restart it (stop fully, then start with the
+ * new init options / heap cap) or just stop it. Goes through the same serialized
+ * `transitions` chain as workspace changes, so a stop is always awaited before a start.
+ */
+function applySettingsTransition(context: vscode.ExtensionContext, action: "restart" | "stop"): Promise<void> {
+	transitions = transitions
+		.then(async () => {
+			const wasRunning = !!client || !!stopping;
+			if (wasRunning) {
+				outputChannel.appendLine(`languageClient: settings changed — ${action === "stop" ? "stopping" : "restarting"} ASFX language server.`);
+				await stopLanguageServer();
+			}
+			if (action === "restart") {
+				startClient(context);
+				if (wasRunning && client && restartNotice.allow()) {
+					vscode.window.setStatusBarMessage("ASFX language server restarted (settings changed)", 5000);
+				}
+			}
+		})
+		.catch((e: any) => outputChannel.appendLine(`languageClient: restart after settings change failed: ${e?.message ?? e}`));
+	return transitions;
+}
+
+const restartNotice = new Throttle(30000);
+
 /** Once per activation: make sure everything we own is torn down with the extension. */
 function registerLifetime(context: vscode.ExtensionContext): void {
 	if (lifetimeRegistered) return;
@@ -109,6 +138,20 @@ function registerLifetime(context: vscode.ExtensionContext): void {
 			void stopLanguageServer();
 		},
 	});
+	// Init options and the heap cap are read once at process start: restart on change.
+	const restarter = new ServerSettingsRestarter({
+		snapshot: () => {
+			const cfg = vscode.workspace.getConfiguration(CONFIG_SECTION);
+			return {
+				mode: cfg.get<string>("apex.languageServer", "on"),
+				soqlCompletion: cfg.get<boolean>("soql.enableCompletion", true),
+				apexCompletion: cfg.get<boolean>("apex.enableCompletion", true),
+			};
+		},
+		restart: () => applySettingsTransition(context, "restart"),
+		stop: () => applySettingsTransition(context, "stop"),
+	});
+	context.subscriptions.push(restarter, vscode.workspace.onDidChangeConfiguration((e) => restarter.onConfigChange(e)));
 	// The Salesforce Apex LS watchdog is independent of our server's lifetime.
 	startApexHealthMonitor(context);
 	// Host commands used by the server's quick fixes (e.g. create a field stub file).
@@ -195,6 +238,8 @@ function startClient(context: vscode.ExtensionContext): void {
 	);
 	client = lc;
 	clientRootsKey = workspaceRootsKey();
+	// Before start(): the new process must receive the open virtual documents when it runs.
+	hookClientState();
 	const disposables: vscode.Disposable[] = [];
 	clientDisposables = disposables;
 
@@ -348,6 +393,8 @@ function startClient(context: vscode.ExtensionContext): void {
 	// filtered here — the stub sync writes thousands of `.cls` files under `.sfdx` that
 	// must never reach the server — and batched into one notification.
 	disposables.push(watchApexSources(lc));
+	// Unsaved LWC / Aura / VF / Flow edits for Find References + LWC → Apex navigation.
+	disposables.push(watchMetadataBuffers(lc));
 
 	// Initial background stub generation: incremental — only create stubs that
 	// don't exist yet, so a reload with stubs already on disk does almost no work.
@@ -411,6 +458,44 @@ function watchApexSources(lc: LanguageClient): vscode.Disposable {
 			if (flushTimer) clearTimeout(flushTimer);
 			flushTimer = undefined;
 			pending.clear();
+			for (const d of subs) d.dispose();
+		},
+	};
+}
+
+/**
+ * Send the unsaved text of open metadata files (LWC / Aura / VF / Flow) to the server as
+ * `sfx/metadataBuffer { uri, text }` (debounced per URI); `text: null` on save / close /
+ * revert means "use disk again". Everything dirty is re-sent when this client reaches
+ * Running, which covers the first start and every restart (the new process has no overlay).
+ */
+function watchMetadataBuffers(lc: LanguageClient): vscode.Disposable {
+	const relevant = (d: vscode.TextDocument) => d.uri.scheme === "file" && isMetadataBufferPath(d.uri.fsPath);
+	const sync = new MetadataBufferSync((uri, text) => {
+		if (lc.isRunning()) void lc.sendNotification(NOTE_METADATA_BUFFER, { uri, text }).catch(() => {});
+	});
+	const push = (d: vscode.TextDocument) => {
+		if (!relevant(d)) return;
+		if (d.isDirty) sync.changed(d.uri.toString(), () => d.getText());
+		else sync.released(d.uri.toString()); // undo back to the saved state / revert
+	};
+	const resend = () =>
+		sync.resendAll(
+			vscode.workspace.textDocuments
+				.filter((d) => relevant(d) && d.isDirty)
+				.map((d) => ({ uri: d.uri.toString(), text: () => d.getText() })),
+		);
+	const subs = [
+		vscode.workspace.onDidChangeTextDocument((e) => push(e.document)),
+		vscode.workspace.onDidSaveTextDocument((d) => relevant(d) && sync.released(d.uri.toString())),
+		vscode.workspace.onDidCloseTextDocument((d) => relevant(d) && sync.released(d.uri.toString())),
+		lc.onDidChangeState((e) => {
+			if (e.newState === State.Running) resend();
+		}),
+	];
+	return {
+		dispose: () => {
+			sync.dispose();
 			for (const d of subs) d.dispose();
 		},
 	};
@@ -633,13 +718,13 @@ const virtualDocs = new Map<string, VirtualDocState>();
 let stateHooked: LanguageClient | undefined;
 
 /**
- * Re-announce open virtual documents after the server (re)started — it lost them.
- * A REPLACED client (restartLanguageServerForWorkspaceChange) never saw them at all:
- * forget them so the next sync sends a fresh didOpen instead of a didChange.
+ * Re-announce open virtual documents whenever a server (re)starts — it lost them. A
+ * REPLACED client (workspace or settings restart) has never seen them: they are kept
+ * and sent as didOpen when the new client reaches Running (hooked in startClient,
+ * before start(), so that transition is never missed).
  */
 function hookClientState(): void {
 	if (!client || stateHooked === client) return;
-	if (stateHooked) virtualDocs.clear();
 	stateHooked = client;
 	const c = client;
 	c.onDidChangeState((e) => {
