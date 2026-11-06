@@ -16,6 +16,8 @@
  *   so the host drops/cancels the LS request.
  * • Lazy completionItem/resolve for items carrying a resolveId.
  * • The busy spinner only appears if a request takes longer than 250 ms.
+ * • Optional `cfg.extra(model)` adds fields to completion / hover payloads (e.g. the
+ *   org of the editor owning `model`, see monacoSoqlInput.ts).
  *
  * `node --check`-style compile test: src/test/monacoLsBridge.test.ts.
  */
@@ -71,7 +73,7 @@ window.ASFXMonacoLs = function (opts) {
 				var payload = { text: model.getValue(), line: pos.lineNumber - 1, character: pos.column - 1,
 					triggerKind: (context && typeof context.triggerKind === 'number') ? context.triggerKind + 1 : 1,
 					triggerCharacter: context && context.triggerCharacter };
-				if (cfg.extra) { var x = cfg.extra(); for (var k in x) payload[k] = x[k]; }
+				if (cfg.extra) { var x = cfg.extra(model); for (var k in x) payload[k] = x[k]; }
 				return request(cfg.completion, payload, token).then(function (res) {
 					if (!res) return { suggestions: [], incomplete: true };
 					var w = model.getWordUntilPosition(pos);
@@ -95,7 +97,7 @@ window.ASFXMonacoLs = function (opts) {
 			monaco.languages.registerHoverProvider(languageId, {
 				provideHover: function (model, pos, token) {
 					var payload = { text: model.getValue(), line: pos.lineNumber - 1, character: pos.column - 1 };
-					if (cfg.extra) { var x = cfg.extra(); for (var k in x) payload[k] = x[k]; }
+					if (cfg.extra) { var x = cfg.extra(model); for (var k in x) payload[k] = x[k]; }
 					return request(cfg.hover, payload, token).then(function (h) {
 						if (!h || !h.contents || !h.contents.length) return null;
 						var range = h.range;
