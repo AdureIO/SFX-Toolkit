@@ -12,6 +12,7 @@ import {
 	BATCH_SIZE,
 	DESCRIBE_TTL_MS,
 	NEGATIVE_TTL_MS,
+	PROBE_INTERVAL_MS,
 } from "../utils/describeStore";
 import { DescribeDiskCache } from "../utils/describeDiskCache";
 import { OrgMetadataCache } from "../utils/orgMetadataCache";
@@ -328,6 +329,61 @@ describe("DescribeStore — failure handling", () => {
 		});
 	}
 
+	it("concurrent failures are one outage: the back-off does not grow per request", async () => {
+		useFakeClock();
+		const t = fakeTransport({ describe: async () => { throw new Error("getaddrinfo ENOTFOUND x.my.salesforce.com"); } });
+		DescribeStore.setTransportForTests(t);
+		await Promise.all(["A", "B", "C", "D", "E"].map((n) => DescribeStore.get(null, n)));
+		assert.strictEqual(t.describes.length, 5);
+		advance(backoffMs("transient", 1) + 1);
+		const d = await DescribeStore.get(null, "F");
+		assert.strictEqual(d, null);
+		assert.strictEqual(t.describes.length, 6, "five simultaneous failures must not have pushed the back-off to 5 steps");
+	});
+
+	it("lets one probe through during a back-off, so a recovered org is noticed within seconds", async () => {
+		useFakeClock();
+		let fail = true;
+		const t = fakeTransport({
+			describe: async (name) => {
+				if (fail) throw new Error("getaddrinfo ENOTFOUND x.my.salesforce.com");
+				return { status: 200, body: JSON.stringify(rawDescribe(name)) };
+			},
+		});
+		DescribeStore.setTransportForTests(t);
+		await assert.rejects(DescribeStore.getStrict(null, "Account"), SchemaUnavailableError);
+		await assert.rejects(DescribeStore.getStrict(null, "Account"), SchemaUnavailableError);
+		assert.strictEqual(t.describes.length, 1, "no probe right after the failure");
+		// Make the nominal back-off long (several failures), then recover.
+		for (let i = 0; i < 3; i++) {
+			advance(PROBE_INTERVAL_MS + 1);
+			await assert.rejects(DescribeStore.getStrict(null, "Account"), SchemaUnavailableError);
+		}
+		fail = false;
+		advance(PROBE_INTERVAL_MS + 1);
+		const d = await DescribeStore.getStrict(null, "Account");
+		assert.strictEqual(d?.name, "Account", "the probe succeeded long before the exponential window ended");
+		assert.strictEqual((await DescribeStore.getStrict(null, "Contact"))?.name, "Contact", "success cleared the back-off");
+	});
+
+	it("a 403/400 on one object does not back the whole org off", async () => {
+		useFakeClock();
+		const t = fakeTransport({
+			describe: async (name) => {
+				if (name === "Forbidden__x") throw Object.assign(new Error("HTTP 403: [{\"errorCode\":\"INSUFFICIENT_ACCESS\"}]"), { status: 403 });
+				return { status: 200, body: JSON.stringify(rawDescribe(name)) };
+			},
+		});
+		DescribeStore.setTransportForTests(t);
+		assert.strictEqual(await DescribeStore.getStrict(null, "Forbidden__x"), null, "treated as not describable");
+		assert.strictEqual((await DescribeStore.getStrict(null, "Account"))?.name, "Account", "other objects are unaffected");
+		// ...but an org-wide limit is still a back-off.
+		const t2 = fakeTransport({ describe: async () => { throw Object.assign(new Error("HTTP 403: REQUEST_LIMIT_EXCEEDED"), { status: 403 }); } });
+		DescribeStore.invalidateAll();
+		DescribeStore.setTransportForTests(t2);
+		await assert.rejects(DescribeStore.getStrict(null, "Account"), SchemaUnavailableError);
+	});
+
 	it("revalidates an expired entry with If-Modified-Since and keeps it on 304", async () => {
 		useFakeClock();
 		let notModified = false;
@@ -463,6 +519,46 @@ describe("DescribeStore persistence", () => {
 		assert.deepStrictEqual(Object.keys(b.entries).sort(), ["O3", "O4", "O5"], "newest kept");
 		const small = new DescribeDiskCache(dir, { maxEntriesPerOrg: 100, maxBytesPerOrg: 60, maxOrgFiles: 2, writeDelayMs: 10 });
 		assert.ok(Object.keys(small.bound({ v: 1, orgId: "x", apiVersion: "v1", savedAt: 0, entries }).entries).length < 6);
+	});
+});
+
+describe("OrgMetadataCache.getObjectListStrict", () => {
+	const origGet = httpUtils.httpsGet;
+	const origRun = commandRunner.runCommandArgs;
+	beforeEach(() => {
+		invalidateOrgKeyCache();
+		AuthInfo.clearCache();
+		OrgMetadataCache.clearAll();
+		DescribeStore.configurePersistence(undefined);
+		commandRunner.runCommandArgs = async () =>
+			JSON.stringify({ status: 0, result: { accessToken: "t", instanceUrl: "https://x.my.salesforce.com", username: USER, id: "00D1" } });
+	});
+	afterEach(() => {
+		httpUtils.httpsGet = origGet;
+		commandRunner.runCommandArgs = origRun;
+		AuthInfo.clearCache();
+		OrgMetadataCache.clearAll();
+	});
+
+	it("rejects (never resolves []) when the org can't answer, throttles retries, and recovers", async () => {
+		useFakeClock();
+		let fail = true;
+		let calls = 0;
+		httpUtils.httpsGet = async () => {
+			calls++;
+			if (fail) throw Object.assign(new Error("HTTP 503: unavailable"), { status: 503 });
+			return JSON.stringify({ sobjects: [{ name: "User" }, { name: "Account" }] });
+		};
+		await assert.rejects(OrgMetadataCache.getObjectListStrict(null), SchemaUnavailableError);
+		assert.deepStrictEqual(await OrgMetadataCache.getObjectList(null), [], "the lenient variant still resolves []");
+		await assert.rejects(OrgMetadataCache.getObjectListStrict(null), SchemaUnavailableError);
+		assert.strictEqual(calls, 1, "failures are re-thrown for a moment, not re-fetched per call");
+		fail = false;
+		advance(PROBE_INTERVAL_MS + 1);
+		assert.deepStrictEqual(await OrgMetadataCache.getObjectListStrict(null), ["Account", "User"]);
+		assert.strictEqual(calls, 2);
+		assert.deepStrictEqual(await OrgMetadataCache.getObjectListStrict(null), ["Account", "User"], "cached once fetched");
+		assert.strictEqual(calls, 2);
 	});
 });
 

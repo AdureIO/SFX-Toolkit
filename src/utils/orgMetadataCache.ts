@@ -2,9 +2,9 @@ import { AuthInfo } from "./authInfo";
 import { getToolingApiVersion } from "./constants";
 import { outputChannel } from "./outputChannel";
 import { isSalesforceProject } from "./projectUtils";
-import { DescribeStore } from "./describeStore";
+import { DescribeStore, PROBE_INTERVAL_MS, AUTH_PROBE_INTERVAL_MS, SchemaUnavailableError } from "./describeStore";
 import { canonicalOrgKey } from "./orgKey";
-import { classifySchemaError, reportSchemaFailure, reportSchemaSuccess } from "./schemaHealth";
+import { classifySchemaError, reportSchemaFailure, reportSchemaSuccess, SchemaFailureKind } from "./schemaHealth";
 
 /** Max orgs whose object list is retained (LRU). Pruned lazily on access — no timers. */
 const MAX_ORGS = 5;
@@ -29,6 +29,8 @@ interface OrgCache {
 	sobjectsFetchedAt: number;
 	/** Last access (ms), for lazy idle pruning. */
 	lastUsed: number;
+	/** The latest failed object-list fetch (cleared by a success): re-thrown, not re-run, for a short while. */
+	failure?: { at: number; kind: SchemaFailureKind; error: unknown };
 }
 
 /** Canonical key (username): alias, username and null-default share one entry. */
@@ -193,7 +195,22 @@ class OrgMetadataCacheImpl {
 	 * Get the list of sobject names for an org. Uses cache; refetches if missing or stale (TTL).
 	 */
 	async getObjectList(org: string | null): Promise<string[]> {
-		if (!isSalesforceProject()) return [];
+		try {
+			return await this.getObjectListStrict(org);
+		} catch {
+			return [];
+		}
+	}
+
+	/**
+	 * Like getObjectList, but rejects (SchemaUnavailableError) when the org can't answer
+	 * instead of resolving `[]` — an empty list must never be mistaken for "the org has no
+	 * objects" (the language server would gate every completion off). A failure is re-thrown
+	 * for a short while instead of re-spawning the CLI on every keystroke; a recovered org is
+	 * probed again after PROBE_INTERVAL_MS (auth problems: AUTH_PROBE_INTERVAL_MS).
+	 */
+	async getObjectListStrict(org: string | null): Promise<string[]> {
+		if (!isSalesforceProject()) throw new SchemaUnavailableError("noCredentials", "Not an SFDX project.");
 		const key = cacheKey(org);
 		const entry = this.getOrCreateOrgCache(key);
 		// Kept indefinitely once fetched — only Refresh Metadata / push-pull invalidation re-fetches.
@@ -201,7 +218,13 @@ class OrgMetadataCacheImpl {
 			return entry.sobjects;
 		}
 		const existing = this.fetchLocks.get(key);
-		if (existing) return existing;
+		if (existing) return this.settle(entry, await existing);
+
+		const f = entry.failure;
+		if (f) {
+			const interval = f.kind === "sessionExpired" || f.kind === "noCredentials" ? AUTH_PROBE_INTERVAL_MS : PROBE_INTERVAL_MS;
+			if (Date.now() - f.at < interval) throw new SchemaUnavailableError(f.kind, String((f.error as any)?.message ?? f.error));
+		}
 
 		// Stale-while-revalidate from the previous session's persisted list: serve it now
 		// (no CLI spawn / describeGlobal on the first completion), refetch in background.
@@ -213,7 +236,14 @@ class OrgMetadataCacheImpl {
 			void this.fetchInto(key, entry, persisted.list);
 			return persisted.list;
 		}
-		return this.fetchLocks.get(key) ?? this.fetchInto(key, entry);
+		return this.settle(entry, await (this.fetchLocks.get(key) ?? this.fetchInto(key, entry)));
+	}
+
+	/** An empty result of a fetch means it failed (fetchInto swallows errors): surface the recorded failure. */
+	private settle(entry: OrgCache, list: string[]): string[] {
+		if (list.length || entry.sobjects !== null) return list;
+		const f = entry.failure;
+		throw new SchemaUnavailableError(f?.kind ?? "transient", String((f?.error as any)?.message ?? f?.error ?? "object list unavailable"));
 	}
 
 	/**
@@ -230,6 +260,7 @@ class OrgMetadataCacheImpl {
 			.then((list) => {
 				reportSchemaSuccess(key);
 				if (owns()) {
+					entry.failure = undefined;
 					entry.sobjects = list;
 					entry.sobjectsFetchedAt = now;
 					this.fetchLocks.delete(key);
@@ -240,7 +271,9 @@ class OrgMetadataCacheImpl {
 			.catch((err: any) => {
 				// Release the lock so the next call can retry instead of replaying this rejection forever.
 				if (owns()) this.fetchLocks.delete(key);
-				reportSchemaFailure(key, classifySchemaError(err));
+				const kind = classifySchemaError(err);
+				entry.failure = { at: Date.now(), kind, error: err };
+				reportSchemaFailure(key, kind);
 				outputChannel.appendLine(`OrgMetadataCache: getObjectList failed: ${err?.message ?? err}`);
 				return servedStale ?? ([] as string[]);
 			});

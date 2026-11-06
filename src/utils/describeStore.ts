@@ -43,6 +43,16 @@ export const BATCH_HTTP_BUDGET_MS = 25_000;
 export const BATCH_SIZE = 25;
 /** Concurrent composite/batch calls per getMany. */
 const BATCH_CONCURRENCY = 2;
+/**
+ * While an org is backing off, one probe request is still let through this often (transient
+ * failures) — so an org that recovered is noticed within seconds, not at the end of an
+ * exponentially grown window. Auth problems (expired session / no credentials) probe rarely:
+ * every probe spawns the CLI.
+ */
+export const PROBE_INTERVAL_MS = 1500;
+export const AUTH_PROBE_INTERVAL_MS = 10_000;
+/** Failures landing within this window of each other are one outage (concurrent requests), not several. */
+const SAME_EPISODE_MS = 1000;
 /** Concurrent background revalidations. */
 const REVALIDATE_CONCURRENCY = 4;
 
@@ -147,6 +157,25 @@ export function trimDescribe(raw: any): TrimmedDescribe {
 	return out;
 }
 
+/** Error codes that make a 4xx an ORG-wide problem (limits, disabled API, session) rather than one object's. */
+const ORG_WIDE_ERROR = /REQUEST_LIMIT_EXCEEDED|API_DISABLED_FOR_ORG|API_CURRENTLY_DISABLED|INVALID_SESSION|LOGIN_|SERVER_UNAVAILABLE|UNKNOWN_EXCEPTION|ORGANIZATION_|INSUFFICIENT_ACCESS_OR_READONLY/i;
+
+/**
+ * A 400/403/405/410 on ONE object's describe (no access, not describable) says nothing about
+ * the org: treat the object as "not describable" (negative-cached) instead of backing the
+ * whole org off, which would blank every other object's completion too.
+ */
+function isObjectScopedStatus(status: number | undefined, text: string): boolean {
+	return (status === 400 || status === 403 || status === 405 || status === 410) && !ORG_WIDE_ERROR.test(text);
+}
+
+function describeErrorKind(e: unknown): SchemaFailureKind {
+	const err = e as { status?: number; message?: string } | undefined;
+	const text = String(err?.message ?? e ?? "");
+	const status = typeof err?.status === "number" ? err.status : Number(text.match(/HTTP (\d{3})\b/)?.[1]) || undefined;
+	return isObjectScopedStatus(status, text) ? "notFound" : classifySchemaError(e);
+}
+
 // ─── Errors / transport ───────────────────────────────────────────────────────
 
 /** Thrown by strict lookups when the org can't answer right now (never for a 404). */
@@ -226,6 +255,9 @@ interface OrgState {
 	failures: number;
 	backoffUntil: number;
 	backoffKind?: SchemaFailureKind;
+	/** When the latest failure episode started / when a probe was last let through during back-off. */
+	failedAt: number;
+	probedAt: number;
 	orgId?: string;
 	diskLoad?: Promise<void>;
 	/** Names invalidated before the disk load finished (must not be resurrected). */
@@ -296,7 +328,7 @@ class DescribeStoreImpl {
 		if (st) {
 			this.orgs.delete(key); // re-insert → most-recently-used
 		} else {
-			st = { key, entries: new Map(), lastUsed: now, failures: 0, backoffUntil: 0, tombstones: new Set(), dropAllOnLoad: false, loaded: false };
+			st = { key, entries: new Map(), lastUsed: now, failures: 0, backoffUntil: 0, failedAt: 0, probedAt: 0, tombstones: new Set(), dropAllOnLoad: false, loaded: false };
 		}
 		st.lastUsed = now;
 		this.orgs.set(key, st);
@@ -387,9 +419,13 @@ class DescribeStoreImpl {
 	}
 
 	private onFailure(st: OrgState, kind: SchemaFailureKind, sobject: string, e: unknown): SchemaUnavailableError {
-		st.failures++;
+		const now = Date.now();
+		// Concurrent requests that fail together are ONE outage: counting each of them would
+		// grow the back-off exponentially (2 s → 30 s) from a single hiccup.
+		if (now - st.failedAt >= SAME_EPISODE_MS || !st.failures) st.failures++;
+		st.failedAt = now;
 		st.backoffKind = kind;
-		st.backoffUntil = Date.now() + backoffMs(kind, st.failures);
+		st.backoffUntil = Math.max(st.backoffUntil, now + backoffMs(kind, st.failures));
 		reportSchemaFailure(st.key, kind);
 		const msg = String((e as any)?.message ?? e);
 		outputChannel.appendLine(`DescribeStore: describe ${sobject} failed (${kind}; backing off): ${msg}`);
@@ -405,11 +441,20 @@ class DescribeStoreImpl {
 		reportSchemaSuccess(st.key);
 	}
 
+	/**
+	 * Non-null while the org is backing off after a failure and no probe is due. A probe
+	 * (one request per interval) is let through so a recovered org is noticed quickly; its
+	 * success clears the back-off, its failure extends it.
+	 */
 	private inBackoff(st: OrgState): SchemaUnavailableError | null {
-		if (Date.now() < st.backoffUntil) {
-			return new SchemaUnavailableError(st.backoffKind ?? "transient", `Schema temporarily unavailable for ${st.key} (backing off).`);
+		const now = Date.now();
+		if (now >= st.backoffUntil) return null;
+		const interval = st.backoffKind === "sessionExpired" || st.backoffKind === "noCredentials" ? AUTH_PROBE_INTERVAL_MS : PROBE_INTERVAL_MS;
+		if (now - Math.max(st.failedAt, st.probedAt) >= interval) {
+			st.probedAt = now;
+			return null;
 		}
-		return null;
+		return new SchemaUnavailableError(st.backoffKind ?? "transient", `Schema temporarily unavailable for ${st.key} (backing off).`);
 	}
 
 	// ── fetching ──
@@ -443,7 +488,7 @@ class DescribeStoreImpl {
 					return d;
 				},
 				(e) => {
-					const kind = classifySchemaError(e);
+					const kind = describeErrorKind(e);
 					if (kind === "notFound") {
 						this.onSuccess(st);
 						if (owns()) {
@@ -632,7 +677,7 @@ class DescribeStoreImpl {
 					this.put(st, name, { d, t: Date.now(), sd: r.date });
 					changed = true;
 				}
-			} else if (sub && sub.statusCode === 404) {
+			} else if (sub && (sub.statusCode === 404 || isObjectScopedStatus(sub.statusCode, JSON.stringify(sub.result ?? "")))) {
 				out.set(name, null);
 				if (owns) this.put(st, name, { d: null, t: Date.now() });
 			} else {
@@ -660,6 +705,7 @@ class DescribeStoreImpl {
 
 	/** Remember the org's object list (persisted with the describes). */
 	persistObjectList(org: string | null, list: string[], orgId?: string): void {
+		if (!list.length) return; // never persist "no objects": it would be served as a real list next session
 		const st = this.state(org);
 		this.learnOrgId(st, orgId);
 		st.objects = { list, t: Date.now() };

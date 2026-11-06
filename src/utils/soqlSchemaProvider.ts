@@ -63,6 +63,11 @@ class SoqlSchemaProviderImpl {
 		return OrgMetadataCache.getObjectList(org);
 	}
 
+	/** Like getObjectList, but rejects (SchemaUnavailableError) when the org can't deliver the list. */
+	async getObjectListStrict(org: string | null): Promise<string[]> {
+		return OrgMetadataCache.getObjectListStrict(org);
+	}
+
 	/**
 	 * Admin Description of an SObject (not present in the standard describe) via the
 	 * Tooling API EntityDefinition. Cached; self-disables per org if not queryable.
