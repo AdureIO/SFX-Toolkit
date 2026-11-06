@@ -46,15 +46,19 @@ export function register(connection: Connection, ctx: ServerContext): void {
         );
     };
 
-    const publish = (doc: TextDocument): void => {
+    // Parse via the worker (currentAsync) so opening/saving a large class never blocks
+    // the server's event loop; drop the result if the document moved on meanwhile.
+    const publish = async (doc: TextDocument): Promise<void> => {
         if (!ctx.settings.apexFeatures || doc.languageId === 'soql' || !isApex(doc.uri)) return;
-        const parse = ctx.parses.current(doc);
+        const parse = await ctx.parses.currentAsync(doc);
+        const live = documents.get(doc.uri);
+        if (!live || live.version !== doc.version) return;
         connection.sendDiagnostics({ uri: doc.uri, diagnostics: [...parse.diagnostics, ...lintApex(doc)] });
         if (ctx.settings.apexValidateSchema) scheduleSchemaValidation(doc.uri);
     };
 
-    documents.onDidOpen((e) => publish(e.document));
-    documents.onDidSave((e) => publish(e.document));
+    documents.onDidOpen((e) => void publish(e.document).catch(() => undefined));
+    documents.onDidSave((e) => void publish(e.document).catch(() => undefined));
     documents.onDidClose((e) => {
         const uri = e.document.uri;
         const t = schemaTimers.get(uri);
@@ -67,7 +71,7 @@ export function register(connection: Connection, ctx: ServerContext): void {
 
     // Re-publish Apex diagnostics for open documents after a push/pull/refresh.
     ctx.onSchemaRefresh(() => {
-        for (const doc of documents.all()) publish(doc);
+        for (const doc of documents.all()) void publish(doc).catch(() => undefined);
     });
 
     ctx.onRelease(() => {
@@ -195,7 +199,7 @@ async function runSchemaValidation(ctx: ServerContext, uri: string): Promise<voi
     doc = documents.get(uri);
     if (!doc) return;
     const atStart = doc.version;
-    const parse = ctx.parses.current(doc);
+    const parse = await ctx.parses.currentAsync(doc);
     try {
         // Decide if a receiver type is an SObject with no API probing — easy logic:
         //   • a type declared in this file (class/enum/inner class), a workspace class,
@@ -229,7 +233,7 @@ async function runSchemaValidation(ctx: ServerContext, uri: string): Promise<voi
                 d.data = data;
             }
         }
-        ctx.connection.sendDiagnostics({ uri, diagnostics: [...ctx.parses.current(live).diagnostics, ...lintApex(live), ...schema] });
+        ctx.connection.sendDiagnostics({ uri, diagnostics: [...parse.diagnostics, ...lintApex(live), ...schema] });
     } catch {
         // Keep the already-published syntax diagnostics; schema pass is best-effort.
     }
