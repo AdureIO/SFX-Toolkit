@@ -299,8 +299,12 @@ function startClient(context: vscode.ExtensionContext): void {
 			if (objects) params.objects = objects;
 			if (change.structural) params.structural = true;
 			if (lc.isRunning() && (objects || change.structural)) void lc.sendNotification(NOTE_REFRESH, params).catch(() => {});
-			// Regenerate just those stubs — not the org.
+			// Regenerate just those stubs — not the org. A structural-only change (the object
+			// list differed on revalidation) runs an incremental pass: it creates stubs for
+			// newly referenced objects and removes managed stubs of deleted ones, rewriting
+			// nothing that already exists.
 			if (objects) scheduleStubSync({ only: objects });
+			else if (change.structural) scheduleStubSync();
 			return;
 		}
 		// Full invalidation (org switch / manual refresh). The emitting cache already dropped
@@ -325,6 +329,9 @@ function startClient(context: vscode.ExtensionContext): void {
 			if (lc.isRunning()) {
 				void lc.sendNotification(NOTE_REFRESH, uris.length ? { uris } : undefined).catch(() => {});
 			}
+			// That project's stubs now describe the wrong org. A forced pass rewrites only
+			// files whose content actually changes (other projects' describes are cached).
+			scheduleStubSync({ force: true });
 		})
 	);
 
