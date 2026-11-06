@@ -602,7 +602,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     // 21. Data Migration Wizard
     const dataMigrationCmd = register("adure-sfx-toolkit.dataMigration", () =>
-      DataMigrationPanelProvider.show(context.globalStorageUri.fsPath)
+      DataMigrationPanelProvider.show(context.globalStorageUri.fsPath, context.extensionUri)
     );
 
     // 22. Package Explorer (Dev Hub 2GP)

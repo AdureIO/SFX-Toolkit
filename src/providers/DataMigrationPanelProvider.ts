@@ -7,6 +7,8 @@ import { SchemaCache } from "../utils/schemaCache";
 import { OrgMetadataCache } from "../utils/orgMetadataCache";
 import { getCachedOrgList, refreshOrgListCache, warmOrgListCache } from "../utils/orgListCache";
 import { onDidChangeDefaultOrg } from "../utils/defaultOrgEvents";
+import { createSoqlInputRouter, monacoBaseUri, monacoPanelCsp, monacoResourceRoot } from "./soqlInputBridge";
+import { monacoSoqlInputCss, monacoSoqlInputScript } from "../webview/monacoSoqlInput";
 import {
   getCreatableFields,
   extractSObjectFromQuery,
@@ -137,7 +139,7 @@ export class DataMigrationPanelProvider {
   /** Singleton: one wizard (and one retained renderer) at most. */
   private static _panel: vscode.WebviewPanel | undefined;
 
-  public static async show(globalStorageDir: string): Promise<void> {
+  public static async show(globalStorageDir: string, extensionUri: vscode.Uri): Promise<void> {
     const folder = vscode.workspace.workspaceFolders?.[0];
     if (!folder) { vscode.window.showErrorMessage("No workspace open."); return; }
     const workspaceRoot = folder.uri.fsPath;
@@ -152,10 +154,13 @@ export class DataMigrationPanelProvider {
       DataMigrationPanelProvider.viewType,
       "Data Migration Wizard",
       vscode.ViewColumn.One,
-      { enableScripts: true, retainContextWhenHidden: true }
+      { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [monacoResourceRoot(extensionUri)] }
     );
     DataMigrationPanelProvider._panel = panel;
-    panel.webview.html = DataMigrationPanelProvider.getHtml();
+    panel.webview.html = DataMigrationPanelProvider.getHtml(panel.webview, extensionUri);
+    // Language-server completion / hover for the source SOQL editor (one virtual buffer),
+    // pinned to the SOURCE org — the query runs there, not against the target.
+    const soqlInput = createSoqlInputRouter(".vscode/soql-migration-buffer.soql", panel.webview);
 
     // Default org changed: refresh the org list ("(default)" label). Explicit source/target picks are preserved.
     const defaultOrgSub = onDidChangeDefaultOrg(async (username) => {
@@ -188,6 +193,7 @@ export class DataMigrationPanelProvider {
       selection?: RevertSelection;
       format?: "org" | "apex" | "csv" | "json";
     }) => {
+      if (await soqlInput.handle(msg)) return;
 
       // ── Init ─────────────────────────────────────────────────────────────
       if (msg.command === "panelReady") {
@@ -691,6 +697,7 @@ export class DataMigrationPanelProvider {
     panel.onDidDispose(() => {
       messageListener.dispose();
       defaultOrgSub.dispose();
+      soqlInput.dispose();
       DataMigrationPanelProvider._panel = undefined;
       lastRun = null; // release the undo journal
     });
@@ -698,12 +705,13 @@ export class DataMigrationPanelProvider {
 
   // ─── HTML ──────────────────────────────────────────────────────────────────
 
-  private static getHtml(): string {
+  private static getHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
+    const monacoBase = monacoBaseUri(webview, extensionUri);
     return `<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+<meta http-equiv="Content-Security-Policy" content="${monacoPanelCsp(webview.cspSource)}">
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 ::-webkit-scrollbar { width: 5px; }
@@ -968,6 +976,7 @@ table.changes .st-failed { color: var(--vscode-errorForeground); }
 .limit-row { display: flex; align-items: center; gap: 8px; }
 .limit-row .form-input { width: 120px; }
 .inline-add { align-self: flex-start; }
+${monacoSoqlInputCss()}
 </style>
 </head>
 <body>
@@ -1076,10 +1085,8 @@ table.changes .st-failed { color: var(--vscode-errorForeground); }
       <!-- ADVANCED raw SOQL -->
       <div id="advanced-panel" style="display:none;">
         <div class="field-block">
-          <label class="field-label" for="src-soql">Source SOQL query (root object)</label>
-          <textarea class="form-textarea" id="src-soql" rows="4"
-            placeholder="SELECT Id, Name, BillingCity, BillingCountry FROM Account WHERE RecordType.DeveloperName = 'Commercial' LIMIT 5000"
-            oninput="onSoqlEdited()"></textarea>
+          <span class="field-label">Source SOQL query (root object)</span>
+          <div id="src-soql-editor" class="asfx-soql-input"></div>
           <span class="hint">Full control. The <code>SELECT</code> list is replaced based on your field selection in the next step — <code>FROM</code>, <code>WHERE</code>, <code>ORDER BY</code> and <code>LIMIT</code> are preserved. Editing here overrides the builder.</span>
         </div>
       </div>
@@ -1141,6 +1148,8 @@ table.changes .st-failed { color: var(--vscode-errorForeground); }
   </div>
 </div>
 
+<script src="${monacoBase}/loader.js"></script>
+<script>${monacoSoqlInputScript()}</script>
 <script>
 /* ══════════════════════════════════════════════════════════════════════════
    VS Code bridge
@@ -1148,7 +1157,15 @@ table.changes .st-failed { color: var(--vscode-errorForeground); }
 var vsc = null;
 try { if (typeof acquireVsCodeApi !== 'undefined') vsc = acquireVsCodeApi(); } catch(e) {}
 function post(msg) { try { if (vsc) vsc.postMessage(msg); } catch(e) {} }
-function safeGet(id) { return document.getElementById(id); }
+// The source SOQL is a Monaco editor (LS completion / hover against the SOURCE org);
+// safeGet('src-soql') hands out its textarea-compatible wrapper (.value). onInput fires for
+// user edits only, like the textarea's oninput — builder syncs (value = …) don't count.
+var soqlInputs = {};
+function safeGet(id) { return soqlInputs[id] || document.getElementById(id); }
+soqlInputs['src-soql'] = ASFXSoqlInput({ containerId: 'src-soql-editor', monacoBase: '${monacoBase}', post: post,
+  getOrg: function () { var s = document.getElementById('src-org'); return (s && s.value) || ''; }, orgSelectId: 'src-org',
+  placeholder: "SELECT Id, Name, BillingCity, BillingCountry FROM Account WHERE RecordType.DeveloperName = 'Commercial' LIMIT 5000",
+  ariaLabel: 'Source SOQL query', onInput: function () { onSoqlEdited(); } });
 function escHtml(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 // A file output has no target org, so nothing is compared against one — otherwise fields would
 // be excluded as "not present in target" for an org that is not part of the operation at all.
@@ -2482,6 +2499,7 @@ function retryFailed() {
 window.addEventListener('message', function(ev) {
   var d = ev.data;
   if (!d || !d.command) return;
+  if (soqlInputs['src-soql'].handle(d)) return;
 
   if (d.command === 'init') {
     orgsData = d.orgs || [];
