@@ -897,7 +897,11 @@ export class DataToolsPanelProvider {
         bar2.style.display = 'block';
         bar2.innerHTML = '✅ <strong>' + escHtml(d.className) + '</strong> — '
           + d.rowCount + ' record' + (d.rowCount!==1?'s':'') + ', '
-          + d.lineCount + ' lines → <span style="font-family:var(--vscode-editor-font-family,monospace);cursor:pointer;text-decoration:underline;" onclick="post({command:\'openFile\',filePath:\'' + escHtml(d.outputPath||'') + '\'})">' + escHtml(d.outputFile) + '</span>';
+          + d.lineCount + ' lines → <span class="apex-open-link" style="font-family:var(--vscode-editor-font-family,monospace);cursor:pointer;text-decoration:underline;">' + escHtml(d.outputFile) + '</span>';
+        // Bound in JS: an inline onclick with quoted args lost its escapes in the host
+        // template literal (\\' → ') and broke this whole script.
+        var openLink = bar2.querySelector('.apex-open-link');
+        if (openLink) openLink.onclick = function() { post({ command: 'openFile', filePath: d.outputPath }); };
       }
       return;
     }
