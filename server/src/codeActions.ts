@@ -78,7 +78,7 @@ const IFACE_STUBS: { match: RegExp; key: string; title: string; body: string }[]
 export function register(connection: Connection, ctx: ServerContext): void {
     connection.onCodeAction((params, token) =>
         orCancelled<CodeAction[]>([], async () => {
-            const actions = editorActions(ctx, params, token);
+            const actions = await editorActions(ctx, params, token);
             const doc = ctx.documents.get(params.textDocument.uri);
             if (!doc || !ctx.settings.apexCompletion || doc.languageId === 'soql') return actions;
             if (!params.context.only || params.context.only.some((k) => k === CodeActionKind.QuickFix || k.startsWith(CodeActionKind.QuickFix + '.'))) {
@@ -90,11 +90,12 @@ export function register(connection: Connection, ctx: ServerContext): void {
 }
 
 /** The context-free editor actions (selection / class level). */
-function editorActions(ctx: ServerContext, params: CodeActionParams, token: CancellationToken): CodeAction[] {
+async function editorActions(ctx: ServerContext, params: CodeActionParams, token: CancellationToken): Promise<CodeAction[]> {
     {
         if (!ctx.settings.apexCompletion || token.isCancellationRequested) return [];
         const doc = ctx.documents.get(params.textDocument.uri);
         if (!doc || doc.languageId === 'soql') return [];
+        const version = doc.version;
         const uri = params.textDocument.uri;
         const range = params.range;
         const actions: CodeAction[] = [];
@@ -142,9 +143,10 @@ function editorActions(ctx: ServerContext, params: CodeActionParams, token: Canc
         }
 
         // 3. Class-level: generate a constructor and implement declared standard interfaces.
-        // Edits must line up with the CURRENT text: always the exact-version parse, never a stale one.
-        const index = ctx.parses.current(doc).index;
-        if (token.isCancellationRequested) return [];
+        // Edits must line up with the CURRENT text: always the exact-version parse (in the
+        // worker), never a stale one — and nothing at all if the document moved on meanwhile.
+        const index = (await ctx.parses.currentAsync(doc)).index;
+        if (token.isCancellationRequested || ctx.documents.get(uri)?.version !== version) return [];
         let cls: { name: string; range: Range } | undefined;
         let best = Infinity;
         for (const c of index.classRanges) {
@@ -253,7 +255,7 @@ async function diagnosticFixes(ctx: ServerContext, doc: TextDocument, params: Co
         let fixes: TextFix[] = [];
         if (diag.source === 'asfx-apex-lint') {
             if (diag.code === CODE_SOQL_IN_LOOP) {
-                const index = ctx.parses.current(doc).index; // exact version — edits must line up
+                const index = (await ctx.parses.currentAsync(doc)).index; // exact version (checked below) — edits must line up
                 const pos = diag.range.start;
                 fixes = await soqlInLoopFixes(text, start, {
                     varType: (name) => resolveVarType(index, name, pos.line, pos.character),

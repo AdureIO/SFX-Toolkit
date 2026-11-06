@@ -4,8 +4,17 @@
  * and classes/interfaces/enums. Helper for navigation.ts (no handler registration here).
  *
  * Occurrences come from symbolSearch (mode `rename`: only occurrences proven to refer to
- * the symbol). A class rename also renames `Name.cls` + `Name.cls-meta.xml` when the
- * file is named after the class and the client supports resource operations.
+ * the symbol) — the same complete engine as Find References. A class rename also renames
+ * `Name.cls` + `Name.cls-meta.xml` when the file is named after the class and the client
+ * supports resource operations.
+ *
+ * Salesforce metadata that names the symbol in strings is updated too, where the new text
+ * is unambiguous: LWC `@salesforce/apex/Cls.method` specifiers (class / method segment —
+ * the import's local binding name is the component's own and stays), Aura `controller=`
+ * and `'c.method'`, Visualforce `controller=` / `extensions=` / `{!name}`, Flow
+ * `<actionName>` / `<apexClass>`, `Type.forName('Cls')`. A Visualforce getter / setter
+ * expression (`{!foo}` for `getFoo()`) is renamed only when the new name keeps the
+ * `get` / `set` prefix; otherwise it is skipped and the user is warned (window message).
  */
 import * as fs from 'fs';
 import * as path from 'path';
@@ -16,6 +25,8 @@ import {
     Range,
     RenameFile,
     ResponseError,
+    ShowMessageNotification,
+    MessageType,
     TextDocumentEdit,
     TextEdit,
     WorkspaceEdit,
@@ -31,6 +42,7 @@ import {
     invalidIdentifierReason,
     ResolvedSymbol,
     Occurrence,
+    contentModified,
 } from './symbolSearch';
 
 export interface RenameClientSupport {
@@ -96,10 +108,28 @@ export async function rename(
     const occ = await findOccurrences(session, sym, 'rename');
     throwIfCancelled(token);
     if (!occ.length) return null;
+    // Every edit is a range into the text we searched: refuse if an open document moved on.
+    for (const d of session.openByPath.values()) if (ctx.documents.get(d.uri)?.version !== d.version) throw contentModified();
 
-    // Group per document, dedupe.
+    // Group per document, dedupe; metadata occurrences get their own replacement text.
     const byUri = new Map<string, { path: string; edits: TextEdit[]; seen: Set<string> }>();
-    for (const o of occ) add(byUri, o, newName);
+    const skipped: Occurrence[] = [];
+    for (const o of occ) {
+        const text = replacementFor(o, newName);
+        if (text === null) continue;
+        if (text === undefined) skipped.push(o);
+        else add(byUri, o, text);
+    }
+    if (skipped.length) {
+        const files = [...new Set(skipped.map((o) => path.basename(o.path)))].join(', ');
+        // A notification (not showMessageRequest): nothing to answer, nothing to reject.
+        void ctx.connection.sendNotification(ShowMessageNotification.type, {
+            type: MessageType.Warning,
+            message:
+                `Rename '${sym.name}' → '${newName}': ${skipped.length} Visualforce expression(s) in ${files} were not updated — ` +
+                `they reach the ${/^get/i.test(sym.name) ? 'getter' : 'setter'} by its property name, and the new name no longer starts with '${/^get/i.test(sym.name) ? 'get' : 'set'}'.`,
+        });
+    }
 
     const fileOps = sym.kind === 'type' && !sym.node.header.outer ? classFileRenames(sym.node.file, sym.name, newName) : [];
     if (fileOps.length && !support.renameFiles) fileOps.length = 0;
@@ -118,6 +148,30 @@ export async function rename(
     }
     for (const op of fileOps) documentChanges.push(op as RenameFile);
     return { documentChanges };
+}
+
+/**
+ * The text an occurrence becomes: the new name for code and plain metadata references;
+ * the derived property name for Visualforce getter / setter expressions (undefined =
+ * can't be expressed → skipped with a warning); null = not renamed at all (LWC import
+ * bindings are the component's local names; a Flow action names the class, not the
+ * invocable method).
+ */
+function replacementFor(o: Occurrence, newName: string): string | null | undefined {
+    switch (o.role) {
+        case 'lwc-use':
+        case 'flow-invocable':
+            return null;
+        case 'vf-getter':
+        case 'vf-setter': {
+            const prefix = o.role === 'vf-getter' ? 'get' : 'set';
+            const m = new RegExp(`^${prefix}([A-Za-z_]\\w*)$`, 'i').exec(newName);
+            if (!m) return undefined;
+            return m[1];
+        }
+        default:
+            return newName;
+    }
 }
 
 function add(byUri: Map<string, { path: string; edits: TextEdit[]; seen: Set<string> }>, o: Occurrence, newName: string): void {

@@ -6,10 +6,11 @@ import type { ServerContext } from './context';
 import { isApex } from './textUtil';
 
 export function register(connection: Connection, ctx: ServerContext): void {
-    connection.onDocumentSymbol((params) => {
+    // Parsed in the worker (currentAsync): opening a large class never blocks the event loop.
+    connection.onDocumentSymbol(async (params) => {
         if (!ctx.settings.apexFeatures) return [];
         const doc = ctx.documents.get(params.textDocument.uri);
         if (!doc || !isApex(doc.uri)) return [];
-        return ctx.parses.current(doc).symbols;
+        return (await ctx.parses.currentAsync(doc)).symbols;
     });
 }
