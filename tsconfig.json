@@ -21,6 +21,7 @@
 		"spike",
 		/* Browser (webview) entry points — bundled by esbuild, type-checked with DOM by tsconfig.webview.json */
 		"src/webview/objectVisualizer.ts",
-		"src/webview/processMap.ts"
+		"src/webview/processMap.ts",
+		"src/webview/orgBrowser.ts"
 	]
 }

@@ -334,6 +334,16 @@ export class AuthInfo {
 	}
 
 	/**
+	 * Run an arbitrary authenticated request (e.g. a Metadata API SOAP call that carries the session
+	 * id in its body). `execute` receives the current auth; an error whose message contains
+	 * `HTTP 401` triggers the single-flight token refresh and one retry, exactly like `get`/`post`.
+	 */
+	public static async withAuth<T>(org: string | null, execute: (auth: OrgAuth) => Promise<T>): Promise<T> {
+		const { result } = await this.withRetry(org, execute);
+		return result;
+	}
+
+	/**
 	 * Authenticated GET. On 401, forces CLI token refresh and retries once.
 	 * Use this for all Salesforce REST/Tooling API GET calls.
 	 */
