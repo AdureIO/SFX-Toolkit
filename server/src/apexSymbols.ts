@@ -60,8 +60,10 @@ export interface ApexMemberDecl {
     nameRange: Range;
     /** The whole declaration. */
     range: Range;
-    /** Lower-cased modifiers (`public`, `static`, `abstract`, `virtual`, `override`, `@istest`…). */
+    /** Lower-cased modifiers (`public`, `static`, `abstract`, `virtual`, `override`, `@istest`…). Enum constants carry `enumvalue`. */
     modifiers: string[];
+    /** Methods / constructors: number of formal parameters (overload resolution by call arity). */
+    arity?: number;
 }
 
 /** A class/interface/enum/trigger declaration with its supertypes and members. */
@@ -292,9 +294,11 @@ class SymbolListener extends ApexParserBaseListener {
     private currentTypeDecl(): ApexTypeDecl | undefined {
         return this.typeDeclStack[this.typeDeclStack.length - 1];
     }
-    private addMemberDecl(name: string, kind: ApexMemberDecl['kind'], nameR: Range, range: Range, modCtx: any): string[] {
+    private addMemberDecl(name: string, kind: ApexMemberDecl['kind'], nameR: Range, range: Range, modCtx: any, arity?: number): string[] {
         const modifiers = this.modifiersOf(modCtx);
-        this.currentTypeDecl()?.members.push({ name, kind, nameRange: nameR, range, modifiers });
+        const decl: ApexMemberDecl = { name, kind, nameRange: nameR, range, modifiers };
+        if (arity !== undefined) decl.arity = arity;
+        this.currentTypeDecl()?.members.push(decl);
         return modifiers;
     }
     /** Static/visibility flags for an ApexMember, from its declaration's modifiers. */
@@ -375,6 +379,9 @@ class SymbolListener extends ApexParserBaseListener {
             const name = this.text(id);
             if (!name) continue;
             this.currentMembers()?.push({ name, kind: 'enumValue', detail: owner.name, type: owner.name, static: true, visibility: 'public' });
+            // Also a (static, final) field-like member declaration, so references / rename find enum values.
+            const r = nameRange(id, id);
+            owner.members.push({ name, kind: 'field', nameRange: r, range: r, modifiers: ['public', 'static', 'final', 'enumvalue'] });
             this.recordDecl(name, id, id);
         }
     };
@@ -413,7 +420,7 @@ class SymbolListener extends ApexParserBaseListener {
         const sym = makeSymbol(name, SymbolKind.Method, range, sel);
         sym.detail = this.strings.s(`(${params.join(', ')}) : ${ret}`);
         this.container().push(sym);
-        const mods = this.addMemberDecl(name, 'method', sel, range, ctx);
+        const mods = this.addMemberDecl(name, 'method', sel, range, ctx, params.length);
         this.currentMembers()?.push({ name, kind: 'method', detail: sym.detail, type: ret, params: this.strings.s(params.join(', ')), ...this.flags(mods) });
         this.recordDecl(name, ctx.id?.(), ctx, sel);
         const sigs = this.index.methods.get(name) ?? [];
@@ -434,7 +441,7 @@ class SymbolListener extends ApexParserBaseListener {
         sym.detail = this.strings.s(`(${params.join(', ')}) : ${ret}`);
         this.container().push(sym);
         this.currentMembers()?.push({ name, kind: 'method', detail: sym.detail, type: ret, params: this.strings.s(params.join(', ')), visibility: 'public' });
-        this.addMemberDecl(name, 'method', sel, range, ctx);
+        this.addMemberDecl(name, 'method', sel, range, ctx, params.length);
         this.recordDecl(name, ctx.id?.(), ctx, sel);
         const sigs = this.index.methods.get(name) ?? [];
         sigs.push(this.strings.s(`${name}(${params.join(', ')}) : ${ret}`));
@@ -447,7 +454,7 @@ class SymbolListener extends ApexParserBaseListener {
         const range = ctxRange(ctx);
         const sel = nameRange(ctx.qualifiedName?.() ?? ctx.id?.(), ctx);
         this.container().push(makeSymbol(name, SymbolKind.Constructor, range, sel));
-        this.addMemberDecl(name, 'constructor', sel, range, ctx);
+        this.addMemberDecl(name, 'constructor', sel, range, ctx, formalParams(ctx).length);
         this.methodScope.push(range);
     };
     exitConstructorDeclaration = () => { this.methodScope.pop(); };

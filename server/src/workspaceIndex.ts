@@ -18,6 +18,7 @@ import { parseApex, ApexMember, ApexTypeDecl, ApexIndex } from './apexSymbols';
 import { blankNonCode } from '../../src/utils/apexReferences';
 import { throwIfCancelled } from './cancel';
 import { ParseWorker } from './parseWorkerClient';
+import { metadataKindOf } from '../../src/utils/sfMetadataRefs';
 
 /** The type index of one Apex file: members per type (simple name) + type declarations. */
 export interface FileTypes {
@@ -25,6 +26,9 @@ export interface FileTypes {
     types: Map<string, ApexMember[]>;
     decls: ApexTypeDecl[];
 }
+
+/** A watched-file / save event for an indexed Apex or metadata file (`reset` = whole index dropped). */
+export type FileChangeListener = (file: string, kind: 'created' | 'changed' | 'deleted' | 'reset') => void;
 
 /** Supplies the latest parse index of an OPEN document for an fs path (unsaved buffer wins over disk). */
 export type OpenDocIndexProvider = (file: string) => Pick<ApexIndex, 'types' | 'typeDecls'> | undefined;
@@ -63,6 +67,9 @@ class WorkspaceIndexImpl {
     /** Open documents' paths that are NOT indexed permanently (outside the roots / not on disk), removed on close. */
     private docOnly = new Set<string>();
     private openDocIndex: OpenDocIndexProvider = () => undefined;
+    /** Salesforce metadata files that can refer to Apex by name (LWC / Aura JS + markup, VF, Flows). */
+    private meta = new Set<string>();
+    private listeners: FileChangeListener[] = [];
     /**
      * Per-file type headers (name, kind, extends/implements, ranges) for the type hierarchy.
      * Filled lazily (cheap regex over the file text, or from a parse done for members) and
@@ -78,6 +85,21 @@ class WorkspaceIndexImpl {
     setRoots(roots: string[]): void {
         this.roots = roots;
         this.clear();
+    }
+
+    /** Be told about every create/change/delete/save of an indexed Apex or metadata file. */
+    onFileChange(fn: FileChangeListener): void {
+        this.listeners.push(fn);
+    }
+
+    private notify(file: string, kind: 'created' | 'changed' | 'deleted' | 'reset'): void {
+        for (const fn of this.listeners) {
+            try {
+                fn(file, kind);
+            } catch {
+                /* a listener failure must not break indexing */
+            }
+        }
     }
 
     /** Let lookups prefer an open document's (possibly unsaved) parse over the file on disk. */
@@ -112,8 +134,10 @@ class WorkspaceIndexImpl {
         this.quickCache.clear();
         this.headerCache.clear();
         this.docOnly.clear();
+        this.meta.clear();
         this.scanned = false;
         this.scanning = undefined;
+        this.notify('', 'reset');
     }
 
     /** Whether the initial workspace scan has finished (filename lookups are definitive). */
@@ -182,6 +206,7 @@ class WorkspaceIndexImpl {
             this.addFile(file);
             this.memberCache.delete(file); // contents may have changed (save)
             this.headerCache.delete(file);
+            if (permanent) this.notify(file, 'changed');
         } catch {
             /* ignore */
         }
@@ -221,13 +246,32 @@ class WorkspaceIndexImpl {
         } catch {
             return;
         }
-        if (!APEX_FILE.test(file) || isIgnoredPath(file)) return;
+        if (isIgnoredPath(file)) return;
+        if (!APEX_FILE.test(file)) {
+            if (!metadataKindOf(file)) return;
+            if (kind === 'deleted') this.meta.delete(file);
+            else this.meta.add(file);
+            this.notify(file, kind);
+            return;
+        }
         if (kind === 'deleted') this.removeFile(file);
         else {
             this.addFile(file);
             this.memberCache.delete(file);
             this.headerCache.delete(file);
         }
+        this.notify(file, kind);
+    }
+
+    /** Every indexed Salesforce metadata file that may refer to Apex by name. */
+    metadataFiles(): string[] {
+        void this.ready();
+        return [...this.meta];
+    }
+
+    /** Cache a file's type headers from text already read elsewhere (no-op when cached). */
+    primeHeaders(file: string, text: string): void {
+        if (!this.headerCache.has(file)) this.setHeaders(file, extractTypeHeaders(text));
     }
 
     /** Every indexed Apex file path — used for workspace-wide reference search. */
@@ -528,6 +572,8 @@ class WorkspaceIndexImpl {
                 } else if (APEX_FILE.test(e.name)) {
                     this.addFile(full);
                     count++;
+                } else if (metadataKindOf(full)) {
+                    this.meta.add(full);
                 }
             }
         };
@@ -903,12 +949,16 @@ export class TypeGraph {
     private inner = new Map<string, Map<string, TypeNode>>();
     private subs = new Map<TypeNode, TypeNode[]>();
     private supers = new Map<TypeNode, TypeNode[]>();
+    private byFile = new Map<string, TypeNode[]>();
 
     constructor(entries: [string, TypeHeader[]][]) {
         for (const [file, headers] of entries) {
             for (const h of headers) {
                 const node: TypeNode = { file, header: h, qname: h.outer ? `${h.outer}.${h.name}` : h.name };
                 this.nodes.push(node);
+                const inFile = this.byFile.get(file);
+                if (inFile) inFile.push(node);
+                else this.byFile.set(file, [node]);
                 const lc = h.name.toLowerCase();
                 if (h.outer) {
                     let m = this.inner.get(file);
@@ -958,7 +1008,7 @@ export class TypeGraph {
     /** The node for `qname` (`Name` / `Outer.Name`) declared in `file`. */
     find(file: string, qname: string): TypeNode | undefined {
         const lc = qname.toLowerCase();
-        return this.nodes.find((n) => n.file === file && n.qname.toLowerCase() === lc);
+        return this.byFile.get(file)?.find((n) => n.qname.toLowerCase() === lc);
     }
 
     supertypes(n: TypeNode): TypeNode[] {
