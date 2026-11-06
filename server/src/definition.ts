@@ -94,10 +94,12 @@ async function apexDefinition(
     const span = wordSpanAt(text, offset);
     if (!span) return null;
     const [start, , word] = span;
-    // Exact parse: the result is a range into the CURRENT text, so a stale parse could
-    // send the user to the wrong line.
-    const { index } = ctx.parses.current(doc);
+    // Exact parse (in the worker): the result is a range into the CURRENT text, so a stale
+    // parse could send the user to the wrong line — give up if the document moved on.
+    const version = doc.version;
+    const { index } = await ctx.parses.currentAsync(doc);
     throwIfCancelled(token);
+    if (doc.version !== version) return null;
     const receiver = receiverBefore(text, start);
     const apexFeatures = ctx.settings.apexFeatures;
 
