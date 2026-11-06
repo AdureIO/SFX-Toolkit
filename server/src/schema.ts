@@ -78,8 +78,8 @@ const MAX_OBJECT_DESCRIPTION_CACHE = 1000;
 export const MAX_DESCRIBE_CACHE = 400;
 /** "No such object" answers are re-checked after this long (the host may simply not have been ready). */
 const NEGATIVE_DESCRIBE_TTL_MS = 60_000;
-/** An empty object list (no org / host not ready yet) is re-asked after this long. */
-const EMPTY_OBJECT_LIST_TTL_MS = 15_000;
+/** An empty object list (host not ready yet) is re-asked after this long. A failed fetch is never cached at all. */
+const EMPTY_OBJECT_LIST_TTL_MS = 2_000;
 /** A failed revalidation keeps the stale entry and retries after this long. */
 const REVALIDATE_BACKOFF_MS = 60_000;
 const MAX_ORG_CONTEXT_CACHE = 500;
@@ -363,7 +363,10 @@ export class SchemaService {
             }
         }
         throwIfCancelled(token);
-        return this.wait(this.loadObjectList(docUri, ctxKey), token, hit ?? null);
+        const entry = await this.wait(this.loadObjectList(docUri, ctxKey), token, hit ?? null);
+        // Unknown list (fetch failed / not ready): tell an interactive caller to ask again.
+        if (!entry || !entry.names.length) budgetOf(token)?.markIncomplete();
+        return entry;
     }
 
     /** All SObject API names of the document's org (cached per org context). */
@@ -400,10 +403,18 @@ export class SchemaService {
         return null;
     }
 
-    /** True when `name` (namespace-optional) is an SObject of the document's org. */
+    /**
+     * True when `name` (namespace-optional) is an SObject of the document's org. When the
+     * object list is unknown (host not ready / org unreachable) a plausible name is probed
+     * with a describe instead of being declared "not an object": otherwise one failed
+     * object-list fetch would switch every SObject completion off.
+     */
     async isObjectName(name: string, docUri: string, token?: CancellationToken): Promise<boolean> {
         try {
-            return !!(await this.resolveObjectName(docUri, name, token));
+            const resolved = await this.resolveObjectName(docUri, name, token);
+            if (resolved !== undefined) return !!resolved;
+            if (!plausibleObjectName(name) || stdTypeName(name)) return false;
+            return !!(await this.describe(docUri, name, token));
         } catch (e) {
             if (isCancelled(e)) throw e;
             return false;

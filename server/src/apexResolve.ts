@@ -415,8 +415,10 @@ const SOBJECT_LIKE = /^[A-Za-z][A-Za-z0-9_]*$/;
  */
 export async function isObjectName(ctx: ServerContext, uri: string, name: string, token?: CancellationToken): Promise<boolean> {
     if (!SOBJECT_LIKE.test(name)) return false;
-    const svc = ctx.schema as unknown as { isObjectName?: (n: string, u: string) => Promise<boolean> };
-    if (svc.isObjectName) return svc.isObjectName(name, uri);
+    const svc = ctx.schema as unknown as { isObjectName?: (n: string, u: string, tk?: CancellationToken) => Promise<boolean> };
+    // The token carries the request's soft deadline (SchemaBudget): without it an unreachable
+    // org would hold the completion for the full host timeout at every gate.
+    if (svc.isObjectName) return svc.isObjectName(name, uri, token);
     const entry = await cachedObjectList(ctx, uri, token);
     const lc = name.toLowerCase();
     if (!entry) return /__(c|mdt|e|b|x)$/i.test(name);
