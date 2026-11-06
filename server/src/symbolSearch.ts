@@ -18,14 +18,19 @@
  *      be reached from a file that declares a family type, names one, or names a
  *      "producer" — a workspace member whose declared type mentions a family type
  *      (`instance()`, `List<Svc> items`…) — so files that merely reuse the member name
- *      on unrelated types are never parsed;
+ *      on unrelated types are never parsed. Producers come from a parse-free outline of
+ *      the mention files (apexOutline.ts, cached per file version), and candidates are
+ *      handed to the parse worker as soon as they are known;
  *   2. each candidate is parsed in the parse worker (open buffers: their exact current
  *      version) and every case-insensitive whole-word occurrence in code is classified
  *      against the target: receiver types (`x.name`, `this` / `super`, static
  *      `Type.member`, `ns.Type.member`, and full expression chains such as
  *      `a.b().c()[0].name` typed with the expression resolver, apexResolve.ts), bare uses
  *      inside the owner's hierarchy, shadowing locals, variable-vs-type positions,
- *      constructor declarations, overload arity, enum values in `when` clauses;
+ *      constructor declarations, overload arity, enum values in `when` clauses. A closed
+ *      candidate is parsed with the method bodies blanked whose occurrences are provable
+ *      misses from text alone (`planSearch`), or not at all; if a resolver then needs the
+ *      document-wide variable table of such a partial parse, the file is redone in full;
  *   3. Salesforce metadata that refers to the symbol by name (metadataRefs.ts): LWC
  *      imports + call sites, Aura `c.method`, Visualforce, Flows, `Type.forName`.
  * Methods use their "family" (the override / implementation slot: base declarations
