@@ -5,6 +5,7 @@
  */
 import * as vscode from "vscode";
 import { fieldMetaFor, objectMetaFor, lookupSearch, resolveNames, saveRecords, deleteRecords, type FieldMeta, type RecordChange } from "./soqlEdit";
+import { CANCELLED_DELETE_MSG } from "./soqlEditPure";
 import { confirmProductionOrgOperation } from "./orgSafety";
 import { Telemetry } from "./telemetry";
 
@@ -57,12 +58,27 @@ export async function handleResultsTableMessage(msg: any, post: Post): Promise<b
 		}
 		Telemetry.event("recordsDelete", undefined, { count: ids.length });
 		const results = await vscode.window.withProgress(
-			{ location: vscode.ProgressLocation.Notification, title: `Deleting ${label}…` },
-			() => deleteRecords(org, ids)
+			{ location: vscode.ProgressLocation.Notification, title: `Deleting ${label}…`, cancellable: true },
+			(progress, token) => {
+				let last = 0;
+				return deleteRecords(org, ids, {
+					isCancelled: () => token.isCancellationRequested,
+					onProgress: (done, total) => {
+						progress.report({ message: `Deleting ${done} of ${total}…`, increment: total ? ((done - last) / total) * 100 : 0 });
+						last = done;
+					},
+				});
+			}
 		);
-		const failed = results.filter((r) => r.error).length;
-		if (failed) vscode.window.showWarningMessage(`Deleted ${results.length - failed} of ${ids.length}; ${failed} failed (see the results table).`);
-		else vscode.window.showInformationMessage(`Deleted ${label}.`);
+		const cancelled = results.filter((r) => r.error === CANCELLED_DELETE_MSG).length;
+		const failed = results.filter((r) => r.error && r.error !== CANCELLED_DELETE_MSG).length;
+		const deleted = results.length - failed - cancelled;
+		if (failed || cancelled) {
+			const parts = [`Deleted ${deleted} of ${ids.length}`];
+			if (failed) parts.push(`${failed} failed`);
+			if (cancelled) parts.push(`${cancelled} not attempted (cancelled)`);
+			vscode.window.showWarningMessage(`${parts.join("; ")}. The remaining records stay in the results table; re-run Delete on them to retry.`);
+		} else vscode.window.showInformationMessage(`Deleted ${label}.`);
 		post({ type: "rt:deleteDone", results });
 		return true;
 	}
