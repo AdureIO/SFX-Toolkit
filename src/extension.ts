@@ -99,6 +99,7 @@ import { LiveLogService } from "./utils/liveLogService";
 import { SoqlSchemaProvider } from "./utils/soqlSchemaProvider";
 import { DescribeStore } from "./utils/describeStore";
 import { registerSchemaHealthUi } from "./utils/schemaHealthUi";
+import { registerSalesforceCoexistence } from "./salesforceCoexistence";
 
 /** Delay before the (CLI-backed) coverage query at startup, so it doesn't compete with activation. */
 const COVERAGE_WARM_DELAY_MS = 5000;
@@ -219,6 +220,8 @@ export function activate(context: vscode.ExtensionContext) {
   }
   // Schema problems (expired session, unreachable org): one status bar item + one warning.
   registerSchemaHealthUi(context);
+  // Jorje coexistence: silence its overlapping providers; one-time RAM tip.
+  registerSalesforceCoexistence(context);
 
   // Warm the default-org auth token (and the other project caches) first — the initial
   // fetches shell out to the CLI, so kicking them off here runs them concurrently with the
