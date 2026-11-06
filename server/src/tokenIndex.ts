@@ -26,6 +26,7 @@ import type { CancellationToken } from 'vscode-languageserver/node';
 const APEX_FILE = /\.(cls|trigger)$/i;
 const BATCH = 32;
 const TOKEN = /[A-Za-z_]\w*/g;
+const MAX_MEMO_KEYS = 8;
 
 /** Tokens of an Apex file: code identifiers + `'name` for Type.forName class strings. */
 export function apexTokens(text: string): Set<string> {
@@ -53,6 +54,8 @@ class TokenIndexImpl {
     private building: Promise<void> | undefined;
     private generation = 0;
     private subscribed = false;
+    /** Per-file derived data keyed by a caller-chosen name (e.g. receiver tokens of a member); LRU over keys. */
+    private memo = new Map<string, Map<string, unknown>>();
 
     /** Subscribe to WorkspaceIndex change events (idempotent). */
     attach(): void {
@@ -79,8 +82,36 @@ class TokenIndexImpl {
         this.postings.clear();
         this.dirty.clear();
         this.removed.clear();
+        this.memo.clear();
         this.built = false;
         this.building = undefined;
+    }
+
+    /**
+     * Derived per-file data cached next to the tokens (valid until the file changes: any
+     * re-index or removal of the file drops it). `undefined` = not computed. Only for
+     * on-disk content — open buffers must not be memoized here.
+     */
+    memoGet<T>(key: string, file: string): T | undefined {
+        const m = this.memo.get(key);
+        if (!m) return undefined;
+        this.memo.delete(key);
+        this.memo.set(key, m);
+        return m.get(file) as T | undefined;
+    }
+
+    memoSet(key: string, file: string, value: unknown): void {
+        let m = this.memo.get(key);
+        if (!m) {
+            m = new Map();
+            this.memo.set(key, m);
+            while (this.memo.size > MAX_MEMO_KEYS) this.memo.delete(this.memo.keys().next().value as string);
+        }
+        m.set(file, value);
+    }
+
+    private forgetMemo(file: string): void {
+        for (const m of this.memo.values()) m.delete(file);
     }
 
     /** Whether the initial build has completed. */
@@ -169,6 +200,7 @@ class TokenIndexImpl {
     }
 
     private put(file: string, tokens: Set<string>): void {
+        this.forgetMemo(file);
         let id = this.ids.get(file);
         if (id === undefined) {
             id = this.paths.length;
@@ -187,6 +219,7 @@ class TokenIndexImpl {
     }
 
     private drop(file: string): void {
+        this.forgetMemo(file);
         const id = this.ids.get(file);
         if (id === undefined) return;
         this.unpost(id);
