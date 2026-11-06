@@ -76,6 +76,8 @@ export class AuthInfo {
 	private static refreshLocks = new Map<string, Promise<void>>();
 	/** Per org: the access token most recently refreshed away from (late 401s with it skip the refresh). */
 	private static refreshedFrom = new Map<string, string>();
+	/** Per `--target-org` argument ("" = CLI default): why the last `sf org display` gave no credentials. */
+	private static lastAuthFailure = new Map<string, string>();
 
 	/** Canonical cache key (the username); alias, username and null-default share one entry. */
 	private static cacheKey(targetOrg: string | null): string {
@@ -114,9 +116,11 @@ export class AuthInfo {
 		}
 		if (parsed.status !== 0 || !parsed.result) {
 			outputChannel.appendLine(`AuthInfo: sf org display failed${targetOrg ? ` (${targetOrg})` : ""}: ${parsed.message || "Unknown"}`);
+			this.lastAuthFailure.set(targetOrg ?? "", `${parsed.name ? parsed.name + ": " : ""}${parsed.message || "Unknown"}`);
 			return null;
 		}
 		const auth = buildOrgAuth(parsed.result);
+		this.lastAuthFailure.delete(targetOrg ?? "");
 		// Recent Salesforce CLI versions hide the access token from `sf org display`.
 		// We set SF_TEMP_SHOW_SECRETS=true to restore it; if it's still missing the
 		// token is genuinely unavailable — surface a precise, actionable error.
@@ -199,6 +203,7 @@ export class AuthInfo {
 		this.generations.clear();
 		this.refreshLocks.clear();
 		this.refreshedFrom.clear();
+		this.lastAuthFailure.clear();
 	}
 
 	/** Release everything (deactivate / workspace switch). Holds no timers. */
@@ -282,10 +287,17 @@ export class AuthInfo {
 		org: string | null,
 		execute: (auth: OrgAuth) => Promise<T>
 	): Promise<{ result: T; auth: OrgAuth }> {
-		const NO_CREDS = "Could not get org credentials. Set a default org or select one and try again.";
 		const key = this.cacheKey(org);
+		// The CLI's own reason (no default org, org not found, expired scratch org …) is kept so
+		// the failure can be classified instead of collapsing into "no credentials".
+		const cause = () => this.lastAuthFailure.get(orgArgForKey(key) ?? "");
+		const NO_CREDS_BASE = "Could not get org credentials. Set a default org or select one and try again.";
+		const noCreds = () => {
+			const c = cause();
+			return c ? `${NO_CREDS_BASE} (${c})` : NO_CREDS_BASE;
+		};
 		let auth = await this.getAuthInfoForOrg(key);
-		if (!auth) throw new Error(NO_CREDS);
+		if (!auth) throw new Error(noCreds());
 		try {
 			const result = await execute(auth);
 			return { result, auth };
@@ -298,7 +310,7 @@ export class AuthInfo {
 			// Single-flight: concurrent 401s for this org share one CLI refresh.
 			await this.refreshOnce(key, auth.accessToken);
 			auth = await this.getAuthInfoForOrg(key);
-			if (!auth) throw new Error(NO_CREDS);
+			if (!auth) throw new Error(noCreds());
 
 			try {
 				const result = await execute(auth);

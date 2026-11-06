@@ -99,6 +99,7 @@ import { LiveLogService } from "./utils/liveLogService";
 import { SoqlSchemaProvider } from "./utils/soqlSchemaProvider";
 import { DescribeStore } from "./utils/describeStore";
 import { registerSchemaHealthUi } from "./utils/schemaHealthUi";
+import { onLoginCompletedHealth } from "./utils/schemaHealth";
 import { registerSalesforceCoexistence } from "./salesforceCoexistence";
 
 /** Delay before the (CLI-backed) coverage query at startup, so it doesn't compete with activation. */
@@ -364,6 +365,8 @@ export function activate(context: vscode.ExtensionContext) {
     const refreshOrgsCmd = register("adure-sfx-toolkit.refreshOrgs", () => {
       // 1. Evict everything synchronously so nothing stale is served
       AuthInfo.clearCache();
+      // A manual refresh (also run after a login) re-evaluates connection problems on the next request.
+      onLoginCompletedHealth();
       OrgMetadataCache.invalidate(null);
       invalidateOrgListCache();
       // 2. Redraw tree immediately (user sees spinner, not stale data)

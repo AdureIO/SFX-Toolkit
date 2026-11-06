@@ -26,7 +26,9 @@ import { DescribeStore } from "../utils/describeStore";
 import { OrgMetadataCache } from "../utils/orgMetadataCache";
 import { AuthInfo } from "../utils/authInfo";
 import { invalidateOrgKeyCache, setAliasFileForTests, getAliasFileForTests } from "../utils/orgKey";
-import { setSchemaHealthSink } from "../utils/schemaHealth";
+import { setSchemaHealthSink, getHealthState, onDefaultOrgChangedHealth } from "../utils/schemaHealth";
+import { checkNoDefaultOrg, forgetProjectsForTests } from "../utils/schemaHealthMonitor";
+import { setKnownTargetOrg, invalidateOrgListCache } from "../utils/orgListCache";
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const rpc = require("vscode-jsonrpc/node");
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -140,8 +142,10 @@ interface FakeNet {
 	httpMs: number;
 	/** `sf org display` fails until this time (ms epoch) — a CLI that is not ready right after activation. */
 	authFailsUntil: number;
+	/** `sf org display` fails with this CLI error text (expired refresh token, deleted org …) while set. */
+	cliAuthError: string | null;
 }
-const net: FakeNet = { log: [], down: null, allow304: true, globalFails: false, cliMs: 0, httpMs: 0, authFailsUntil: 0 };
+const net: FakeNet = { log: [], down: null, allow304: true, globalFails: false, cliMs: 0, httpMs: 0, authFailsUntil: 0, cliAuthError: null };
 
 function respond(
 	method: string,
@@ -232,6 +236,7 @@ function installFakes(): void {
 	commandRunner.runCommandArgs = async (_cmd: string, args: string[]) => {
 		await new Promise((r) => setTimeout(r, net.cliMs));
 		if (Date.now() < net.authFailsUntil) throw new Error("Command failed: sf org display (transient CLI failure)");
+		if (net.cliAuthError && args[0] === "org" && args[1] === "display") throw new Error(net.cliAuthError);
 		if (args[0] === "org" && args[1] === "display" && args[2] !== "user") {
 			return JSON.stringify({
 				status: 0,
@@ -535,6 +540,63 @@ describe(`host → server completion (real host modules, real server, fake HTTP)
 		} finally {
 			net.down = null;
 		}
+	});
+
+	// Health states (run once: they rewrite the project's default-org config and restore it).
+	const healthIt = scenario.name === "default org = username in .sfdx/sfdx-config.json" ? it : it.skip;
+
+	healthIt("no default org is detected proactively, before any completion, and clears when one is set", async () => {
+		const cfg = path.join(root, ".sfdx", "sfdx-config.json");
+		fs.rmSync(cfg, { force: true });
+		setKnownTargetOrg(null);
+		invalidateOrgListCache();
+		resetHostState();
+		forgetProjectsForTests();
+		setSchemaHealthSink({ onProblem: () => undefined, onRecovered: () => undefined });
+		try {
+			const missing = await checkNoDefaultOrg([root]);
+			assert.deepStrictEqual(missing, [root]);
+			assert.strictEqual(getHealthState("__default__"), "noDefaultOrg", "set before any completion request");
+			// A default org is configured (Set-as-Default): the host announces it and re-checks.
+			fs.writeFileSync(cfg, JSON.stringify({ "target-org": USERNAME }));
+			invalidateOrgKeyCache();
+			onDefaultOrgChangedHealth();
+			assert.strictEqual(getHealthState("__default__"), "ok");
+			assert.deepStrictEqual(await checkNoDefaultOrg([root]), []);
+			assert.strictEqual(getHealthState("__default__"), "ok");
+		} finally {
+			fs.writeFileSync(cfg, JSON.stringify({ "target-org": USERNAME }));
+			setKnownTargetOrg(null);
+			invalidateOrgKeyCache();
+			setSchemaHealthSink(undefined);
+		}
+	});
+
+	healthIt("a CLI auth failure ('expired') reaches schema health as authInvalid, and recovery clears it", async () => {
+		DescribeStore.clearPersisted(null);
+		resetHostState();
+		setSchemaHealthSink({ onProblem: () => undefined, onRecovered: () => undefined });
+		net.cliAuthError = "Error authenticating with the refresh token due to: expired access/refresh token";
+		try {
+			await conn.sendNotification("sfx/refreshSchema");
+			const until = Date.now() + waitMs;
+			while (getHealthState(USERNAME) !== "authInvalid" && Date.now() < until) {
+				await completeAt(inMethod("    Account a;\n    a.Na|"));
+				await new Promise((r) => setTimeout(r, 250));
+			}
+			assert.strictEqual(getHealthState(USERNAME), "authInvalid");
+		} finally {
+			net.cliAuthError = null;
+		}
+		// The login was repaired: the next successful request clears the status.
+		resetHostState();
+		await conn.sendNotification("sfx/refreshSchema");
+		const until = Date.now() + waitMs + 12_000;
+		while (getHealthState(USERNAME) !== "ok" && Date.now() < until) {
+			await completeAt(inMethod("    User t;\n    t.Na|"));
+			await new Promise((r) => setTimeout(r, 500));
+		}
+		assert.strictEqual(getHealthState(USERNAME), "ok");
 	});
 
 	it("recovers after the org comes back (no negative cache that never clears)", async () => {

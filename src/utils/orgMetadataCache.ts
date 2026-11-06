@@ -4,7 +4,7 @@ import { outputChannel } from "./outputChannel";
 import { isSalesforceProject } from "./projectUtils";
 import { DescribeStore, PROBE_INTERVAL_MS, AUTH_PROBE_INTERVAL_MS, SchemaUnavailableError } from "./describeStore";
 import { canonicalOrgKey } from "./orgKey";
-import { classifySchemaError, reportSchemaFailure, reportSchemaSuccess, SchemaFailureKind } from "./schemaHealth";
+import { classifySchemaError, isAuthKind, reportSchemaFailure, reportSchemaSuccess, SchemaFailureKind } from "./schemaHealth";
 
 /** Max orgs whose object list is retained (LRU). Pruned lazily on access — no timers. */
 const MAX_ORGS = 5;
@@ -222,7 +222,7 @@ class OrgMetadataCacheImpl {
 
 		const f = entry.failure;
 		if (f) {
-			const interval = f.kind === "sessionExpired" || f.kind === "noCredentials" ? AUTH_PROBE_INTERVAL_MS : PROBE_INTERVAL_MS;
+			const interval = isAuthKind(f.kind) ? AUTH_PROBE_INTERVAL_MS : PROBE_INTERVAL_MS;
 			if (Date.now() - f.at < interval) throw new SchemaUnavailableError(f.kind, String((f.error as any)?.message ?? f.error));
 		}
 
@@ -273,7 +273,7 @@ class OrgMetadataCacheImpl {
 				if (owns()) this.fetchLocks.delete(key);
 				const kind = classifySchemaError(err);
 				entry.failure = { at: Date.now(), kind, error: err };
-				reportSchemaFailure(key, kind);
+				reportSchemaFailure(key, kind, err);
 				outputChannel.appendLine(`OrgMetadataCache: getObjectList failed: ${err?.message ?? err}`);
 				return servedStale ?? ([] as string[]);
 			});

@@ -1,11 +1,14 @@
 import * as vscode from "vscode";
 import { reportError } from "../utils/reportError";
 import { runCommandArgs } from "../utils/commandRunner";
-import { getOrgListResult } from "../utils/orgListCache";
+import { getOrgListResult, getOrgByTarget, getOrgListForPicker, invalidateOrgListCache } from "../utils/orgListCache";
 import { OrgItem, orgTreeProvider } from "../providers/OrgTreeProvider";
 import { AuthInfo } from "../utils/authInfo";
 import { Logger } from "../utils/outputChannel";
 import { notifyDefaultOrgChanged } from "../utils/defaultOrgEvents";
+import { invalidateOrgKeyCache } from "../utils/orgKey";
+import { primaryProjectRoot } from "../utils/projectUtils";
+import { NO_ORG_KEY, onLoginCompletedHealth } from "../utils/schemaHealth";
 
 /** Scratch org creation regularly exceeds the default 5-minute command timeout. */
 const SCRATCH_CREATE_TIMEOUT_MS = 30 * 60 * 1000;
@@ -246,6 +249,7 @@ export async function connectOrg() {
           token
         );
         AuthInfo.clearCache();
+        onLoginCompletedHealth();
         vscode.window.showInformationMessage(`Successfully connected to ${alias}.`);
         orgTreeProvider.refresh();
       } catch (e: any) {
@@ -459,4 +463,68 @@ export async function quickScratch() {
     if (e.cancelled) return;
     reportError({ operation: "Quick scratch org", error: e });
   }
+}
+
+/**
+ * Pick one of the connected orgs (expired scratch orgs left out) and make it the default of
+ * `projectDir` (omitted = the primary project). Used by the schema-health quick pick.
+ */
+export async function chooseDefaultOrg(projectDir?: string): Promise<void> {
+  const orgs = (await getOrgListForPicker()).filter((o) => !getOrgByTarget(o.username)?.isExpired);
+  if (!orgs.length) {
+    const pick = await vscode.window.showInformationMessage("No connected orgs. Connect one first.", "Connect org…");
+    if (pick) await connectOrg();
+    return;
+  }
+  const picked = await vscode.window.showQuickPick(
+    orgs.map((o) => ({ label: o.label.replace(/ \(default\)$/, ""), description: o.username, username: o.username })),
+    { placeHolder: "Select the default org for this project", matchOnDescription: true }
+  );
+  if (!picked) return;
+  try {
+    await runCommandArgs("sf", ["config", "set", `target-org=${picked.username}`], projectDir);
+    const primary = primaryProjectRoot();
+    if (!projectDir || projectDir === primary) {
+      await notifyDefaultOrgChanged(picked.username);
+    } else {
+      // A nested project: its config watcher announces the change; drop what it resolved before.
+      invalidateOrgKeyCache(projectDir);
+    }
+    vscode.window.showInformationMessage(`Set ${picked.label} as default org.`);
+    orgTreeProvider.refresh();
+  } catch (e: any) {
+    reportError({ operation: "Set default org", error: e });
+  }
+}
+
+/**
+ * Re-run the web login for an org whose connection is expired / revoked, with the alias and
+ * login URL the CLI already knows for it. Clears the health problem when it completes.
+ */
+export async function reauthenticateOrg(orgKey: string): Promise<void> {
+  const rec = orgKey && orgKey !== NO_ORG_KEY ? getOrgByTarget(orgKey) : null;
+  const args = ["org", "login", "web"];
+  if (rec?.alias) args.push("--alias", rec.alias);
+  if (rec?.instanceUrl) args.push("--instance-url", rec.instanceUrl);
+  await vscode.window.withProgress(
+    {
+      location: vscode.ProgressLocation.Notification,
+      title: `Re-authenticating ${rec?.alias || rec?.username || "org"}... Check your browser.`,
+      cancellable: true
+    },
+    async (_progress, token) => {
+      try {
+        await runCommandArgs("sf", args, undefined, undefined, true, undefined, token);
+        AuthInfo.clearCache();
+        invalidateOrgListCache();
+        onLoginCompletedHealth();
+        vscode.window.showInformationMessage("Re-authenticated. Schema features are restored.");
+        orgTreeProvider.refresh();
+        void vscode.commands.executeCommand("adure-sfx-toolkit.refreshOrgs");
+      } catch (e: any) {
+        if (e.cancelled) return;
+        reportError({ operation: "Re-authenticate org", error: e });
+      }
+    }
+  );
 }

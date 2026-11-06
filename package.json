@@ -233,6 +233,10 @@
         "title": "ASFXT: Compare with Org"
       },
       {
+        "command": "adure-sfx-toolkit.schemaHealthActions",
+        "title": "ASFXT: Fix Schema Connection (default org / login)"
+      },
+      {
         "command": "adure-sfx-toolkit.orgHealth",
         "title": "ASFXT: Org Health Dashboard"
       },

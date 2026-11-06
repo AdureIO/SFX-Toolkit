@@ -281,8 +281,8 @@ describe("DescribeStore — failure handling", () => {
 
 	it("classifies errors", () => {
 		assert.strictEqual(classifySchemaError(new Error("HTTP 404: NOT_FOUND")), "notFound");
-		assert.strictEqual(classifySchemaError(Object.assign(new Error("x"), { status: 401 })), "sessionExpired");
-		assert.strictEqual(classifySchemaError(new Error("Salesforce session expired or revoked. Re-authenticate")), "sessionExpired");
+		assert.strictEqual(classifySchemaError(Object.assign(new Error("x"), { status: 401 })), "authInvalid");
+		assert.strictEqual(classifySchemaError(new Error("Salesforce session expired or revoked. Re-authenticate")), "authInvalid");
 		assert.strictEqual(classifySchemaError(new Error("Could not get org credentials. Set a default org")), "noCredentials");
 		assert.strictEqual(classifySchemaError(new Error("HTTP 503: down")), "transient");
 		assert.strictEqual(classifySchemaError(new Error("Request timed out after 30000ms")), "transient");

@@ -11,6 +11,10 @@ export type OrgRecord = {
   isDevHub: boolean;
   isScratch: boolean;
   isDefault: boolean;
+  /** Scratch org that `sf org list` reports as expired / deleted. */
+  isExpired?: boolean;
+  /** Login URL (instance URL) from `sf org list`, for re-authenticating. */
+  instanceUrl?: string;
 };
 
 let cachedRecords: OrgRecord[] = [];
@@ -69,8 +73,9 @@ function recordsFromSfListResult(result: {
     isDefaultUsername?: boolean;
     isSandbox?: boolean;
     isDevHub?: boolean;
+    instanceUrl?: string;
   }[];
-  scratchOrgs?: { alias?: string; username: string; isDefaultUsername?: boolean; isSandbox?: boolean }[];
+  scratchOrgs?: { alias?: string; username: string; isDefaultUsername?: boolean; isSandbox?: boolean; isExpired?: boolean; instanceUrl?: string }[];
 }): OrgRecord[] {
   const records: OrgRecord[] = [];
   for (const o of result.scratchOrgs ?? []) {
@@ -81,7 +86,9 @@ function recordsFromSfListResult(result: {
       isSandbox: !!o.isSandbox,
       isDevHub: false,
       isScratch: true,
-      isDefault: !!o.isDefaultUsername
+      isDefault: !!o.isDefaultUsername,
+      isExpired: !!o.isExpired,
+      instanceUrl: o.instanceUrl
     });
   }
   for (const o of result.nonScratchOrgs ?? []) {
@@ -92,7 +99,8 @@ function recordsFromSfListResult(result: {
       isSandbox: !!o.isSandbox,
       isDevHub: !!o.isDevHub,
       isScratch: false,
-      isDefault: !!o.isDefaultUsername
+      isDefault: !!o.isDefaultUsername,
+      instanceUrl: (o as { instanceUrl?: string }).instanceUrl
     });
   }
   return records;
@@ -160,6 +168,24 @@ export function setOrgListCacheFromSfResult(
   cached = orgOptionsFromSfListResult(result);
   cachedRecords = recordsFromSfListResult(result);
   syncKnownTargetFromSfdxConfig();
+  for (const l of [...orgListListeners]) {
+    try {
+      l();
+    } catch {
+      /* listeners must not break the cache */
+    }
+  }
+}
+
+const orgListListeners: (() => void)[] = [];
+
+/** Called after every successful org-list (re)load. Returns an unsubscribe function. */
+export function onOrgListUpdated(listener: () => void): () => void {
+  orgListListeners.push(listener);
+  return () => {
+    const i = orgListListeners.indexOf(listener);
+    if (i >= 0) orgListListeners.splice(i, 1);
+  };
 }
 
 export function invalidateOrgListCache(): void {

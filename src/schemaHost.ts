@@ -17,6 +17,7 @@ import { canonicalOrgKey, orgArgForKey } from "./utils/orgKey";
 import { SchemaUnavailableError } from "./utils/describeStore";
 import { getBufferOrgOverride } from "./utils/bufferOrgOverride";
 import { outputChannel } from "./utils/outputChannel";
+import { classifySchemaError, NO_ORG_KEY, reportSchemaFailure } from "./utils/schemaHealth";
 
 export const REQ_OBJECT_LIST = "sfx/objectList";
 export const REQ_DESCRIBE = "sfx/describe";
@@ -61,6 +62,17 @@ export function registerSchemaHostHandlers(lc: RequestRegistrar): SchemaHost {
 		}
 	};
 
+	/**
+	 * Host-side failures feed the same health state as the caches' own reports (idempotent):
+	 * a request the server sees as -32803 must also reach the status bar item.
+	 */
+	const reportFailure = (org: string | null, e: unknown) => {
+		const msg = String((e as any)?.message ?? e);
+		if (/Not an SFDX project/i.test(msg)) return;
+		const kind = e instanceof SchemaUnavailableError ? e.kind : classifySchemaError(e);
+		reportSchemaFailure(org ?? NO_ORG_KEY, kind, e);
+	};
+
 	/** Transient host failures reject the request (the server must not negative-cache them). */
 	const unavailable = (e: unknown) =>
 		new ResponseError(-32803 /* RequestFailed */, `schema unavailable: ${(e as any)?.message ?? e}`);
@@ -68,9 +80,11 @@ export function registerSchemaHostHandlers(lc: RequestRegistrar): SchemaHost {
 	// An object list the org could not deliver REJECTS (-32803) instead of answering `[]`: the
 	// server caches a real answer, and an empty one would gate every SObject completion off.
 	lc.onRequest(REQ_OBJECT_LIST, async (params: { uri?: string }) => {
+		const org = orgForUri(params?.uri);
 		try {
-			return await SoqlSchemaProvider.getObjectListStrict(orgForUri(params?.uri));
+			return await SoqlSchemaProvider.getObjectListStrict(org);
 		} catch (e: any) {
+			reportFailure(org, e);
 			if (e instanceof SchemaUnavailableError) throw unavailable(e);
 			outputChannel.appendLine(`languageClient: objectList failed: ${e?.message ?? e}`);
 			throw unavailable(e);
@@ -78,10 +92,14 @@ export function registerSchemaHostHandlers(lc: RequestRegistrar): SchemaHost {
 	});
 
 	lc.onRequest(REQ_DESCRIBE, async (params: { uri?: string; sobject: string }) => {
+		const org = orgForUri(params?.uri);
 		try {
-			return await SoqlSchemaProvider.getDescribeStrict(orgForUri(params?.uri), params?.sobject);
+			return await SoqlSchemaProvider.getDescribeStrict(org, params?.sobject);
 		} catch (e: any) {
-			if (e instanceof SchemaUnavailableError) throw unavailable(e);
+			if (e instanceof SchemaUnavailableError) {
+				reportFailure(org, e);
+				throw unavailable(e);
+			}
 			outputChannel.appendLine(`languageClient: describe failed: ${e?.message ?? e}`);
 			return null;
 		}
@@ -92,10 +110,14 @@ export function registerSchemaHostHandlers(lc: RequestRegistrar): SchemaHost {
 	// through the shared DescribeStore cache. Rejects when the org can't answer.
 	lc.onRequest(REQ_DESCRIBE_MANY, async (params: { names?: string[]; uri?: string }) => {
 		const names = Array.isArray(params?.names) ? params.names.slice(0, 500) : [];
+		const org = orgForUri(params?.uri);
 		try {
-			return await SoqlSchemaProvider.getDescribeMany(orgForUri(params?.uri), names, { strict: true });
+			return await SoqlSchemaProvider.getDescribeMany(org, names, { strict: true });
 		} catch (e: any) {
-			if (e instanceof SchemaUnavailableError) throw unavailable(e);
+			if (e instanceof SchemaUnavailableError) {
+				reportFailure(org, e);
+				throw unavailable(e);
+			}
 			outputChannel.appendLine(`languageClient: describeMany failed: ${e?.message ?? e}`);
 			return names.map(() => null);
 		}

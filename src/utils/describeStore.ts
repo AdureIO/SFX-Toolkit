@@ -22,7 +22,7 @@ import { AuthInfo } from "./authInfo";
 import { getToolingApiVersion } from "./constants";
 import { outputChannel } from "./outputChannel";
 import { canonicalOrgKey } from "./orgKey";
-import { classifySchemaError, backoffMs, reportSchemaFailure, reportSchemaSuccess, SchemaFailureKind } from "./schemaHealth";
+import { classifySchemaError, backoffMs, isAuthKind, reportSchemaFailure, reportSchemaSuccess, SchemaFailureKind } from "./schemaHealth";
 import { DescribeDiskCache, DiskCacheLimits, PersistedOrg } from "./describeDiskCache";
 
 /** Freshness window for a successful describe; after it the entry is revalidated (served stale meanwhile). */
@@ -426,7 +426,7 @@ class DescribeStoreImpl {
 		st.failedAt = now;
 		st.backoffKind = kind;
 		st.backoffUntil = Math.max(st.backoffUntil, now + backoffMs(kind, st.failures));
-		reportSchemaFailure(st.key, kind);
+		reportSchemaFailure(st.key, kind, e);
 		const msg = String((e as any)?.message ?? e);
 		outputChannel.appendLine(`DescribeStore: describe ${sobject} failed (${kind}; backing off): ${msg}`);
 		return new SchemaUnavailableError(kind, msg);
@@ -449,7 +449,7 @@ class DescribeStoreImpl {
 	private inBackoff(st: OrgState): SchemaUnavailableError | null {
 		const now = Date.now();
 		if (now >= st.backoffUntil) return null;
-		const interval = st.backoffKind === "sessionExpired" || st.backoffKind === "noCredentials" ? AUTH_PROBE_INTERVAL_MS : PROBE_INTERVAL_MS;
+		const interval = isAuthKind(st.backoffKind) ? AUTH_PROBE_INTERVAL_MS : PROBE_INTERVAL_MS;
 		if (now - Math.max(st.failedAt, st.probedAt) >= interval) {
 			st.probedAt = now;
 			return null;
