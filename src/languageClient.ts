@@ -15,13 +15,11 @@ import {
 	State,
 	DidChangeWatchedFilesNotification,
 	FileChangeType,
-	ResponseError,
 } from "vscode-languageclient/node";
+import { registerSchemaHostHandlers } from "./schemaHost";
 import { SoqlSchemaProvider } from "./utils/soqlSchemaProvider";
 import { OrgMetadataCache } from "./utils/orgMetadataCache";
-import { findSfdxProjectDir, isSalesforceProject } from "./utils/projectUtils";
-import { canonicalOrgKey, orgArgForKey } from "./utils/orgKey";
-import { SchemaUnavailableError } from "./utils/describeStore";
+import { isSalesforceProject } from "./utils/projectUtils";
 import { shouldForwardDiagnostics } from "./utils/diagnosticsFilter";
 import { FileEventBatcher } from "./utils/fileEventBatcher";
 import { MetadataBufferSync, isMetadataBufferPath } from "./utils/metadataBufferSync";
@@ -29,15 +27,9 @@ import { apexFeaturesEnabled } from "./utils/apexProviderSuppression";
 import { ServerSettingsRestarter, Throttle, CONFIG_SECTION } from "./utils/serverSettingsRestart";
 import { onDidChangeProjectDefaultOrg } from "./utils/defaultOrgEvents";
 import { scheduleStubSync, cleanRestartApex, getInitialSyncState, disposeStubSync } from "./utils/sobjectStubSync";
-import { getBufferOrgOverride } from "./utils/bufferOrgOverride";
 import { outputChannel } from "./utils/outputChannel";
 import { registerApexQuickFixCommands } from "./commands/apexQuickFixCommands";
 
-const REQ_OBJECT_LIST = "sfx/objectList";
-const REQ_DESCRIBE = "sfx/describe";
-const REQ_DESCRIBE_MANY = "sfx/describeMany";
-const REQ_PROJECT_INFO = "sfx/projectInfo";
-const REQ_OBJECT_INFO = "sfx/objectInfo";
 const NOTE_REFRESH = "sfx/refreshSchema";
 const NOTE_EPHEMERAL = "sfx/ephemeralBuffers";
 const NOTE_METADATA_BUFFER = "sfx/metadataBuffer";
@@ -262,103 +254,7 @@ function startClient(context: vscode.ExtensionContext): void {
 	const disposables: vscode.Disposable[] = [];
 	clientDisposables = disposables;
 
-	// Resolve which org a request's document belongs to, as the CANONICAL org key
-	// (username) — the same key the warm-up, push/pull invalidation and every host
-	// cache use. Walks up to the nearest sfdx-project.json so nested sub-projects
-	// (e.g. billing/force-app/...) use their own default org. Null = no org resolvable
-	// (the CLI's global default).
-	const projectDirCache = new Map<string, string | null>();
-	const orgForUri = (uri?: string): string | null => {
-		try {
-			if (!uri) return orgArgForKey(canonicalOrgKey(null));
-			const fsPath = vscode.Uri.parse(uri).fsPath;
-			// A webview buffer (ASFX Workbench) may pin its IntelliSense to a chosen org.
-			const ov = getBufferOrgOverride(fsPath);
-			if (ov.has) return orgArgForKey(canonicalOrgKey(ov.org));
-			const dir = path.dirname(fsPath);
-			let projectDir = projectDirCache.get(dir);
-			if (projectDir === undefined) {
-				projectDir = findSfdxProjectDir(fsPath);
-				if (projectDirCache.size > 2000) projectDirCache.clear();
-				projectDirCache.set(dir, projectDir);
-			}
-			return orgArgForKey(canonicalOrgKey(null, projectDir ?? undefined));
-		} catch {
-			return null;
-		}
-	};
-
-	/** Transient host failures reject the request (the server must not negative-cache them). */
-	const unavailable = (e: unknown): ResponseError<void> =>
-		new ResponseError(-32803 /* RequestFailed */, `schema unavailable: ${(e as any)?.message ?? e}`);
-
-	lc.onRequest(REQ_OBJECT_LIST, async (params: { uri?: string }) => {
-		try {
-			return await SoqlSchemaProvider.getObjectList(orgForUri(params?.uri));
-		} catch (e: any) {
-			outputChannel.appendLine(`languageClient: objectList failed: ${e?.message ?? e}`);
-			return [];
-		}
-	});
-
-	lc.onRequest(REQ_DESCRIBE, async (params: { uri?: string; sobject: string }) => {
-		try {
-			return await SoqlSchemaProvider.getDescribeStrict(orgForUri(params?.uri), params?.sobject);
-		} catch (e: any) {
-			if (e instanceof SchemaUnavailableError) throw unavailable(e);
-			outputChannel.appendLine(`languageClient: describe failed: ${e?.message ?? e}`);
-			return null;
-		}
-	});
-
-	// Batched describes (contract 3): same Describe shape as REQ_DESCRIBE, same order as
-	// `names`, null = not an SObject. Misses go out as REST composite/batch (<=25 each)
-	// through the shared DescribeStore cache. Rejects when the org can't answer.
-	lc.onRequest(REQ_DESCRIBE_MANY, async (params: { names?: string[]; uri?: string }) => {
-		const names = Array.isArray(params?.names) ? params.names.slice(0, 500) : [];
-		try {
-			return await SoqlSchemaProvider.getDescribeMany(orgForUri(params?.uri), names, { strict: true });
-		} catch (e: any) {
-			if (e instanceof SchemaUnavailableError) throw unavailable(e);
-			outputChannel.appendLine(`languageClient: describeMany failed: ${e?.message ?? e}`);
-			return names.map(() => null);
-		}
-	});
-
-	// Object-level admin Description (Tooling API; not in the standard describe).
-	lc.onRequest(REQ_OBJECT_INFO, async (params: { uri?: string; sobject: string }) => {
-		try {
-			const description = await SoqlSchemaProvider.getObjectDescription(orgForUri(params?.uri), params?.sobject);
-			return { description };
-		} catch {
-			return { description: null };
-		}
-	});
-
-	// Project namespace (from sfdx-project.json) for the document's sub-project.
-	// Lets the server match/resolve names with the namespace optional.
-	const nsCache = new Map<string, string | null>();
-	lc.onRequest(REQ_PROJECT_INFO, (params: { uri?: string }) => {
-		try {
-			if (!params?.uri) return { namespace: null };
-			const fsPath = vscode.Uri.parse(params.uri).fsPath;
-			const projectDir = findSfdxProjectDir(fsPath);
-			if (!projectDir) return { namespace: null };
-			if (nsCache.has(projectDir)) return { namespace: nsCache.get(projectDir) ?? null };
-			let namespace: string | null = null;
-			try {
-				const raw = fs.readFileSync(path.join(projectDir, "sfdx-project.json"), "utf8");
-				const ns = JSON.parse(raw).namespace;
-				namespace = typeof ns === "string" && ns.trim() ? ns.trim() : null;
-			} catch {
-				namespace = null;
-			}
-			nsCache.set(projectDir, namespace);
-			return { namespace };
-		} catch {
-			return { namespace: null };
-		}
-	});
+	const schemaHost = registerSchemaHostHandlers(lc);
 
 	// When the org switches or metadata is refreshed, drop the host-side describe
 	// cache and tell the server to drop its own.
@@ -383,7 +279,7 @@ function startClient(context: vscode.ExtensionContext): void {
 		// Full invalidation (org switch / manual refresh). The emitting cache already dropped
 		// that org's describes; only the admin descriptions live here.
 		SoqlSchemaProvider.invalidateDescriptions(org);
-		projectDirCache.clear();
+		schemaHost.clearProjectDirCache();
 		if (lc.isRunning()) void lc.sendNotification(NOTE_REFRESH).catch(() => {});
 		// Don't trust any stub.
 		scheduleStubSync({ force: true });
@@ -394,7 +290,7 @@ function startClient(context: vscode.ExtensionContext): void {
 	// A nested project's own default org changed: drop only its documents' org context.
 	disposables.push(
 		onDidChangeProjectDefaultOrg((projectDir) => {
-			projectDirCache.clear();
+			schemaHost.clearProjectDirCache();
 			const prefix = projectDir.replace(/[\\/]+$/, "") + path.sep;
 			const uris = vscode.workspace.textDocuments
 				.filter((d) => d.uri.scheme === "file" && d.uri.fsPath.startsWith(prefix))
