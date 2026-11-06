@@ -235,6 +235,14 @@ async function writeFile(file: string, content: string): Promise<void> {
 	await fs.promises.writeFile(file, content, "utf8");
 }
 
+function fileExistsSyncSafe(file: string): boolean {
+	try {
+		return fs.existsSync(file);
+	} catch {
+		return false;
+	}
+}
+
 async function fileExists(file: string): Promise<boolean> {
 	try {
 		await fs.promises.access(file);
@@ -334,6 +342,21 @@ async function syncProject(
 	let done = 0;
 	let skipped = 0;
 	const gen = generation;
+
+	// Prefetch the describes this run will need in a few composite/batch calls
+	// (≤25 per request) instead of one REST round-trip per object. Stubs that already
+	// exist and aren't regenerated need no describe. Best-effort: misses fall back
+	// to the per-object getDescribe below.
+	const needDescribe = force
+		? targets.filter((n) => used.has(n))
+		: targets.filter((n) => used.has(n) && (only?.has(n) || !(fileExistsSyncSafe(stubFile(n)))));
+	if (needDescribe.length > 1) {
+		try {
+			await SoqlSchemaProvider.getDescribeMany(org, needDescribe);
+		} catch {
+			/* fall back to single describes */
+		}
+	}
 	for (const name of targets) {
 		if (gen !== generation) break; // disposed (deactivate / window close) — stop writing
 		const file = stubFile(name);
