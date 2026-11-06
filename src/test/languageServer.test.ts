@@ -26,6 +26,8 @@ const rpc = require("vscode-jsonrpc/node");
 const OBJECTS = [
   "Account", "Contact", "Opportunity", "acme__Widget__c",
   "AccountHistory", "AccountShare", "My_Setting__mdt", "acme__Widget__History",
+  // Listed by describeGlobal (the server only describes listed objects):
+  "acme__DynamicField__c", "acme__Datasource__c", "Whatever__c", "Slow__c",
 ];
 
 type Field = Record<string, unknown> & { name: string; type: string };

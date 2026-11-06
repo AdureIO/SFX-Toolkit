@@ -50,6 +50,7 @@ import { isApex } from './textUtil';
 import { stdTypeName } from './apexStdlib';
 import { stubbedObjectNames } from './sobjectStub';
 import { WorkspaceIndex } from './workspaceIndex';
+import { MAX_DESCRIBE_CACHE } from './schema';
 import type { HostDescribe } from './schema';
 
 // ─── Legend ──────────────────────────────────────────────────────────────────────
@@ -1268,13 +1269,28 @@ export function diffTokens(prev: number[], next: number[]): { start: number; del
 // ─── LSP wiring ──────────────────────────────────────────────────────────────────
 
 const MAX_DOC_CACHE = 30;
-const MAX_DESCRIBE_INDEX = 300;
+/**
+ * Compact describes kept here. Kept ≥ the schema cache size (and entries are tiny) so
+ * the index never evicts what the schema cache still holds — an eviction here meant a
+ * re-fetch, a "changed" pass and a refresh, forever (refresh ping-pong).
+ */
+const MAX_DESCRIBE_INDEX = Math.max(1000, MAX_DESCRIBE_CACHE);
+/** "No describe" (not found / timed out) entries are retried after this long. */
+const NULL_DESCRIBE_TTL_MS = 60_000;
 const MAX_OBJECT_LISTS = 20;
-/** Background describes started per tokenization pass (bounded — never a burst). */
-const MAX_FETCH_PER_PASS = 5;
+/** Background describes queued per tokenization pass (bounded — never a burst). */
+const MAX_FETCH_PER_PASS = 25;
 /** Queue cap across all documents. */
-const MAX_FETCH_QUEUE = 20;
+const MAX_FETCH_QUEUE = 100;
+/** Describes warmed per host round-trip (sfx/describeMany). */
+const FETCH_BATCH = 25;
+/** Times the pump re-tokenizes documents itself to find more describes before refreshing. */
+const MAX_SELF_FEED_ROUNDS = 40;
 const REFRESH_DEBOUNCE_MS = 400;
+/** Minimum spacing between workspace/semanticTokens/refresh requests. */
+const MIN_REFRESH_INTERVAL_MS = 2_000;
+/** Refreshes caused by background describes per schema generation (backstop). */
+const MAX_FETCH_REFRESHES = 10;
 const OBJECT_LIST_WAIT_MS = 300;
 
 interface DocEntry {
@@ -1282,6 +1298,11 @@ interface DocEntry {
     gen: number;
     resultId: string;
     data: number[];
+}
+
+interface IdxEntry {
+    idx: DescribeIndex | null;
+    at: number;
 }
 
 function toIndex(d: HostDescribe): DescribeIndex {
@@ -1309,59 +1330,128 @@ function toIndex(d: HostDescribe): DescribeIndex {
     return { fields, rels, children };
 }
 
+/** Debug counters (tests / harnesses). */
+export const semanticTokenStats = { refreshes: 0, fetched: 0, pumpRuns: 0 };
+
 export function register(connection: Connection, ctx: ServerContext): void {
     const docCache = new Map<string, DocEntry>();
     // Schema knowledge, per org context.
-    const describeIdx = new Map<string, DescribeIndex | null>(); // `${orgCtx}|${lc}`
+    const describeIdx = new Map<string, IdxEntry>(); // `${orgCtx}|${lc}`
     const objectLists = new Map<string, Set<string>>(); // orgCtx → lower-cased names
     const objectListInflight = new Map<string, Promise<void>>();
     const fetchQueue: { uri: string; sobject: string; key: string }[] = [];
     const queued = new Set<string>();
+    // Keys fetched in the current schema generation: a re-fetch (after an index eviction)
+    // brings nothing new and must not trigger another refresh.
+    const fetchedThisGen = new Set<string>();
+    // Documents whose last tokenization wanted more describes than one pass may queue.
+    const overflowDocs = new Set<string>();
     let fetching = false;
+    // Bumped on schema refresh / release: a pump started earlier stops at its next await
+    // (and no longer owns `fetching`), so one unanswered describe can't wedge it.
+    let pumpGen = 0;
     let gen = 0; // bumped whenever schema knowledge changes → cached tokens are stale
     let resultSeq = 0;
     let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+    let lastRefreshAt = 0;
+    let fetchRefreshes = 0;
     let wsReadyHooked = false;
 
     const enabled = (): boolean => ctx.settings.apexSemanticHighlighting !== false;
 
-    const scheduleRefresh = (): void => {
+    const scheduleRefresh = (fromFetch = false): void => {
         gen++;
         if (!ctx.settings.semanticTokensRefreshSupport) return;
+        if (fromFetch && ++fetchRefreshes > MAX_FETCH_REFRESHES) return;
         if (refreshTimer) clearTimeout(refreshTimer);
+        const delay = Math.max(REFRESH_DEBOUNCE_MS, lastRefreshAt + MIN_REFRESH_INTERVAL_MS - Date.now());
         refreshTimer = setTimeout(() => {
             refreshTimer = undefined;
             // Only when something the client holds was computed with older knowledge.
             let stale = false;
             for (const e of docCache.values()) if (e.gen !== gen) stale = true;
             if (!stale) return;
+            lastRefreshAt = Date.now();
+            semanticTokenStats.refreshes++;
             // Typed `void` in vscode-languageserver 9, but it is a request: swallow a rejection.
             const sent: unknown = connection.languages.semanticTokens.refresh();
             (sent as Promise<void> | undefined)?.catch?.(() => undefined);
-        }, REFRESH_DEBOUNCE_MS);
+        }, delay);
+    };
+
+    const idxGet = (key: string): DescribeIndex | null | undefined => {
+        const hit = lruGet(describeIdx, key);
+        if (!hit) return undefined;
+        if (!hit.idx && Date.now() - hit.at >= NULL_DESCRIBE_TTL_MS) {
+            describeIdx.delete(key);
+            return undefined;
+        }
+        return hit.idx;
+    };
+
+    const resetPump = (): void => {
+        pumpGen++;
+        fetching = false;
+        fetchQueue.length = 0;
+        queued.clear();
+        fetchedThisGen.clear();
+        overflowDocs.clear();
+        fetchRefreshes = 0;
     };
 
     const pump = async (): Promise<void> => {
         if (fetching) return;
         fetching = true;
+        const myGen = pumpGen;
+        semanticTokenStats.pumpRuns++;
         let changed = false;
+        let rounds = 0;
         try {
-            while (fetchQueue.length) {
-                const job = fetchQueue.shift()!;
-                queued.delete(job.key);
-                let d: HostDescribe | null = null;
-                try {
-                    d = await ctx.schema.describe(job.uri, job.sobject);
-                } catch {
-                    d = null;
+            for (;;) {
+                while (fetchQueue.length) {
+                    const first = fetchQueue[0];
+                    const batch: typeof fetchQueue = [];
+                    for (let i = 0; i < fetchQueue.length && batch.length < FETCH_BATCH; ) {
+                        if (fetchQueue[i].uri === first.uri) batch.push(...fetchQueue.splice(i, 1));
+                        else i++;
+                    }
+                    // One round-trip for the batch (falls back to single describes), then read the cache.
+                    try {
+                        await ctx.schema.prefetch(first.uri, batch.map((j) => j.sobject));
+                    } catch {
+                        /* best-effort */
+                    }
+                    if (myGen !== pumpGen) return;
+                    for (const job of batch) {
+                        queued.delete(job.key);
+                        let d: HostDescribe | null = null;
+                        try {
+                            d = await ctx.schema.describe(job.uri, job.sobject);
+                        } catch {
+                            d = null;
+                        }
+                        if (myGen !== pumpGen) return;
+                        semanticTokenStats.fetched++;
+                        lruSet(describeIdx, job.key, { idx: d ? toIndex(d) : null, at: Date.now() }, MAX_DESCRIBE_INDEX);
+                        if (d && !fetchedThisGen.has(job.key)) changed = true;
+                        fetchedThisGen.add(job.key);
+                    }
                 }
-                lruSet(describeIdx, job.key, d ? toIndex(d) : null, MAX_DESCRIBE_INDEX);
-                if (d) changed = true;
+                // Re-tokenize documents that wanted more than one pass could queue, here,
+                // instead of a client refresh round-trip per batch.
+                if (!overflowDocs.size || rounds++ >= MAX_SELF_FEED_ROUNDS) break;
+                const uris = [...overflowDocs];
+                overflowDocs.clear();
+                for (const u of uris) {
+                    const doc = ctx.documents.get(u);
+                    if (doc) compute(doc, false);
+                }
+                if (!fetchQueue.length) break;
             }
         } finally {
-            fetching = false;
+            if (myGen === pumpGen) fetching = false;
         }
-        if (changed) scheduleRefresh();
+        if (changed) scheduleRefresh(true);
     };
 
     const ensureObjectList = (uri: string, orgCtx: string): Promise<void> => {
@@ -1369,11 +1459,12 @@ export function register(connection: Connection, ctx: ServerContext): void {
         let p = objectListInflight.get(orgCtx);
         if (!p) {
             p = ctx.schema
-                .objectList(uri)
+                .objectNames(uri)
                 .then(
                     (list) => {
+                        if (!list.length) return; // unknown yet: ask again next time (served from the schema cache)
                         lruSet(objectLists, orgCtx, new Set(list.map((s) => s.toLowerCase())), MAX_OBJECT_LISTS);
-                        if (list.length) scheduleRefresh();
+                        scheduleRefresh();
                     },
                     () => undefined,
                 )
@@ -1383,7 +1474,7 @@ export function register(connection: Connection, ctx: ServerContext): void {
         return p;
     };
 
-    const compute = (doc: TextDocument): number[] => {
+    const compute = (doc: TextDocument, startPump = true): number[] => {
         const uri = doc.uri;
         const orgCtx = ctx.schema.orgContext(uri);
         const list = objectLists.get(orgCtx);
@@ -1394,19 +1485,23 @@ export function register(connection: Connection, ctx: ServerContext): void {
             isWorkspaceType: (lc) => WorkspaceIndex.hasType(lc),
             describe: (sobject, fetch) => {
                 const key = `${orgCtx}|${sobject.toLowerCase()}`;
-                const hit = lruGet(describeIdx, key);
+                const hit = idxGet(key);
                 if (hit !== undefined) return hit;
-                if (fetch && !queued.has(key) && started < MAX_FETCH_PER_PASS && fetchQueue.length < MAX_FETCH_QUEUE) {
-                    started++;
-                    queued.add(key);
-                    fetchQueue.push({ uri, sobject, key });
+                if (fetch && !queued.has(key)) {
+                    if (started < MAX_FETCH_PER_PASS && fetchQueue.length < MAX_FETCH_QUEUE) {
+                        started++;
+                        queued.add(key);
+                        fetchQueue.push({ uri, sobject, key });
+                    } else {
+                        overflowDocs.add(uri);
+                    }
                 }
                 return undefined;
             },
         };
         const soqlOnly = doc.languageId === 'soql' || /\.soql$/i.test(uri);
         const data = computeApexTokens(doc.getText(), env, soqlOnly);
-        if (fetchQueue.length) void pump();
+        if (startPump && fetchQueue.length) void pump();
         return data;
     };
 
@@ -1422,10 +1517,12 @@ export function register(connection: Connection, ctx: ServerContext): void {
         }
         const orgCtx = ctx.schema.orgContext(doc.uri);
         if (!objectLists.has(orgCtx)) {
+            let timer: ReturnType<typeof setTimeout> | undefined;
             await Promise.race([
                 ensureObjectList(doc.uri, orgCtx),
-                new Promise<void>((r) => setTimeout(r, OBJECT_LIST_WAIT_MS)),
+                new Promise<void>((r) => (timer = setTimeout(r, OBJECT_LIST_WAIT_MS))),
             ]);
+            if (timer) clearTimeout(timer);
         }
         if (token?.isCancellationRequested) return null;
         const live = ctx.documents.get(doc.uri) ?? doc;
@@ -1466,9 +1563,22 @@ export function register(connection: Connection, ctx: ServerContext): void {
         return e ? { data: sliceLines(e.data, params.range.start.line, params.range.end.line) } : EMPTY;
     });
 
-    ctx.documents.onDidClose((ev) => docCache.delete(ev.document.uri));
+    ctx.documents.onDidClose((ev) => {
+        docCache.delete(ev.document.uri);
+        overflowDocs.delete(ev.document.uri);
+    });
 
-    ctx.onSchemaRefresh((objects) => {
+    ctx.onSchemaRefresh((objects, info) => {
+        resetPump();
+        const uris = info?.uris;
+        if (uris?.length) {
+            // Only these documents' org contexts changed (e.g. a workbench org override).
+            for (const u of uris) {
+                const prefix = ctx.schema.orgContext(u) + '|';
+                for (const k of [...describeIdx.keys()]) if (k.startsWith(prefix)) describeIdx.delete(k);
+                objectLists.delete(ctx.schema.orgContext(u));
+            }
+        }
         if (objects) {
             const lower = new Set(objects.map((o) => o.toLowerCase()));
             for (const k of [...describeIdx.keys()]) {
@@ -1477,22 +1587,23 @@ export function register(connection: Connection, ctx: ServerContext): void {
                 if (lower.has(name) || (p.length >= 3 && lower.has(p.slice(1).join('__')))) describeIdx.delete(k);
             }
             // created/deleted objects → re-fetch the object lists lazily
-            objectLists.clear();
-        } else {
+            if (info?.structural || !info) objectLists.clear();
+        } else if (!uris?.length) {
             describeIdx.clear();
+            objectLists.clear();
+        } else if (info?.structural) {
             objectLists.clear();
         }
         scheduleRefresh();
     });
 
     ctx.onRelease(() => {
+        resetPump();
         if (refreshTimer) clearTimeout(refreshTimer);
         refreshTimer = undefined;
         docCache.clear();
         describeIdx.clear();
         objectLists.clear();
         objectListInflight.clear();
-        fetchQueue.length = 0;
-        queued.clear();
     });
 }

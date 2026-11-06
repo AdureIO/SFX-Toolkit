@@ -8,7 +8,7 @@
  */
 import type { Connection, TextDocuments } from 'vscode-languageserver/node';
 import type { TextDocument } from 'vscode-languageserver-textdocument';
-import { SchemaService } from './schema';
+import { SchemaService, SchemaInvalidation } from './schema';
 import { ParseCache } from './parseCache';
 
 export interface ServerSettings {
@@ -40,10 +40,15 @@ export interface ServerContext {
     readonly ephemeralDocs: Set<string>;
     readonly schema: SchemaService;
     readonly parses: ParseCache;
-    /** Register a callback run after the host signals a schema change (targeted `objects` or all). */
-    onSchemaRefresh(fn: (objects?: string[]) => void): void;
+    /**
+     * Register a callback run after the host signals a schema change: targeted `objects`
+     * or all (`objects` undefined). `info` carries the full NOTE_REFRESH params — a
+     * callback that ignores it treats a `uris`/`structural`-only refresh as a full one
+     * (safe, just broader).
+     */
+    onSchemaRefresh(fn: (objects?: string[], info?: SchemaInvalidation) => void): void;
     /** Fire the schema-refresh callbacks (called by the NOTE_REFRESH handler). */
-    fireSchemaRefresh(objects?: string[]): void;
+    fireSchemaRefresh(objects?: string[], info?: SchemaInvalidation): void;
     /** Register a callback that releases module state (timers, caches) on shutdown. */
     onRelease(fn: () => void): void;
     /** Run every release callback. */
@@ -51,7 +56,7 @@ export interface ServerContext {
 }
 
 export function createServerContext(connection: Connection, documents: TextDocuments<TextDocument>): ServerContext {
-    const refreshFns: ((objects?: string[]) => void)[] = [];
+    const refreshFns: ((objects?: string[], info?: SchemaInvalidation) => void)[] = [];
     const releaseFns: (() => void)[] = [];
     const ephemeralDocs = new Set<string>();
     return {
@@ -68,10 +73,10 @@ export function createServerContext(connection: Connection, documents: TextDocum
         schema: new SchemaService(connection, (uri) => ephemeralDocs.has(uri)),
         parses: new ParseCache((uri) => documents.get(uri)),
         onSchemaRefresh: (fn) => void refreshFns.push(fn),
-        fireSchemaRefresh: (objects) => {
+        fireSchemaRefresh: (objects, info) => {
             for (const fn of refreshFns) {
                 try {
-                    fn(objects);
+                    fn(objects, info);
                 } catch {
                     /* one module's failure must not block the others */
                 }

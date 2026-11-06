@@ -55,6 +55,7 @@ import * as workspaceSymbols from './workspaceSymbols';
 import * as diagnostics from './diagnostics';
 import * as codeActions from './codeActions';
 import * as semanticTokens from './semanticTokens';
+import * as schemaPrefetch from './schemaPrefetch';
 
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments(TextDocument);
@@ -166,15 +167,21 @@ documents.onDidClose((e) => {
     ctx.schema.dropDocument(e.document.uri);
 });
 
-// Host → server: org/schema changed (targeted `{ objects }` or everything).
-connection.onNotification(NOTE_REFRESH, (params?: { objects?: string[] }) => {
+// Host → server: org/schema changed. Params `{ objects?, uris?, structural? }`:
+// `objects` = only these objects, `uris` = only these documents' org contexts (e.g. a
+// workbench org override changed), `structural` = objects were added/removed; none = all.
+connection.onNotification(NOTE_REFRESH, (params?: { objects?: string[]; uris?: string[]; structural?: boolean }) => {
     const objects = params?.objects?.length ? params.objects : undefined;
-    ctx.schema.invalidate(objects);
+    const uris = params?.uris?.length ? params.uris : undefined;
+    const structural = !!params?.structural;
+    ctx.schema.invalidate({ objects, uris, structural });
     // The Apex parse cache is a pure text parse keyed by document version — schema-independent.
-    clearStubs(objects);
+    // Stubs are shared on disk per default org: a per-buffer (uris) refresh never touches them.
+    if (!uris || objects) clearStubs(objects);
     invalidateStubbedNames(); // stubs may have been (re)generated → rescan for validation
-    ctx.fireSchemaRefresh(objects);
+    ctx.fireSchemaRefresh(objects, { objects, uris, structural });
 });
+schemaPrefetch.register(connection, ctx);
 
 connection.onNotification(NOTE_EPHEMERAL, (params: { uris?: string[] }) => {
     ctx.ephemeralDocs.clear();
