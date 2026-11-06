@@ -56,6 +56,7 @@ import { TokenIndex } from './tokenIndex';
 import { Resolver, receiverExprBefore, splitGeneric, typeLabel } from './apexResolve';
 import type { ParseView } from './parseCache';
 import { metadataOccurrences } from './metadataRefs';
+import { Outline, OutlineBody, outlineOf, elideBodies } from './apexOutline';
 
 // ─── Apex words ─────────────────────────────────────────────────────────────────
 
@@ -101,6 +102,12 @@ export interface FileModel {
     lineStarts: number[];
     /** Document version for open buffers (undefined for files read from disk). */
     version?: number;
+    /**
+     * Method bodies blanked before parsing (partial model, search candidates only): their
+     * locals are missing, so occurrences inside them must not be classified — the plan
+     * proved none of them can be a hit.
+     */
+    elided?: readonly OutlineBody[];
 }
 
 /**
@@ -114,7 +121,7 @@ function blankCode(text: string): string {
         .replace(/'(?:\\.|[^'\\\n])*'/g, (m) => `'${' '.repeat(m.length - 2)}'`);
 }
 
-function makeModel(path: string, uri: string, text: string, index: ApexIndex, version?: number): FileModel {
+function makeModel(path: string, uri: string, text: string, index: ApexIndex, version?: number, code?: string, elided?: readonly OutlineBody[]): FileModel {
     const lineStarts = [0];
     for (let i = text.indexOf('\n'); i !== -1; i = text.indexOf('\n', i + 1)) lineStarts.push(i + 1);
     const typeDecls = index.typeDecls ?? [];
@@ -122,12 +129,13 @@ function makeModel(path: string, uri: string, text: string, index: ApexIndex, ve
         path,
         uri,
         text,
-        code: blankCode(text),
+        code: code ?? blankCode(text),
         index,
         typeDecls,
         typeScopes: new Set(typeDecls.map((t) => t.range)),
         lineStarts,
         version,
+        elided,
     };
 }
 
@@ -177,10 +185,43 @@ function cacheClosed(path: string, mtime: number, model: FileModel): void {
     }
 }
 
-/** Release the closed-file model cache (call on shutdown). */
+/**
+ * Per-file-version source cache for closed files (path → mtime + text + blanked code +
+ * parse-free outline). The outline answers producer detection without a parse; the
+ * `elided` models are partial parses (bodies that provably hold no hit blanked out), keyed
+ * by which bodies were blanked so a different target / graph never reuses the wrong one.
+ */
+interface ClosedSrc {
+    mtime: number;
+    text: string;
+    code: string;
+    outline: Outline;
+    elided: Map<string, FileModel>;
+}
+const MAX_CLOSED_SRC = 1500;
+const MAX_CLOSED_SRC_CHARS = 10_000_000;
+const MAX_ELIDED_PER_FILE = 3;
+const closedSrcs = new Map<string, ClosedSrc>();
+let closedSrcChars = 0;
+
+function cacheSrc(path: string, src: ClosedSrc): void {
+    const prev = closedSrcs.get(path);
+    if (prev) closedSrcChars -= prev.text.length;
+    lruSet(closedSrcs, path, src, Number.MAX_SAFE_INTEGER);
+    closedSrcChars += src.text.length;
+    while (closedSrcs.size > 1 && (closedSrcs.size > MAX_CLOSED_SRC || closedSrcChars > MAX_CLOSED_SRC_CHARS)) {
+        const [k, v] = closedSrcs.entries().next().value as [string, ClosedSrc];
+        closedSrcs.delete(k);
+        closedSrcChars -= v.text.length;
+    }
+}
+
+/** Release the closed-file caches (call on shutdown). */
 export function clearSearchCaches(): void {
     closedModels.clear();
     closedChars = 0;
+    closedSrcs.clear();
+    closedSrcChars = 0;
 }
 
 /** Thrown when an open document changed while a request computed exact ranges for it. */
@@ -198,6 +239,10 @@ export class SearchSession {
     private models = new Map<string, FileModel>();
     private nsP: Promise<string | null> | undefined;
     private docs = new Map<string, TextDocument>();
+    private openSrcs = new Map<string, { version: number; src: ClosedSrc }>();
+    private srcPs = new Map<string, Promise<ClosedSrc | undefined>>();
+    /** Set when a resolver consulted the flat variable table of a partial model (see `indexOf`). */
+    partialTouched = false;
 
     constructor(readonly ctx: ServerContext, readonly token?: CancellationToken) {
         for (const d of ctx.documents.all()) {
@@ -275,6 +320,128 @@ export class SearchSession {
             if (e instanceof ResponseError) throw e;
             return undefined;
         }
+    }
+
+    /**
+     * Text, blanked code and parse-free outline of any Apex file: the open buffer's
+     * CURRENT text if open (never the disk copy), else the file on disk — cached per file
+     * version (mtime) across requests. Undefined when the file can't be read.
+     */
+    srcOf(path: string): Promise<ClosedSrc | undefined> {
+        let p = this.srcPs.get(path);
+        if (!p) this.srcPs.set(path, (p = this.readSrc(path)));
+        return p;
+    }
+
+    private async readSrc(path: string): Promise<ClosedSrc | undefined> {
+        const open = this.openByPath.get(path);
+        if (open) {
+            const hit = this.openSrcs.get(path);
+            if (hit && hit.version === open.version) return hit.src;
+            const text = open.getText();
+            const code = blankCode(text);
+            const src: ClosedSrc = { mtime: -1, text, code, outline: outlineOf(code), elided: new Map() };
+            this.openSrcs.set(path, { version: open.version, src });
+            return src;
+        }
+        try {
+            const st = await fs.promises.stat(path);
+            const cached = lruGet(closedSrcs, path);
+            if (cached && cached.mtime === st.mtimeMs) return cached;
+            const text = await fs.promises.readFile(path, 'utf8');
+            this.check();
+            const code = blankCode(text);
+            const src: ClosedSrc = { mtime: st.mtimeMs, text, code, outline: outlineOf(code), elided: new Map() };
+            cacheSrc(path, src);
+            return src;
+        } catch (e) {
+            this.check();
+            if (e instanceof ResponseError) throw e;
+            return undefined;
+        }
+    }
+
+    /**
+     * Model of a search candidate. Like `load`, except that a closed file with no cached
+     * full model is parsed with the bodies `plan` proves irrelevant blanked out (or not at
+     * all when nothing in it can be a hit). Partial models are never shared with other
+     * lookups (`load` / `declOf` always see a complete parse).
+     */
+    async loadCandidate(path: string, plan: (src: ClosedSrc) => SearchPlan): Promise<FileModel | undefined> {
+        if (this.openByPath.has(path)) return this.load(path);
+        const have = this.models.get(path);
+        if (have) return have;
+        const src = await this.srcOf(path);
+        this.check();
+        if (!src) return undefined;
+        const cached = lruGet(closedModels, path);
+        if (cached && cached.mtime === src.mtime) {
+            this.models.set(path, cached.model);
+            return cached.model;
+        }
+        const p = src.outline.ok ? plan(src) : undefined;
+        if (!p || (!p.skip && !p.elide.length)) return this.load(path);
+        if (p.skip) return undefined;
+        const sig = p.elide.map((b) => b.open).join(',');
+        let m = src.elided.get(sig);
+        if (!m) {
+            try {
+                const parse = await ParseWorker.parseText(elideBodies(src.text, p.elide), 'background');
+                this.check();
+                m = makeModel(path, pathToFileURL(path).href, src.text, parse.index, undefined, src.code, p.elide);
+            } catch (e) {
+                this.check();
+                if (e instanceof ResponseError) throw e;
+                return undefined;
+            }
+            lruSet(src.elided, sig, m, MAX_ELIDED_PER_FILE);
+        }
+        return m;
+    }
+
+    /**
+     * The parse index a resolver should use for `m`. A partial model (bodies blanked) lacks
+     * the locals of those bodies, which only the document-wide `varTypes` fallback could
+     * still surface; that table is wrapped so any read marks `partialTouched` and the
+     * caller redoes the file with a complete model.
+     */
+    indexOf(m: FileModel): ApexIndex {
+        if (!m.elided) return m.index;
+        const touch = () => {
+            this.partialTouched = true;
+        };
+        const inner = m.index.varTypes;
+        const guarded = new (class extends Map<string, string> {
+            get(k: string) {
+                touch();
+                return inner.get(k);
+            }
+            has(k: string) {
+                touch();
+                return inner.has(k);
+            }
+            forEach(...a: Parameters<Map<string, string>['forEach']>) {
+                touch();
+                inner.forEach(...a);
+            }
+            keys() {
+                touch();
+                return inner.keys();
+            }
+            values() {
+                touch();
+                return inner.values();
+            }
+            entries() {
+                touch();
+                return inner.entries();
+            }
+            [Symbol.iterator]() {
+                touch();
+                return inner[Symbol.iterator]();
+            }
+        })();
+        return { ...m.index, varTypes: guarded };
     }
 
     /** Text of a file without parsing (open buffer or disk). */
@@ -505,7 +672,7 @@ async function typeOfReceiver(
     let expr = receiverExprBefore(m.text, dot);
     if (!expr) return undefined;
     expr = await stripNamespace(s, g, m, expr, pos);
-    const view: ParseView = { result: { index: m.index } as ApexParseResult, stale: false, toParsePosition: (p) => p };
+    const view: ParseView = { result: { index: s.indexOf(m) } as ApexParseResult, stale: false, toParsePosition: (p) => p };
     let v;
     try {
         v = await new Resolver(s.ctx, s.docOf(m), pos, [view], s.token).exprValue(expr);
@@ -720,7 +887,7 @@ async function argTypeOf(s: SearchSession, m: FileModel, expr: string, pos: { li
     }
     const literal = newExprType(e) ?? soqlQueryType(e);
     if (literal) return literal;
-    const view: ParseView = { result: { index: m.index } as ApexParseResult, stale: false, toParsePosition: (p) => p };
+    const view: ParseView = { result: { index: s.indexOf(m) } as ApexParseResult, stale: false, toParsePosition: (p) => p };
     try {
         const v = await new Resolver(s.ctx, s.docOf(m), pos, [view], s.token).exprValue(e);
         if (!v || v.static) return undefined;
@@ -1169,22 +1336,47 @@ const isFsPath = (f: string) => f.startsWith('/') || /^[A-Za-z]:[\\/]/.test(f);
 const wordRe = (n: string) => new RegExp(`(?<![\\w])${n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w])`, 'i');
 
 /**
- * Candidate files for a member / type search: open buffers containing the name, plus
- * indexed files whose CODE contains it — for members only those that can reach the
- * family (declare / name a family type or a producer member). Declaring files first.
+ * Declared (name, type) pairs of the members of a file, for producer detection: the
+ * parse-free outline (cached per file version) when it understands the file, else the
+ * full model's member table.
  */
-async function candidateFiles(s: SearchSession, sym: Exclude<ResolvedSymbol, { kind: 'local' }>, family: Set<TypeNode>): Promise<string[]> {
+async function declaredMembers(s: SearchSession, f: string): Promise<{ name: string; type: string }[]> {
+    const src = await s.srcOf(f);
+    if (src?.outline.ok) return src.outline.members;
+    const m = await s.load(f);
+    const out: { name: string; type: string }[] = [];
+    for (const members of m?.index.types.values() ?? []) {
+        for (const mem of members) {
+            if (!mem.type || mem.kind === 'constructor' || mem.kind === 'enumValue') continue;
+            out.push({ name: mem.name, type: mem.type });
+        }
+    }
+    return out;
+}
+
+/**
+ * Candidate files for a member / type search, reported through `emit` as soon as each is
+ * known (so the caller can start parsing while selection continues): open buffers
+ * containing the name, plus indexed files whose CODE contains it — for members only those
+ * that can reach the family (declare / name a family type or a producer member).
+ * Declaring files first.
+ */
+async function candidateFiles(
+    s: SearchSession,
+    sym: Exclude<ResolvedSymbol, { kind: 'local' }>,
+    family: Set<TypeNode>,
+    emit: (f: string) => void,
+): Promise<void> {
     await TokenIndex.ensure(s.token);
     s.check();
     const lc = sym.name.toLowerCase();
     const familyFiles = new Set([...family].map((t) => t.file));
-    const out: string[] = [];
     const seen = new Set<string>();
     const add = (f: string) => {
         if (seen.has(f)) return;
         seen.add(f);
         if (isFsPath(f) && isIgnoredPath(f)) return;
-        out.push(f);
+        emit(f);
     };
     const open = s.openByPath;
     const re = wordRe(lc);
@@ -1198,7 +1390,7 @@ async function candidateFiles(s: SearchSession, sym: Exclude<ResolvedSymbol, { k
             const t = open.get(f)!.getText();
             if (re.test(blankNonCode(t)) || (/forName/i.test(t) && typeForNameRefs(t).some((r) => r.name.toLowerCase() === lc))) add(f);
         }
-        return out;
+        return;
     }
     // Family type names + producers (members whose declared type mentions a family type).
     const famNames = new Set<string>();
@@ -1210,18 +1402,15 @@ async function candidateFiles(s: SearchSession, sym: Exclude<ResolvedSymbol, { k
     for (const n of famNames) for (const f of TokenIndex.lookup(n)) if (!open.has(f)) mentionFiles.add(f);
     const famRes = [...famNames].map((n) => wordRe(n));
     for (const f of open.keys()) if (famRes.some((r) => openHas(f, r))) mentionFiles.add(f);
+    // Mention files that use the name are candidates whatever the producers turn out to be:
+    // report them now so their (partial) parses overlap with the producer scan below.
+    for (const f of mentionFiles) if (open.has(f) ? openHas(f, re) : TokenIndex.has(f, lc)) add(f);
     const producers = new Set<string>();
     const mention = [...mentionFiles];
     for (let i = 0; i < mention.length; i += 16) {
         s.check();
-        // The full model (worker parse, cached): these files are almost always candidates too.
-        const typeMaps = await Promise.all(mention.slice(i, i + 16).map((f) => s.load(f).then((m) => m?.index.types)));
-        for (const types of typeMaps) for (const members of types?.values() ?? []) {
-            for (const mem of members) {
-                if (!mem.type || mem.kind === 'constructor' || mem.kind === 'enumValue') continue;
-                if (famRes.some((r) => r.test(mem.type!))) producers.add(mem.name.toLowerCase());
-            }
-        }
+        const lists = await Promise.all(mention.slice(i, i + 16).map((f) => declaredMembers(s, f)));
+        for (const members of lists) for (const mem of members) if (famRes.some((r) => r.test(mem.type))) producers.add(mem.name.toLowerCase());
     }
     const viaProducer = new Set<string>();
     for (const p of producers) {
@@ -1229,34 +1418,265 @@ async function candidateFiles(s: SearchSession, sym: Exclude<ResolvedSymbol, { k
         const pr = wordRe(p);
         for (const f of open.keys()) if (openHas(f, pr)) viaProducer.add(f);
     }
-    for (const f of mentionFiles) if (open.has(f) ? openHas(f, re) : TokenIndex.has(f, lc)) add(f);
     // Files that reach the family only through a producer: parse them only if an occurrence's
     // receiver expression actually goes through one (`x.svc.name`, `instance().name`) —
     // bare / `this` uses outside the family and receivers naming no producer can't be hits.
-    let n = 0;
-    for (const f of viaProducer) {
-        if (seen.has(f)) continue;
-        if (!(open.has(f) ? openHas(f, re) : TokenIndex.has(f, lc))) continue;
-        if (++n % 25 === 0) await new Promise<void>((r) => setImmediate(r));
+    // Per-file receiver tokens are memoized in the token index (until the file changes).
+    const pending = [...viaProducer].filter((f) => !seen.has(f) && (open.has(f) ? openHas(f, re) : TokenIndex.has(f, lc)));
+    const memoKey = `recv:${lc}`;
+    const CHUNK = 32;
+    for (let i = 0; i < pending.length; i += CHUNK) {
         s.check();
-        const text = await s.textOf(f);
-        if (text !== undefined && receiverThroughProducer(blankNonCode(text), lc, producers)) add(f);
+        const chunk = pending.slice(i, i + CHUNK);
+        const toks = await Promise.all(
+            chunk.map(async (f): Promise<string[] | null | undefined> => {
+                const isOpen = open.has(f);
+                if (!isOpen) {
+                    const memo = TokenIndex.memoGet<string[] | null>(memoKey, f);
+                    if (memo !== undefined) return memo;
+                }
+                const text = await s.textOf(f);
+                if (text === undefined) return undefined;
+                const r = receiverTokens(blankNonCode(text), lc);
+                if (!isOpen) TokenIndex.memoSet(memoKey, f, r);
+                return r;
+            }),
+        );
+        for (let k = 0; k < chunk.length; k++) {
+            const t = toks[k];
+            if (t === undefined) continue;
+            if (t === null || t.some((x) => producers.has(x))) add(chunk[k]);
+        }
+        await new Promise<void>((r) => setImmediate(r));
     }
-    return out;
 }
 
-/** Whether some `….name` occurrence in code has a receiver expression mentioning a producer. */
-function receiverThroughProducer(code: string, lcName: string, producers: Set<string>): boolean {
+/**
+ * Identifiers appearing in the receiver expression of every `….name` occurrence in code,
+ * or null when some receiver can't be extracted (the file must then be assumed to reach
+ * the family). A file is a candidate through a producer when one of these is a producer.
+ */
+function receiverTokens(code: string, lcName: string): string[] | null {
     const re = new RegExp(`(?<![\\w])${lcName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w])`, 'gi');
+    const out = new Set<string>();
     for (const mm of code.matchAll(re)) {
         let i = (mm.index ?? 0) - 1;
         while (i >= 0 && /\s/.test(code[i])) i--;
         if (code[i] !== '.') continue;
         const expr = receiverExprBefore(code, i);
-        if (!expr) return true; // can't tell — parse it
-        for (const t of expr.matchAll(/[A-Za-z_]\w*/g)) if (producers.has(t[0].toLowerCase())) return true;
+        if (!expr) return null;
+        for (const t of expr.matchAll(/[A-Za-z_]\w*/g)) out.add(t[0].toLowerCase());
     }
-    return false;
+    return [...out];
+}
+
+// ─── Partial parses (bodies that cannot hold a hit are not parsed) ───────────────
+
+/** Which method bodies of a candidate file to blank before parsing, or skip the file. */
+export interface SearchPlan {
+    /** No occurrence in the file can be a hit: no model is needed at all. */
+    skip: boolean;
+    /** Bodies holding no hit (no occurrence of the name, or only provable misses). */
+    elide: OutlineBody[];
+}
+
+/** Statement words that can precede an identifier without declaring it. */
+const NOT_A_TYPE = new Set(
+    'return throw new else case when instanceof do extends implements from where select by limit on into in and or not as static final public private protected global override virtual abstract transient void'.split(' '),
+);
+
+const isWordCh = (c: string | undefined) => !!c && /\w/.test(c);
+
+function skipWsBackAt(code: string, i: number): number {
+    while (i >= 0 && /\s/.test(code[i])) i--;
+    return i;
+}
+
+/** The declared type text ending at index `q` (`Foo`, `a.Foo`, `List<Foo>`, `Foo[]`), or undefined. */
+function typeEndingAt(code: string, q: number): string | undefined {
+    let i = q;
+    while (code[i] === ']') {
+        const j = skipWsBackAt(code, i - 1);
+        if (code[j] !== '[') return undefined;
+        i = skipWsBackAt(code, j - 1);
+    }
+    if (code[i] === '>') {
+        let depth = 0;
+        let k = i;
+        for (; k >= 0; k--) {
+            if (code[k] === '>') depth++;
+            else if (code[k] === '<' && --depth === 0) break;
+        }
+        if (k < 0 || !/^[\w\s,.<>[\]?]*$/.test(code.slice(k + 1, i))) return undefined;
+        i = skipWsBackAt(code, k - 1);
+    }
+    if (!isWordCh(code[i])) return undefined;
+    let k = i;
+    while (k >= 0 && /[\w.]/.test(code[k])) k--;
+    const word = code.slice(k + 1, i + 1);
+    const last = word.slice(word.lastIndexOf('.') + 1);
+    if (!/^[A-Za-z_]/.test(word) || NOT_A_TYPE.has(last.toLowerCase())) return undefined;
+    return code.slice(k + 1, q + 1).replace(/\s+/g, '');
+}
+
+interface PlanCtx {
+    src: ClosedSrc;
+    code: string;
+    path: string;
+    g: TypeGraph;
+    sym: Exclude<ResolvedSymbol, { kind: 'local' }>;
+    family: Set<TypeNode>;
+    arities?: Set<number>;
+}
+
+/**
+ * Whether the receiver variable `recvName` of an occurrence provably does NOT denote a
+ * family type, judged from text alone with the same rules `classifyFile` applies to a
+ * resolved declaration (declared type resolves to a non-family type, or to no workspace
+ * type at all). Conservative: any construct it can't read makes it answer false (the body
+ * is then parsed and classified normally).
+ */
+function receiverOutsideFamily(ctx: PlanCtx, recvName: string, body: OutlineBody, at: number): boolean {
+    const { head, open, close } = body;
+    const { code, g, family, path } = ctx;
+    const rlc = recvName.toLowerCase();
+    if (rlc === 'this' || rlc === 'super') return false;
+    const re = new RegExp(`(?<![\\w])${recvName}(?![\\w])`, 'gi');
+    re.lastIndex = head;
+    const types: string[] = [];
+    let before = false;
+    let mm: RegExpExecArray | null;
+    while ((mm = re.exec(code)) !== null && mm.index < close) {
+        const p = mm.index;
+        if (/^\s*\(/.test(code.slice(p + recvName.length, p + recvName.length + 80))) continue; // a call / method name
+        const q = skipWsBackAt(code, p - 1);
+        if (q < 0) continue;
+        const ch = code[q];
+        let declared: string | undefined;
+        if (ch === '.') continue; // member access `x.name`
+        if (isWordCh(ch)) {
+            declared = typeEndingAt(code, q);
+            if (declared === undefined) {
+                let k = q;
+                while (k >= 0 && /\w/.test(code[k])) k--;
+                if (NOT_A_TYPE.has(code.slice(k + 1, q + 1).toLowerCase())) continue; // `return name`, `else name`…
+                return false;
+            }
+        } else if (ch === '>' || ch === ']') {
+            declared = typeEndingAt(code, q);
+            if (declared === undefined) continue; // an operator / index, not a type
+        } else if (ch === ',') {
+            // Inside an argument / parameter list it is a use; a statement-level comma may be
+            // a multi-declarator (`Foo a, name;`), which we don't read.
+            let depth = 0;
+            let verdict: 'args' | 'bail' = 'bail';
+            for (let k = q - 1; k >= head; k--) {
+                const c = code[k];
+                if (c === ')' || c === ']') depth++;
+                else if (c === '(' || c === '[') {
+                    if (depth === 0) {
+                        const w = /([A-Za-z_]\w*)\s*$/.exec(code.slice(Math.max(head, k - 20), k));
+                        verdict = w && w[1].toLowerCase() === 'for' ? 'bail' : 'args';
+                        break;
+                    }
+                    depth--;
+                } else if ((c === ';' || c === '{' || c === '}') && depth === 0) break;
+            }
+            if (verdict === 'bail') return false;
+            continue;
+        } else continue;
+        types.push(declared);
+        // Scopes are blocks: only a parameter or a declaration directly in the method body is
+        // certain to be visible at `at` (nested ones may be, but then they are checked too).
+        if (p < at && (p < open || braceDepth(code, open, p) === 0)) before = true;
+    }
+    if (types.length) {
+        if (!before) return false;
+        for (const t of types) {
+            const tn = g.resolve(baseTypeName(t), path);
+            if (tn && family.has(tn)) return false;
+        }
+        return true;
+    }
+    // No local declaration in this method: a field of the file or an inherited one decides
+    // before anything else could — unless the name is a type / standard-library name.
+    if (ctx.src.outline.members.some((x) => x.name.toLowerCase() === rlc)) return false;
+    const tn = g.resolve(recvName, path);
+    if (tn) return !family.has(tn);
+    return !!(stdTypeName(recvName) || stdMembersFor(recvName));
+}
+
+/** Net `{` nesting of code[from, to): 0 = directly inside the block opened at `from`. */
+function braceDepth(code: string, from: number, to: number): number {
+    let d = 0;
+    for (let i = from; i < to; i++) {
+        const c = code.charCodeAt(i);
+        if (c === 123) d++;
+        else if (c === 125) d--;
+    }
+    return d - 1;
+}
+
+/** Exclude same-named overloads with a different arity (declarations and calls). */
+function arityOkFor(sym: ResolvedSymbol, arities: Set<number> | undefined, a: number | undefined): boolean {
+    if (sym.kind !== 'method' || a === undefined || sym.member.arity === undefined) return true;
+    if (a === sym.member.arity) return true;
+    return !arities?.has(a); // an arity no family overload declares: keep (can't tell)
+}
+
+/**
+ * Whether an occurrence inside a method body is provably not a hit without a parse —
+ * mirrors the opening branches of `classifyFile` (non-call / `new` / wrong arity) and the
+ * receiver test for `x.name`.
+ */
+function occurrenceMisses(ctx: PlanCtx, w: { start: number; end: number }, body: OutlineBody): boolean {
+    const { code, sym } = ctx;
+    if (sym.kind === 'method') {
+        if (!followedByCall(code, w.end) || precededByNew(code, w.start)) return true;
+        if (!arityOkFor(sym, ctx.arities, callArity(code, w.end))) return true;
+    } else if (sym.kind === 'field') {
+        if (followedByCall(code, w.end)) return true;
+    } else return false;
+    const recv = receiverAt(code, w.start);
+    if (recv.kind !== 'ident') return false;
+    return receiverOutsideFamily(ctx, recv.name, body, w.start);
+}
+
+/**
+ * Decide which bodies of a candidate file need parsing. Type searches only drop bodies
+ * without any occurrence of the name; member searches also drop bodies whose occurrences
+ * are all provable misses, and skip the file when nothing else remains.
+ */
+function planSearch(
+    src: ClosedSrc,
+    path: string,
+    g: TypeGraph,
+    sym: Exclude<ResolvedSymbol, { kind: 'local' }>,
+    family: Set<TypeNode>,
+    arities: Set<number> | undefined,
+): SearchPlan {
+    const ctx: PlanCtx = { src, code: src.code, path, g, sym, family, arities };
+    const re = new RegExp(`(?<![\\w])${sym.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w])`, 'gi');
+    const bodies = src.outline.bodies;
+    const elide: OutlineBody[] = [];
+    let outside = 0;
+    let b = 0;
+    const perBody = new Map<OutlineBody, { start: number; end: number }[]>();
+    for (const mm of src.code.matchAll(re)) {
+        const start = mm.index ?? 0;
+        while (b < bodies.length && bodies[b].close < start) b++;
+        if (b < bodies.length && bodies[b].open < start) {
+            const list = perBody.get(bodies[b]) ?? [];
+            list.push({ start, end: start + mm[0].length });
+            perBody.set(bodies[b], list);
+        } else outside++;
+    }
+    for (const body of bodies) {
+        const occ = perBody.get(body);
+        if (!occ || (sym.kind !== 'type' && occ.every((w) => occurrenceMisses(ctx, w, body)))) elide.push(body);
+    }
+    const skip = sym.kind !== 'type' && outside === 0 && elide.length === bodies.length;
+    return { skip, elide };
 }
 
 /**
@@ -1269,33 +1689,83 @@ export async function findOccurrences(s: SearchSession, sym: ResolvedSymbol, mod
 
     const g = await s.graph();
     const family = await symbolFamily(s, sym);
-    const files = await candidateFiles(s, sym, family);
     const arities = sym.kind === 'method' ? await familyArities(s, family, sym.name) : undefined;
     const ov = sym.kind === 'method' ? await overloadSet(s, family, sym) : undefined;
 
-    const out: Occurrence[] = [];
-    // Parse candidates a few ahead (the worker queues them); classify in order. Every load
+    // Candidates stream in while selection is still running; each is parsed (a few ahead in
+    // the worker queue) as soon as it is known, and classified in discovery order. Every load
     // promise gets a handler at once so a cancellation never leaves a rejection unhandled.
     const AHEAD = 16;
+    const files: string[] = [];
     const loads: Promise<{ m?: FileModel; e?: unknown }>[] = [];
-    const start = (i: number) => {
-        if (i < files.length && !loads[i]) loads[i] = s.load(files[i]).then((m) => ({ m }), (e) => ({ e }));
-    };
-    for (let i = 0; i < Math.min(AHEAD, files.length); i++) start(i);
-    for (let i = 0; i < files.length; i++) {
-        start(i + AHEAD);
-        const r = await loads[i];
-        if (r.e) {
-            // Drain the rest quietly, then surface the cancellation / content change.
-            void Promise.all(loads.slice(i + 1));
-            throw r.e;
+    let classified = 0;
+    let selected = false;
+    let selectionError: unknown;
+    let stopped = false;
+    let wake: (() => void) | undefined;
+    const pump = () => {
+        for (let i = loads.length; i < files.length && i < classified + AHEAD; i++) {
+            const f = files[i];
+            loads[i] = s
+                .loadCandidate(f, (src) => planSearch(src, f, g, sym, family, arities))
+                .then(
+                    (m) => ({ m }),
+                    (e) => ({ e }),
+                );
         }
-        s.check();
-        if (i % 10 === 9) await new Promise<void>((res) => setImmediate(res));
-        const m = r.m;
-        if (!m) continue;
-        for (const o of await classifyFile(s, m, g, sym, family, mode, arities, ov)) out.push({ path: m.path, uri: s.uriOf(m.path), ...o });
+        wake?.();
+    };
+    void candidateFiles(s, sym, family, (f) => {
+        if (stopped) return;
+        files.push(f);
+        pump();
+    }).then(
+        () => {
+            selected = true;
+            wake?.();
+        },
+        (e) => {
+            selected = true;
+            selectionError = e;
+            wake?.();
+        },
+    );
+
+    const out: Occurrence[] = [];
+    try {
+        for (;;) {
+            if (classified >= files.length) {
+                if (selected) break;
+                await new Promise<void>((r) => (wake = r));
+                wake = undefined;
+                continue;
+            }
+            const r = await loads[classified];
+            if (r.e) {
+                // Drain the rest quietly, then surface the cancellation / content change.
+                void Promise.all(loads.slice(classified + 1));
+                throw r.e;
+            }
+            s.check();
+            const i = classified++;
+            pump();
+            if (i % 10 === 9) await new Promise<void>((res) => setImmediate(res));
+            const m = r.m;
+            if (!m) continue;
+            s.partialTouched = false;
+            let found = await classifyFile(s, m, g, sym, family, mode, arities, ov);
+            if (m.elided && s.partialTouched) {
+                // A resolver fell back to the document-wide variable table, which the partial
+                // parse doesn't have in full: classify against the complete model instead.
+                const full = await s.load(m.path);
+                found = full ? await classifyFile(s, full, g, sym, family, mode, arities, ov) : [];
+            }
+            for (const o of found) out.push({ path: m.path, uri: s.uriOf(m.path), ...o });
+        }
+    } finally {
+        stopped = true; // a failed request must not keep starting parses for late candidates
     }
+    if (selectionError) throw selectionError;
     for (const o of await metadataOccurrences(s, sym, family)) out.push(o);
     return dedupeOccurrences(out);
 }
@@ -1412,11 +1882,7 @@ async function classifyFile(
         return t ? family.has(t) : undefined;
     };
     /** Exclude same-named overloads with a different arity (declarations and calls). */
-    const arityOk = (a: number | undefined): boolean => {
-        if (sym.kind !== 'method' || a === undefined || sym.member.arity === undefined) return true;
-        if (a === sym.member.arity) return true;
-        return !arities?.has(a); // an arity no family overload declares: keep (can't tell)
-    };
+    const arityOk = (a: number | undefined): boolean => arityOkFor(sym, arities, a);
     const memberDeclAt = (p: { line: number; character: number }) => {
         for (const t of m.typeDecls) {
             const x = t.members.find((mm) => at(mm.nameRange, p));
@@ -1425,7 +1891,12 @@ async function classifyFile(
         return undefined;
     };
 
+    let skipTo = 0;
     for (const w of wordRanges(m, sym.name)) {
+        if (m.elided) {
+            while (skipTo < m.elided.length && m.elided[skipTo].close < w.start) skipTo++;
+            if (skipTo < m.elided.length && m.elided[skipTo].open < w.start) continue; // proven miss, not parsed
+        }
         const p = positionOf(m, w.start);
         const recv = receiverAt(m.code, w.start);
         const call = followedByCall(m.code, w.end);
