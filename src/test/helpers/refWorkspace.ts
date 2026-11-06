@@ -149,6 +149,9 @@ public with sharing virtual class «C:decl,@C|AccountService» {
     public static String «GMS:decl,@GMS|gen»(Map<String,Account> v) { return 'ms'; }
     public static String «GQA:decl,@GQA|genq»(List<Account> v) { return 'qa'; }
     public static String «GQC:decl,@GQC|genq»(List<Contact> v) { return 'qc'; }
+    public static String «GSO:decl,@GSO|gens»(List<SObject> v) { return 'so'; }
+    public static String «GPA:decl,@GPA|pick»(List<Account> v) { return 'pa'; }
+    public static String «GPS:decl,@GPS|pick»(List<SObject> v) { return 'ps'; }
     public static List<String> names() { return null; }
 }
 `,
@@ -192,6 +195,10 @@ public with sharing virtual class «C:decl,@C|AccountService» {
         Overloads.«GQA:local|genq»(lacc);
         Overloads.«GQA:array-param|genq»(pacc);
         Overloads.«GLS:undetermined,GLI:undetermined,GMA:undetermined,GMS:undetermined|gen»(Mystery.value());
+        List<Contact> lcon = new List<Contact>();
+        Overloads.«GSO:covariant|gens»(lacc);
+        Overloads.«GPA:account|pick»(lacc);
+        Overloads.«GPS:contact|pick»(lcon);
         Overloads.«GQA:undetermined,GQC:undetermined|genq»(Mystery.value());
     }
 }

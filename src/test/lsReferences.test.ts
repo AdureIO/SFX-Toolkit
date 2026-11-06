@@ -304,7 +304,7 @@ describe("references: ground truth (300-class workspace)", function () {
 
 		it("overloads by parameter type: rename touches only the proven calls (never an undeterminable argument)", async () => {
 			const key = (x: { file: string; line: number; character: number; length: number }) => `${x.file}:${x.line}:${x.character}:${x.length}`;
-			for (const sym of ["OVS", "OVI", "OVA", "GLS", "GLI", "GMA", "GMS", "GQA", "GQC"]) {
+			for (const sym of ["OVS", "OVI", "OVA", "GLS", "GLI", "GMA", "GMS", "GQA", "GQC", "GSO", "GPA", "GPS"]) {
 				const edits = editsOf(await renameAt(sym, "transform"));
 				const expected = s.fx.expected.get(sym)!.filter((e) => e.cat !== "undetermined");
 				assert.deepStrictEqual(edits.map(key).sort(), expected.map(key).sort(), `rename ${sym}`);
