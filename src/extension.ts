@@ -30,10 +30,9 @@ import {
   pushSourceForce,
   pullSource,
   pullSourceForce,
-  deployCurrentFile,
-  retrieveCurrentFile,
   resetSourceTracking
 } from "./commands/devCommands";
+import { deployToDefaultOrg, retrieveFromDefaultOrg } from "./commands/sourceTransfer";
 import { validateApexFile, registerValidateOnSave } from "./commands/validateApex";
 import { PermissionSetEditorProvider } from "./editors/PermissionSetEditorProvider";
 import { ScratchOrgDefEditorProvider } from "./editors/ScratchOrgDefEditorProvider";
@@ -440,8 +439,8 @@ export function activate(context: vscode.ExtensionContext) {
     const pushForceCmd = register("adure-sfx-toolkit.pushSourceForce", pushSourceForce);
     const pullCmd = register("adure-sfx-toolkit.pullSource", pullSource);
     const pullForceCmd = register("adure-sfx-toolkit.pullSourceForce", pullSourceForce);
-    const deployFileCmd = register("adure-sfx-toolkit.deployCurrentFile", deployCurrentFile);
-    const retrieveFileCmd = register("adure-sfx-toolkit.retrieveCurrentFile", retrieveCurrentFile);
+    const deployFileCmd = register("adure-sfx-toolkit.deployCurrentFile", deployToDefaultOrg);
+    const retrieveFileCmd = register("adure-sfx-toolkit.retrieveCurrentFile", retrieveFromDefaultOrg);
     const resetTrackingCmd = register("adure-sfx-toolkit.resetSourceTracking", resetSourceTracking);
     const validateApexCmd = register("adure-sfx-toolkit.validateApexFile", () => validateApexFile());
     registerValidateOnSave(context);

@@ -187,11 +187,11 @@
       },
       {
         "command": "adure-sfx-toolkit.deployCurrentFile",
-        "title": "ASFXT: Deploy Current File"
+        "title": "ASFXT: Deploy to Default Org"
       },
       {
         "command": "adure-sfx-toolkit.retrieveCurrentFile",
-        "title": "ASFXT: Retrieve Current File"
+        "title": "ASFXT: Retrieve from Default Org"
       },
       {
         "command": "adure-sfx-toolkit.validateApexFile",
@@ -738,6 +738,16 @@
       ],
       "explorer/context": [
         {
+          "command": "adure-sfx-toolkit.deployCurrentFile",
+          "when": "adure-sfx-toolkit:isSalesforceProject && resourceScheme == file && !(resourcePath =~ /[\\\\/](\\.sfdx|\\.sf|node_modules|\\.git)([\\\\/]|$)/)",
+          "group": "6_asfx@1"
+        },
+        {
+          "command": "adure-sfx-toolkit.retrieveCurrentFile",
+          "when": "adure-sfx-toolkit:isSalesforceProject && resourceScheme == file && !(resourcePath =~ /[\\\\/](\\.sfdx|\\.sf|node_modules|\\.git)([\\\\/]|$)/)",
+          "group": "6_asfx@2"
+        },
+        {
           "command": "adure-sfx-toolkit.addToGitignore",
           "when": "adure-sfx-toolkit:isUsableProject",
           "group": "7_modification@1"
@@ -746,6 +756,30 @@
           "command": "adure-sfx-toolkit.addToForceignore",
           "when": "adure-sfx-toolkit:isSalesforceProject",
           "group": "7_modification@2"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "adure-sfx-toolkit.deployCurrentFile",
+          "when": "adure-sfx-toolkit:isSalesforceProject && resourceScheme == file && !(resourcePath =~ /[\\\\/](\\.sfdx|\\.sf|node_modules|\\.git)([\\\\/]|$)/)",
+          "group": "6_asfx@1"
+        },
+        {
+          "command": "adure-sfx-toolkit.retrieveCurrentFile",
+          "when": "adure-sfx-toolkit:isSalesforceProject && resourceScheme == file && !(resourcePath =~ /[\\\\/](\\.sfdx|\\.sf|node_modules|\\.git)([\\\\/]|$)/)",
+          "group": "6_asfx@2"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "adure-sfx-toolkit.deployCurrentFile",
+          "when": "adure-sfx-toolkit:isSalesforceProject && resourceScheme == file && !(resourcePath =~ /[\\\\/](\\.sfdx|\\.sf|node_modules|\\.git)([\\\\/]|$)/)",
+          "group": "6_asfx@1"
+        },
+        {
+          "command": "adure-sfx-toolkit.retrieveCurrentFile",
+          "when": "adure-sfx-toolkit:isSalesforceProject && resourceScheme == file && !(resourcePath =~ /[\\\\/](\\.sfdx|\\.sf|node_modules|\\.git)([\\\\/]|$)/)",
+          "group": "6_asfx@2"
         }
       ],
       "commandPalette": [
