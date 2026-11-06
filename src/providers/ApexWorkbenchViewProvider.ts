@@ -85,6 +85,9 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 		this._releaseView();
 		this._disposables.forEach((d) => d.dispose());
 		this._disposables.length = 0;
+		// Close the Execute/SOQL virtual LS documents and drop their org overrides.
+		this._bridge.dispose();
+		this._soqlBridge.dispose();
 		this._bodyCache.clear();
 		this._lastLog = '';
 		this._pendingExternal = null;
