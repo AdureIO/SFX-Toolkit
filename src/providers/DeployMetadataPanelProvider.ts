@@ -23,6 +23,7 @@ import { Logger, DeployLog } from "../utils/outputChannel";
 import { cleanDeployOutput, parseDeployStats, parseCoverageData } from "../commands/devCommands";
 import { addDeployHistoryEntry } from "../commands/deployHistory";
 import { clearDeployDiagnostics, setDeployDiagnosticsFromFailure, setDeployDiagnosticsFromApiResult, formatApiDeployResultForLog, componentFailuresOf, withSyntheticTestFailures } from "../utils/deployDiagnostics";
+import { DEPLOY_SELECTION_SOURCE } from "../utils/deploySelectionPure";
 import { runJsonDeploy } from "../utils/deployEngine";
 import { statsFromResult, coverageFromResult, toApiDeployResult, formatStatus, formatElapsed, formatResultSummary, type DeployStats, type CoverageRow } from "../utils/deployStatusMap";
 import { AuthInfo } from "../utils/authInfo";
@@ -887,6 +888,7 @@ export class DeployMetadataPanelProvider {
 		</div>
 	</div>
 	<script>
+		${DEPLOY_SELECTION_SOURCE}
 		var treeData = [], testClassesData = [], presetsData = [], initialPreset = null, orgsData = [], defaultOrgVal = '';
 		var testSuitesData = [];
 		var lastRenderedTreeData = null;
@@ -895,6 +897,17 @@ export class DeployMetadataPanelProvider {
 		// Contains normalized leaf file paths that are currently selected.
 		// Single source of truth; DOM is restored from this on every re-render.
 		var _selSS = new Set();
+		// Selection = leaf snapshot + extra (git/preset) paths. Folder checkboxes never feed this.
+		function currentSelection() {
+			var s = new Set(_selSS);
+			extraPaths.forEach(function(p) { var np = dsNorm(p); if (np) s.add(np); });
+			return s;
+		}
+		var _treeIdxFor = null, _treeIdx = null;
+		function getTreeIndex() {
+			if (_treeIdxFor !== treeData || !_treeIdx) { _treeIdx = dsBuildIndex(treeData || []); _treeIdxFor = treeData; }
+			return _treeIdx;
+		}
 		var vsCodeApi = null;
 		try { if (typeof acquireVsCodeApi !== 'undefined') vsCodeApi = acquireVsCodeApi(); } catch (e) { console.error('acquireVsCodeApi failed', e); }
 		function postToHost(payload) { try { if (vsCodeApi) vsCodeApi.postMessage(payload); } catch (err) { console.error('postMessage failed', err); } }
@@ -981,6 +994,13 @@ export class DeployMetadataPanelProvider {
 				var idx = (presetsData || []).findIndex(function(p){ return p.name === loadedPresetName; });
 				if (idx >= 0) presetSel.value = String(idx); else presetSel.value = '';
 			}
+			// Rebuild persistent snapshot BEFORE folder tri-state (folder display derives from it)
+			_selSS = new Set();
+			document.querySelectorAll('.path-check:not(.folder-check):checked').forEach(function(cb) {
+				var p = norm(cb.getAttribute('data-path') || '');
+				if (p) _selSS.add(p);
+			});
+			extraPaths.forEach(function(p) { var np = norm(p); if (np) _selSS.add(np); });
 			document.querySelectorAll('.folder-node, .package-node').forEach(function(f) { updateFolderCheckboxState(f); });
 			updateSelectAllButtonState();
 			var searchEl = safeGet('tree-search');
@@ -1000,13 +1020,6 @@ export class DeployMetadataPanelProvider {
 				var delBtn = safeGet('btn-delete-suite');
 				if (delBtn) delBtn.style.display = suiteEl.value ? '' : 'none';
 			}
-			// Rebuild persistent snapshot from restored leaf checkboxes + extra paths
-			_selSS = new Set();
-			document.querySelectorAll('.path-check:not(.folder-check):checked').forEach(function(cb) {
-				var p = norm(cb.getAttribute('data-path') || '');
-				if (p) _selSS.add(p);
-			});
-			extraPaths.forEach(function(p) { var np = norm(p); if (np) _selSS.add(np); });
 			filterTree();
 			updateSelectionStatus();
 		}
@@ -1062,17 +1075,13 @@ export class DeployMetadataPanelProvider {
 			var statusEl = safeGet('deploy-status');
 			if (!statusEl) return;
 			// Count: use _selSS (leaf paths, includes items hidden by filter) + extra paths not already in snapshot
-			var totalCount = _selSS.size + extraPaths.filter(function(p) { return !_selSS.has(norm(p)); }).length;
+			var selLeaves = dsCountByLeaf(currentSelection());
+			var totalCount = selLeaves.length;
 			var badge = safeGet('sel-count-badge');
 			if (badge) { badge.textContent = totalCount > 0 ? String(totalCount) : ''; badge.style.display = totalCount > 0 ? 'inline' : 'none'; }
-			var paths = [];
-			document.querySelectorAll('.path-check:checked').forEach(function(cb) { paths.push(cb.getAttribute('data-path')); });
 			if (totalCount === 0) { statusEl.textContent = 'Ready. No metadata selected.'; return; }
 			var byType = {};
-			document.querySelectorAll('.path-check:checked').forEach(function(cb) {
-				if (cb.classList.contains('folder-check')) return;
-				var p = cb.getAttribute('data-path');
-				if (!p) return;
+			selLeaves.forEach(function(p) {
 				var t = pathToMetadataType(p);
 				byType[t] = (byType[t] || 0) + 1;
 			});
@@ -1093,14 +1102,6 @@ export class DeployMetadataPanelProvider {
 			statusEl.textContent = 'Ready. ' + (parts.length ? parts.join(', ') + '.' : 'No metadata selected.');
 		}
 
-		function getSelectedPathSet() {
-			var set = new Set();
-			document.querySelectorAll('.path-check:checked').forEach(function(cb) {
-				var p = (cb.getAttribute('data-path') || '').replace(/\\\\/g, '/').trim();
-				if (p) set.add(p);
-			});
-			return set;
-		}
 		function getAllPathsFromTreeData(data) {
 			var paths = [];
 			function walk(nodes) {
@@ -1258,39 +1259,14 @@ export class DeployMetadataPanelProvider {
 			renderTreeWithData(filtered, _selSS, true);
 		}
 
+		/** Minimal deploy paths from the LEAF selection vs the FULL tree. Never reads folder checkbox state. */
 		function getMinimalSourcePaths() {
-			var items = [];
-			var domPaths = new Set();
-			// Read visible selections from DOM (folders + leaves currently rendered)
-			document.querySelectorAll('.path-check:checked').forEach(function(cb) {
-				var p = cb.getAttribute('data-path');
-				if (!p) return;
-				var isFolder = cb.classList.contains('folder-check');
-				var np = norm(p);
-				domPaths.add(np);
-				items.push({ path: np, isFolder: isFolder });
+			// Flush visible leaf checkboxes into the snapshot (captures explicit unchecks) - leaves only.
+			document.querySelectorAll('#tree-wrap .path-check:not(.folder-check)').forEach(function(cb) {
+				var p = norm(cb.getAttribute('data-path') || '');
+				if (p) { if (cb.checked) _selSS.add(p); else _selSS.delete(p); }
 			});
-			// Add leaf paths selected but currently hidden by the active filter
-			_selSS.forEach(function(p) {
-				if (!domPaths.has(p)) items.push({ path: p, isFolder: false });
-			});
-			// Extra paths: git/preset paths not matched to any tree node (not in _selSS)
-			extraPaths.forEach(function(p) {
-				var np = norm(p);
-				if (!domPaths.has(np) && !_selSS.has(np)) items.push({ path: np, isFolder: false });
-			});
-			var onlyShowSelected = !!(safeGet('filter-only-selected') && safeGet('filter-only-selected').checked);
-			if (onlyShowSelected) {
-				return items.filter(function(x) { return !x.isFolder; }).map(function(x) { return x.path; });
-			}
-			var folderPaths = items.filter(function(x) { return x.isFolder; }).map(function(x) { return x.path; });
-			var filePaths = items.filter(function(x) { return !x.isFolder; }).map(function(x) { return x.path; });
-			var result = folderPaths.slice();
-			filePaths.forEach(function(fp) {
-				var underFolder = folderPaths.some(function(f) { return fp !== f && fp.indexOf(f + '/') === 0; });
-				if (!underFolder) result.push(fp);
-			});
-			return result;
+			return dsMinimalPaths(treeData || [], currentSelection());
 		}
 
 		function getCurrentPresetState() {
@@ -1499,16 +1475,16 @@ export class DeployMetadataPanelProvider {
 			document.querySelectorAll('.test-class').forEach(function(cb) { cb.checked = Array.isArray(preset.testClassNames) && preset.testClassNames.indexOf(cb.value) !== -1; });
 			var orgSel = safeGet('org-select');
 			if (orgSel && preset.targetOrg) { var found = Array.from(orgSel.options).find(function(o){ return o.value === preset.targetOrg; }); if (found) orgSel.value = preset.targetOrg; }
-			document.querySelectorAll('.folder-node, .package-node').forEach(function(f) { updateFolderCheckboxState(f); });
-			updateSelectAllButtonState();
-			updateSelectionStatus();
-			// Rebuild persistent snapshot from current leaf checkboxes + extra paths
+			// Rebuild persistent snapshot from current leaf checkboxes + extra paths (before folder tri-state / status)
 			_selSS = new Set();
 			document.querySelectorAll('.path-check:not(.folder-check):checked').forEach(function(cb) {
 				var p = norm(cb.getAttribute('data-path') || '');
 				if (p) _selSS.add(p);
 			});
 			extraPaths.forEach(function(p) { var np = norm(p); if (np) _selSS.add(np); });
+			document.querySelectorAll('.folder-node, .package-node').forEach(function(f) { updateFolderCheckboxState(f); });
+			updateSelectAllButtonState();
+			updateSelectionStatus();
 			if (savedOnlyShowSelected || savedSearch) {
 				if (filterEl) filterEl.checked = savedOnlyShowSelected;
 				if (searchEl) searchEl.value = savedSearch;
@@ -1596,25 +1572,13 @@ export class DeployMetadataPanelProvider {
 			return '<label class="tree-node file-node"><input type="checkbox" class="path-check" data-path="' + escapeAttr(node.path) + '"><span class="file-icon" aria-hidden="true">📄</span><span class="label-text">' + escapeHtml(node.label) + '</span></label>';
 		}
 
+		/** Display only: checked iff ALL leaves under the folder in the FULL tree are selected; indeterminate if some (visible or hidden). */
 		function updateFolderCheckboxState(folderNode) {
 			var folderCheck = folderNode.querySelector('.path-check.folder-check');
 			if (!folderCheck) return;
-			var childrenContainer = folderNode.querySelector('.package-children, .node-children');
-			var all = childrenContainer ? childrenContainer.querySelectorAll('.path-check') : [];
-			var checked = childrenContainer ? childrenContainer.querySelectorAll('.path-check:checked') : [];
-			var n = all.length;
-			var c = checked.length;
-			folderCheck.indeterminate = false;
-			if (n === 0) {
-				folderCheck.checked = false;
-			} else if (c === 0) {
-				folderCheck.checked = false;
-			} else if (c === n) {
-				folderCheck.checked = true;
-			} else {
-				folderCheck.checked = false;
-				folderCheck.indeterminate = true;
-			}
+			var st = dsFolderState(getTreeIndex(), currentSelection(), folderCheck.getAttribute('data-path') || '');
+			folderCheck.checked = st === 'checked';
+			folderCheck.indeterminate = st === 'indeterminate';
 		}
 
 		function updateAncestorCheckboxes(startFrom) {
@@ -1634,8 +1598,8 @@ export class DeployMetadataPanelProvider {
 			if (!btn || !iconSpan) return;
 			var wrap = safeGet('tree-wrap');
 			if (!wrap) return;
-			var all = wrap.querySelectorAll('.path-check');
-			var checked = wrap.querySelectorAll('.path-check:checked');
+			var all = wrap.querySelectorAll('.path-check:not(.folder-check)');
+			var checked = wrap.querySelectorAll('.path-check:not(.folder-check):checked');
 			var allSelected = all.length > 0 && checked.length === all.length;
 			if (allSelected) {
 				iconSpan.textContent = '☐';
@@ -1700,14 +1664,17 @@ export class DeployMetadataPanelProvider {
 					setDirty();
 					var folderNode = this.closest('.folder-node, .package-node');
 					if (!folderNode) return;
+					// An indeterminate/unchecked folder click checks; a checked one unchecks.
 					var check = this.checked;
-					// Cascade: check/uncheck all items below this folder (files and subfolders)
-					folderNode.querySelectorAll('.path-check').forEach(function(c) { c.checked = check; c.indeterminate = false; });
-					// Sync all leaf paths in this folder into the persistent snapshot
+					// Only leaves currently rendered (= visible under the active filter) are affected.
+					var visibleLeaves = [];
 					folderNode.querySelectorAll('.path-check:not(.folder-check)').forEach(function(c) {
-						var p = norm(c.getAttribute('data-path') || '');
-						if (p) { if (check) _selSS.add(p); else _selSS.delete(p); }
+						c.checked = check;
+						visibleLeaves.push(c.getAttribute('data-path') || '');
 					});
+					_selSS = dsApplyFolderToggle(_selSS, visibleLeaves, check);
+					folderNode.querySelectorAll('.folder-node, .package-node').forEach(function(f) { updateFolderCheckboxState(f); });
+					updateFolderCheckboxState(folderNode);
 					updateAncestorCheckboxes(folderNode.parentElement);
 					updateSelectAllButtonState();
 					updateSelectionStatus();
@@ -1767,8 +1734,9 @@ export class DeployMetadataPanelProvider {
 				setDirty();
 				var wrap = safeGet('tree-wrap');
 				if (!wrap) return;
-				var all = wrap.querySelectorAll('.path-check');
-				var checked = wrap.querySelectorAll('.path-check:checked');
+				// Leaf checkboxes only: under a filter, folder boxes can be indeterminate (hidden siblings).
+				var all = wrap.querySelectorAll('.path-check:not(.folder-check)');
+				var checked = wrap.querySelectorAll('.path-check:not(.folder-check):checked');
 				var allSelected = all.length > 0 && checked.length === all.length;
 				var newState = !allSelected;
 				wrap.querySelectorAll('.path-check').forEach(function(cb) { cb.checked = newState; cb.indeterminate = false; });
