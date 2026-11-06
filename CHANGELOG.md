@@ -4,6 +4,21 @@ All notable changes to the Adure SFX Toolkit extension are documented here.
 
 ---
 
+## [3.0.1] — Org connection status, network resilience
+
+### 🔌 Org connection
+- Status bar shows when the project has no default org, the connection is expired or invalid (including expired or deleted scratch orgs), or the org is unreachable; one click to set a default org, create a scratch org or re-authenticate. Follows the active editor's project, also for nested projects. At most one popup per org and problem per session.
+- SObject completion no longer goes silent when the org's object list can't be loaded; it keeps probing and recovers on its own.
+
+### 🌐 Network
+- A stalled connection is retried once on a fresh connection for queries and deletes. Network errors name the host and the cause instead of a bare `read ETIMEDOUT`.
+- Execute Anonymous waits up to 10 minutes (new setting `apex.executeAnonymousTimeoutMs`) instead of 30 s. Network failures on Apex runs, creates and updates are never retried and say the outcome is unknown ("Outcome unknown —" in the Workbench).
+
+### 🗑 Bulk delete
+- "Deleting X of N…" progress with Cancel; records not attempted stay in the table, already-deleted records count as done, a failed batch no longer stops the rest.
+
+---
+
 ## [3.0.0] — Language server overhaul, references you can trust, less RAM
 
 ### 🧠 Completion
