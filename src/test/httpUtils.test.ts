@@ -2,7 +2,7 @@ import * as assert from "assert";
 import { EventEmitter } from "events";
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const https = require("https");
-import { httpsGetEx, httpsDelete, httpsPost, httpsPatch, isRetryableHttpError, isTransientSocketError, wrapNetworkError, clampTimeoutMs } from "../utils/httpUtils";
+import { httpsGetEx, httpsDelete, httpsPost, httpsPatch, isRetryableHttpError, isTransientSocketError, wrapNetworkError, clampTimeoutMs, disableTcpKeepAlive } from "../utils/httpUtils";
 import { deleteInBatches, collectionResults, CANCELLED_DELETE_MSG } from "../utils/soqlEditPure";
 
 type Step = { error?: { code?: string; message: string }; status?: number; body?: string };
@@ -185,5 +185,50 @@ describe("non-idempotent wording and timeouts", () => {
 		assert.strictEqual(clampTimeoutMs(undefined, 600000, 30000), 600000);
 		assert.strictEqual(clampTimeoutMs(1000, 600000, 30000), 30000);
 		assert.strictEqual(clampTimeoutMs(120000, 600000, 30000), 120000);
+	});
+});
+
+describe("httpUtils TCP keepalive", () => {
+	it("disableTcpKeepAlive turns keepalive off and tolerates odd sockets", () => {
+		const seen: any[][] = [];
+		disableTcpKeepAlive({ setKeepAlive: (...a: any[]) => { seen.push(a); return undefined; } });
+		assert.deepStrictEqual(seen, [[false]]);
+		assert.doesNotThrow(() => disableTcpKeepAlive(undefined));
+		assert.doesNotThrow(() => disableTcpKeepAlive({}));
+		assert.doesNotThrow(() => disableTcpKeepAlive({ setKeepAlive: () => { throw new Error("destroyed"); } }));
+	});
+
+	it("every request registers the helper on 'socket' (reused sockets re-armed by the Agent are disabled again)", async () => {
+		const reqs: any[] = [];
+		https.request = (_opts: any, cb: (res: any) => void) => {
+			const req: any = new EventEmitter();
+			req.write = () => undefined;
+			req.destroy = () => undefined;
+			req.end = () => {
+				const res: any = new EventEmitter();
+				res.statusCode = 200;
+				res.headers = {};
+				res.resume = () => undefined;
+				const keepAliveCalls: any[][] = [];
+				const sock = { setKeepAlive: (...a: any[]) => { keepAliveCalls.push(a); } };
+				req.keepAliveCalls = keepAliveCalls;
+				req.emit("socket", sock);
+				cb(res);
+				res.emit("data", Buffer.from("ok"));
+				res.emit("end");
+			};
+			reqs.push(req);
+			return req;
+		};
+		try {
+			await httpsPost("https://example.my.salesforce.com/x", "<a/>", {});
+			await httpsPatch("https://example.my.salesforce.com/x", "{}", {});
+			await httpsDelete("https://example.my.salesforce.com/x", "tok");
+			await httpsGetEx("https://example.my.salesforce.com/x", "tok");
+			assert.strictEqual(reqs.length, 4);
+			for (const r of reqs) assert.deepStrictEqual(r.keepAliveCalls, [[false]]);
+		} finally {
+			https.request = origRequest;
+		}
 	});
 });

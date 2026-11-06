@@ -135,6 +135,25 @@ function decode(buf: Buffer, encoding: string | undefined, cb: (err: Error | nul
     else cb(null, buf);
 }
 
+/**
+ * Turn off TCP keepalive on a socket that is about to carry an in-flight request.
+ *
+ * Node's keep-alive Agent (the default since Node 19) calls `socket.setKeepAlive(true, 1000)` when it
+ * parks a socket in the pool (`Agent.keepSocketAlive`) and never turns it off on reuse. With libuv >= 1.49
+ * that also sets TCP_KEEPINTVL=1s / TCP_KEEPCNT=10, so a reused socket waiting for a slow response
+ * (e.g. Execute Anonymous, long deploys) is declared dead by the kernel after ~11 s of unanswered probes
+ * (`read ETIMEDOUT`) whenever a middlebox/NAT drops the probes. Our own idle/total timeouts govern in-flight
+ * requests, so probes are unnecessary there. Runs on every 'socket' event (also for reused sockets); when the
+ * response completes the Agent re-arms keepalive for the idle pooled socket, which is harmless.
+ */
+export function disableTcpKeepAlive(socket: { setKeepAlive?: (enable?: boolean, initialDelay?: number) => unknown } | undefined): void {
+    try {
+        socket?.setKeepAlive?.(false);
+    } catch {
+        // best effort: never fail a request over socket tuning
+    }
+}
+
 function rawRequest(opts: RawRequest): Promise<string> {
     return rawRequestEx(opts).then((r) => r.body);
 }
@@ -256,6 +275,7 @@ function rawRequestOnce(opts: RawRequest, hops = 0, startedAt = Date.now()): Pro
             }
         );
 
+        req.on('socket', disableTcpKeepAlive);
         req.on('timeout', () => {
             req.destroy();
             fail(httpError(`Request timed out after ${opts.timeout}ms: ${opts.method} ${opts.url}${isIdempotentMethod(opts.method) ? '' : MAY_HAVE_COMPLETED}`, undefined, true));
