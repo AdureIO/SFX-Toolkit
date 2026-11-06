@@ -11,10 +11,11 @@ node_modules/**
 
 # ── Build output ───────────────────────────────────────────────────────────
 # tsc emits per-module JS (+ tests) into out/ for the unit tests; the VSIX needs only
-# the two esbuild bundles. Webview bundles live in resources/webview (shipped).
+# the esbuild bundles (extension, language server, its parse worker). Webview bundles live in resources/webview (shipped).
 out/**
 !out/extension.js
 !out/server.js
+!out/serverParseWorker.js
 **/*.map
 
 # ── Sources, tooling and repo metadata ─────────────────────────────────────

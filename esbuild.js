@@ -82,11 +82,26 @@ async function main() {
     },
   });
 
+  // Language-server parse worker (worker_threads entry): runs the Apex parse off the
+  // server's event loop. Loaded by path (out/serverParseWorker.js, next to out/server.js).
+  const workerCtx = await esbuild.context({
+    ...shared,
+    entryPoints: ["server/src/parseWorker.ts"],
+    outfile: "out/serverParseWorker.js",
+    banner: {
+      js: "const __importMetaUrl = require('url').pathToFileURL(__filename).href;",
+    },
+    define: {
+      "import.meta.url": "__importMetaUrl",
+    },
+  });
+
+  const all = [extensionCtx, webviewCtx, serverCtx, workerCtx];
   if (watch) {
-    await Promise.all([extensionCtx.watch(), webviewCtx.watch(), serverCtx.watch()]);
+    await Promise.all(all.map((c) => c.watch()));
   } else {
-    await Promise.all([extensionCtx.rebuild(), webviewCtx.rebuild(), serverCtx.rebuild()]);
-    await Promise.all([extensionCtx.dispose(), webviewCtx.dispose(), serverCtx.dispose()]);
+    await Promise.all(all.map((c) => c.rebuild()));
+    await Promise.all(all.map((c) => c.dispose()));
   }
 }
 
