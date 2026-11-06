@@ -367,9 +367,15 @@ function languageServerHeapMB(): number {
 	return typeof v === "number" && Number.isFinite(v) ? Math.min(8192, Math.max(128, Math.round(v))) : DEFAULT_SERVER_HEAP_MB;
 }
 
-/** Forward relevant `.cls`/`.trigger` create/change/delete events to the server (batched). */
+/**
+ * Forward relevant create/change/delete events to the server (batched): Apex sources
+ * (`.cls`/`.trigger`, the type index) and the metadata that refers to Apex by name
+ * (LWC / Aura JS + markup, Visualforce, Flows — the Find References / rename token index).
+ */
 function watchApexSources(lc: LanguageClient): vscode.Disposable {
-	const watcher = vscode.workspace.createFileSystemWatcher("**/*.{cls,trigger}");
+	const watcher = vscode.workspace.createFileSystemWatcher(
+		"{**/*.cls,**/*.trigger,**/lwc/**/*.js,**/lwc/**/*.ts,**/aura/**/*.js,**/aura/**/*.cmp,**/aura/**/*.app,**/*.page,**/*.component,**/*.flow-meta.xml}",
+	);
 	// Deduped by URI (last net change per file) — a huge branch switch coalesces instead
 	// of being truncated, so no file event is ever lost.
 	const pending = new FileEventBatcher();
