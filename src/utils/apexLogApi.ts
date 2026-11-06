@@ -79,24 +79,44 @@ async function toolingQueryIds(org: string | null, soql: string): Promise<string
 	}
 }
 
-/** Delete all debug logs for an org (in small parallel batches). Returns count deleted. */
-export async function deleteAllApexLogs(org: string | null): Promise<number> {
+/**
+ * Delete all debug logs for an org (in small parallel batches). Returns the counts;
+ * throws when the org can't be queried at all (auth/connection), so callers can show
+ * the real reason instead of a silent "0 deleted".
+ */
+export async function deleteAllApexLogs(org: string | null): Promise<{ deleted: number; failed: number; firstError?: string }> {
 	const version = getToolingApiVersion();
 	let deleted = 0;
+	let failed = 0;
+	let firstError: string | undefined;
 	// Loop in case there are more than one page worth.
 	for (let guard = 0; guard < 50; guard++) {
-		const ids = await toolingQueryIds(org, "SELECT Id FROM ApexLog LIMIT 200");
+		const { body } = await AuthInfo.get(org, (a) =>
+			`${base(a)}/services/data/${version}/tooling/query/?q=${encodeURIComponent("SELECT Id FROM ApexLog LIMIT 200")}`
+		);
+		const ids: string[] = (JSON.parse(body).records ?? []).map((r: any) => r.Id);
 		if (!ids.length) break;
-		for (let i = 0; i < ids.length; i += 5) {
-			const slice = ids.slice(i, i + 5);
+		let batchDeleted = 0;
+		for (let i = 0; i < ids.length; i += 10) {
+			const slice = ids.slice(i, i + 10);
 			const res = await Promise.allSettled(
-				slice.map((id) => AuthInfo.delete(org, (a) => `${base(a)}/services/data/${version}/tooling/sobjects/ApexLog/${id}`))
+				slice.map((id) => AuthInfo.delete(org, (a) => `${base(a)}/services/data/${version}/tooling/sobjects/ApexLog/${encodeURIComponent(id)}`))
 			);
-			deleted += res.filter((r) => r.status === "fulfilled").length;
+			for (const r of res) {
+				if (r.status === "fulfilled") batchDeleted++;
+				else {
+					failed++;
+					firstError ??= String((r.reason as any)?.message ?? r.reason);
+				}
+			}
 		}
-		if (ids.length < 200) break;
+		deleted += batchDeleted;
+		// Stop when the last page is done — or nothing in this page could be deleted
+		// (e.g. other users' logs without permission), instead of re-querying the same ids.
+		if (ids.length < 200 || batchDeleted === 0) break;
 	}
-	return deleted;
+	if (firstError) outputChannel.appendLine(`apexLogApi: deleteAllApexLogs — ${failed} failed: ${firstError}`);
+	return { deleted, failed, firstError };
 }
 
 /** Current user's Id for an org (via the OAuth userinfo endpoint). */
@@ -117,7 +137,7 @@ async function currentUserId(org: string | null): Promise<string | null> {
 export async function createUserTrace(org: string | null, durationMinutes?: number): Promise<boolean> {
 	const version = getToolingApiVersion();
 	const userId = await currentUserId(org);
-	if (!userId) {
+	if (!userId || !/^[a-zA-Z0-9]{15,18}$/.test(userId)) {
 		outputChannel.appendLine("apexLogApi: createUserTrace — could not resolve current user id");
 		return false;
 	}
@@ -134,7 +154,7 @@ export async function createUserTrace(org: string | null, durationMinutes?: numb
 	// Remove the user's existing trace flags to avoid overlap errors.
 	const existing = await toolingQueryIds(org, `SELECT Id FROM TraceFlag WHERE TracedEntityId = '${userId}'`);
 	await Promise.allSettled(
-		existing.map((id) => AuthInfo.delete(org, (a) => `${base(a)}/services/data/${version}/tooling/sobjects/TraceFlag/${id}`))
+		existing.map((id) => AuthInfo.delete(org, (a) => `${base(a)}/services/data/${version}/tooling/sobjects/TraceFlag/${encodeURIComponent(id)}`))
 	);
 
 	const now = Date.now();
@@ -164,7 +184,7 @@ export { extractCodeUnit } from "./apexLogParse";
 export async function fetchApexLogHead(org: string | null, logId: string, maxBytes = 16000): Promise<string> {
 	const version = getToolingApiVersion();
 	try {
-		return await AuthInfo.getRange(org, (a) => `${base(a)}/services/data/${version}/tooling/sobjects/ApexLog/${logId}/Body`, maxBytes);
+		return await AuthInfo.getRange(org, (a) => `${base(a)}/services/data/${version}/tooling/sobjects/ApexLog/${encodeURIComponent(logId)}/Body`, maxBytes);
 	} catch {
 		return "";
 	}
@@ -175,7 +195,7 @@ export async function fetchApexLogBody(org: string | null, logId: string): Promi
 	const version = getToolingApiVersion();
 	try {
 		const { body } = await AuthInfo.get(org, (a) =>
-			`${a.instanceUrl.replace(/\/$/, "")}/services/data/${version}/tooling/sobjects/ApexLog/${logId}/Body`
+			`${a.instanceUrl.replace(/\/$/, "")}/services/data/${version}/tooling/sobjects/ApexLog/${encodeURIComponent(logId)}/Body`
 		);
 		return body;
 	} catch (e: any) {

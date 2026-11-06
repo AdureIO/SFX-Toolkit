@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 import { resolveDefaultTargetOrgUsernameSync } from "./defaultOrg";
 import { getWarnOnProductionOrg } from "./constants";
-import { getOrgByTarget, getTargetOrgUsernameFromCli, setKnownTargetOrg, type OrgRecord } from "./orgListCache";
+import { getOrgByTarget, getTargetOrgUsernameFromCli, refreshOrgListCache, setKnownTargetOrg, type OrgRecord } from "./orgListCache";
 
 /** Warn for any non-scratch, non-sandbox org (production, Developer Edition, and Dev Hub). */
 export function isProductionOrg(org: OrgRecord): boolean {
@@ -53,8 +53,29 @@ export async function confirmProductionOrgOperation(action: string, targetOrg?: 
   if (!getWarnOnProductionOrg()) {
     return true;
   }
-  const org = await resolveOrgForTarget(targetOrg);
-  if (!org || !isProductionOrg(org)) {
+  let org = await resolveOrgForTarget(targetOrg);
+  if (!org) {
+    // The org list cache may have been emptied (refresh, default-org change) — reload
+    // it once and look again before deciding.
+    try {
+      await refreshOrgListCache();
+    } catch {
+      /* fall through to the fail-closed prompt below */
+    }
+    org = await resolveOrgForTarget(targetOrg);
+  }
+  if (!org) {
+    // Fail closed: we cannot prove this is not a production org, so ask.
+    const name = targetOrg?.trim() || resolveDefaultTargetOrgUsernameSync();
+    const label = name ? `"${name}"` : "the default org";
+    const unknownChoice = await vscode.window.showWarningMessage(
+      `Could not verify whether ${label} is a production org. You are about to ${action} it.`,
+      { modal: true },
+      "Continue"
+    );
+    return unknownChoice === "Continue";
+  }
+  if (!isProductionOrg(org)) {
     return true;
   }
   const name = orgDisplayName(org);

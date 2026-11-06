@@ -12,7 +12,8 @@ import { AuthInfo } from "./authInfo";
 import { getToolingApiVersion } from "./constants";
 import { outputChannel } from "./outputChannel";
 import { OrgMetadataCache } from "./orgMetadataCache";
-import { DescribeStore } from "./describeStore";
+import { DescribeStore, TrimmedDescribe } from "./describeStore";
+import { canonicalOrgKey } from "./orgKey";
 
 export interface SoqlHostField {
 	name: string;
@@ -48,7 +49,8 @@ export interface SoqlHostDescribe {
 	childRelationships: SoqlHostChildRelationship[];
 }
 
-const CACHE_KEY_DEFAULT = "__default__";
+/** Cap on cached admin descriptions across all orgs (LRU by insertion/access order). */
+const MAX_DESCRIPTIONS = 1000;
 
 class SoqlSchemaProviderImpl {
 	/** org+sobject → admin description (null = none). */
@@ -61,16 +63,27 @@ class SoqlSchemaProviderImpl {
 		return OrgMetadataCache.getObjectList(org);
 	}
 
+	/** Like getObjectList, but rejects (SchemaUnavailableError) when the org can't deliver the list. */
+	async getObjectListStrict(org: string | null): Promise<string[]> {
+		return OrgMetadataCache.getObjectListStrict(org);
+	}
+
 	/**
 	 * Admin Description of an SObject (not present in the standard describe) via the
 	 * Tooling API EntityDefinition. Cached; self-disables per org if not queryable.
 	 */
 	async getObjectDescription(org: string | null, sobject: string): Promise<string | null> {
 		if (!sobject) return null;
-		const orgKeyStr = org || CACHE_KEY_DEFAULT;
+		const orgKeyStr = canonicalOrgKey(org);
 		if (this.descriptionUnavailable.has(orgKeyStr)) return null;
 		const key = `${orgKeyStr}|${sobject}`;
-		if (this.descriptionCache.has(key)) return this.descriptionCache.get(key) ?? null;
+		if (this.descriptionCache.has(key)) {
+			const hit = this.descriptionCache.get(key) ?? null;
+			// Refresh LRU position.
+			this.descriptionCache.delete(key);
+			this.descriptionCache.set(key, hit);
+			return hit;
+		}
 
 		const version = getToolingApiVersion();
 		const soql = `SELECT Description FROM EntityDefinition WHERE QualifiedApiName='${sobject.replace(/'/g, "")}'`;
@@ -81,11 +94,21 @@ class SoqlSchemaProviderImpl {
 			const data = JSON.parse(body);
 			const desc = (data.records && data.records[0] && data.records[0].Description) || null;
 			this.descriptionCache.set(key, desc);
+			while (this.descriptionCache.size > MAX_DESCRIPTIONS) {
+				const oldest = this.descriptionCache.keys().next().value;
+				if (oldest === undefined) break;
+				this.descriptionCache.delete(oldest);
+			}
 			return desc;
 		} catch (e: any) {
-			// Likely INVALID_FIELD on this org/version — stop retrying to avoid noise.
-			this.descriptionUnavailable.add(orgKeyStr);
-			outputChannel.appendLine(`SoqlSchemaProvider: object description unavailable (${sobject}): ${e?.message ?? e}`);
+			const msg = String(e?.message ?? e);
+			// Only a 400 INVALID_FIELD / INVALID_TYPE means EntityDefinition.Description isn't
+			// queryable on this org/version — stop retrying for this org. Timeouts, 5xx and
+			// auth errors are transient: don't cache them, a later hover can try again.
+			if (/HTTP 400/.test(msg) && /INVALID_FIELD|INVALID_TYPE/.test(msg)) {
+				this.descriptionUnavailable.add(orgKeyStr);
+			}
+			outputChannel.appendLine(`SoqlSchemaProvider: object description unavailable (${sobject}): ${msg}`);
 			return null;
 		}
 	}
@@ -94,12 +117,33 @@ class SoqlSchemaProviderImpl {
 	 *  (the single per-org, ~10-min cache); parsed per call so it can't outlive that TTL. */
 	async getDescribe(org: string | null, sobject: string): Promise<SoqlHostDescribe | null> {
 		if (!sobject) return null;
-		const raw = await DescribeStore.getRaw(org, sobject);
+		const raw = await DescribeStore.get(org, sobject);
 		if (!raw) return null;
 		return this.parse(raw);
 	}
 
-	private parse(raw: any): SoqlHostDescribe {
+	/**
+	 * Like getDescribe, but rejects (SchemaUnavailableError) when the org can't answer
+	 * right now instead of resolving null — null then really means "not an SObject".
+	 */
+	async getDescribeStrict(org: string | null, sobject: string): Promise<SoqlHostDescribe | null> {
+		if (!sobject) return null;
+		const raw = await DescribeStore.getStrict(org, sobject);
+		return raw ? this.parse(raw) : null;
+	}
+
+	/**
+	 * Server-shaped describes for many objects (same order), fetched through the shared
+	 * DescribeStore with REST composite/batch for the misses. `strict` rejects when any
+	 * could not be answered (network / auth), so callers don't mistake that for "not found".
+	 */
+	async getDescribeMany(org: string | null, names: string[], opts: { strict?: boolean } = {}): Promise<(SoqlHostDescribe | null)[]> {
+		const list = Array.isArray(names) ? names.filter((n) => typeof n === "string") : [];
+		const raws = await DescribeStore.getMany(org, list, opts);
+		return raws.map((r) => (r ? this.parse(r) : null));
+	}
+
+	private parse(raw: TrimmedDescribe | any): SoqlHostDescribe {
 		const fields: SoqlHostField[] = Array.isArray(raw.fields)
 			? raw.fields.map((f: any) => {
 					const out: SoqlHostField = {
@@ -146,17 +190,27 @@ class SoqlSchemaProviderImpl {
 	}
 
 	invalidate(org: string | null): void {
-		// Drop admin descriptions for this org (key prefix `org|…`); describes live in DescribeStore.
-		const prefix = `${org || CACHE_KEY_DEFAULT}|`;
-		for (const k of [...this.descriptionCache.keys()]) if (k.startsWith(prefix)) this.descriptionCache.delete(k);
-		this.descriptionUnavailable.delete(org || CACHE_KEY_DEFAULT);
+		this.invalidateDescriptions(org);
 		DescribeStore.invalidate(org);
+	}
+
+	/** Drop admin descriptions for this org only (key prefix `org|…`); describes untouched. */
+	invalidateDescriptions(org: string | null): void {
+		const key = canonicalOrgKey(org);
+		const prefix = `${key}|`;
+		for (const k of [...this.descriptionCache.keys()]) if (k.startsWith(prefix)) this.descriptionCache.delete(k);
+		this.descriptionUnavailable.delete(key);
 	}
 
 	invalidateAll(): void {
 		this.descriptionCache.clear();
 		this.descriptionUnavailable.clear();
 		DescribeStore.invalidateAll();
+	}
+
+	/** Release everything this provider (and the shared DescribeStore) holds. */
+	disposeAll(): void {
+		this.invalidateAll();
 	}
 }
 

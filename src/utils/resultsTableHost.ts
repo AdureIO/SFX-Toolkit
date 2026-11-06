@@ -3,10 +3,16 @@
  * (column metadata, lookup search, save) using the soqlEdit backend. Both SOQL
  * surfaces call this from their webview message handler.
  */
-import { fieldMetaFor, lookupSearch, resolveNames, saveRecords, type FieldMeta, type RecordChange } from "./soqlEdit";
+import * as vscode from "vscode";
+import { fieldMetaFor, objectMetaFor, lookupSearch, resolveNames, saveRecords, deleteRecords, type FieldMeta, type RecordChange } from "./soqlEdit";
+import { CANCELLED_DELETE_MSG } from "./soqlEditPure";
+import { confirmProductionOrgOperation } from "./orgSafety";
 import { Telemetry } from "./telemetry";
 
 type Post = (msg: Record<string, unknown>) => void;
+
+/** Saves touching this many records (typically a bulk "set field") ask for confirmation first. */
+const BULK_CONFIRM_AT = 10;
 
 /** Handle an `rt:*` message. Returns true if it was one of ours. */
 export async function handleResultsTableMessage(msg: any, post: Post): Promise<boolean> {
@@ -15,8 +21,12 @@ export async function handleResultsTableMessage(msg: any, post: Post): Promise<b
 
 	if (msg.type === "rt:colMeta") {
 		const meta: Record<string, Record<string, FieldMeta>> = {};
-		for (const t of (msg.sobjects as string[]) ?? []) meta[t] = await fieldMetaFor(org, t);
-		post({ type: "rt:colMeta", meta });
+		const objMeta: Record<string, { deletable: boolean; updateable: boolean }> = {};
+		for (const t of (msg.sobjects as string[]) ?? []) {
+			meta[t] = await fieldMetaFor(org, t);
+			objMeta[t] = await objectMetaFor(org, t);
+		}
+		post({ type: "rt:colMeta", meta, objMeta });
 		return true;
 	}
 	if (msg.type === "rt:lookup") {
@@ -30,8 +40,54 @@ export async function handleResultsTableMessage(msg: any, post: Post): Promise<b
 	if (msg.type === "rt:save") {
 		const changes = (msg.changes as RecordChange[]) ?? [];
 		Telemetry.event("recordsSave", undefined, { count: changes.length });
+		// A bulk "set field" can touch hundreds of rows — confirm larger saves (incl. the production check).
+		const records = new Set(changes.map((c) => c.id)).size;
+		if (records >= BULK_CONFIRM_AT && !(await confirmRecords(`Save changes to ${records} records`, org))) {
+			post({ type: "rt:saveDone", results: [], cancelled: true });
+			return true;
+		}
 		post({ type: "rt:saveDone", results: await saveRecords(org, changes) });
 		return true;
 	}
+	if (msg.type === "rt:delete") {
+		const ids = ((msg.ids as string[]) ?? []).filter((x) => typeof x === "string");
+		const label = `${ids.length} ${msg.sobjectType || "record"}${ids.length === 1 ? "" : "s"}`;
+		if (!ids.length || !(await confirmRecords(`Delete ${label}`, org, "Delete"))) {
+			post({ type: "rt:deleteDone", results: [], cancelled: true });
+			return true;
+		}
+		Telemetry.event("recordsDelete", undefined, { count: ids.length });
+		const results = await vscode.window.withProgress(
+			{ location: vscode.ProgressLocation.Notification, title: `Deleting ${label}…`, cancellable: true },
+			(progress, token) => {
+				let last = 0;
+				return deleteRecords(org, ids, {
+					isCancelled: () => token.isCancellationRequested,
+					onProgress: (done, total) => {
+						progress.report({ message: `Deleting ${done} of ${total}…`, increment: total ? ((done - last) / total) * 100 : 0 });
+						last = done;
+					},
+				});
+			}
+		);
+		const cancelled = results.filter((r) => r.error === CANCELLED_DELETE_MSG).length;
+		const failed = results.filter((r) => r.error && r.error !== CANCELLED_DELETE_MSG).length;
+		const deleted = results.length - failed - cancelled;
+		if (failed || cancelled) {
+			const parts = [`Deleted ${deleted} of ${ids.length}`];
+			if (failed) parts.push(`${failed} failed`);
+			if (cancelled) parts.push(`${cancelled} not attempted (cancelled)`);
+			vscode.window.showWarningMessage(`${parts.join("; ")}. The remaining records stay in the results table; re-run Delete on them to retry.`);
+		} else vscode.window.showInformationMessage(`Deleted ${label}.`);
+		post({ type: "rt:deleteDone", results });
+		return true;
+	}
 	return false;
+}
+
+/** Modal confirmation for bulk record operations; production orgs get the standard extra warning. */
+async function confirmRecords(action: string, org: string | null, button = "Continue"): Promise<boolean> {
+	if (!(await confirmProductionOrgOperation(action.charAt(0).toLowerCase() + action.slice(1) + " in", org))) return false;
+	const pick = await vscode.window.showWarningMessage(`${action}${org ? ` in ${org}` : " in the default org"}?`, { modal: true }, button);
+	return pick === button;
 }

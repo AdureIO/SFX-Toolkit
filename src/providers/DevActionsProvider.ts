@@ -10,7 +10,19 @@ class DevGroupItem extends vscode.TreeItem {
   }
 }
 
-export class DevActionsProvider implements vscode.TreeDataProvider<vscode.TreeItem> {
+export class DevActionsProvider implements vscode.TreeDataProvider<vscode.TreeItem>, vscode.Disposable {
+	private readonly _onDidChangeTreeData = new vscode.EventEmitter<void>();
+	readonly onDidChangeTreeData: vscode.Event<void> = this._onDidChangeTreeData.event;
+
+	/** Re-render (e.g. an SFDX project folder was added/removed after activation). */
+	refresh(): void {
+		this._onDidChangeTreeData.fire();
+	}
+
+	dispose(): void {
+		this._onDidChangeTreeData.dispose();
+	}
+
 	getTreeItem(element: vscode.TreeItem): vscode.TreeItem {
 		return element;
 	}
@@ -33,7 +45,7 @@ export class DevActionsProvider implements vscode.TreeDataProvider<vscode.TreeIt
 				this.createItem("Push Source", "adure-sfx-toolkit.pushSource", "cloud-upload", "Deploy all source to default org"),
 				this.createItem("Push Source (Force)", "adure-sfx-toolkit.pushSourceForce", "alert", "Force push source (overwrite conflicts)"),
 				this.createItem("Pull Source", "adure-sfx-toolkit.pullSource", "cloud-download", "Retrieve all source from default org"),
-					this.createItem("Pull Source (Force)", "adure-sfx-toolkit.pullSourceForce", "alert", "Force pull source (overwrite conflicts)"),
+				this.createItem("Pull Source (Force)", "adure-sfx-toolkit.pullSourceForce", "alert", "Force pull source (overwrite conflicts)"),
 				this.createItem("Reset Source Tracking", "adure-sfx-toolkit.resetSourceTracking", "history", "Reset source tracking for default org"),
 			]),
 			new DevGroupItem("Deploy & Retrieve", "package", [

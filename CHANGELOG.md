@@ -4,6 +4,52 @@ All notable changes to the Adure SFX Toolkit extension are documented here.
 
 ---
 
+## [3.0.1] — Org connection status, network resilience
+
+### 🔌 Org connection
+- Status bar shows when the project has no default org, the connection is expired or invalid (including expired or deleted scratch orgs), or the org is unreachable; one click to set a default org, create a scratch org or re-authenticate. Follows the active editor's project, also for nested projects. At most one popup per org and problem per session.
+- SObject completion no longer goes silent when the org's object list can't be loaded; it keeps probing and recovers on its own.
+
+### 🌐 Network
+- A stalled connection is retried once on a fresh connection for queries and deletes. Network errors name the host and the cause instead of a bare `read ETIMEDOUT`.
+- Execute Anonymous waits up to 10 minutes (new setting `apex.executeAnonymousTimeoutMs`) instead of 30 s. Network failures on Apex runs, creates and updates are never retried and say the outcome is unknown ("Outcome unknown —" in the Workbench).
+
+### 🗑 Bulk delete
+- "Deleting X of N…" progress with Cancel; records not attempted stay in the table, already-deleted records count as done, a failed batch no longer stops the rest.
+
+---
+
+## [3.0.0] — Language server overhaul, references you can trust, less RAM
+
+### 🧠 Completion
+- Apex: relationship paths (`acc.Owner.Manager.`), method chains, `list[0].`, `map.get(k).`, List/Set/Map and String instance members, inherited members, static access, enums, inner classes, child relationships, `Schema.SObjectType.X.fields.`; locals, members and keywords on a plain word; workspace and standard classes after `new`.
+- SOQL: subqueries resolve against their own `FROM`, polymorphic lookups and `TYPEOF` (snippet right after `What.`), picklist values first, no placeholder noise.
+- Never hangs on a slow or offline org: partial results within 1.5 s, every org request bounded, "schema unavailable / session expired" shown once in the status bar.
+- No describes for names that aren't objects; object list cached; describes batched (composite), compressed, cached on disk per org and revalidated in the background.
+- One org key everywhere: push/pull refreshes exactly the changed objects, new objects appear without a reload, stubs follow nested-project default orgs.
+- Documentation loads lazily; long lists are capped and marked incomplete.
+
+### 🔍 Navigation
+- Go to Definition resolves through the type engine: methods land in the right class (overrides, interfaces, inherited, overloads by argument type incl. generics, constructors, properties, enums, inner classes), falls back to the class when the member doesn't exist.
+- Find References and Rename are workspace-wide and type-checked, include unsaved and unopened files, and list Apex usages from LWC, Aura, Visualforce, Flow and `Type.forName`. Cold searches ~0.3 s, warm ~13 ms on a 2,000-class workspace.
+- LWC/Aura → Apex: definition, references and hover from imports, `@wire`, imperative calls, `c.method` and `controller=`.
+- LWC: `@salesforce/schema` completion; label and message-channel imports insert correctly.
+
+### 🧰 Workbench and panels
+- Workbench, SOQL Builder, Data Tools, REST Explorer and Data Migration share one Monaco SOQL/Apex editor backed by the language server (in-memory buffers, cancellation, no duplicates, nothing in the Problems panel).
+- Data Tools panel script fixed (it failed to load).
+
+### ⚡ Performance and memory
+- Parsing runs in a background worker (default 1; `apex.languageServerParseWorkers` opts into more).
+- Salesforce coexistence: our server answers completion, hover, definition and references; the Salesforce Apex server keeps the debugger, Run/Debug Test and refactorings (`apex.preferOwnProviders`). `apex.languageServer: auto` now behaves like `on`.
+- New command **ASFXT: Optimize Salesforce Extensions Memory**: cap the Salesforce Apex (Jorje) JVM at 1 GB and point to the TS Apex server.
+- Language server restarts automatically when its settings change; no process leaks, no stalls after an unanswered describe, no refresh loops; stubs written incrementally and asynchronously.
+
+### 🗑️ Removed
+- Legacy host-side Apex completion provider and the SOQL panel's unused completion code.
+
+---
+
 ## [1.3.0] — Process Visualizer, Apex intelligence, migration overhaul
 
 ### ✨ New features

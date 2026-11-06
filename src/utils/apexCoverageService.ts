@@ -2,6 +2,8 @@ import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
 import { runCommandArgs } from "./commandRunner";
+import { AuthInfo } from "./authInfo";
+import { getToolingApiVersion } from "./constants";
 import { Telemetry, categorizeError } from "./telemetry";
 
 /** Coverage rollup for a single Apex class or trigger. */
@@ -21,9 +23,10 @@ export const COVERAGE_THRESHOLD = 75;
  * (latest per-class coverage from the last test run); the Explorer badges and the
  * Coverage panel both read from it and refresh together via {@link onDidChange}.
  */
-class CoverageService {
+class CoverageService implements vscode.Disposable {
   private map = new Map<string, CoverageRecord>(); // lower-case name -> record
   private _loadedAt: number | null = null;
+  private inflight: Promise<boolean> | null = null;
   private readonly _onDidChange = new vscode.EventEmitter<void>();
   readonly onDidChange = this._onDidChange.event;
 
@@ -52,23 +55,57 @@ class CoverageService {
     return { percent: total ? Math.round((covered / total) * 100) : 0, covered, total, below, classes: this.map.size };
   }
 
-  /** Re-query coverage from the org. Returns true if any coverage was found. Throws on CLI failure. */
-  async refresh(): Promise<boolean> {
-    const query = "SELECT ApexClassOrTrigger.Name, NumLinesCovered, NumLinesUncovered FROM ApexCodeCoverageAggregate";
-    let raw: string;
-    try {
-      raw = await runCommandArgs(
-        "sf",
-        ["data", "query", "--use-tooling-api", "-q", query, "--json"],
-        undefined,
-        undefined,
-        false
-      );
-    } catch (error) {
-      Telemetry.error("apexCoverageError", { reason: categorizeError(error) });
-      throw error;
+  /**
+   * Re-query coverage from the org. Returns true if any coverage was found. Throws on failure.
+   * Concurrent callers (watcher, test run, panel) share one in-flight query.
+   */
+  refresh(): Promise<boolean> {
+    if (!this.inflight) {
+      this.inflight = this.doRefresh().finally(() => {
+        this.inflight = null;
+      });
     }
-    const records = (JSON.parse(raw) as { result?: { records?: Record<string, unknown>[] } }).result?.records ?? [];
+    return this.inflight;
+  }
+
+  /** Tooling query over REST (follows nextRecordsUrl); null when REST/auth is unavailable. */
+  private async queryRest(query: string): Promise<Record<string, unknown>[] | null> {
+    try {
+      const records: Record<string, unknown>[] = [];
+      let next: string | undefined = `/services/data/${getToolingApiVersion()}/tooling/query?q=${encodeURIComponent(query)}`;
+      for (let page = 0; next && page < 100; page++) {
+        const rel: string = next;
+        const { body } = await AuthInfo.get(null, (a) => `${a.instanceUrl.replace(/\/$/, "")}${rel}`);
+        const json = JSON.parse(body) as { records?: Record<string, unknown>[]; nextRecordsUrl?: string; done?: boolean };
+        records.push(...(json.records ?? []));
+        next = json.done === false ? json.nextRecordsUrl : undefined;
+      }
+      return records;
+    } catch {
+      return null;
+    }
+  }
+
+  private async doRefresh(): Promise<boolean> {
+    const query = "SELECT ApexClassOrTrigger.Name, NumLinesCovered, NumLinesUncovered FROM ApexCodeCoverageAggregate";
+    // REST first (no process spawn); fall back to the CLI, which surfaces auth errors clearly.
+    let records = await this.queryRest(query);
+    if (!records) {
+      let raw: string;
+      try {
+        raw = await runCommandArgs(
+          "sf",
+          ["data", "query", "--use-tooling-api", "-q", query, "--json"],
+          undefined,
+          undefined,
+          false
+        );
+      } catch (error) {
+        Telemetry.error("apexCoverageError", { reason: categorizeError(error) });
+        throw error;
+      }
+      records = (JSON.parse(raw) as { result?: { records?: Record<string, unknown>[] } }).result?.records ?? [];
+    }
     const next = new Map<string, CoverageRecord>();
     for (const r of records) {
       const name = (r["ApexClassOrTrigger"] as { Name?: string } | undefined)?.Name;
@@ -98,6 +135,12 @@ class CoverageService {
     this._loadedAt = null;
     this._onDidChange.fire();
   }
+
+  dispose(): void {
+    this.map.clear();
+    this._loadedAt = null;
+    this._onDidChange.dispose();
+  }
 }
 
 export const apexCoverage = new CoverageService();
@@ -109,6 +152,7 @@ export const apexCoverage = new CoverageService();
  * files. Uses a per-folder RelativePattern so it isn't hidden by `files.watcherExclude`.
  */
 let watcherTimer: ReturnType<typeof setTimeout> | undefined;
+let suppressTimer: ReturnType<typeof setTimeout> | undefined;
 let watcherSuppressed = false;
 
 function scheduleWatcherRefresh(): void {
@@ -121,19 +165,42 @@ function scheduleWatcherRefresh(): void {
 }
 
 export function registerCoverageWatchers(context: vscode.ExtensionContext): void {
-  for (const folder of vscode.workspace.workspaceFolders ?? []) {
+  // One watcher per workspace folder, kept in sync when folders are added/removed.
+  const watchers = new Map<string, vscode.Disposable>();
+  const watch = (folder: vscode.WorkspaceFolder) => {
+    const key = folder.uri.toString();
+    if (watchers.has(key)) return;
     const watcher = vscode.workspace.createFileSystemWatcher(
       new vscode.RelativePattern(folder, ".sfdx/tools/testresults/**")
     );
-    watcher.onDidCreate(scheduleWatcherRefresh);
-    watcher.onDidChange(scheduleWatcherRefresh);
-    watcher.onDidDelete(scheduleWatcherRefresh);
-    context.subscriptions.push(watcher);
-  }
+    watchers.set(
+      key,
+      vscode.Disposable.from(
+        watcher,
+        watcher.onDidCreate(scheduleWatcherRefresh),
+        watcher.onDidChange(scheduleWatcherRefresh),
+        watcher.onDidDelete(scheduleWatcherRefresh)
+      )
+    );
+  };
+  (vscode.workspace.workspaceFolders ?? []).forEach(watch);
   context.subscriptions.push(
+    vscode.workspace.onDidChangeWorkspaceFolders((e) => {
+      for (const f of e.removed) {
+        watchers.get(f.uri.toString())?.dispose();
+        watchers.delete(f.uri.toString());
+      }
+      e.added.forEach(watch);
+    }),
     new vscode.Disposable(() => {
+      watchers.forEach((w) => w.dispose());
+      watchers.clear();
       if (watcherTimer) clearTimeout(watcherTimer);
-    })
+      watcherTimer = undefined;
+      if (suppressTimer) clearTimeout(suppressTimer);
+      suppressTimer = undefined;
+    }),
+    apexCoverage
   );
 }
 
@@ -166,7 +233,9 @@ export async function clearApexTestResults(): Promise<number> {
     apexCoverage.clear();
   } finally {
     // Outlast the watcher debounce before re-enabling, so delete events don't refire.
-    setTimeout(() => {
+    if (suppressTimer) clearTimeout(suppressTimer);
+    suppressTimer = setTimeout(() => {
+      suppressTimer = undefined;
       watcherSuppressed = false;
     }, 2500);
   }

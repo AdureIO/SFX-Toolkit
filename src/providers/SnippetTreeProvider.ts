@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { loadSnippets, ApexSnippet } from '../commands/apexSnippets';
+import { loadSnippets, ApexSnippet, onDidChangeSnippets, createSnippetsWatcher } from '../commands/apexSnippets';
 import { isSalesforceProject } from '../utils/projectUtils';
 
 /** Tree item for one snippet in the Apex Snippets sidebar view. */
@@ -24,12 +24,24 @@ export class SnippetItem extends vscode.TreeItem {
     }
 }
 
-export class SnippetTreeProvider implements vscode.TreeDataProvider<SnippetItem> {
+export class SnippetTreeProvider implements vscode.TreeDataProvider<SnippetItem>, vscode.Disposable {
     private _onDidChangeTreeData = new vscode.EventEmitter<SnippetItem | undefined | null | void>();
     readonly onDidChangeTreeData: vscode.Event<SnippetItem | undefined | null | void> = this._onDidChangeTreeData.event;
+    private readonly _disposables: vscode.Disposable[] = [];
+
+    constructor() {
+        // Add/delete from the overview panel, the palette, or on disk all land here.
+        this._disposables.push(onDidChangeSnippets(() => this.refresh()), createSnippetsWatcher());
+    }
 
     refresh(): void {
         this._onDidChangeTreeData.fire();
+    }
+
+    dispose(): void {
+        this._disposables.forEach((d) => d.dispose());
+        this._disposables.length = 0;
+        this._onDidChangeTreeData.dispose();
     }
 
     getTreeItem(element: SnippetItem): vscode.TreeItem {

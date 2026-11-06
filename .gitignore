@@ -2,6 +2,13 @@ out
 node_modules
 .vscode-test
 .vscode/anon-apex-buffer.apex
+# Webview editor buffers (ASFX Workbench / SOQL Builder) — persisted editor text, never committed.
+.vscode/anon-workbench-buffer.apex
+.vscode/workbench-soql-buffer.soql
+.vscode/soql-wb-buffer*.soql
+.vscode/soql-datatools-buffer.soql
+.vscode/soql-rest-explorer-buffer.soql
+.vscode/soql-migration-buffer.soql
 .DS_Store
 *.log
 

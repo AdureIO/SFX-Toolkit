@@ -17,11 +17,21 @@ import { Logger, outputChannel } from "../utils/outputChannel";
 import { Telemetry } from "../utils/telemetry";
 
 const VALIDATE_TIMEOUT_MS = 5 * 60 * 1000;
+/** Quiet period after a save before the on-save validation starts (coalesces save bursts). */
+const ON_SAVE_DEBOUNCE_MS = 1500;
+/** Generated / tooling folders (e.g. `.sfdx/tools/sobjects/**.cls` schema stubs) are never deployable. */
+const GENERATED_PATH = /[\\/](?:\.sfdx|\.sf|node_modules)[\\/]/;
 
 /** Apex source that can be compiled by a check-only deploy (anonymous .apex cannot). */
 export function isDeployableApex(uri: vscode.Uri): boolean {
-	return /\.(cls|trigger)$/i.test(uri.fsPath);
+	return /\.(cls|trigger)$/i.test(uri.fsPath) && !GENERATED_PATH.test(uri.fsPath);
 }
+
+/**
+ * One in-flight validation per file: a newer request cancels the older `sf` process
+ * instead of piling up concurrent dry-run deploys.
+ */
+const inFlight = new Map<string, vscode.CancellationTokenSource>();
 
 /**
  * Validate a single Apex file against the default org (check-only). `silent` skips
@@ -50,19 +60,27 @@ export async function validateApexFile(doc?: vscode.TextDocument, silent = false
 
 	if (!silent) await document.save();
 
+	// Supersede any validation of this file that is still running.
+	inFlight.get(filePath)?.cancel();
+	const cts = new vscode.CancellationTokenSource();
+	inFlight.set(filePath, cts);
+
 	const title = `Validating ${document.uri.path.split("/").pop()} against ${org.displayName}…`;
 	await vscode.window.withProgress(
 		{ location: vscode.ProgressLocation.Window, title, cancellable: true },
-		async (_progress, token) => {
+		async (_progress, progressToken) => {
+			const cancelSub = progressToken.onCancellationRequested(() => cts.cancel());
+			const token = cts.token;
 			const command = `sf project deploy start --dry-run -d ${escapeShellArg(filePath)}`;
 			try {
 				await runCommand(command, projectDir, undefined, false, token, VALIDATE_TIMEOUT_MS);
+				if (token.isCancellationRequested) return; // superseded
 				// Success — clear any prior validation diagnostics for a clean slate.
 				clearDeployDiagnostics();
 					Telemetry.event("validateApex", { status: "passed", trigger: silent ? "onSave" : "command" });
 				if (!silent) vscode.window.showInformationMessage("Apex validation passed — no compile errors.");
 			} catch (e: any) {
-				if (e?.cancelled) {
+				if (e?.cancelled || token.isCancellationRequested) {
 					Logger.info("Apex validation cancelled.");
 					return;
 				}
@@ -76,6 +94,10 @@ export async function validateApexFile(doc?: vscode.TextDocument, silent = false
 							if (sel === "View Log") outputChannel.show();
 						});
 				}
+			} finally {
+				cancelSub.dispose();
+				if (inFlight.get(filePath) === cts) inFlight.delete(filePath);
+				cts.dispose();
 			}
 		}
 	);
@@ -86,13 +108,34 @@ export async function validateApexFile(doc?: vscode.TextDocument, silent = false
  * `apex.validateOnSave` is enabled and a deployable Apex file is saved.
  */
 export function registerValidateOnSave(context: vscode.ExtensionContext): void {
+	// Per-file debounce: rapid saves (format-on-save, save-all) start one validation.
+	const timers = new Map<string, NodeJS.Timeout>();
 	context.subscriptions.push(
 		vscode.workspace.onDidSaveTextDocument((doc) => {
+			if (doc.uri.scheme !== "file" || !isDeployableApex(doc.uri)) return;
 			const enabled = vscode.workspace
 				.getConfiguration("adure-sfx-toolkit")
 				.get<boolean>("apex.validateOnSave", false);
-			if (!enabled || !isSalesforceProject() || !isDeployableApex(doc.uri)) return;
-			void validateApexFile(doc, true);
-		})
+			if (!enabled || !isSalesforceProject()) return;
+			const key = doc.uri.fsPath;
+			const prev = timers.get(key);
+			if (prev) clearTimeout(prev);
+			timers.set(
+				key,
+				setTimeout(() => {
+					timers.delete(key);
+					void validateApexFile(doc, true);
+				}, ON_SAVE_DEBOUNCE_MS)
+			);
+		}),
+		{
+			// Window close / project switch: drop pending runs and stop running `sf` processes.
+			dispose: () => {
+				for (const t of timers.values()) clearTimeout(t);
+				timers.clear();
+				for (const cts of inFlight.values()) cts.cancel();
+				inFlight.clear();
+			},
+		}
 	);
 }

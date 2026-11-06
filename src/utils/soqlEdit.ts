@@ -11,11 +11,13 @@ import { DescribeStore } from "./describeStore";
 import { AuthInfo } from "./authInfo";
 import { getToolingApiVersion } from "./constants";
 import { outputChannel } from "./outputChannel";
-import { nameFieldOf, buildLookupSoql } from "./soqlEditPure";
+import { nameFieldOf, buildLookupSoql, errorText, collectionResults, deleteInBatches, COLLECTION_BATCH, type RecordResult, type DeleteOptions } from "./soqlEditPure";
 
 export { nameFieldOf, buildLookupSoql } from "./soqlEditPure";
 
 export interface FieldMeta {
+	/** Exact-case API name (the map is keyed lower-case). */
+	name?: string;
 	type: string; // string|boolean|int|double|currency|percent|date|datetime|picklist|multipicklist|reference|...
 	updateable: boolean;
 	picklistValues?: string[];
@@ -29,6 +31,7 @@ export async function fieldMetaFor(org: string | null, sobject: string): Promise
 	const out: Record<string, FieldMeta> = {};
 	for (const f of raw.fields ?? []) {
 		out[String(f.name).toLowerCase()] = {
+			name: String(f.name),
 			type: f.type || "string",
 			updateable: !!f.updateable && !f.calculated,
 			picklistValues: Array.isArray(f.picklistValues)
@@ -87,25 +90,53 @@ export async function resolveNames(org: string | null, refObject: string, ids: s
 }
 
 export interface RecordChange { id: string; sobjectType: string; fields: Record<string, unknown> }
+export type { RecordResult, DeleteOptions } from "./soqlEditPure";
 
-/** Apply field updates to records via the REST API. Returns per-record errors. */
-export async function saveRecords(org: string | null, changes: RecordChange[]): Promise<{ id: string; error?: string }[]> {
+/**
+ * Apply field updates via the sObject Collections API (allOrNone=false, 200 per request) —
+ * one round-trip per 200 rows instead of one per record, so bulk edits stay fast.
+ */
+export async function saveRecords(org: string | null, changes: RecordChange[]): Promise<RecordResult[]> {
 	const version = getToolingApiVersion();
-	const results: { id: string; error?: string }[] = [];
-	for (const ch of changes) {
+	const results: RecordResult[] = [];
+	for (let i = 0; i < changes.length; i += COLLECTION_BATCH) {
+		const batch = changes.slice(i, i + COLLECTION_BATCH);
+		const ids = batch.map((c) => c.id);
 		try {
-			await AuthInfo.post(
+			const body = await AuthInfo.patch(
 				org,
-				(a) => `${a.instanceUrl.replace(/\/$/, "")}/services/data/${version}/sobjects/${ch.sobjectType}/${ch.id}?_HttpMethod=PATCH`,
-				ch.fields
+				(a) => `${a.instanceUrl.replace(/\/$/, "")}/services/data/${version}/composite/sobjects`,
+				{ allOrNone: false, records: batch.map((c) => ({ attributes: { type: c.sobjectType }, id: c.id, ...c.fields })) }
 			);
-			results.push({ id: ch.id });
+			results.push(...collectionResults(ids, body));
 		} catch (e: any) {
-			let msg = e?.message ?? String(e);
-			const m = /HTTP \d+: (.+)$/s.exec(msg);
-			if (m) { try { const j = JSON.parse(m[1]); msg = Array.isArray(j) ? j.map((x) => x.message).join("; ") : (j.message || m[1]); } catch { msg = m[1]; } }
-			results.push({ id: ch.id, error: msg });
+			const msg = errorText(e);
+			results.push(...ids.map((id) => ({ id, error: msg })));
 		}
 	}
 	return results;
+}
+
+/**
+ * Delete records by id via the sObject Collections API (allOrNone=false, 200 per request, sequential).
+ * Reports progress per batch and honours cancellation between batches (remaining ids come back as
+ * "Cancelled — not deleted."). Socket stalls are retried once on a fresh connection by the HTTP layer;
+ * re-deleting an already-deleted id (ENTITY_IS_DELETED) counts as deleted.
+ */
+export async function deleteRecords(org: string | null, ids: string[], opts: DeleteOptions = {}): Promise<RecordResult[]> {
+	const version = getToolingApiVersion();
+	return deleteInBatches(
+		ids,
+		(batch) => AuthInfo.deleteWithBody(
+			org,
+			(a) => `${a.instanceUrl.replace(/\/$/, "")}/services/data/${version}/composite/sobjects?allOrNone=false&ids=${batch.join(",")}`
+		),
+		opts
+	);
+}
+
+/** Object-level permissions for the bulk actions (from the cached describe). */
+export async function objectMetaFor(org: string | null, sobject: string): Promise<{ deletable: boolean; updateable: boolean }> {
+	const raw = await DescribeStore.getRaw(org, sobject);
+	return { deletable: !!raw?.deletable, updateable: !!raw?.updateable };
 }

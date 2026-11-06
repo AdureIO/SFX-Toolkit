@@ -21,6 +21,19 @@ export function isSalesforceProject(): boolean {
 }
 
 /**
+ * Root of the primary SFDX project: the first workspace folder containing
+ * sfdx-project.json (multi-root workspaces may list a non-SFDX folder first),
+ * else the first folder. This is the project whose default org `null` means.
+ */
+export function primaryProjectRoot(): string | undefined {
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    for (const folder of folders) {
+        if (fs.existsSync(path.join(folder.uri.fsPath, 'sfdx-project.json'))) return folder.uri.fsPath;
+    }
+    return folders[0]?.uri.fsPath;
+}
+
+/**
  * Walk up from a file path to the nearest directory containing sfdx-project.json.
  * Lets nested/sub-projects (e.g. billing/force-app/...) resolve their own org/config
  * instead of always using the workspace root. Returns null if none is found.

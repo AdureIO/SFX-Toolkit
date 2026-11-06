@@ -10,13 +10,12 @@ import { getSalesforceLogDirectory } from '../utils/logPaths';
 import { AuthInfo } from '../utils/authInfo';
 import { getToolingApiVersion } from '../utils/constants';
 import { isSalesforceProject } from '../utils/projectUtils';
-import { setBufferOrgOverride } from '../utils/bufferOrgOverride';
 import { getSoqlMarkers } from '../utils/soqlMarkers';
 import { parseSoqlError } from '../utils/soqlError';
 import { handleResultsTableMessage } from '../utils/resultsTableHost';
 import { resultsTableCss, resultsTableScript } from '../webview/resultsTableComponent';
-import { refreshLanguageServerSchema, setEphemeralBuffers } from '../languageClient';
-import { ApexBufferBridge } from './apexBufferBridge';
+import { ApexBufferBridge, BridgeRequest } from './apexBufferBridge';
+import { monacoLsBridgeScript, monacoQuickSuggestions, APEX_TRIGGER_CHARACTERS, SOQL_TRIGGER_CHARACTERS } from '../webview/monacoLsBridge';
 import { Telemetry } from '../utils/telemetry';
 import { onDidChangeDefaultOrg } from '../utils/defaultOrgEvents';
 
@@ -35,24 +34,121 @@ const HISTORY_MAX = 10;
  *     a results pane, running anonymous Apex against the selected org.
  * This is the single home for Apex logs; the sidebar keeps only the Traces view.
  */
-export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
+/** Shape pushed into the workbench's Execute tab, whether the run started there or elsewhere. */
+interface ExecResultPayload {
+	success: boolean;
+	error: string;
+	log: string;
+	hasLog: boolean;
+	/** True when this came from outside the workbench (command palette, snippets, rerun) — the
+	 * client uses this to switch to the Execute tab so the result is actually visible. */
+	external: boolean;
+}
+
+export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
+	/** Single instance (constructed once in extension.ts) — lets other command files reach the
+	 * live workbench without extension.ts having to thread a reference through every caller. */
+	private static _instance: ApexWorkbenchViewProvider | undefined;
+
 	private _view?: vscode.WebviewView;
 	private _listener?: vscode.Disposable;
 	private _lastLog = '';
-	private readonly _bridge = new ApexBufferBridge(WORKBENCH_BUFFER);
-	private readonly _soqlBridge = new ApexBufferBridge(SOQL_BUFFER, 'soql');
+	/** Execute-tab buffer: virtual LS document; text persisted to WORKBENCH_BUFFER on change/blur. */
+	private readonly _bridge = new ApexBufferBridge(WORKBENCH_BUFFER, 'apex', true);
+	private readonly _soqlBridge = new ApexBufferBridge(SOQL_BUFFER, 'soql', true);
 	/** Cache of fetched log bodies (id → { text, unit }) so re-opening is instant. */
 	private readonly _bodyCache = new Map<string, { text: string; unit: string | null }>();
 	/** Live-log subscription for the Logs tab's current org (shared LiveLogService). */
 	private _logSub?: vscode.Disposable;
 	private _logOrg: string | null = null;
+	/** The Logs tab has been loaded at least once — resubscribe when the view is shown again. */
+	private _logsWanted = false;
+	/** An external exec result that arrived before the webview's script had loaded (e.g. the
+	 * very first reveal of the view this session) — flushed once the client signals it's ready. */
+	private _pendingExternal: ExecResultPayload | null = null;
+	/** Provider-lifetime subscriptions (default-org events). */
+	private readonly _disposables: vscode.Disposable[] = [];
+	/** Subscriptions tied to the current webview view (visibility, dispose) — reset per resolve. */
+	private _viewDisposables: vscode.Disposable[] = [];
 
 	constructor(private readonly _extensionUri: vscode.Uri) {
+		ApexWorkbenchViewProvider._instance = this;
 		// When the default org changes, re-send the org list so the selector realigns
 		// (the "(default)" marker follows, and a default-selected user follows along).
-		onDidChangeDefaultOrg(async () => {
+		this._disposables.push(onDidChangeDefaultOrg(async () => {
 			if (this._view) this._post('orgList', { orgs: await getAnonymousApexOrgList(), defaultChanged: true });
-		});
+		}));
+	}
+
+	/** Release everything (extension deactivate): subscriptions, live-log feed, cached log bodies. */
+	public dispose(): void {
+		this._releaseView();
+		this._disposables.forEach((d) => d.dispose());
+		this._disposables.length = 0;
+		// Close the Execute/SOQL virtual LS documents and drop their org overrides.
+		this._bridge.dispose();
+		this._soqlBridge.dispose();
+		this._bodyCache.clear();
+		this._lastLog = '';
+		this._pendingExternal = null;
+		if (ApexWorkbenchViewProvider._instance === this) ApexWorkbenchViewProvider._instance = undefined;
+	}
+
+	/** Drop everything bound to the current webview view (it was disposed or is being replaced). */
+	private _releaseView(): void {
+		this._viewDisposables.forEach((d) => d.dispose());
+		this._viewDisposables = [];
+		this._listener?.dispose();
+		this._listener = undefined;
+		// No view → nobody to feed: stop live log polling.
+		this._logSub?.dispose();
+		this._logSub = undefined;
+		this._view = undefined;
+	}
+
+	/**
+	 * Reveal the Apex Workbench and show the result of an anonymous Apex run executed elsewhere
+	 * (command palette, snippets, rerun) on its Execute tab — inline, the same way a run started
+	 * from the workbench itself is shown. This is the ONLY place those commands should send a
+	 * result: never open the debug log as a separate editor tab/file automatically — the
+	 * workbench's own "Open log" button is the sole, explicit opt-in for that.
+	 *
+	 * Use this for anything the user should see immediately (a failure — you DO want the error
+	 * in front of you). For a quiet success (e.g. a snippet that just ran fine), use
+	 * `pushExecResultSilently` instead and let the user pull it up via a toast button.
+	 */
+	public static async showExternalExecResult(result: { success: boolean; errorMessage?: string; log?: string }): Promise<void> {
+		await ApexWorkbenchViewProvider.reveal();
+		ApexWorkbenchViewProvider._instance?._pushExternalResult(result, true);
+	}
+
+	/**
+	 * Update the workbench's Execute tab with a result WITHOUT revealing the view or forcing it
+	 * to the Execute tab. Popping the workbench open (or yanking it off whatever tab the user is
+	 * already looking at) on every successful snippet run would be disruptive when snippets run
+	 * often/in quick succession — the result is there the moment the user does look (already
+	 * painted if the view is resolved, or flushed on the next reveal otherwise).
+	 */
+	public static pushExecResultSilently(result: { success: boolean; errorMessage?: string; log?: string }): void {
+		ApexWorkbenchViewProvider._instance?._pushExternalResult(result, false);
+	}
+
+	/** Reveal the workbench to show whatever exec result is already there — the "Open log" action on a quiet-success toast. */
+	public static async reveal(): Promise<void> {
+		await vscode.commands.executeCommand('adure-sfx-toolkit.apexWorkbench.focus');
+	}
+
+	private _pushExternalResult(result: { success: boolean; errorMessage?: string; log?: string }, focusTab: boolean): void {
+		const payload: ExecResultPayload = {
+			success: result.success,
+			error: result.errorMessage || '',
+			log: result.log || '',
+			hasLog: !!(result.log && result.log.trim()),
+			external: focusTab
+		};
+		this._lastLog = result.log || '';
+		if (this._view) this._post('execResult', { ...payload }); // best-effort immediate paint if already loaded
+		this._pendingExternal = payload; // always stash — flushed on 'getOrgs' covers a fresh/first-ever load
 	}
 
 	private _post(type: string, payload: Record<string, unknown> = {}): void {
@@ -89,12 +185,15 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	}
 
 	public async resolveWebviewView(view: vscode.WebviewView): Promise<void> {
+		this._releaseView();
 		this._view = view;
 		// Stop live log discovery while the panel is hidden; resume (re-subscribe) when shown.
-		view.onDidChangeVisibility(() => {
-			if (view.visible) { if (this._logSub) this._subscribeLogs(this._logOrg); }
+		// (_logsWanted remembers the Logs tab was loaded — _logSub is cleared while hidden,
+		// so it can't be the resume signal or the tab silently stops updating after a hide.)
+		this._viewDisposables.push(view.onDidChangeVisibility(() => {
+			if (view.visible) { if (this._logsWanted) this._subscribeLogs(this._logOrg); }
 			else { this._logSub?.dispose(); this._logSub = undefined; }
-		});
+		}));
 		view.webview.options = {
 			enableScripts: true,
 			localResourceRoots: [
@@ -113,19 +212,22 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 			switch (data?.type) {
 				case 'getOrgs':
 					this._post('orgList', { orgs: await getAnonymousApexOrgList() });
+					// The client only starts listening for messages once its script has run —
+					// 'getOrgs' is the first thing it sends, so it's the reliable "ready" signal
+					// for flushing a result that arrived before this webview instance existed.
+					if (this._pendingExternal) {
+						this._post('execResult', { ...this._pendingExternal });
+						this._pendingExternal = null;
+					}
 					break;
 				case 'warmOrg': {
 					const org = (typeof data.org === 'string' && data.org) ? data.org : null;
 					if (isSalesforceProject()) AuthInfo.warmAuthForOrg(org);
-					// Point both workbench buffers' IntelliSense at the selected org and
-					// clear the server's schema cache so completion reflects it.
-					const apexUri = this._bridge.getBufferUri();
-					const soqlUri = this._soqlBridge.getBufferUri();
-					if (apexUri) setBufferOrgOverride(apexUri.fsPath, org);
-					if (soqlUri) setBufferOrgOverride(soqlUri.fsPath, org);
-					// Mark these buffers ephemeral so go-to-def never writes stubs for them.
-					setEphemeralBuffers([apexUri?.toString(), soqlUri?.toString()].filter((u): u is string => !!u));
-					refreshLanguageServerSchema();
+					// Point both workbench buffers' IntelliSense at the selected org (marks them
+					// ephemeral → no stub writes). The webview re-posts this on every org-list
+					// refresh; the server only gets a TARGETED refresh when the org changed.
+					this._bridge.setOrg(org);
+					this._soqlBridge.setOrg(org);
 					break;
 				}
 				// ── Logs ────────────────────────────────────────────────────────────
@@ -166,9 +268,24 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 					const pick = await vscode.window.showWarningMessage(
 						'Delete all debug logs for the selected org?', { modal: true }, 'Delete all');
 					if (pick !== 'Delete all') break;
-					const n = await deleteAllApexLogs(data.org || null);
-					vscode.window.showInformationMessage(`Deleted ${n} log${n === 1 ? '' : 's'}.`);
-					void LiveLogService.refresh(data.org || null);
+					const org: string | null = data.org || null;
+					// Always clear the local side first — the list, the open log, cached bodies and
+					// log files saved under .sfdx — whether or not the org call below succeeds.
+					this._bodyCache.clear();
+					this._deleteLocalLogFiles();
+					this._post('logsCleared', { org: org ?? '' });
+					if (!this._logSub || org !== this._logOrg) this._subscribeLogs(org);
+					try {
+						const { deleted, failed, firstError } = await deleteAllApexLogs(org);
+						if (failed) {
+							vscode.window.showWarningMessage(`Deleted ${deleted} log${deleted === 1 ? '' : 's'}; ${failed} could not be deleted: ${firstError}`);
+						} else {
+							vscode.window.showInformationMessage(deleted ? `Deleted ${deleted} log${deleted === 1 ? '' : 's'}.` : 'No logs to delete in the org.');
+						}
+					} catch (e: any) {
+						vscode.window.showErrorMessage(`Could not delete logs in the org: ${e?.message ?? e}. Local logs were cleared.`);
+					}
+					await LiveLogService.clear(org);
 					break;
 				}
 				case 'openLog': {
@@ -189,20 +306,28 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 				}
 				// ── Execute (editor bridge + run) ────────────────────────────────────
 				case 'getCompletions':
-					this._post('completionResult', { requestId: data.requestId, items: await this._bridge.completions(data.text || '', data.line || 0, data.character || 0) });
+					await this._postCompletions(this._bridge, data);
 					break;
 				case 'getHover':
-					this._post('hoverResult', { requestId: data.requestId, hover: await this._bridge.hover(data.text || '', data.line || 0, data.character || 0) });
+					await this._postHover(this._bridge, data);
+					break;
+				case 'resolveCompletion':
+					await this._postResolve(this._bridge, data);
+					break;
+				case 'cancelRequest':
+					// Request ids are unique per page, so cancelling on both bridges is safe.
+					if (typeof data.requestId === 'number') { this._bridge.cancel(data.requestId); this._soqlBridge.cancel(data.requestId); }
 					break;
 				case 'gotoDefinition': {
-					const inBuf = await this._bridge.gotoDefinition(data.text || '', data.line || 0, data.character || 0);
+					const inBuf = await this._bridge.gotoDefinition(ApexWorkbenchViewProvider._req(data));
 					// In-buffer target (a function/class declared in the same anonymous block):
 					// move the webview editor's cursor instead of opening the hidden doc.
 					if (inBuf) this._post('revealDefinition', { line: inBuf.line, character: inBuf.character });
 					break;
 				}
 				case 'contentChanged':
-					if (typeof data.code === 'string') await this._bridge.update(data.code);
+					// Debounced (500 ms) / blur: the only path that writes the buffer file.
+					if (typeof data.code === 'string') await this._bridge.persist(data.code);
 					break;
 				case 'execute': {
 					if (!isSalesforceProject()) { this._post('execResult', { success: false, error: 'Open an SFDX project to use this feature.' }); return; }
@@ -221,13 +346,16 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 					break;
 				// ── SOQL tab (editor bridge + run) ───────────────────────────────────
 				case 'getSoqlCompletions':
-					this._post('completionResult', { requestId: data.requestId, items: await this._soqlBridge.completions(data.text || '', data.line || 0, data.character || 0) });
+					await this._postCompletions(this._soqlBridge, data);
 					break;
 				case 'getSoqlHover':
-					this._post('hoverResult', { requestId: data.requestId, hover: await this._soqlBridge.hover(data.text || '', data.line || 0, data.character || 0) });
+					await this._postHover(this._soqlBridge, data);
+					break;
+				case 'resolveSoqlCompletion':
+					await this._postResolve(this._soqlBridge, data);
 					break;
 				case 'soqlChanged':
-					if (typeof data.query === 'string') await this._soqlBridge.update(data.query);
+					if (typeof data.query === 'string') await this._soqlBridge.persist(data.query);
 					break;
 				case 'runSoql': {
 					Telemetry.event('soqlExecute', { surface: 'workbench' });
@@ -244,7 +372,36 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 			}
 		});
 
-		view.onDidDispose(() => { this._listener?.dispose(); this._listener = undefined; });
+		this._viewDisposables.push(view.onDidDispose(() => {
+			if (this._view === view) this._releaseView();
+		}));
+	}
+
+	private static _req(data: any): BridgeRequest {
+		return {
+			requestId: typeof data.requestId === 'number' ? data.requestId : undefined,
+			text: typeof data.text === 'string' ? data.text : '',
+			line: data.line || 0,
+			character: data.character || 0,
+			triggerKind: typeof data.triggerKind === 'number' ? data.triggerKind : undefined,
+			triggerCharacter: typeof data.triggerCharacter === 'string' ? data.triggerCharacter : undefined,
+		};
+	}
+
+	private async _postCompletions(bridge: ApexBufferBridge, data: any): Promise<void> {
+		const res = await bridge.completions(ApexWorkbenchViewProvider._req(data));
+		this._post('completionResult', res
+			? { requestId: data.requestId, items: res.items, incomplete: res.incomplete, listId: res.listId }
+			: { requestId: data.requestId, dropped: true });
+	}
+
+	private async _postHover(bridge: ApexBufferBridge, data: any): Promise<void> {
+		this._post('hoverResult', { requestId: data.requestId, hover: await bridge.hover(ApexWorkbenchViewProvider._req(data)) });
+	}
+
+	private async _postResolve(bridge: ApexBufferBridge, data: any): Promise<void> {
+		const item = await bridge.resolveCompletion(data.listId, data.resolveId, typeof data.requestId === 'number' ? data.requestId : undefined);
+		this._post('resolveResult', { requestId: data.requestId, item });
 	}
 
 	/**
@@ -253,6 +410,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	 * trace is active. Pushes the full list (+ resolved units + live flag) on each update.
 	 */
 	private _subscribeLogs(org: string | null): void {
+		this._logsWanted = true;
 		this._logSub?.dispose();
 		this._logOrg = org;
 		this._logSub = LiveLogService.subscribe(org, (snap) => {
@@ -275,6 +433,17 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 			const p = parseSoqlError(e?.message ?? String(e));
 			return { error: p.code ? `${p.code}: ${p.message}` : p.message, errorDetails: p.details, errorLine: p.line, errorColumn: p.column };
 		}
+	}
+
+	/** Remove downloaded `.log` files from the local Salesforce debug-log folder (best effort). */
+	private _deleteLocalLogFiles(): void {
+		const dir = getSalesforceLogDirectory();
+		if (!dir) return;
+		try {
+			for (const f of fs.readdirSync(dir)) {
+				if (f.endsWith('.log')) { try { fs.unlinkSync(path.join(dir, f)); } catch { /* in use / gone */ } }
+			}
+		} catch { /* folder doesn't exist yet */ }
 	}
 
 	private async _openLogFile(name: string, text: string): Promise<void> {
@@ -454,6 +623,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 
 <script src="${monacoBase}/loader.js"></script>
 <script>${resultsTableScript()}</script>
+<script>${monacoLsBridgeScript()}</script>
 <script>
 	const vscode = acquireVsCodeApi();
 	let initial = { highlightPatterns: [], code: '' };
@@ -554,10 +724,11 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	listenBtn.onclick=loadLogs;
 
 	// ── execute editor ─────────────────────────────────────────────────────────
-	let editor=null, saveTimer=null, reqId=0; const pending={};
-	let busyCount=0; function setBusy(d){ busyCount=Math.max(0,busyCount+d); const b=document.getElementById('busy'); if(b) b.style.display=busyCount>0?'inline-flex':'none'; }
+	let editor=null, saveTimer=null;
+	// Language-server completion/hover glue (shared with the SOQL Builder panel).
+	const lsBridge=ASFXMonacoLs({ key:'type', post:function(m){ vscode.postMessage(m); }, busyId:'busy', cancel:'cancelRequest',
+		results:{ completion:'completionResult', hover:'hoverResult', resolve:'resolveResult' } });
 	let soqlEd=null, soqlTimer=null;
-	function mapKind(k){ const M=monaco.languages.CompletionItemKind; const T={0:M.Text,1:M.Method,2:M.Function,3:M.Constructor,4:M.Field,5:M.Variable,6:M.Class,7:M.Interface,8:M.Module,9:M.Property,10:M.Unit,11:M.Value,12:M.Enum,13:M.Keyword,14:M.Snippet,15:M.Color,16:M.File,17:M.Reference,18:M.Folder,19:M.EnumMember,20:M.Constant,21:M.Struct,22:M.Event,23:M.Operator,24:M.TypeParameter}; return T[k]!=null?T[k]:M.Text; }
 	require.config({ paths:{ vs:'${monacoBase}' } });
 	self.MonacoEnvironment={ getWorkerUrl:function(){ return URL.createObjectURL(new Blob(["self.MonacoEnvironment={baseUrl:'"+'${monacoBase}'+"/'};importScripts('"+'${monacoBase}'+"/base/worker/workerMain.js');"],{type:'text/javascript'})); } };
 	require(['vs/editor/editor.main'], function(){
@@ -569,10 +740,9 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 				comment:[[/[^*/]+/,'comment'],[/\\*\\//,'comment','@pop'],[/[*/]/,'comment']],
 				soql:[[/'(?:[^'\\\\]|\\\\.)*'/,'string'],[/\\]/,'string.soql','@pop'],[/[a-zA-Z_][\\w]*/,{cases:{'@keywords':'keyword','@default':'identifier'}}],[/./,'string.soql']] } });
 		monaco.languages.setLanguageConfiguration('apex',{ comments:{lineComment:'//',blockComment:['/*','*/']}, brackets:[['{','}'],['[',']'],['(',')']], autoClosingPairs:[{open:'{',close:'}'},{open:'[',close:']'},{open:'(',close:')'},{open:"'",close:"'"}] });
-		monaco.languages.registerHoverProvider('apex',{ provideHover:function(model,pos){ return new Promise(function(resolve){ const id=++reqId; pending[id]=function(h){ if(!h||!h.contents||!h.contents.length){resolve(null);return;} const w=model.getWordAtPosition(pos); const range=w?{startLineNumber:pos.lineNumber,endLineNumber:pos.lineNumber,startColumn:w.startColumn,endColumn:w.endColumn}:undefined; resolve({range:range,contents:h.contents.map(function(v){return{value:v};})}); }; setBusy(1); vscode.postMessage({type:'getHover',requestId:id,text:model.getValue(),line:pos.lineNumber-1,character:pos.column-1}); }); } });
-		monaco.languages.registerCompletionItemProvider('apex',{ triggerCharacters:['.',' ','(',',','_'], provideCompletionItems:function(model,pos){ return new Promise(function(resolve){ const id=++reqId; pending[id]=function(items){ const w=model.getWordUntilPosition(pos); const range={startLineNumber:pos.lineNumber,endLineNumber:pos.lineNumber,startColumn:w.startColumn,endColumn:w.endColumn}; resolve({suggestions:items.map(function(it){ return {label:it.label,kind:mapKind(it.kind),insertText:it.insertText||it.label,insertTextRules:it.isSnippet?monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet:undefined,detail:it.detail,documentation:it.documentation?{value:it.documentation}:undefined,sortText:it.sortText,filterText:it.filterText,range:range}; })}); }; setBusy(1); vscode.postMessage({type:'getCompletions',requestId:id,text:model.getValue(),line:pos.lineNumber-1,character:pos.column-1}); }); } });
+		lsBridge.register(monaco,'apex',{ completion:'getCompletions', hover:'getHover', resolve:'resolveCompletion', triggerCharacters:${JSON.stringify(APEX_TRIGGER_CHARACTERS)} });
 		const dark=document.body.classList.contains('vscode-dark')||document.body.classList.contains('vscode-high-contrast');
-		editor=monaco.editor.create(document.getElementById('editor'),{ value:initial.code||'', language:'apex', theme:dark?'vs-dark':'vs', automaticLayout:true, minimap:{enabled:false}, scrollBeyondLastLine:false, fontSize:13, tabSize:4, quickSuggestions:true, quickSuggestionsDelay:200, fixedOverflowWidgets:true });
+		editor=monaco.editor.create(document.getElementById('editor'),{ value:initial.code||'', language:'apex', theme:dark?'vs-dark':'vs', automaticLayout:true, minimap:{enabled:false}, scrollBeyondLastLine:false, fontSize:13, tabSize:4, quickSuggestions:${monacoQuickSuggestions('apex')}, quickSuggestionsDelay:200, fixedOverflowWidgets:true });
 		editor.onDidChangeModelContent(function(){ if(saveTimer) clearTimeout(saveTimer); saveTimer=setTimeout(function(){ vscode.postMessage({type:'contentChanged',code:editor.getValue()}); },500); });
 		editor.onMouseDown(function(e){ if((e.event.ctrlKey||e.event.metaKey)&&e.target&&e.target.position){ const p=e.target.position; vscode.postMessage({type:'gotoDefinition',text:editor.getValue(),line:p.lineNumber-1,character:p.column-1}); } });
 		// addAction (not addCommand) scopes the keybinding to THIS editor instance; with two
@@ -588,15 +758,16 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 		monaco.languages.setMonarchTokensProvider('soql',{ ignoreCase:true,
 			keywords:['SELECT','FROM','WHERE','LIMIT','OFFSET','ORDER','BY','GROUP','HAVING','AND','OR','NOT','LIKE','IN','INCLUDES','EXCLUDES','ASC','DESC','NULLS','FIRST','LAST','COUNT','COUNT_DISTINCT','AVG','MIN','MAX','SUM','TYPEOF','WHEN','THEN','ELSE','END','USING','SCOPE','FOR','VIEW','REFERENCE','UPDATE','TRACKING','NULL','TRUE','FALSE'],
 			tokenizer:{ root:[[/'(?:[^'\\\\]|\\\\.)*'/,'string'],[/\\b\\d+(\\.\\d+)?\\b/,'number'],[/[a-zA-Z_][\\w.]*/,{cases:{'@keywords':'keyword','@default':'identifier'}}]] } });
-		soqlEd=monaco.editor.create(document.getElementById('soqlEditor'),{ value:initial.soql||'SELECT Id, Name FROM Account ORDER BY CreatedDate DESC LIMIT 50', language:'soql', theme:dark?'vs-dark':'vs', automaticLayout:true, minimap:{enabled:false}, scrollBeyondLastLine:false, fontSize:13, quickSuggestions:true, quickSuggestionsDelay:200, fixedOverflowWidgets:true });
+		soqlEd=monaco.editor.create(document.getElementById('soqlEditor'),{ value:initial.soql||'SELECT Id, Name FROM Account ORDER BY CreatedDate DESC LIMIT 50', language:'soql', theme:dark?'vs-dark':'vs', automaticLayout:true, minimap:{enabled:false}, scrollBeyondLastLine:false, fontSize:13, quickSuggestions:${monacoQuickSuggestions('soql')}, quickSuggestionsDelay:200, fixedOverflowWidgets:true });
 		soqlEd.onDidChangeModelContent(function(){ if(soqlTimer) clearTimeout(soqlTimer); soqlTimer=setTimeout(function(){ vscode.postMessage({type:'soqlChanged',query:soqlEd.getValue()}); },500); });
 		soqlEd.onDidChangeModelContent(scheduleSoqlValidate);
 		scheduleSoqlValidate();
 		soqlEd.addAction({ id:'asfx.runSoql', label:'Run SOQL Query', keybindings:[monaco.KeyMod.CtrlCmd|monaco.KeyCode.Enter, monaco.KeyMod.WinCtrl|monaco.KeyCode.Enter], run:function(){ doRunSoql(); } });
-		monaco.languages.registerCompletionItemProvider('soql',{ triggerCharacters:['.',' ',',','('], provideCompletionItems:function(model,pos){ return new Promise(function(resolve){ const id=++reqId; pending[id]=function(items){ const w=model.getWordUntilPosition(pos); const range={startLineNumber:pos.lineNumber,endLineNumber:pos.lineNumber,startColumn:w.startColumn,endColumn:w.endColumn}; resolve({suggestions:items.map(function(it){ return {label:it.label,kind:mapKind(it.kind),insertText:it.insertText||it.label,insertTextRules:it.isSnippet?monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet:undefined,detail:it.detail,documentation:it.documentation?{value:it.documentation}:undefined,sortText:it.sortText,filterText:it.filterText,range:range}; })}); }; setBusy(1); vscode.postMessage({type:'getSoqlCompletions',requestId:id,text:model.getValue(),line:pos.lineNumber-1,character:pos.column-1}); }); } });
-		monaco.languages.registerHoverProvider('soql',{ provideHover:function(model,pos){ return new Promise(function(resolve){ const id=++reqId; pending[id]=function(h){ if(!h||!h.contents||!h.contents.length){resolve(null);return;} resolve({contents:h.contents.map(function(v){return{value:v};})}); }; setBusy(1); vscode.postMessage({type:'getSoqlHover',requestId:id,text:model.getValue(),line:pos.lineNumber-1,character:pos.column-1}); }); } });
+		lsBridge.register(monaco,'soql',{ completion:'getSoqlCompletions', hover:'getSoqlHover', resolve:'resolveSoqlCompletion', triggerCharacters:${JSON.stringify(SOQL_TRIGGER_CHARACTERS)} });
 	});
-	function flush(){ if(!editor) return; if(saveTimer){clearTimeout(saveTimer);saveTimer=null;} vscode.postMessage({type:'contentChanged',code:editor.getValue()}); }
+	function flush(){
+		if(soqlEd&&soqlTimer){ clearTimeout(soqlTimer); soqlTimer=null; vscode.postMessage({type:'soqlChanged',query:soqlEd.getValue()}); }
+		if(!editor) return; if(saveTimer){clearTimeout(saveTimer);saveTimer=null;} vscode.postMessage({type:'contentChanged',code:editor.getValue()}); }
 	window.addEventListener('blur', flush);
 	function doRun(){ vscode.postMessage({type:'execute', code:editor?editor.getValue():'', org:orgVal()||undefined}); }
 	// Manual line-comment toggle (fallback for Cmd/Ctrl+/ if Monaco's built-in action is unavailable).
@@ -648,8 +819,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 	// ── messages ────────────────────────────────────────────────────────────────
 	window.addEventListener('message', function(e){ const d=e.data; if(!d) return;
 		if(d.type && d.type.indexOf('rt:')===0){ soqlTable.handleMessage(d); return; }
-		if(d.type==='completionResult'){ setBusy(-1); const cb=pending[d.requestId]; if(cb){ delete pending[d.requestId]; cb(d.items||[]); } return; }
-		if(d.type==='hoverResult'){ setBusy(-1); const cb=pending[d.requestId]; if(cb){ delete pending[d.requestId]; cb(d.hover||null); } return; }
+		if(lsBridge.handle(d)) return;
 		if(d.type==='revealDefinition'){ if(editor){ const ln=(d.line||0)+1, col=(d.character||0)+1; editor.setPosition({lineNumber:ln,column:col}); editor.revealLineInCenter(ln); editor.focus(); } return; }
 		if(d.type==='soqlMarkers'){ if(soqlEd){ try{ monaco.editor.setModelMarkers(soqlEd.getModel(),'asfx-soql',(d.markers||[]).map(function(m){ return {severity:monaco.MarkerSeverity.Error,message:m.message,startLineNumber:m.line+1,startColumn:m.startCol+1,endLineNumber:m.line+1,endColumn:m.endCol+1}; })); }catch(e){} } return; }
 		if(d.type==='soqlStarted'){ const s=document.getElementById('soqlStatus'); s.className='muted'; s.style.color=''; s.textContent='Running…'; document.getElementById('soqlResults').innerHTML=''; return; }
@@ -661,6 +831,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 			vscode.postMessage({type:'warmOrg', org:orgVal()}); loadLogs(); }
 		else if(d.type==='logList'){ if((d.org||'')!==orgVal()) return; if(d.units){ for(const k in d.units) unitById[k]=d.units[k]; } renderList(d.rows||[]);
 			const lb=document.getElementById('listen'); if(lb) lb.classList.toggle('on', !!d.live); }
+		else if(d.type==='logsCleared'){ if((d.org||'')!==orgVal()) return; currentId=''; for(const k in unitById) delete unitById[k]; logView.setText('Select a log to view it.', true); renderList([]); }
 		else if(d.type==='logLoading'){ if(d.id===currentId) logView.setText('Loading log…', true); }
 		else if(d.type==='logBody'){ if(d.unit){ unitById[d.id]=d.unit; const r=listRows.querySelector('.row[data-id="'+d.id+'"]'); if(r&&r.firstElementChild) r.firstElementChild.textContent=d.unit; } if(d.id===currentId) logView.setLog(d.text||''); }
 		else if(d.type==='historyUpdated'){ setHistory(d.history||[]); }
@@ -668,6 +839,9 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider {
 			const pill=document.getElementById('tracePill'); pill.classList.toggle('on', d.count>0); pill.textContent= d.count>0 ? ('Trace: '+d.count+' on') : 'Trace: off'; }
 		else if(d.type==='execStarted'){ execTitle.textContent='Running…'; execOpen.style.display='none'; execFilter.style.display='none'; execView.setText('Executing…', true); }
 		else if(d.type==='execResult'){
+			// A run started outside the workbench (command palette, snippet, rerun) — switch to
+			// the Execute tab so the result is actually visible instead of arriving unseen.
+			if(d.external) setTab('exec');
 			if(!d.success){ execTitle.textContent='Error'; execOpen.style.display='none'; execFilter.style.display='none'; execView.setError(d.error||'Execution failed.'); }
 			else if(d.hasLog){ execTitle.textContent='Debug log'; execOpen.style.display='inline-block'; execFilter.style.display='inline-block'; execView.setLog(d.log||''); }
 			else { execTitle.textContent='Result'; execOpen.style.display='none'; execFilter.style.display='none'; execView.setText('Executed successfully.', true); } }

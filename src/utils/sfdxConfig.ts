@@ -1,6 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
-import * as vscode from "vscode";
+import { primaryProjectRoot } from "./projectUtils";
 
 /** Parsed shape of workspace `.sfdx/sfdx-config.json`. */
 type SfdxConfigJson = {
@@ -14,7 +14,7 @@ type SfdxConfigJson = {
  * Updated by `sf config set target-org` — fast and avoids a CLI round-trip.
  */
 export function readTargetOrgFromSfdxConfig(workspaceRoot?: string): string | null {
-  const root = workspaceRoot ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  const root = workspaceRoot ?? primaryProjectRoot();
   if (!root) {
     return null;
   }

@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { clampTimeoutMs } from "./httpUtils";
 
 export const TOOLING_API_VERSION = "v67.0";
 export const ASFX_DIR = ".sfdx/asfx";
@@ -38,6 +39,11 @@ export function getAutoSaveBeforePush(): boolean {
 
 export function getHttpTimeout(): number {
   return getConfig().get<number>("httpTimeoutMs", 30000);
+}
+
+/** Timeout for Execute Anonymous (SOAP): long-running DML keeps going server-side, so default 10 min. */
+export function getExecuteAnonymousTimeout(): number {
+  return clampTimeoutMs(getConfig().get<number>("apex.executeAnonymousTimeoutMs", 600000), 600000, 30000);
 }
 
 export function getWarnOnProductionOrg(): boolean {

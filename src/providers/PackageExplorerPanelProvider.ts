@@ -3,6 +3,9 @@ import * as fs from "fs";
 import * as path from "path";
 import { runCommandArgs } from "../utils/commandRunner";
 import { Telemetry, categorizeError } from "../utils/telemetry";
+import { getOrgListForPicker, refreshOrgListCache, getOrgByTarget } from "../utils/orgListCache";
+import { getNonce } from "../utils/htmlUtils";
+import * as os from "os";
 
 /** A Dev Hub org that can own 2GP packages. */
 interface HubOption {
@@ -94,26 +97,42 @@ export class PackageExplorerPanelProvider {
   /** Cached Dev Hub list and per-hub packages, so reopening/switching is instant. Refresh forces a reload. */
   private static _hubCache: HubOption[] | undefined;
   private static readonly _packageCache = new Map<string, PackageEntry[]>();
+  /** Max hubs whose package lists are kept in memory (oldest evicted first). */
+  private static readonly MAX_CACHED_HUBS = 5;
+  /** In-flight package loads per hub, so a 'ready' reload and an explicit show() don't spawn the CLI twice. */
+  private static readonly _packageInflight = new Map<string, Promise<PackageEntry[]>>();
+  /** Which view the panel shows — repainted from this when the (non-retained) webview reloads. */
+  private static _mode: "hub" | "installed" = "hub";
 
   /** @param hubUsername when launched from a Dev Hub org node, preselect that hub. */
   public static async show(hubUsername?: string): Promise<void> {
     if (hubUsername) PackageExplorerPanelProvider._selectedHub = hubUsername;
-    this.ensurePanel();
-    await this.load();
+    PackageExplorerPanelProvider._mode = "hub";
+    // A freshly created panel loads on its 'ready' message; an existing one is refreshed now.
+    if (!this.ensurePanel()) await this.load();
   }
 
   /** Open directly on the "Installed in org" view for a specific org (any org, not just hubs). */
   public static async showInstalled(username: string): Promise<void> {
     PackageExplorerPanelProvider._installedOrg = username;
-    this.ensurePanel();
-    await this.loadInstalled();
+    PackageExplorerPanelProvider._mode = "installed";
+    if (!this.ensurePanel()) await this.loadInstalled();
   }
 
-  private static ensurePanel(): void {
+  /** Close the panel and drop cached hub/package data (extension deactivate / project switch). */
+  public static disposeAll(): void {
+    PackageExplorerPanelProvider._panel?.dispose();
+    PackageExplorerPanelProvider._hubCache = undefined;
+    PackageExplorerPanelProvider._packageCache.clear();
+    PackageExplorerPanelProvider._packageInflight.clear();
+  }
+
+  /** @returns true when a new panel was created (it will request data via 'ready'). */
+  private static ensurePanel(): boolean {
     const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
     if (PackageExplorerPanelProvider._panel) {
       PackageExplorerPanelProvider._panel.reveal(column);
-      return;
+      return false;
     }
     const panel = vscode.window.createWebviewPanel(
       PackageExplorerPanelProvider.viewType,
@@ -130,6 +149,7 @@ export class PackageExplorerPanelProvider {
       messageListener.dispose();
       PackageExplorerPanelProvider._panel = undefined;
     });
+    return true;
   }
 
   // ── Message routing ─────────────────────────────────────────────────────────
@@ -137,6 +157,11 @@ export class PackageExplorerPanelProvider {
   private static async handleMessage(msg: { command: string; [k: string]: unknown }): Promise<void> {
     const s = (k: string): string | undefined => (typeof msg[k] === "string" ? (msg[k] as string) : undefined);
     switch (msg.command) {
+      case "ready":
+        // Webview (re)loaded — initial open or re-shown after being hidden (not retained).
+        if (PackageExplorerPanelProvider._mode === "installed" && PackageExplorerPanelProvider._installedOrg) await this.loadInstalled();
+        else await this.load(false);
+        break;
       case "refresh":
         await this.load(true);
         break;
@@ -199,6 +224,7 @@ export class PackageExplorerPanelProvider {
   private static async load(force = false): Promise<void> {
     const panel = PackageExplorerPanelProvider._panel;
     if (!panel) return;
+    PackageExplorerPanelProvider._mode = "hub";
     try {
       const hubs = await this.getDevHubs(force);
       if (hubs.length === 0) {
@@ -241,23 +267,45 @@ export class PackageExplorerPanelProvider {
 
   private static async getDevHubs(force = false): Promise<HubOption[]> {
     if (!force && PackageExplorerPanelProvider._hubCache) return PackageExplorerPanelProvider._hubCache;
-    const raw = await runCommandArgs("sf", ["org", "list", "--json"], undefined, undefined, false);
-    const parsed = JSON.parse(raw) as {
-      result?: {
-        nonScratchOrgs?: {
-          username?: string;
-          alias?: string;
-          isDevHub?: boolean;
-          isDefaultDevHubUsername?: boolean;
-        }[];
-      };
-    };
-    const orgs = parsed.result?.nonScratchOrgs ?? [];
-    const hubs = orgs
-      .filter((o) => o.isDevHub && o.username)
-      .map((o) => ({ username: o.username as string, alias: o.alias, isDefault: !!o.isDefaultDevHubUsername }));
+    // Shared org-list cache (one deduped `sf org list` for the whole extension) instead of our own spawn.
+    const orgs = force ? await refreshOrgListCache() : await getOrgListForPicker();
+    const defaultHub = this.readDefaultDevHub();
+    const defaultHubUser = defaultHub ? getOrgByTarget(defaultHub)?.username ?? defaultHub : undefined;
+    const hubs: HubOption[] = [];
+    for (const o of orgs) {
+      const rec = getOrgByTarget(o.username);
+      if (!rec?.isDevHub || rec.isScratch) continue;
+      hubs.push({
+        username: rec.username,
+        alias: rec.alias,
+        isDefault: !!defaultHubUser && defaultHubUser.toLowerCase() === rec.username.toLowerCase()
+      });
+    }
     PackageExplorerPanelProvider._hubCache = hubs;
     return hubs;
+  }
+
+  /** Default Dev Hub (username or alias) from project then global SF/SFDX config files — no CLI spawn. */
+  private static readDefaultDevHub(): string | undefined {
+    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const home = os.homedir();
+    const candidates = [
+      root && path.join(root, ".sf", "config.json"),
+      root && path.join(root, ".sfdx", "sfdx-config.json"),
+      path.join(home, ".sf", "config.json"),
+      path.join(home, ".sfdx", "sfdx-config.json")
+    ].filter((p): p is string => !!p);
+    for (const file of candidates) {
+      try {
+        if (!fs.existsSync(file)) continue;
+        const json = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
+        const v = json["target-dev-hub"] ?? json.defaultdevhubusername ?? json.defaultDevHubUsername;
+        if (typeof v === "string" && v.trim()) return v.trim();
+      } catch {
+        /* unreadable config — try the next */
+      }
+    }
+    return undefined;
   }
 
   private static async getPackages(hub: string, force = false): Promise<PackageEntry[]> {
@@ -265,6 +313,14 @@ export class PackageExplorerPanelProvider {
       const cached = PackageExplorerPanelProvider._packageCache.get(hub);
       if (cached) return cached;
     }
+    const inflight = PackageExplorerPanelProvider._packageInflight.get(hub);
+    if (inflight) return inflight;
+    const p = this.fetchPackages(hub).finally(() => PackageExplorerPanelProvider._packageInflight.delete(hub));
+    PackageExplorerPanelProvider._packageInflight.set(hub, p);
+    return p;
+  }
+
+  private static async fetchPackages(hub: string): Promise<PackageEntry[]> {
     const project = this.readProject();
     const aliases = project.idToAlias; // id -> alias
     // `--verbose` computes code coverage per version — very slow on packages with many
@@ -325,7 +381,14 @@ export class PackageExplorerPanelProvider {
         p.dependencies = dir.dependencies.map((d) => this.resolveDep(d, project.aliasToId));
       }
     }
-    PackageExplorerPanelProvider._packageCache.set(hub, packages);
+    const cache = PackageExplorerPanelProvider._packageCache;
+    cache.delete(hub); // re-insert so Map order is LRU-ish
+    cache.set(hub, packages);
+    while (cache.size > PackageExplorerPanelProvider.MAX_CACHED_HUBS) {
+      const oldest = cache.keys().next().value;
+      if (oldest === undefined) break;
+      cache.delete(oldest);
+    }
     return packages;
   }
 
@@ -372,12 +435,14 @@ export class PackageExplorerPanelProvider {
       if (pick || !org) {
         const chosen = await this.pickOrg("Select an org to list installed packages");
         if (!chosen) {
+          PackageExplorerPanelProvider._mode = "hub";
           panel.webview.postMessage({ command: "setMode", mode: "hub" });
           return;
         }
         org = chosen.username;
         PackageExplorerPanelProvider._installedOrg = org;
       }
+      PackageExplorerPanelProvider._mode = "installed";
       panel.webview.postMessage({ command: "setLoading", loading: true });
       try {
         const installed = await this.getInstalled(org);
@@ -596,7 +661,7 @@ export class PackageExplorerPanelProvider {
       const uri = await vscode.window.showSaveDialog({
         filters: { CSV: ["csv"] },
         saveLabel: "Export versions",
-        defaultUri: vscode.Uri.file(`${pkg.name.replace(/\W+/g, "_")}_versions.csv`)
+        defaultUri: this.defaultSaveUri(`${pkg.name.replace(/\W+/g, "_")}_versions.csv`)
       });
       if (!uri) return;
       fs.writeFileSync(uri.fsPath, csv, "utf8");
@@ -627,18 +692,19 @@ export class PackageExplorerPanelProvider {
     await this.load(true);
   }
 
+  /** Save-dialog default next to the workspace (a bare relative Uri.file resolves to the filesystem root). */
+  private static defaultSaveUri(fileName: string): vscode.Uri {
+    const folder = vscode.workspace.workspaceFolders?.[0]?.uri;
+    return folder ? vscode.Uri.joinPath(folder, fileName) : vscode.Uri.file(path.join(os.homedir(), fileName));
+  }
+
   private static async pickOrg(placeHolder: string): Promise<OrgOption | undefined> {
-    const raw = await runCommandArgs("sf", ["org", "list", "--json"], undefined, undefined, false);
-    const parsed = JSON.parse(raw) as {
-      result?: {
-        nonScratchOrgs?: { username?: string; alias?: string }[];
-        scratchOrgs?: { username?: string; alias?: string }[];
-      };
-    };
-    const orgs: OrgOption[] = [
-      ...(parsed.result?.nonScratchOrgs ?? []).map((o) => ({ username: o.username ?? "", alias: o.alias, scratch: false })),
-      ...(parsed.result?.scratchOrgs ?? []).map((o) => ({ username: o.username ?? "", alias: o.alias, scratch: true }))
-    ].filter((o) => o.username);
+    // Shared, deduped org-list cache — no extra `sf org list` spawn per pick.
+    const list = await getOrgListForPicker();
+    const orgs: OrgOption[] = list.map((o) => {
+      const rec = getOrgByTarget(o.username);
+      return { username: o.username, alias: rec?.alias, scratch: !!rec?.isScratch };
+    });
     const items = orgs.map((o) => ({
       label: o.alias || o.username,
       description: o.username + (o.scratch ? "  (scratch)" : ""),
@@ -711,12 +777,13 @@ export class PackageExplorerPanelProvider {
   // ── Webview HTML ────────────────────────────────────────────────────────────
 
   private static getHtml(): string {
+    const nonce = getNonce();
     return `<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
     <style>
         * { box-sizing: border-box; }
         body { font-family: var(--vscode-font-family, system-ui, sans-serif); font-size: 13px; color: var(--vscode-foreground); background: var(--vscode-editor-background); margin: 0; padding: 16px; }
@@ -818,7 +885,7 @@ export class PackageExplorerPanelProvider {
     <div id="content"></div>
     <div class="menu" id="menu"></div>
 
-    <script>
+    <script nonce="${nonce}">
         const vscode = acquireVsCodeApi();
         const tabHub = document.getElementById('tab-hub');
         const tabInst = document.getElementById('tab-installed');
@@ -1050,6 +1117,8 @@ export class PackageExplorerPanelProvider {
             else if (m.command === 'setMode') { setModeUi(m.mode); }
             else if (m.command === 'setError') { subbar.style.display = 'none'; content.innerHTML = '<div class="error">' + esc(m.message) + '</div>'; }
         });
+        // Not retained while hidden: ask the host to (re)send the current view on every load.
+        vscode.postMessage({ command: 'ready' });
     </script>
 </body>
 </html>`;

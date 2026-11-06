@@ -1,0 +1,16 @@
+{
+	// Type-check only: the webview entry points run in the browser (DOM) and are
+	// bundled by esbuild (esbuild.js → resources/webview/*.js), never emitted by tsc.
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"lib": [
+			"ES2020",
+			"DOM"
+		],
+		"noEmit": true
+	},
+	"include": [
+		"src/webview/**/*.ts"
+	],
+	"exclude": []
+}

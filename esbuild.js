@@ -6,6 +6,27 @@ const esbuild = require("esbuild");
 const production = process.argv.includes("--production");
 const watch = process.argv.includes("--watch");
 
+// Watch mode: print one "[watch] build started" / "[watch] build finished" pair per
+// rebuild wave across all three contexts (plus file:line:col for errors), so the VS Code
+// background task (see .vscode/tasks.json) knows when the debuggee bundles are ready.
+let pendingBuilds = 0;
+const watchMarkersPlugin = {
+  name: "watch-markers",
+  setup(build) {
+    if (!watch) return;
+    build.onStart(() => {
+      if (pendingBuilds++ === 0) console.log("[watch] build started");
+    });
+    build.onEnd((result) => {
+      for (const { text, location } of result.errors) {
+        console.error(`✘ [ERROR] ${text}`);
+        if (location) console.error(`    ${location.file}:${location.line}:${location.column}:`);
+      }
+      if (--pendingBuilds === 0) console.log("[watch] build finished");
+    });
+  },
+};
+
 const shared = {
   bundle: true,
   format: "cjs",
@@ -14,6 +35,7 @@ const shared = {
   sourcemap: !production,
   minify: production,
   logLevel: "info",
+  plugins: [watchMarkersPlugin],
 };
 
 async function main() {
@@ -40,7 +62,8 @@ async function main() {
     outdir: "resources/webview",
     sourcemap: !production,
     minify: production,
-    logLevel: "info"
+    logLevel: "info",
+    plugins: [watchMarkersPlugin],
   });
 
   // Language server: a standalone Node process spawned by the extension. Bundles
@@ -59,11 +82,26 @@ async function main() {
     },
   });
 
+  // Language-server parse worker (worker_threads entry): runs the Apex parse off the
+  // server's event loop. Loaded by path (out/serverParseWorker.js, next to out/server.js).
+  const workerCtx = await esbuild.context({
+    ...shared,
+    entryPoints: ["server/src/parseWorker.ts"],
+    outfile: "out/serverParseWorker.js",
+    banner: {
+      js: "const __importMetaUrl = require('url').pathToFileURL(__filename).href;",
+    },
+    define: {
+      "import.meta.url": "__importMetaUrl",
+    },
+  });
+
+  const all = [extensionCtx, webviewCtx, serverCtx, workerCtx];
   if (watch) {
-    await Promise.all([extensionCtx.watch(), webviewCtx.watch(), serverCtx.watch()]);
+    await Promise.all(all.map((c) => c.watch()));
   } else {
-    await Promise.all([extensionCtx.rebuild(), webviewCtx.rebuild(), serverCtx.rebuild()]);
-    await Promise.all([extensionCtx.dispose(), webviewCtx.dispose(), serverCtx.dispose()]);
+    await Promise.all(all.map((c) => c.rebuild()));
+    await Promise.all(all.map((c) => c.dispose()));
   }
 }
 
