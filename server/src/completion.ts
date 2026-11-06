@@ -3,7 +3,7 @@
  * completion (member access, `new`, constructor named args, annotations, catch types,
  * picklist values, type names, standard library, statement snippets).
  */
-import { CancellationToken, Connection, CompletionItem, CompletionItemKind, InsertTextFormat } from 'vscode-languageserver/node';
+import { CancellationToken, Connection, CompletionItem, CompletionItemKind, CompletionList, InsertTextFormat } from 'vscode-languageserver/node';
 import type { TextDocument } from 'vscode-languageserver-textdocument';
 import type { ServerContext } from './context';
 import { enclosingClass, resolveVarType, ApexMember, ApexIndex } from './apexSymbols';
@@ -15,9 +15,15 @@ import { orCancelled, throwIfCancelled } from './cancel';
 import { baseTypeName, regexReceiverType, matchesMemberPrefix, nameMatchesNsOptional } from './textUtil';
 
 export function register(connection: Connection, ctx: ServerContext): void {
-    connection.onCompletion((params, token) =>
-        orCancelled<CompletionItem[]>([], () => complete(ctx, params.textDocument.uri, params.position, token)),
-    );
+    connection.onCompletion((params, token) => {
+        // Soft schema deadline (team B): schema waits stop after ~1.5 s and return what's
+        // ready; `budget.incomplete` then makes the client re-ask (served from cache).
+        const budget = ctx.schema.completionBudget(token);
+        return orCancelled<CompletionList>({ isIncomplete: false, items: [] }, async () => {
+            const items = await complete(ctx, params.textDocument.uri, params.position, budget);
+            return { isIncomplete: budget.incomplete, items };
+        });
+    });
 }
 
 /**
