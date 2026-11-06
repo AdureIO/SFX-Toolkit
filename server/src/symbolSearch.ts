@@ -103,6 +103,17 @@ export interface FileModel {
     version?: number;
 }
 
+/**
+ * Comments and string contents blanked (offsets preserved), string delimiters kept so
+ * `f('x')` still has one argument (a fully blanked literal would look like `f(   )`).
+ */
+function blankCode(text: string): string {
+    return text
+        .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+        .replace(/\/\/[^\n]*/g, (m) => ' '.repeat(m.length))
+        .replace(/'(?:\\.|[^'\\\n])*'/g, (m) => `'${' '.repeat(m.length - 2)}'`);
+}
+
 function makeModel(path: string, uri: string, text: string, index: ApexIndex, version?: number): FileModel {
     const lineStarts = [0];
     for (let i = text.indexOf('\n'); i !== -1; i = text.indexOf('\n', i + 1)) lineStarts.push(i + 1);
@@ -111,7 +122,7 @@ function makeModel(path: string, uri: string, text: string, index: ApexIndex, ve
         path,
         uri,
         text,
-        code: blankNonCode(text),
+        code: blankCode(text),
         index,
         typeDecls,
         typeScopes: new Set(typeDecls.map((t) => t.range)),
@@ -509,6 +520,192 @@ async function typeOfReceiver(
     return g.find(v.t.ft.file, qn) ?? g.resolve(qn, m.path) ?? undefined;
 }
 
+// ─── Overload selection by argument types ───────────────────────────────────────
+
+/** Lower-cased simple type name of an argument / parameter (`undefined` = not determinable). */
+export type ArgType = string | undefined;
+
+function normType(t: string): string {
+    const x = t.trim();
+    if (/\[\s*\]$/.test(x)) return 'list';
+    return (x.replace(/<[\s\S]*$/, '').split('.').pop() ?? '').trim().toLowerCase();
+}
+
+/** Normalised parameter types of a method / constructor declaration (read from the file text). */
+export function paramTypesOf(m: FileModel, member: ApexMemberDecl): string[] {
+    const code = m.code;
+    let i = offsetOf(m, member.nameRange.end.line, member.nameRange.end.character);
+    while (i < code.length && /\s/.test(code[i])) i++;
+    if (code[i] !== '(') return [];
+    const parts: string[] = [];
+    let depth = 0;
+    let from = i + 1;
+    for (i++; i < code.length; i++) {
+        const c = code[i];
+        if (c === '(' || c === '[' || c === '<') depth++;
+        else if (c === ']' || c === '>') depth--;
+        else if (c === ')') {
+            if (depth === 0) {
+                parts.push(code.slice(from, i));
+                break;
+            }
+            depth--;
+        } else if (c === ',' && depth === 0) {
+            parts.push(code.slice(from, i));
+            from = i + 1;
+        }
+    }
+    return parts
+        .map((p) => p.trim())
+        .filter((p) => p)
+        .map((p) => normType(p.replace(/^(?:final\s+)+/i, '').replace(/\s+[A-Za-z_]\w*\s*$/, '')));
+}
+
+const NUMERIC_RANK: Record<string, number> = { integer: 1, long: 2, double: 3, decimal: 3 };
+const PRIMITIVES = new Set(['integer', 'long', 'double', 'decimal', 'boolean']);
+
+/** Compatibility score of passing an `arg` to a `param` (negative = not callable). */
+function argScore(arg: ArgType, param: string, isSub: (a: string, p: string) => boolean): number {
+    if (arg === undefined) return 0;
+    if (param === 'object') return 1;
+    if (arg === param) return 4;
+    if (arg === 'null') return PRIMITIVES.has(param) ? -1 : 1;
+    const ra = NUMERIC_RANK[arg];
+    const rp = NUMERIC_RANK[param];
+    if (ra && rp) return rp >= ra ? 3 - 0.1 * (rp - ra) : -1;
+    if ((arg === 'string' && param === 'id') || (arg === 'id' && param === 'string')) return 2;
+    if (isSub(arg, param)) return 3;
+    if (param === 'sobject' && !PRIMITIVES.has(arg) && arg !== 'string' && arg !== 'list' && arg !== 'set' && arg !== 'map') return 2;
+    return -1;
+}
+
+export interface OverloadChoice<T> {
+    picks: T[];
+    /** True when the argument types single out exactly one signature. */
+    sure: boolean;
+}
+
+/**
+ * Choose among same-arity overloads by the call's argument types. `picks` keeps the
+ * candidates' order (nearest first); it is every candidate when nothing can be told.
+ */
+export function chooseOverload<T extends { params: string[] }>(
+    cands: T[],
+    args: ArgType[] | undefined,
+    isSub: (a: string, p: string) => boolean,
+): OverloadChoice<T> {
+    const sigs = new Set(cands.map((c) => c.params.join(',')));
+    if (!args || sigs.size <= 1) return { picks: cands, sure: sigs.size <= 1 };
+    const scored = cands.map((c) => {
+        let total = 0;
+        for (let k = 0; k < args.length; k++) {
+            const sc = argScore(args[k], c.params[k] ?? '', isSub);
+            if (sc < 0) return { c, total: -1 };
+            total += sc;
+        }
+        return { c, total };
+    });
+    const compat = scored.filter((x) => x.total >= 0);
+    if (!compat.length) return { picks: cands, sure: false };
+    const best = Math.max(...compat.map((x) => x.total));
+    const picks = compat.filter((x) => x.total === best).map((x) => x.c);
+    const allKnown = args.every((a) => a !== undefined);
+    const compatSigs = new Set(compat.map((x) => x.c.params.join(',')));
+    const pickSigs = new Set(picks.map((c) => c.params.join(',')));
+    return { picks, sure: pickSigs.size === 1 && (allKnown || compatSigs.size === 1) };
+}
+
+/** The value type of an argument expression, or undefined. */
+async function argTypeOf(s: SearchSession, m: FileModel, expr: string, pos: { line: number; character: number }): Promise<ArgType> {
+    const e = expr.trim();
+    if (!e) return undefined;
+    if (e[0] === "'") return /^'(?:[^'\\]|\\.)*'$/.test(e) || /^'(?:[^'\\]|\\.)*'\s*\+/.test(e) ? 'string' : undefined;
+    if (/^[-+]?\d+$/.test(e)) return 'integer';
+    if (/^[-+]?\d+[lL]$/.test(e)) return 'long';
+    if (/^[-+]?(\d+\.\d*|\.\d+)[dD]?$/.test(e)) return 'decimal';
+    if (/^(true|false)$/i.test(e)) return 'boolean';
+    if (/^null$/i.test(e)) return 'null';
+    const cast = /^\(\s*([A-Za-z_][\w.]*(?:<[^()]*>)?(?:\[\])?)\s*\)\s*[A-Za-z_(]/.exec(e);
+    if (cast) return normType(cast[1]);
+    if (/^[A-Za-z_]\w*$/.test(e)) {
+        const v = varAt(m, e, pos.line, pos.character);
+        if (v) return normType(v.type);
+    }
+    const view: ParseView = { result: { index: m.index } as ApexParseResult, stale: false, toParsePosition: (p) => p };
+    try {
+        const v = await new Resolver(s.ctx, s.docOf(m), pos, [view], s.token).exprValue(e);
+        if (!v || v.static) return undefined;
+        switch (v.t.k) {
+            case 'user':
+                return v.t.decl.name.toLowerCase();
+            case 'std':
+                return v.t.cls.name.toLowerCase();
+            case 'sobject':
+                return v.t.name.toLowerCase();
+            default:
+                return undefined;
+        }
+    } catch {
+        s.check();
+        return undefined;
+    }
+}
+
+/** Argument types of the call whose name ends at `end` (undefined when the parens don't match). */
+export async function argTypesAt(s: SearchSession, m: FileModel, end: number, pos: { line: number; character: number }): Promise<ArgType[] | undefined> {
+    const code = m.code;
+    let i = end;
+    while (i < code.length && /\s/.test(code[i])) i++;
+    if (code[i] !== '(') return undefined;
+    const spans: [number, number][] = [];
+    let depth = 0;
+    let angle = 0;
+    let from = i + 1;
+    let closed = false;
+    for (i++; i < code.length; i++) {
+        const c = code[i];
+        if (c === '(' || c === '[' || c === '{') depth++;
+        else if (c === ')' || c === ']' || c === '}') {
+            if (depth === 0) {
+                if (c !== ')') return undefined;
+                if (code.slice(from, i).trim() || spans.length) spans.push([from, i]);
+                closed = true;
+                break;
+            }
+            depth--;
+        } else if (c === '<' && /\w/.test(code[i - 1] ?? '')) angle++;
+        else if (c === '>' && angle > 0) angle--;
+        else if (c === ',' && depth === 0 && angle === 0) {
+            spans.push([from, i]);
+            from = i + 1;
+        } else if (c === ';') return undefined;
+    }
+    if (!closed) return undefined;
+    const out: ArgType[] = [];
+    for (const [a, b] of spans) out.push(await argTypeOf(s, m, m.text.slice(a, b), pos));
+    return out;
+}
+
+/** Subtype test on the workspace graph, by simple names. */
+function subtypeTest(g: TypeGraph, fromPath: string): (a: string, p: string) => boolean {
+    return (a, p) => {
+        const n = g.resolve(a, fromPath);
+        return !!n && g.ancestors(n).some((x) => x.header.name.toLowerCase() === p);
+    };
+}
+
+/** A same-arity method candidate with its normalised parameter types. */
+interface OverloadCand {
+    owner: TypeNode;
+    member: ApexMemberDecl;
+    params: string[];
+}
+
+async function candOf(s: SearchSession, owner: TypeNode, member: ApexMemberDecl): Promise<OverloadCand> {
+    const m = await s.load(owner.file);
+    return { owner, member, params: m ? paramTypesOf(m, member) : [] };
+}
+
 // ─── Resolution ─────────────────────────────────────────────────────────────────
 
 export type ResolvedSymbol =
@@ -544,31 +741,49 @@ function pickOverload(list: ApexMemberDecl[], arity: number | undefined): ApexMe
     return list[0];
 }
 
-/** First type in [start, ...ancestors] declaring a member `name` of the wanted kind. */
+/**
+ * First type in [start, ...ancestors] declaring a member `name` of the wanted kind. For
+ * methods, every same-arity overload along the chain competes when `args` is given: the
+ * call's argument types pick the signature (nearest declaration first among equals).
+ */
 async function findMemberOwner(
     s: SearchSession,
     start: TypeNode,
     name: string,
     want: 'method' | 'field',
     arity?: number,
+    args?: () => Promise<ArgType[] | undefined>,
 ): Promise<{ owner: TypeNode; member: ApexMemberDecl } | undefined> {
     const g = await s.graph();
     const lc = name.toLowerCase();
     let fallback: { owner: TypeNode; member: ApexMemberDecl } | undefined;
+    const exact: { owner: TypeNode; member: ApexMemberDecl }[] = [];
     for (const t of [start, ...g.ancestors(start)]) {
         s.check();
         const list = (await s.membersOf(t)).filter(
             (x) => x.name.toLowerCase() === lc && (want === 'method' ? isMethodKind(x.kind) : isFieldKind(x.kind)),
         );
         if (!list.length) continue;
-        if (want === 'method' && arity !== undefined && !list.some((x) => x.arity === arity)) {
-            fallback ??= { owner: t, member: list[0] };
-            continue; // an overload with this arity may be inherited
+        if (want === 'method' && arity !== undefined) {
+            const same = list.filter((x) => x.arity === arity);
+            if (!same.length) {
+                fallback ??= { owner: t, member: list[0] };
+                continue; // an overload with this arity may be inherited
+            }
+            for (const x of same) exact.push({ owner: t, member: x });
+            if (!args) break;
+            continue;
         }
         const member = want === 'method' ? pickOverload(list, arity) : list[0];
         if (member) return { owner: t, member };
     }
-    return fallback;
+    if (!exact.length) return fallback;
+    if (exact.length === 1 || !args) return exact[0];
+    const cands = await Promise.all(exact.map((e) => candOf(s, e.owner, e.member)));
+    if (new Set(cands.map((c) => c.params.join(','))).size <= 1) return exact[0];
+    const choice = chooseOverload(cands, await args(), subtypeTest(g, start.file));
+    const pick = choice.picks[0] ?? cands[0];
+    return { owner: pick.owner, member: pick.member };
 }
 
 /** Graph node for a type declared in a model. */
@@ -627,6 +842,7 @@ export async function resolveAt(
 
     const call = followedByCall(m.code, end);
     const arity = call ? callArity(m.code, end) : undefined;
+    const argsFn = call ? () => argTypesAt(s, m, end, sp) : undefined;
     const recv = receiverAt(m.code, start);
     const notWorkspace = (what?: string): Resolution => {
         if (SCHEMA_SUFFIX.test(word) || stubbedObjectNames().has(lc)) return out(undefined, `'${word}' is part of the org schema (SObject/field) and can't be renamed here.`);
@@ -636,7 +852,7 @@ export async function resolveAt(
     const memberOf = async (nodes: TypeNode[]): Promise<Resolution> => {
         const want = call ? 'method' : 'field';
         for (const n of nodes) {
-            const hit = await findMemberOwner(s, n, word, want, arity);
+            const hit = await findMemberOwner(s, n, word, want, arity, argsFn);
             if (hit) return out({ kind: want, name: hit.member.name, owner: hit.owner, member: hit.member });
         }
         // A static access of an inner type: `Outer.Inner`.
@@ -719,7 +935,7 @@ export async function resolveAt(
         for (const t of encl) {
             const n = await nodeOf(s, m, t);
             if (!n) continue;
-            const hit = await findMemberOwner(s, n, word, 'method', arity);
+            const hit = await findMemberOwner(s, n, word, 'method', arity, argsFn);
             if (hit) return out({ kind: 'method', name: hit.member.name, owner: hit.owner, member: hit.member });
         }
         if (stdTypeName(word) || stdMembersFor(word)) return notWorkspace();
@@ -958,6 +1174,7 @@ export async function findOccurrences(s: SearchSession, sym: ResolvedSymbol, mod
     const family = await symbolFamily(s, sym);
     const files = await candidateFiles(s, sym, family);
     const arities = sym.kind === 'method' ? await familyArities(s, family, sym.name) : undefined;
+    const ov = sym.kind === 'method' ? await overloadSet(s, family, sym) : undefined;
 
     const out: Occurrence[] = [];
     // Parse candidates a few ahead (the worker queues them); classify in order. Every load
@@ -980,7 +1197,7 @@ export async function findOccurrences(s: SearchSession, sym: ResolvedSymbol, mod
         if (i % 10 === 9) await new Promise<void>((res) => setImmediate(res));
         const m = r.m;
         if (!m) continue;
-        for (const o of await classifyFile(s, m, g, sym, family, mode, arities)) out.push({ path: m.path, uri: s.uriOf(m.path), ...o });
+        for (const o of await classifyFile(s, m, g, sym, family, mode, arities, ov)) out.push({ path: m.path, uri: s.uriOf(m.path), ...o });
     }
     for (const o of await metadataOccurrences(s, sym, family)) out.push(o);
     return dedupeOccurrences(out);
@@ -1002,6 +1219,31 @@ async function familyArities(s: SearchSession, family: Set<TypeNode>, name: stri
     const out = new Set<number>();
     for (const t of family) for (const x of await s.membersOf(t)) if (isMethodKind(x.kind) && x.name.toLowerCase() === lc && x.arity !== undefined) out.add(x.arity);
     return out;
+}
+
+/**
+ * The same-arity overloads of a method across its family, when they differ in parameter
+ * types (undefined = not overloaded at that arity: arity alone decides).
+ */
+interface OverloadSet {
+    arity: number;
+    symSig: string;
+    cands: OverloadCand[];
+}
+
+async function overloadSet(s: SearchSession, family: Set<TypeNode>, sym: { name: string; owner: TypeNode; member: ApexMemberDecl }): Promise<OverloadSet | undefined> {
+    const arity = sym.member.arity;
+    if (arity === undefined) return undefined;
+    const lc = sym.name.toLowerCase();
+    const cands: OverloadCand[] = [];
+    for (const t of family) {
+        for (const x of await s.membersOf(t)) {
+            if (isMethodKind(x.kind) && x.name.toLowerCase() === lc && x.arity === arity) cands.push(await candOf(s, t, x));
+        }
+    }
+    if (new Set(cands.map((c) => c.params.join(','))).size <= 1) return undefined;
+    const me = cands.find((c) => c.member === sym.member) ?? (await candOf(s, sym.owner, sym.member));
+    return { arity, symSig: me.params.join(','), cands };
 }
 
 function wordRanges(m: FileModel, name: string, from = 0, to = m.code.length): { start: number; end: number }[] {
@@ -1043,6 +1285,7 @@ async function classifyFile(
     family: Set<TypeNode>,
     mode: SearchMode,
     arities?: Set<number>,
+    ov?: OverloadSet,
 ): Promise<{ range: Range; role?: OccurrenceRole }[]> {
     const out: { range: Range; role?: OccurrenceRole }[] = [];
     const nodeFor = (t: ApexTypeDecl | undefined) => (t ? g.find(m.path, qnameOf(t)) : undefined);
@@ -1130,10 +1373,18 @@ async function classifyFile(
                 if (d) {
                     // A declaration: one of the family's (same arity) declarations.
                     hit = isMethodKind(d.x.kind) && inFamily(nodeFor(d.t)) && arityOk(d.x.arity);
+                    if (hit && ov && d.x.arity === ov.arity && paramTypesOf(m, d.x).join(',') !== ov.symSig) hit = false;
                 } else {
                     // Bare call: inside a family type (innermost→outer: inner classes may call outer statics).
                     hit = enclosingTypes(m, p.line, p.character).some((t) => inFamily(nodeFor(t)));
                 }
+            }
+            // Overloads that differ only in parameter types: the argument types decide. A call
+            // whose target can't be proven stays a reference but is never renamed.
+            if (hit && ov && !memberDeclAt(p) && callArity(m.code, w.end) === ov.arity) {
+                const choice = chooseOverload(ov.cands, await argTypesAt(s, m, w.end, p), subtypeTest(g, m.path));
+                if (!choice.picks.some((c) => c.params.join(',') === ov.symSig)) hit = false;
+                else if (!choice.sure && mode === 'rename') hit = false;
             }
         } else {
             // field / property / enum value
@@ -1194,6 +1445,36 @@ export function declarationOf(s: SearchSession, sym: ResolvedSymbol): Occurrence
     }
     if (sym.kind === 'type') return { path: sym.node.file, uri: s.uriOf(sym.node.file), range: sym.node.header.nameRange };
     return { path: sym.owner.file, uri: s.uriOf(sym.owner.file), range: sym.member.nameRange };
+}
+
+/**
+ * `new Cls(args)` at a resolved type: the constructor declaration the call selects (by
+ * argument count, then argument types), or undefined when the class declares none.
+ */
+export async function constructorTarget(
+    s: SearchSession,
+    m: FileModel,
+    node: TypeNode,
+    wordStart: number,
+    wordEnd: number,
+): Promise<Occurrence | undefined> {
+    if (!/\bnew\s+(?:[A-Za-z_]\w*\s*\.\s*)*$/i.test(m.code.slice(Math.max(0, wordStart - 120), wordStart)) || !followedByCall(m.code, wordEnd)) return undefined;
+    const ctors = (await s.membersOf(node)).filter((x) => x.kind === 'constructor');
+    if (!ctors.length) return undefined;
+    const arity = callArity(m.code, wordEnd);
+    let list = ctors;
+    if (arity !== undefined) {
+        const same = ctors.filter((c) => c.arity === arity);
+        if (same.length) list = same;
+    }
+    let pick = list[0];
+    if (list.length > 1) {
+        const cands = await Promise.all(list.map((c) => candOf(s, node, c)));
+        const g = await s.graph();
+        const args = await argTypesAt(s, m, wordEnd, positionOf(m, wordStart));
+        pick = chooseOverload(cands, args, subtypeTest(g, m.path)).picks[0]?.member ?? list[0];
+    }
+    return { path: node.file, uri: s.uriOf(node.file), range: pick.nameRange };
 }
 
 export function sameRange(a: Range, b: Range): boolean {

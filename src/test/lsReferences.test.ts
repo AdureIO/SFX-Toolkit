@@ -302,6 +302,15 @@ describe("references: ground truth (300-class workspace)", function () {
 			assert.ok(edits.every((e) => e.newText === "fetchAccounts"));
 		});
 
+		it("overloads by parameter type: rename touches only the proven calls (never an undeterminable argument)", async () => {
+			const key = (x: { file: string; line: number; character: number; length: number }) => `${x.file}:${x.line}:${x.character}:${x.length}`;
+			for (const sym of ["OVS", "OVI", "OVA"]) {
+				const edits = editsOf(await renameAt(sym, "transform"));
+				const expected = s.fx.expected.get(sym)!.filter((e) => e.cat !== "undetermined");
+				assert.deepStrictEqual(edits.map(key).sort(), expected.map(key).sort(), `rename ${sym}`);
+			}
+		});
+
 		it("class: VF extensions, the constructor and files are renamed", async () => {
 			const edit: any = await renameAt("EXT", "AccountExtension");
 			const edits = editsOf(edit);
