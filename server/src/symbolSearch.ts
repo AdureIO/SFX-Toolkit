@@ -253,7 +253,7 @@ export class SearchSession {
             }
             const text = await fs.promises.readFile(path, 'utf8');
             this.check();
-            const parse = await ParseWorker.parseText(text);
+            const parse = await ParseWorker.parseText(text, 'background');
             this.check();
             const m = makeModel(path, pathToFileURL(path).href, text, parse.index);
             cacheClosed(path, st.mtimeMs, m);
