@@ -73,7 +73,7 @@ export function register(connection: Connection, ctx: ServerContext): void {
     // Cross-file lookups read open buffers (unsaved edits) instead of disk.
     WorkspaceIndex.setOpenDocProvider((file) => openDocIndex(ctx, file));
     // Pre-load workspace types an open document references once its parse lands.
-    ctx.parses.onParsed((uri, result) => prewarmReferencedTypes(result));
+    ctx.parses.onParsed((_uri, result) => prewarmReferencedTypes(result));
     ctx.onSchemaRefresh((objects, info) => {
         // A full refresh or a structural one (objects created/deleted) changes the object list.
         if (!objects || info?.structural) invalidateObjectNames();
@@ -707,7 +707,10 @@ class ApexCompletion {
             const label = d.outer && !this.resolver.local.decls.some((x) => x.name === d.outer && !x.outer) ? `${d.outer}.${d.name}` : d.name;
             if (matchesTyped(label, partial)) candidates.push(newTypeItem(label, '1', 'Apex class'));
         }
-        for (const name of WorkspaceIndex.allTypeNames()) if (matchesTyped(name, partial)) candidates.push(newTypeItem(name, '2', 'Apex class'));
+        for (const name of WorkspaceIndex.allTypeNames()) {
+            // Skip known enums / interfaces / abstract classes (unknown files are kept).
+            if (matchesTyped(name, partial) && WorkspaceIndex.constructableHint(name) !== false) candidates.push(newTypeItem(name, '2', 'Apex class'));
+        }
         for (const name of stdConstructableTypes()) {
             if (name.includes('.') || name === 'List' || name === 'Map' || name === 'Set') continue;
             if (matchesTyped(name, partial)) candidates.push(newTypeItem(name, '3', 'System'));

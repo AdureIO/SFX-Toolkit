@@ -69,6 +69,7 @@ class WorkspaceIndexImpl {
      * dropped on any change event for the file — at most one small entry per indexed file.
      */
     private headerCache = new Map<string, TypeHeader[]>();
+    private headerScans = new Set<string>();
     private scanned = false;
     private scanning: Promise<void> | undefined;
     /** Bumped on setRoots/dispose so an in-flight scan from an old root set is discarded. */
@@ -113,6 +114,11 @@ class WorkspaceIndexImpl {
         this.docOnly.clear();
         this.scanned = false;
         this.scanning = undefined;
+    }
+
+    /** Whether the initial workspace scan has finished (filename lookups are definitive). */
+    get scanComplete(): boolean {
+        return this.scanned;
     }
 
     /** Start (once) the background scan; resolves when the index is populated. */
@@ -285,6 +291,35 @@ class WorkspaceIndexImpl {
         const file = this.fileFor(name);
         if (!file) return Promise.resolve(undefined);
         return this.typeFileAt(file);
+    }
+
+    /**
+     * Whether `new Name()` can work for workspace type `name` (a non-abstract class), from
+     * what is already known (open buffer / parse cache / type headers); `undefined` when
+     * not known yet — the file's headers are then scanned in the background (regex, no
+     * parse) so later requests can tell.
+     */
+    constructableHint(name: string): boolean | undefined {
+        const file = this.fileFor(name);
+        if (!file) return undefined;
+        const ln = name.toLowerCase();
+        const fromDecl = (d: { kind: string; modifiers: string[] } | undefined) =>
+            d ? d.kind === 'class' && !d.modifiers.includes('abstract') : undefined;
+        const ft = this.cachedFile(file);
+        const decl = fromDecl(ft?.decls.find((d) => !d.outer && d.name.toLowerCase() === ln));
+        if (decl !== undefined) return decl;
+        const headers = this.headerCache.get(file);
+        const header = fromDecl(headers?.find((h) => !h.outer && h.name.toLowerCase() === ln));
+        if (header !== undefined) return header;
+        if (!headers && !this.headerScans.has(file)) {
+            this.headerScans.add(file);
+            fs.promises
+                .readFile(file, 'utf8')
+                .then((text) => this.setHeaders(file, extractTypeHeaders(text)))
+                .catch(() => undefined)
+                .finally(() => this.headerScans.delete(file));
+        }
+        return undefined;
     }
 
     /** Like `typeFile`, but only what's available without parsing (open buffer / cache). */

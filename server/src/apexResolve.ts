@@ -125,7 +125,9 @@ export function receiverExprBefore(t: string, dot: number): string | undefined {
             while (s > 0 && isWord(t[s - 1])) s--;
             start = s;
             const j = skipWsBack(t, s - 1);
-            if (j >= 0 && t[j] === '.') {
+            // A `.` ending an earlier line (`x.⏎    y.`) is an unfinished statement being
+            // typed over, not a chain; continuation lines lead with the dot instead.
+            if (j >= 0 && t[j] === '.' && !t.slice(j + 1, s).includes('\n')) {
                 i = skipWsBack(t, j - 1);
                 continue;
             }
@@ -478,6 +480,15 @@ export function mergeIndexes(list: Pick<ApexIndex, 'types' | 'typeDecls'>[]): { 
     return { types, typeDecls };
 }
 
+const INDEX_WAIT_MS = 500;
+
+/** Wait (bounded) for the initial workspace scan, so a type isn't mistaken for an SObject right after start. */
+function waitForIndex(): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<void>((r) => (timer = setTimeout(r, INDEX_WAIT_MS)));
+    return Promise.race([WorkspaceIndex.ready(), timeout]).finally(() => clearTimeout(timer));
+}
+
 export class Resolver {
     /** The current document's types: latest parse merged with the last error-free one. */
     readonly local: FileTypes;
@@ -551,6 +562,7 @@ export class Resolver {
         }
         const own = findDecl(from, base);
         if (own) return { k: 'user', ft: from, decl: own, local: from === this.local };
+        if (!WorkspaceIndex.hasType(base) && !WorkspaceIndex.scanComplete) await waitForIndex();
         if (WorkspaceIndex.hasType(base)) {
             const ft = await WorkspaceIndex.typeFile(base);
             throwIfCancelled(this.token);
