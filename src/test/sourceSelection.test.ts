@@ -124,10 +124,10 @@ describe("sourceSelection (windows paths)", () => {
 describe("buildDeployStartArgs", () => {
 	it("builds ONE call with multiple -d, --json and the target org", () => {
 		assert.deepStrictEqual(buildDeployStartArgs(["/a", "/b"], "me@org", { json: true }), [
-			"project", "deploy", "start", "-d", "/a", "-d", "/b", "--target-org", "me@org", "--json",
+			"project", "deploy", "start", "-d", "/a", "-d", "/b", "--test-level", "RunRelevantTests", "--target-org", "me@org", "--json",
 		]);
 	});
 	it("omits org and json when not requested", () => {
-		assert.deepStrictEqual(buildDeployStartArgs(["/a"], null), ["project", "deploy", "start", "-d", "/a"]);
+		assert.deepStrictEqual(buildDeployStartArgs(["/a"], null), ["project", "deploy", "start", "-d", "/a", "--test-level", "RunRelevantTests"]);
 	});
 });

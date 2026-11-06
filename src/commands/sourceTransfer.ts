@@ -125,6 +125,7 @@ export async function deployToDefaultOrg(uri?: vscode.Uri, uris?: vscode.Uri[]):
 					targetOrg: targetUser ?? "",
 					sourcePaths: relPaths,
 					presetName: null,
+					deployType: "RunRelevantTests",
 				});
 			try {
 				const res = await runJsonDeploy({

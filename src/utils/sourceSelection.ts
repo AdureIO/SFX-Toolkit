@@ -114,11 +114,13 @@ export function planSelection(inputs: string[], env: SelectionEnv): SelectionPla
 
 /**
  * Argument vector for ONE `sf project deploy start` covering every path (multiple `-d`).
+ * Always runs with `--test-level RunRelevantTests`.
  * `json` appends `--json`; leave it off when a caller (runJsonDeploy) adds it itself.
  */
 export function buildDeployStartArgs(paths: string[], org: string | null, opts: { json?: boolean } = {}): string[] {
 	const args = ["project", "deploy", "start"];
 	for (const p of paths) args.push("-d", p);
+	args.push("--test-level", "RunRelevantTests");
 	if (org) args.push("--target-org", org);
 	if (opts.json) args.push("--json");
 	return args;
