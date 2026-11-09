@@ -51,7 +51,7 @@ export function parseLoginUsername(stdout: string): string | null {
 
 /** Shell command shown to the user to re-authenticate `target` (alias or username). */
 export function formatReauthHint(target: string | null, rec?: Omit<ReauthRecord, "username"> & { username?: string }): string {
-	const known = rec ? { ...rec, username: rec.username ?? target ?? "" } : null;
+	const known = rec ? { ...rec, username: rec.username ?? target ?? "" } : target ? { username: target } : null;
 	const args = buildReauthArgs(known);
 	if (!args.includes("--alias") && target) args.splice(3, 0, "--alias", target);
 	return `sf ${args.join(" ")}`;
