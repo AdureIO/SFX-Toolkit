@@ -10,7 +10,7 @@ import { invalidateOrgKeyCache } from "../utils/orgKey";
 import { primaryProjectRoot, isMdapiProject } from "../utils/projectUtils";
 import { NO_ORG_KEY, onLoginCompletedHealth } from "../utils/schemaHealth";
 import { resolveDefaultTargetOrgUsername } from "../utils/defaultOrg";
-import { buildReauthArgs, parseLoginUsername } from "../utils/reauthArgsPure";
+import { buildReauthArgs, orgPickItems, parseLoginUsername } from "../utils/reauthArgsPure";
 
 /** Scratch org creation regularly exceeds the default 5-minute command timeout. */
 const SCRATCH_CREATE_TIMEOUT_MS = 30 * 60 * 1000;
@@ -514,12 +514,12 @@ export async function chooseDefaultOrg(projectDir?: string): Promise<void> {
  * Re-run the web login for an org whose connection is expired / revoked, with the alias and
  * login URL the CLI already knows for it. Clears the health problem when it completes.
  */
-export async function reauthenticateOrg(orgKey: string): Promise<void> {
+export async function reauthenticateOrg(orgKey: string, projectDir?: string): Promise<void> {
   // "__default__" (NO_ORG_KEY / DEFAULT_ORG_KEY) is a sentinel for "the default org", not an org.
   const isDefaultKey = !orgKey || orgKey === NO_ORG_KEY;
   let target = orgKey;
   if (isDefaultKey) {
-    const username = await resolveDefaultTargetOrgUsername(primaryProjectRoot());
+    const username = await resolveDefaultTargetOrgUsername(projectDir ?? primaryProjectRoot());
     if (!username) {
       await chooseDefaultOrg();
       return;
@@ -545,17 +545,19 @@ export async function reauthenticateOrg(orgKey: string): Promise<void> {
         const out = await runCommandArgs("sf", args, undefined, undefined, true, undefined, token);
         AuthInfo.clearCache();
         invalidateOrgListCache();
-        onLoginCompletedHealth();
         const got = parseLoginUsername(out);
+        onLoginCompletedHealth([orgKey, target, rec?.username, rec?.alias, expected, got]);
         if (got && expected && got.toLowerCase() !== expected.toLowerCase()) {
           const makeDefault = `Make ${got} the default`;
           const pick = await vscode.window.showWarningMessage(
-            `You signed in as ${got}, but the default org is ${expected}. ${expected} is still expired.`,
+            isDefaultKey
+              ? `You signed in as ${got}, but the default org is ${expected}. ${expected} is still expired.`
+              : `You signed in as ${got}, but ${expected} is still expired.`,
             ...(isDefaultKey ? [makeDefault] : [])
           );
           if (pick === makeDefault) {
             try {
-              await runCommandArgs("sf", ["config", "set", `target-org=${got}`], primaryProjectRoot());
+              await runCommandArgs("sf", ["config", "set", `target-org=${got}`], projectDir ?? primaryProjectRoot());
               await notifyDefaultOrgChanged(got);
               vscode.window.showInformationMessage(`Set ${got} as default org.`);
             } catch (e: any) {
@@ -573,4 +575,19 @@ export async function reauthenticateOrg(orgKey: string): Promise<void> {
       }
     }
   );
+}
+
+/** Palette entry: pick a connected org (expired scratch orgs left out) and re-authenticate it. */
+export async function reauthenticateOrgPicker(): Promise<void> {
+  const orgs = (await getOrgListForPicker()).filter((o) => !getOrgByTarget(o.username)?.isExpired);
+  if (!orgs.length) {
+    const pick = await vscode.window.showInformationMessage("No connected orgs. Connect one first.", "Connect org…");
+    if (pick) await connectOrg();
+    return;
+  }
+  const picked = await vscode.window.showQuickPick(orgPickItems(orgs), {
+    placeHolder: "Select the org to re-authenticate",
+    matchOnDescription: true
+  });
+  if (picked) await reauthenticateOrg(picked.username);
 }

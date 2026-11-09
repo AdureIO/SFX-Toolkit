@@ -160,6 +160,7 @@ export async function deployToDefaultOrg(uri?: vscode.Uri, uris?: vscode.Uri[]):
 						operation: "Deploy",
 						error: res.errorText || (api ? JSON.stringify(api, null, 2) : "Deploy failed."),
 						org: defaultOrg?.displayName,
+						reauthOrg: targetUser ?? undefined,
 						failures,
 						topError: api?.errorMessage ?? api?.stateDetail,
 						handle: operationHandle,
@@ -179,7 +180,7 @@ export async function deployToDefaultOrg(uri?: vscode.Uri, uris?: vscode.Uri[]):
 				}
 				Telemetry.event("deployFile", { status: "failed" });
 				record("Failed");
-				reportError({ operation: "Deploy", error: e, org: defaultOrg?.displayName, handle: operationHandle });
+				reportError({ operation: "Deploy", error: e, org: defaultOrg?.displayName, reauthOrg: targetUser ?? undefined, handle: operationHandle });
 				return;
 			}
 		}
@@ -241,7 +242,7 @@ export async function retrieveFromDefaultOrg(uri?: vscode.Uri, uris?: vscode.Uri
 				return;
 			}
 			Telemetry.event("retrieveFile", { status: "failed" });
-			reportError({ operation: "Retrieve", error: e, org: defaultOrg?.displayName, handle: operationHandle });
+			reportError({ operation: "Retrieve", error: e, org: defaultOrg?.displayName, reauthOrg: targetUser ?? undefined, handle: operationHandle });
 		}
 	});
 }
@@ -334,7 +335,7 @@ export async function updateProjectFromOrg(): Promise<void> {
 					return;
 				}
 				Telemetry.event("updateProjectFromOrg", { status: "failed" });
-				reportError({ operation: "Retrieve", error: e, org: defaultOrg.displayName, handle: operationHandle });
+				reportError({ operation: "Retrieve", error: e, org: defaultOrg.displayName, reauthOrg: targetUser, handle: operationHandle });
 			}
 		}
 	);

@@ -51,3 +51,36 @@ describe("formatWarmupFailure", () => {
 		assert.strictEqual(formatWarmupFailure("o", new Error("boom\nmore")), "AuthInfo: background auth warm-up failed (o): Error: boom");
 	});
 });
+
+import { formatReauthHint, orgPickItems, reauthButtonLabel } from "../utils/reauthArgsPure";
+import { onLoginCompletedHealth, reportSchemaFailure, getHealthState, reportSchemaSuccess } from "../utils/schemaHealth";
+
+describe("reauth hint, picker and button label", () => {
+	it("renders a valid hint (no --target-org)", () => {
+		assert.strictEqual(formatReauthHint("m@x.com"), "sf org login web --alias m@x.com");
+		assert.strictEqual(
+			formatReauthHint("uat", { username: "m@x.com.uat", alias: "uat", instanceUrl: "https://x.my.salesforce.com" }),
+			"sf org login web --alias uat --instance-url https://x.my.salesforce.com"
+		);
+		assert.strictEqual(formatReauthHint("m@24flow.eu.partial"), "sf org login web --alias m@24flow.eu.partial --instance-url https://test.salesforce.com");
+		assert.ok(!formatReauthHint("a").includes("--target-org"));
+	});
+	it("builds picker items", () => {
+		assert.deepStrictEqual(orgPickItems([{ label: "prod (default)", username: "a@b.com" }]), [{ label: "prod", description: "a@b.com", username: "a@b.com" }]);
+	});
+	it("button label", () => {
+		assert.strictEqual(reauthButtonLabel("uat"), "Re-authenticate uat");
+		assert.strictEqual(reauthButtonLabel(undefined), "Re-authenticate…");
+		assert.strictEqual(reauthButtonLabel("__default__"), "Re-authenticate…");
+	});
+	it("login clears only the named org's problem", () => {
+		reportSchemaFailure("a@x.com", "authInvalid" as any);
+		reportSchemaFailure("b@x.com", "authInvalid" as any);
+		onLoginCompletedHealth(["A@x.com"]);
+		assert.strictEqual(getHealthState("a@x.com"), "ok");
+		assert.notStrictEqual(getHealthState("b@x.com"), "ok");
+		onLoginCompletedHealth();
+		assert.strictEqual(getHealthState("b@x.com"), "ok");
+		reportSchemaSuccess("b@x.com");
+	});
+});

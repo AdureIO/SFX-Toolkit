@@ -136,7 +136,7 @@ const RULES: Rule[] = [
     },
     // ── CLI / environment (apply to every command, not just deploys) ──────────────────────────
     {
-        test: /(INVALID_SESSION_ID|expired access\/refresh token|Session expired or invalid|refresh token is invalid)/i,
+        test: /(INVALID_SESSION_ID|expired access\/refresh token|Session expired or invalid|session expired or revoked|refresh token is invalid)/i,
         category: "Session expired",
         explanation: "The org's access token is no longer valid.",
         suggestion: "Re-authenticate the org (`sf org login web`), then retry."

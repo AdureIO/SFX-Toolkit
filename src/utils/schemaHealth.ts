@@ -258,9 +258,18 @@ export function onDefaultOrgChangedHealth(): void {
 	reportSchemaSuccess(NO_ORG_KEY);
 }
 
-/** A login completed: every connection problem is re-evaluated by the next request. */
-export function onLoginCompletedHealth(): void {
-	for (const p of [...problems.values()]) if (p.state === "authInvalid") reportSchemaSuccess(p.orgKey);
+/**
+ * A login completed: connection problems are re-evaluated by the next request. With `orgKeys`
+ * (every spelling of the re-authenticated org: key, username, alias) only those problems are
+ * cleared, so another org's genuine problem stays visible; without, every auth problem is.
+ */
+export function onLoginCompletedHealth(orgKeys?: (string | null | undefined)[]): void {
+	const wanted = orgKeys?.filter((k): k is string => !!k).map((k) => k.toLowerCase());
+	for (const p of [...problems.values()]) {
+		if (p.state !== "authInvalid") continue;
+		if (wanted && !wanted.includes(p.orgKey.toLowerCase())) continue;
+		reportSchemaSuccess(p.orgKey);
+	}
 }
 
 /**

@@ -142,7 +142,7 @@ export function registerSchemaHealthUi(context: vscode.ExtensionContext): void {
 				await vscode.commands.executeCommand("adure-sfx-toolkit.createScratch");
 				break;
 			case "reauth":
-				await reauthenticateOrg(cur.orgKey);
+				await reauthenticateOrg(cur.orgKey, cur.projectDir);
 				break;
 			case "showDetails":
 				await vscode.commands.executeCommand("adure-sfx-toolkit.showOutput");

@@ -116,6 +116,11 @@
         "icon": "$(globe)"
       },
       {
+        "command": "adure-sfx-toolkit.reauthenticateOrg",
+        "title": "ASFXT: Re-authenticate Org",
+        "icon": "$(key)"
+      },
+      {
         "command": "adure-sfx-toolkit.setAsDefaultOrg",
         "title": "ASFXT: Set as Default",
         "icon": "$(check)"
@@ -652,6 +657,11 @@
           "command": "adure-sfx-toolkit.openOrgBrowser",
           "when": "view == adure-sfx-toolkit.orgs && viewItem =~ /^org-/",
           "group": "0_browse"
+        },
+        {
+          "command": "adure-sfx-toolkit.reauthenticateOrg",
+          "when": "view == adure-sfx-toolkit.orgs && viewItem =~ /^org-/",
+          "group": "1_modify"
         },
         {
           "command": "adure-sfx-toolkit.setAsDefaultOrg",

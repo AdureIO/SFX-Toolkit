@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { reportError } from "../utils/reportError";
 import { runCommandArgs } from "../utils/commandRunner";
 import { Logger, outputChannel } from "../utils/outputChannel";
+import { getDefaultOrgSync } from "../utils/defaultOrg";
 import { Telemetry } from "../utils/telemetry";
 
 export async function executeSOQL() {
@@ -54,7 +55,7 @@ export async function executeSOQL() {
       } catch (e: any) {
         if (e?.cancelled || token.isCancellationRequested) return;
         Telemetry.event("soqlExecute", { success: "0" });
-        reportError({ operation: "SOQL query", error: e });
+        reportError({ operation: "SOQL query", error: e, reauthOrg: getDefaultOrgSync()?.username });
       }
     }
   );

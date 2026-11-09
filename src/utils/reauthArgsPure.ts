@@ -48,3 +48,21 @@ export function parseLoginUsername(stdout: string): string | null {
 		return null;
 	}
 }
+
+/** Shell command shown to the user to re-authenticate `target` (alias or username). */
+export function formatReauthHint(target: string | null, rec?: Omit<ReauthRecord, "username"> & { username?: string }): string {
+	const known = rec ? { ...rec, username: rec.username ?? target ?? "" } : null;
+	const args = buildReauthArgs(known);
+	if (!args.includes("--alias") && target) args.splice(3, 0, "--alias", target);
+	return `sf ${args.join(" ")}`;
+}
+
+/** Quick-pick items for choosing which org to re-authenticate (default flag suffix stripped). */
+export function orgPickItems(orgs: { label: string; username: string }[]): { label: string; description: string; username: string }[] {
+	return orgs.map((o) => ({ label: o.label.replace(/ \(default\)$/, ""), description: o.username, username: o.username }));
+}
+
+/** Label of the "Re-authenticate" button on an error toast; no org (or the default sentinel) = generic. */
+export function reauthButtonLabel(org?: string | null): string {
+	return org && org !== "__default__" ? `Re-authenticate ${org}` : "Re-authenticate…";
+}

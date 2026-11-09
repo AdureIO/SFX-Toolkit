@@ -3,6 +3,8 @@ import { httpsGet, httpsDelete, httpsPost, httpsPatch, httpsGetRange, httpsGetEx
 import { canonicalOrgKey, orgArgForKey } from "./orgKey";
 import { outputChannel } from "./outputChannel";
 import { formatWarmupFailure } from "./authInfoPure";
+import { formatReauthHint } from "./reauthArgsPure";
+import { getOrgByTarget } from "./orgListCache";
 import { isWorkspaceUsable } from "./projectUtils";
 
 /** Default: consider token expired after 55 minutes so we refresh before typical 2h OAuth expiry. */
@@ -323,8 +325,8 @@ export class AuthInfo {
 				if (/HTTP 401/i.test(String(retryErr?.message ?? ""))) {
 					const target = orgArgForKey(key);
 					const err = new Error(
-						"Salesforce session expired or revoked. Re-authenticate your org: sf org login web" +
-							(target ? ` --target-org ${target}` : "")
+						"Salesforce session expired or revoked. Re-authenticate your org: " +
+							formatReauthHint(target, getOrgByTarget(target) ?? undefined)
 					) as Error & { status?: number };
 					err.status = 401;
 					throw err;

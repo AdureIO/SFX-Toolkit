@@ -27,6 +27,7 @@ const ORG: string[] = [
 	"executeSOQL",
 	"refreshOrgs",
 	"openOrg",
+	"reauthenticateOrg",
 	"setAsDefaultOrg",
 	"setAsDefaultDevHub",
 	"copyUsername",

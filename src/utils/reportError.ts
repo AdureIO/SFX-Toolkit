@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { Logger, DeployLog } from "./outputChannel";
 import { interpretError, toRawError } from "./errorInterpret";
+import { reauthButtonLabel } from "./reauthArgsPure";
 import type { ApiComponentFailure, ApiDeployResult } from "./deployDiagnostics";
 import { OperationPanelProvider, type OperationHandle } from "../providers/OperationPanelProvider";
 
@@ -18,6 +19,8 @@ export interface ReportErrorOptions {
     error: unknown;
     /** Org label shown in the panel header. */
     org?: string;
+    /** The org to re-authenticate (alias or username the CLI accepts) when the failure is an expired session. */
+    reauthOrg?: string;
     /** Structured Metadata API component failures, when the operation has them. */
     failures?: ApiComponentFailure[];
     /** Top-level message when it's known separately from `error`. */
@@ -63,8 +66,12 @@ export function reportError(opts: ReportErrorOptions): void {
 
     const toastMessage = opts.message ?? `${opts.operation} failed.`;
     const buttons = opts.extraButton ? ["Show details", opts.extraButton.label] : ["Show details"];
+    const sessionExpired = report.issues.some((i) => i.category === "Session expired");
+    const reauthLabel = sessionExpired ? reauthButtonLabel(opts.reauthOrg) : undefined;
+    if (reauthLabel) buttons.unshift(reauthLabel);
     const handlePick = (pick: string | undefined) => {
-        if (pick === "Show details") revealExisting();
+        if (reauthLabel && pick === reauthLabel) void vscode.commands.executeCommand("adure-sfx-toolkit.reauthenticateOrg", opts.reauthOrg);
+        else if (pick === "Show details") revealExisting();
         else if (pick && pick === opts.extraButton?.label) opts.extraButton.onClick();
     };
 

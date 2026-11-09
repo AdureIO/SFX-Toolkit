@@ -424,6 +424,7 @@ async function pushSourceHelper(force: boolean) {
               failures,
               topError,
               org: defaultOrg?.displayName,
+              reauthOrg: defaultOrg?.username,
               retry: () => { void pushSourceHelper(force); },
               handle: operationHandle
             });
@@ -492,6 +493,7 @@ async function pushSourceHelper(force: boolean) {
             operation: "Push",
             error: raw,
             org: defaultOrg?.displayName,
+            reauthOrg: defaultOrg?.username,
             retry: () => { void pushSourceHelper(force); },
             handle: operationHandle
           });
@@ -562,7 +564,7 @@ async function pullSourceHelper(force: boolean) {
           return;
         }
         Telemetry.event("pull", { force: String(force), status: "failed" }, { durationMs: Date.now() - pullStartTime });
-        reportError({ operation: "Pull", error: e, org, handle: operationHandle });
+        reportError({ operation: "Pull", error: e, org, reauthOrg: defaultOrg?.username, handle: operationHandle });
       }
     }
   );
@@ -606,7 +608,7 @@ export async function resetSourceTracking() {
           Logger.info("Reset tracking cancelled by user.");
           return;
         }
-        reportError({ operation: "Reset source tracking", error: e, org: getDefaultOrgSync()?.displayName });
+        reportError({ operation: "Reset source tracking", error: e, org: getDefaultOrgSync()?.displayName, reauthOrg: getDefaultOrgSync()?.username });
       }
     }
   );

@@ -532,6 +532,7 @@ export class DeployMetadataPanelProvider {
               failures,
               topError,
               org: msg.targetOrg || undefined,
+              reauthOrg: msg.targetOrg || undefined,
               handle: operationHandle,
               message: `${deployOpLabel} failed after ${formatElapsed(durationMs)}${failSummary ? ` · ${failSummary}` : ""}.`,
               extraButton: {

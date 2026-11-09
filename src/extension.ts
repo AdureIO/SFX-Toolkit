@@ -19,7 +19,9 @@ import {
   setAsDefaultDevHub,
   connectOrg,
   createScratch,
-  quickScratch
+  quickScratch,
+  reauthenticateOrg,
+  reauthenticateOrgPicker
 } from "./commands/orgCommands";
 import { orgTreeProvider } from "./providers/OrgTreeProvider";
 import { ApexCodeLensProvider } from "./providers/ApexCodeLensProvider";
@@ -530,6 +532,11 @@ export function activate(context: vscode.ExtensionContext) {
     const orgBrowserCmd = register("adure-sfx-toolkit.openOrgBrowser", (item?: { orgData?: { username?: string } }) =>
       OrgBrowserPanelProvider.show(item?.orgData?.username ?? undefined)
     );
+    // Re-authenticate: org-node context menu (that org), a string org from an error toast, or the palette picker.
+    const reauthCmd = register("adure-sfx-toolkit.reauthenticateOrg", (arg?: string | { orgData?: { username?: string } }) => {
+      const org = typeof arg === "string" ? arg : arg?.orgData?.username;
+      return org ? reauthenticateOrg(org) : reauthenticateOrgPicker();
+    });
     const processMapCmd = register("adure-sfx-toolkit.processMap", () => {
       ProcessMapPanelProvider.show(context.extensionUri);
     });
@@ -728,6 +735,7 @@ export function activate(context: vscode.ExtensionContext) {
       objectVisualizerCmd,
       processMapCmd,
       orgBrowserCmd,
+      reauthCmd,
       showOutputCmd,
       revealOperationPanelCmd,
       metadataDiffCmd,
