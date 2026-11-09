@@ -392,7 +392,10 @@ export class OrgBrowserPanelProvider {
 			const msg = String(e?.message ?? e).replace(/\s+/g, " ").trim();
 			const health = classifyHealth(e, this.orgKey);
 			Logger.error("Org Browser: listing failed", msg);
-			const label = getOrgByTarget(this.orgKey)?.alias || this.orgKey;
+			const label =
+				this.orgKey === DEFAULT_ORG_KEY
+					? getDefaultOrgSync()?.displayName || "the default org"
+					: getOrgByTarget(this.orgKey)?.alias || this.orgKey;
 			let state: string = health.state;
 			let text: string;
 			if (health.state === "authInvalid") {
@@ -488,7 +491,10 @@ export class OrgBrowserPanelProvider {
 			this.post({ type: "retrieveResult", results: [], cancelled: true });
 			return;
 		}
-		const label = getOrgByTarget(this.orgKey)?.alias || this.orgKey;
+		const label =
+				this.orgKey === DEFAULT_ORG_KEY
+					? getDefaultOrgSync()?.displayName || "the default org"
+					: getOrgByTarget(this.orgKey)?.alias || this.orgKey;
 		let outcome: Awaited<ReturnType<typeof retrieveComponents>> | undefined;
 		let cancelled = false;
 		await vscode.window.withProgress(

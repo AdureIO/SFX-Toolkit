@@ -2,6 +2,7 @@ import { runCommandArgs } from "./commandRunner";
 import { httpsGet, httpsDelete, httpsPost, httpsPatch, httpsGetRange, httpsGetEx, httpsPostEx, GetOptions, HttpResponse } from "./httpUtils";
 import { canonicalOrgKey, orgArgForKey } from "./orgKey";
 import { outputChannel } from "./outputChannel";
+import { formatWarmupFailure } from "./authInfoPure";
 import { isWorkspaceUsable } from "./projectUtils";
 
 /** Default: consider token expired after 55 minutes so we refresh before typical 2h OAuth expiry. */
@@ -191,7 +192,7 @@ export class AuthInfo {
 		if (this.getValidFromCache(key)) return;
 		if (this.fetchLocks.has(key)) return;
 		this.getAuthInfoForOrg(targetOrg).catch((e) => {
-			outputChannel.appendLine(`AuthInfo: background auth warm-up failed${targetOrg ? ` (${targetOrg})` : ""}: ${e?.message ?? e}`);
+			outputChannel.appendLine(formatWarmupFailure(targetOrg, e));
 		});
 	}
 

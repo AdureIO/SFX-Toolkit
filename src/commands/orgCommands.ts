@@ -9,6 +9,8 @@ import { notifyDefaultOrgChanged } from "../utils/defaultOrgEvents";
 import { invalidateOrgKeyCache } from "../utils/orgKey";
 import { primaryProjectRoot, isMdapiProject } from "../utils/projectUtils";
 import { NO_ORG_KEY, onLoginCompletedHealth } from "../utils/schemaHealth";
+import { resolveDefaultTargetOrgUsername } from "../utils/defaultOrg";
+import { buildReauthArgs, parseLoginUsername } from "../utils/reauthArgsPure";
 
 /** Scratch org creation regularly exceeds the default 5-minute command timeout. */
 const SCRATCH_CREATE_TIMEOUT_MS = 30 * 60 * 1000;
@@ -513,23 +515,56 @@ export async function chooseDefaultOrg(projectDir?: string): Promise<void> {
  * login URL the CLI already knows for it. Clears the health problem when it completes.
  */
 export async function reauthenticateOrg(orgKey: string): Promise<void> {
-  const rec = orgKey && orgKey !== NO_ORG_KEY ? getOrgByTarget(orgKey) : null;
-  const args = ["org", "login", "web"];
-  if (rec?.alias) args.push("--alias", rec.alias);
-  if (rec?.instanceUrl) args.push("--instance-url", rec.instanceUrl);
+  // "__default__" (NO_ORG_KEY / DEFAULT_ORG_KEY) is a sentinel for "the default org", not an org.
+  const isDefaultKey = !orgKey || orgKey === NO_ORG_KEY;
+  let target = orgKey;
+  if (isDefaultKey) {
+    const username = await resolveDefaultTargetOrgUsername(primaryProjectRoot());
+    if (!username) {
+      await chooseDefaultOrg();
+      return;
+    }
+    target = username;
+  }
+  // The cache may be empty (or stale) when the CLI default was read from sfdx-config.
+  if (!getOrgByTarget(target)) {
+    await getOrgListResult().catch(() => undefined);
+  }
+  const rec = getOrgByTarget(target);
+  const expected = rec?.username ?? (target.includes("@") ? target : undefined);
+  const args = buildReauthArgs(rec ?? (target.includes("@") ? { username: target } : null));
+  args.push("--json");
   await vscode.window.withProgress(
     {
       location: vscode.ProgressLocation.Notification,
-      title: `Re-authenticating ${rec?.alias || rec?.username || "org"}... Check your browser.`,
+      title: `Re-authenticating ${rec?.alias || rec?.username || target || "org"}... Check your browser.`,
       cancellable: true
     },
     async (_progress, token) => {
       try {
-        await runCommandArgs("sf", args, undefined, undefined, true, undefined, token);
+        const out = await runCommandArgs("sf", args, undefined, undefined, true, undefined, token);
         AuthInfo.clearCache();
         invalidateOrgListCache();
         onLoginCompletedHealth();
-        vscode.window.showInformationMessage("Re-authenticated. Schema features are restored.");
+        const got = parseLoginUsername(out);
+        if (got && expected && got.toLowerCase() !== expected.toLowerCase()) {
+          const makeDefault = `Make ${got} the default`;
+          const pick = await vscode.window.showWarningMessage(
+            `You signed in as ${got}, but the default org is ${expected}. ${expected} is still expired.`,
+            ...(isDefaultKey ? [makeDefault] : [])
+          );
+          if (pick === makeDefault) {
+            try {
+              await runCommandArgs("sf", ["config", "set", `target-org=${got}`], primaryProjectRoot());
+              await notifyDefaultOrgChanged(got);
+              vscode.window.showInformationMessage(`Set ${got} as default org.`);
+            } catch (e: any) {
+              reportError({ operation: "Set default org", error: e });
+            }
+          }
+        } else {
+          vscode.window.showInformationMessage("Re-authenticated. Schema features are restored.");
+        }
         orgTreeProvider.refresh();
         void vscode.commands.executeCommand("adure-sfx-toolkit.refreshOrgs");
       } catch (e: any) {
