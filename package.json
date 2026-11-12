@@ -1156,7 +1156,7 @@
     "cytoscape-node-html-label": "^1.2.2",
     "cytoscape-svg": "^0.4.0",
     "dagre": "^0.8.5",
-    "fast-xml-parser": "^5.10.1",
+    "fast-xml-parser": "^5.12.0",
     "glob": "^8.1.0",
     "minimatch": "^11.0.1",
     "monaco-editor": "^0.52.2",
