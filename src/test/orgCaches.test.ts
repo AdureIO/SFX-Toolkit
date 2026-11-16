@@ -525,10 +525,16 @@ describe("DescribeStore persistence", () => {
 describe("OrgMetadataCache.getObjectListStrict", () => {
 	const origGet = httpUtils.httpsGet;
 	const origRun = commandRunner.runCommandArgs;
+	const origLookup = AuthInfo.sessionTimeoutLookup;
+	before(() => {
+		AuthInfo.sessionTimeoutLookup = false;
+	});
+	after(() => {
+		AuthInfo.sessionTimeoutLookup = origLookup;
+	});
 	beforeEach(() => {
 		invalidateOrgKeyCache();
 		AuthInfo.clearCache();
-		AuthInfo.sessionTimeoutLookup = false;
 		OrgMetadataCache.clearAll();
 		DescribeStore.configurePersistence(undefined);
 		commandRunner.runCommandArgs = async () =>
@@ -566,14 +572,42 @@ describe("OrgMetadataCache.getObjectListStrict", () => {
 describe("AuthInfo — single-flight 401 refresh", () => {
 	const origRun = commandRunner.runCommandArgs;
 	const origGet = httpUtils.httpsGet;
+	const origLookup = AuthInfo.sessionTimeoutLookup;
+	before(() => {
+		AuthInfo.sessionTimeoutLookup = false;
+	});
+	after(() => {
+		AuthInfo.sessionTimeoutLookup = origLookup;
+	});
 	afterEach(() => {
 		commandRunner.runCommandArgs = origRun;
 		httpUtils.httpsGet = origGet;
 		AuthInfo.clearCache();
 	});
 
+	it("an org-less CLI command invalidates only the default org's cache entry", async () => {
+		invalidateOrgKeyCache();
+		AuthInfo.clearCache();
+		let displays = 0;
+		commandRunner.runCommandArgs = async (_c: string, args: string[]) => {
+			displays++;
+			const user = args.includes(OTHER) ? OTHER : USER;
+			return JSON.stringify({ status: 0, result: { accessToken: "t-" + user, instanceUrl: "https://x.my.salesforce.com", username: user, id: "00D1" } });
+		};
+		await AuthInfo.getAuthInfoForOrg(null);
+		await AuthInfo.getAuthInfoForOrg(OTHER);
+		assert.strictEqual(displays, 2);
+		AuthInfo.onCliCompleted(["sf", "apex", "run", "test"]);
+		await AuthInfo.getAuthInfoForOrg(OTHER);
+		assert.strictEqual(displays, 2, "the other org stays cached");
+		await AuthInfo.getAuthInfoForOrg(null);
+		assert.strictEqual(displays, 3, "the default org is re-read");
+		AuthInfo.onCliCompleted(["sf", "org", "display", "--json"]);
+		await AuthInfo.getAuthInfoForOrg(null);
+		assert.strictEqual(displays, 3, "our own auth read does not invalidate");
+	});
+
 	it("concurrent 401s share one CLI token refresh; auth spawns are capped and canonical", async () => {
-		AuthInfo.sessionTimeoutLookup = false;
 		invalidateOrgKeyCache();
 		AuthInfo.clearCache();
 		let token = "t0";

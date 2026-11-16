@@ -51,10 +51,6 @@ function isAlive(child: cp.ChildProcess): boolean {
 }
 
 /**
- * Kill every child process still running (SIGTERM, then SIGKILL after a short grace
- * period for anything that ignored it). Call from the extension's deactivate().
- */
-/**
  * Called after every command finishes (success or not) with its argv (`["sf", ...]`). AuthInfo uses it
  * to drop cached tokens when a CLI call may have refreshed the stored one.
  */
@@ -70,6 +66,10 @@ function notifyCliDone(argv: string[]): void {
   }
 }
 
+/**
+ * Kill every child process still running (SIGTERM, then SIGKILL after a short grace
+ * period for anything that ignored it). Call from the extension's deactivate().
+ */
 export function killAllChildProcesses(): void {
   const children = [...activeChildren.entries()];
   activeChildren.clear();

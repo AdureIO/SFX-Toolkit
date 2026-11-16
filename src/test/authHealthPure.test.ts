@@ -233,7 +233,7 @@ describe("authHealthPure: cliRefreshesToken", () => {
 	});
 });
 
-import { MAX_SESSION_MS, MIN_SESSION_MS, clampSessionTimeoutMs, parseSessionTimeout, sessionTimeoutQuery, slidingExpiry } from "../utils/authHealthPure";
+import { MAX_SESSION_MS, MIN_SESSION_MS, clampSessionTimeoutMs, parseSessionTimeout, parseUserId, sessionTimeoutQuery, slidingExpiry } from "../utils/authHealthPure";
 
 describe("authHealthPure: sliding session expiry", () => {
 	const MIN = 60_000;
@@ -267,5 +267,11 @@ describe("authHealthPure: sliding session expiry", () => {
 		assert.ok(sessionTimeoutQuery("005xx000001Sv6AAAS")!.includes("UsersId = '005xx000001Sv6AAAS'"));
 		assert.strictEqual(sessionTimeoutQuery("x' OR '1'='1"), undefined);
 		assert.strictEqual(sessionTimeoutQuery(undefined), undefined);
+	});
+	it("parseUserId validates the userinfo user_id", () => {
+		assert.strictEqual(parseUserId(JSON.stringify({ user_id: "005xx000001Sv6AAAS" })), "005xx000001Sv6AAAS");
+		assert.strictEqual(parseUserId(JSON.stringify({ user_id: "x' OR '1'='1" })), undefined);
+		assert.strictEqual(parseUserId(JSON.stringify({})), undefined);
+		assert.strictEqual(parseUserId("nope"), undefined);
 	});
 });

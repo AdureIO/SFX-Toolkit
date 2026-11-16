@@ -87,22 +87,20 @@ export type AuthError = Error & { status?: number; authConfirmed?: boolean; auth
 export function buildSessionError(rr: CliRefreshResult, reauthHint: string): AuthError {
 	if (!rr.ok && rr.authError) {
 		const err: AuthError = new Error(
-			`Salesforce session expired or revoked (CLI: ${rr.error}). Re-authenticate your org: ${reauthHint}`
+			`Salesforce session expired or revoked (CLI: ${rr.error}). Re-authenticate: ${reauthHint}`
 		);
 		err.status = 401;
 		err.authConfirmed = true;
 		return err;
 	}
-	const why = rr.ok
-		? "Salesforce rejected the session although the CLI refresh succeeded"
-		: `the CLI could not refresh the session (${rr.error ?? "unknown error"})`;
-	const err: AuthError = new Error(`Temporary connection problem: ${why}. Try again in a moment.`);
+	const why = rr.ok ? "Salesforce rejected the session after a CLI refresh" : `CLI refresh failed: ${rr.error ?? "unknown error"}`;
+	const err: AuthError = new Error(`Temporary connection problem (${why}). Try again in a moment.`);
 	err.authTransient = true;
 	return err;
 }
 
 /** Back-off between background re-probes of an org whose connection was confirmed bad: 1, 2, 5, then every 10 min. */
-export const AUTH_REPROBE_DELAYS_MS = [60_000, 120_000, 300_000, 600_000];
+const AUTH_REPROBE_DELAYS_MS = [60_000, 120_000, 300_000, 600_000];
 
 export function nextReprobeDelayMs(attempt: number): number {
 	return AUTH_REPROBE_DELAYS_MS[Math.min(Math.max(0, attempt), AUTH_REPROBE_DELAYS_MS.length - 1)];
@@ -226,8 +224,12 @@ export async function recoverSession<A extends { accessToken: string }, T>(
 
 // ─── CLI commands that may rewrite the stored token ─────────────────────────────
 
-/** `sf` subcommands (first word) that authenticate and so can refresh the stored access token. */
-const TOKEN_REFRESHING_TOPICS = new Set(["project", "apex", "data", "package", "sobject", "schema", "limits", "lightning", "deploy", "retrieve", "force"]);
+/**
+ * `sf` topics (first word) the toolkit runs that authenticate against the org and so may rewrite the
+ * stored token: deploy/retrieve/convert (project), Apex runs and tests (apex), queries and imports (data),
+ * package installs and versions (package), org API usage (limits).
+ */
+const TOKEN_REFRESHING_TOPICS = new Set(["project", "apex", "data", "package", "limits"]);
 
 /**
  * Does this `sf` invocation possibly refresh the org's stored token? Returns the org it targeted
@@ -289,8 +291,23 @@ export function parseSessionTimeout(body: string): number | undefined {
 	}
 }
 
+/** OAuth userinfo endpoint (path only): the one place that knows it; `parseUserId` reads its answer. */
+export const USERINFO_PATH = "/services/oauth2/userinfo";
+
+const SF_ID_RE = /^[a-zA-Z0-9]{15,18}$/;
+
+/** The validated `user_id` of a userinfo response body; undefined when absent, malformed or not an Id. */
+export function parseUserId(body: string): string | undefined {
+	try {
+		const id = JSON.parse(body)?.user_id;
+		return typeof id === "string" && SF_ID_RE.test(id) ? id : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 /** SOQL for the org's OAuth session timeout of a user; undefined when the id does not look like a user Id. */
 export function sessionTimeoutQuery(userId: string | undefined): string | undefined {
-	if (!userId || !/^[a-zA-Z0-9]{15,18}$/.test(userId)) return undefined;
+	if (!userId || !SF_ID_RE.test(userId)) return undefined;
 	return `SELECT NumSecondsValid FROM AuthSession WHERE UsersId = '${userId}' AND SessionType = 'Oauth2' ORDER BY LastModifiedDate DESC LIMIT 1`;
 }
