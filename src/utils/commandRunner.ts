@@ -51,6 +51,22 @@ function isAlive(child: cp.ChildProcess): boolean {
 }
 
 /**
+ * Called after every command finishes (success or not) with its argv (`["sf", ...]`). AuthInfo uses it
+ * to drop cached tokens when a CLI call may have refreshed the stored one.
+ */
+let cliCompletionHook: ((argv: string[]) => void) | undefined;
+export function setCliCompletionHook(fn: ((argv: string[]) => void) | undefined): void {
+  cliCompletionHook = fn;
+}
+function notifyCliDone(argv: string[]): void {
+  try {
+    cliCompletionHook?.(argv);
+  } catch {
+    /* never break a command */
+  }
+}
+
+/**
  * Kill every child process still running (SIGTERM, then SIGKILL after a short grace
  * period for anything that ignored it). Call from the extension's deactivate().
  */
@@ -440,16 +456,20 @@ export async function runCommandArgs(
     // Own process group so timeout / cancel / deactivate also kill sf's worker children.
     child = cp.spawn(plan.file, plan.argv, { shell: false, cwd: cwdPath, env: plan.env, detached: true });
   }
-  return supervise(child, {
-    label: command,
-    logCommand: true,
-    onOutput,
-    stderrToOutput: false,
-    logOnError,
-    cancellationToken,
-    timeoutMs,
-    processGroup: !IS_WINDOWS
-  });
+  try {
+    return await supervise(child, {
+      label: command,
+      logCommand: true,
+      onOutput,
+      stderrToOutput: false,
+      logOnError,
+      cancellationToken,
+      timeoutMs,
+      processGroup: !IS_WINDOWS
+    });
+  } finally {
+    notifyCliDone([command, ...args]);
+  }
 }
 
 function shouldLogCommand(command: string): boolean {
@@ -492,14 +512,18 @@ export async function runCommand(
       env: plan.env
     });
   }
-  return supervise(child, {
-    label: command,
-    logCommand: log,
-    onOutput,
-    stderrToOutput: true,
-    logOnError,
-    cancellationToken,
-    timeoutMs,
-    processGroup: !IS_WINDOWS
-  });
+  try {
+    return await supervise(child, {
+      label: command,
+      logCommand: log,
+      onOutput,
+      stderrToOutput: true,
+      logOnError,
+      cancellationToken,
+      timeoutMs,
+      processGroup: !IS_WINDOWS
+    });
+  } finally {
+    notifyCliDone(command.trim().split(/\s+/));
+  }
 }

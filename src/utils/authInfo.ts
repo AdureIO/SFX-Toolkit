@@ -1,4 +1,5 @@
-import { runCommandArgs } from "./commandRunner";
+import { getToolingApiVersion } from "./constants";
+import { runCommandArgs, setCliCompletionHook } from "./commandRunner";
 import { httpsGet, httpsDelete, httpsPost, httpsPatch, httpsGetRange, httpsGetEx, httpsPostEx, GetOptions, HttpResponse } from "./httpUtils";
 import { canonicalOrgKey, orgArgForKey } from "./orgKey";
 import { outputChannel } from "./outputChannel";
@@ -6,9 +7,8 @@ import { formatWarmupFailure } from "./authInfoPure";
 import { formatReauthHint } from "./reauthArgsPure";
 import { getOrgByTarget } from "./orgListCache";
 import { isWorkspaceUsable } from "./projectUtils";
-
-/** Default: consider token expired after 55 minutes so we refresh before typical 2h OAuth expiry. */
-const AUTH_VALID_MS = 55 * 60 * 1000;
+import { healAuthProblem } from "./schemaHealth";
+import { buildSessionError, classifyRefreshOutcome, cliRefreshesToken, computeExpiresAt, parseSessionTimeout, parseUserId, sessionTimeoutQuery, slidingExpiry, USERINFO_PATH, healthKeyCandidates, recoverSession, CliRefreshResult } from "./authHealthPure";
 
 /**
  * Cap on the `sf org display` spawn used for auth (the generic runner default is 5 min).
@@ -25,6 +25,8 @@ export interface OrgAuth {
 	alias?: string;
 	/** Timestamp (ms) after which this auth is considered expired and must be refreshed. */
 	expiresAt: number;
+	/** The CLI's explicit `accessTokenExpiration`, when it gave one (caps the sliding expiry). */
+	cliExpiresAt?: number;
 }
 
 /** If the CLI returns an expiration, use it; otherwise return undefined for default. */
@@ -37,13 +39,16 @@ function parseExpiration(result: { accessTokenExpiration?: string }): number | u
 }
 
 function buildOrgAuth(parsed: any): OrgAuth {
-	const expiresAt = parseExpiration(parsed) ?? Date.now() + AUTH_VALID_MS;
+	// Capped at AUTH_VALID_MS: the CLI's expiration is the OAuth token's, not the org's (shorter) session timeout.
+	const cliExpiresAt = parseExpiration(parsed);
+	const expiresAt = computeExpiresAt(cliExpiresAt, Date.now());
 	return {
 		accessToken: parsed.accessToken,
 		instanceUrl: parsed.instanceUrl,
 		username: parsed.username,
 		orgId: parsed.id ?? parsed.orgId ?? "",
 		expiresAt,
+		...(cliExpiresAt !== undefined ? { cliExpiresAt } : {}),
 	};
 }
 
@@ -76,9 +81,13 @@ export class AuthInfo {
 	 * Kept separate from fetchLocks so invalidateOrg() (which the refresh itself
 	 * calls) cannot drop it and let the next 401 spawn a second refresh.
 	 */
-	private static refreshLocks = new Map<string, Promise<void>>();
+	private static refreshLocks = new Map<string, Promise<CliRefreshResult>>();
 	/** Per org: the access token most recently refreshed away from (late 401s with it skip the refresh). */
 	private static refreshedFrom = new Map<string, string>();
+	/** Per org: the failed token the cache was last re-read for (see withRetry). */
+	private static rereadFrom = new Map<string, string>();
+	/** Test hook (restore after use): false skips the background AuthSession timeout lookup. */
+	public static sessionTimeoutLookup = true;
 	/** Per `--target-org` argument ("" = CLI default): why the last `sf org display` gave no credentials. */
 	private static lastAuthFailure = new Map<string, string>();
 
@@ -206,6 +215,7 @@ export class AuthInfo {
 		this.generations.clear();
 		this.refreshLocks.clear();
 		this.refreshedFrom.clear();
+		this.rereadFrom.clear();
 		this.lastAuthFailure.clear();
 	}
 
@@ -227,8 +237,79 @@ export class AuthInfo {
 	 * our cached copy, so the next getAuthInfoForOrg returns the new token. Use after
 	 * an INVALID_SESSION_ID / 401 from a call that does not go through withRetry.
 	 */
-	public static async refreshAuth(org: string | null): Promise<void> {
-		await this.refreshOnce(this.cacheKey(org), undefined);
+	public static async refreshAuth(org: string | null): Promise<CliRefreshResult> {
+		return this.refreshOnce(this.cacheKey(org), undefined);
+	}
+
+	/** Per canonical org key: the OAuth session timeout (ms) read from AuthSession, once per VS Code session. */
+	private static sessionTimeouts = new Map<string, number>();
+	/** Keys whose timeout lookup was started (success or not): never asked twice. */
+	private static sessionTimeoutAsked = new Set<string>();
+
+	/** A request with `auth` succeeded: slide the cached entry's expiry forward and learn the org's timeout once. */
+	private static slideExpiry(key: string, auth: OrgAuth): void {
+		this.slideEntry(key, auth.accessToken);
+		if (this.sessionTimeoutLookup && !this.sessionTimeoutAsked.has(key)) {
+			this.sessionTimeoutAsked.add(key);
+			void this.loadSessionTimeout(key, auth).catch(() => undefined);
+		}
+	}
+
+	/**
+	 * Read the org's OAuth session timeout (AuthSession.NumSecondsValid). Background, best effort: any failure
+	 * (no access to AuthSession, no rows, network) silently keeps the 10-min default. Uses the quiet path of
+	 * withRetry so this query neither slides expiry nor heals health state itself.
+	 */
+	private static async loadSessionTimeout(key: string, auth: OrgAuth): Promise<void> {
+		const base = auth.instanceUrl.replace(/\/$/, "");
+		let ms: number | undefined;
+		try {
+			const info = await this.withRetry(key, (a) => httpsGet(`${base}${USERINFO_PATH}`, a.accessToken), true);
+			const q = sessionTimeoutQuery(parseUserId(info.result));
+			if (q) {
+				const ver = getToolingApiVersion();
+				const url = `${base}/services/data/${/^v/i.test(ver) ? ver : "v" + ver}/query?q=${encodeURIComponent(q)}`;
+				const res = await this.withRetry(key, (a) => httpsGet(url, a.accessToken), true);
+				ms = parseSessionTimeout(res.result);
+			}
+		} catch {
+			ms = undefined;
+		}
+		if (ms === undefined) {
+			outputChannel.appendLine(`AuthInfo: session timeout of ${auth.username} unknown; assuming 10 min`);
+			return;
+		}
+		this.sessionTimeouts.set(key, ms);
+		outputChannel.appendLine(`AuthInfo: session timeout of ${auth.username} is ${Math.round(ms / 60000)} min`);
+		this.slideEntry(key);
+	}
+
+	/** Slide the cached entry's expiry (only for `token` when given) by the org's known session timeout. */
+	private static slideEntry(key: string, token?: string): void {
+		const entry = this.cache.get(key);
+		if (!entry || (token !== undefined && entry.accessToken !== token)) return;
+		entry.expiresAt = slidingExpiry({
+			now: Date.now(),
+			current: entry.expiresAt,
+			sessionTimeoutMs: this.sessionTimeouts.get(key),
+			cliCap: entry.cliExpiresAt,
+		});
+	}
+
+	/**
+	 * A CLI call the toolkit ran (open org, deploy, apex run, data …) may have rewritten the stored token:
+	 * drop the cached copy of the org it targeted (the default org when it named none) so the next request re-reads it.
+	 */
+	public static onCliCompleted(argv: string[]): void {
+		const r = cliRefreshesToken(argv);
+		if (r.match) this.invalidateOrg(r.org);
+	}
+
+	/** An authenticated request succeeded for `org`: clear any stale auth problem shown for it. */
+	public static markHealthy(org: string | null): void {
+		const key = this.cacheKey(org);
+		const rec = getOrgByTarget(key);
+		healAuthProblem(healthKeyCandidates(key, org, orgArgForKey(key), rec?.username, rec?.alias));
 	}
 
 	/**
@@ -236,16 +317,16 @@ export class AuthInfo {
 	 * flight, and skips it when `failedToken` was already refreshed away from (a
 	 * late 401 from a request that started before the previous refresh).
 	 */
-	private static refreshOnce(key: string, failedToken: string | undefined): Promise<void> {
+	private static refreshOnce(key: string, failedToken: string | undefined): Promise<CliRefreshResult> {
 		const inflight = this.refreshLocks.get(key);
 		if (inflight) return inflight;
 		if (failedToken !== undefined) {
-			if (this.refreshedFrom.get(key) === failedToken) return Promise.resolve();
+			if (this.refreshedFrom.get(key) === failedToken) return Promise.resolve({ ok: true });
 			const current = this.getValidFromCache(key);
-			if (current && current.accessToken !== failedToken) return Promise.resolve();
+			if (current && current.accessToken !== failedToken) return Promise.resolve({ ok: true });
 			this.refreshedFrom.set(key, failedToken);
 		}
-		const p: Promise<void> = this.forceCliAuthRefresh(key).finally(() => {
+		const p: Promise<CliRefreshResult> = this.forceCliAuthRefresh(key).finally(() => {
 			if (this.refreshLocks.get(key) === p) this.refreshLocks.delete(key);
 		});
 		this.refreshLocks.set(key, p);
@@ -261,22 +342,26 @@ export class AuthInfo {
 	 * accessTokenExpiration timestamp. After this returns, `sf org display` will serve
 	 * the newly-written token.
 	 */
-	private static async forceCliAuthRefresh(key: string): Promise<void> {
+	private static async forceCliAuthRefresh(key: string): Promise<CliRefreshResult> {
 		// Clear both cache and any in-flight dedup fetch so getAuthInfoForOrg always
 		// starts a fresh sf org display call after the CLI refresh completes.
 		this.invalidateOrg(key);
 		const org = orgArgForKey(key);
 		const args = ["org", "display", "user", "--json"];
 		if (org) args.push("--target-org", org);
+		let failure: unknown;
 		try {
 			await runCommandArgs("sf", args, undefined, undefined, false, AUTH_CLI_TIMEOUT_MS);
-		} catch {
-			// Ignore — if the CLI refresh fails the subsequent getAuthInfoForOrg will
-			// also fail, which is handled by the caller.
+		} catch (e) {
+			// Not swallowed: the caller classifies it (genuine refresh-token error vs. timeout / lock).
+			failure = e ?? new Error("sf org display user failed");
 		}
 		// Evict whatever was written to cache during the CLI call so getAuthInfoForOrg
 		// re-reads the auth file with the token the CLI just refreshed.
 		this.invalidateOrg(key);
+		const result = classifyRefreshOutcome(failure);
+		if (!result.ok) outputChannel.appendLine(`AuthInfo: CLI token refresh failed (${key}${result.authError ? ", auth error" : ", transient"}): ${result.error}`);
+		return result;
 	}
 
 	/**
@@ -288,7 +373,9 @@ export class AuthInfo {
 	 */
 	private static async withRetry<T>(
 		org: string | null,
-		execute: (auth: OrgAuth) => Promise<T>
+		execute: (auth: OrgAuth) => Promise<T>,
+		/** Internal lookups (session timeout): no health healing, no expiry sliding. */
+		quiet = false
 	): Promise<{ result: T; auth: OrgAuth }> {
 		const key = this.cacheKey(org);
 		// The CLI's own reason (no default org, org not found, expired scratch org …) is kept so
@@ -299,40 +386,61 @@ export class AuthInfo {
 			const c = cause();
 			return c ? `${NO_CREDS_BASE} (${c})` : NO_CREDS_BASE;
 		};
-		let auth = await this.getAuthInfoForOrg(key);
+		const isSessionErr = (e: any) => /HTTP 401|INVALID_SESSION_ID/i.test(String(e?.message ?? ""));
+		const reauthHint = () => {
+			const target = orgArgForKey(key);
+			return formatReauthHint(target, getOrgByTarget(target) ?? undefined);
+		};
+		const ok = <R>(result: R, a: OrgAuth) => {
+			if (!quiet) {
+				this.markHealthy(key);
+				this.slideExpiry(key, a);
+			}
+			return { result, auth: a };
+		};
+		const auth = await this.getAuthInfoForOrg(key);
 		if (!auth) throw new Error(noCreds());
 		try {
-			const result = await execute(auth);
-			return { result, auth };
+			return ok(await execute(auth), auth);
 		} catch (e: any) {
-			if (!(/HTTP 401/i.test(String(e?.message ?? "")))) throw e;
+			if (!isSessionErr(e)) throw e;
 
-			// 401: run a CLI command that makes a real authenticated API call so that
-			// @salesforce/core triggers its refresh-token flow and updates the auth store,
-			// then re-fetch the now-fresh token and retry.
-			// Single-flight: concurrent 401s for this org share one CLI refresh.
-			await this.refreshOnce(key, auth.accessToken);
-			auth = await this.getAuthInfoForOrg(key);
-			if (!auth) throw new Error(noCreds());
-
-			try {
-				const result = await execute(auth);
-				return { result, auth };
-			} catch (retryErr: any) {
-				// Retry also failed — evict the bad token so the next call does not serve
-				// it from cache for the next 55 minutes.
-				this.invalidateOrg(key);
-				if (/HTTP 401/i.test(String(retryErr?.message ?? ""))) {
-					const target = orgArgForKey(key);
-					const err = new Error(
-						"Salesforce session expired or revoked. Re-authenticate your org: " +
-							formatReauthHint(target, getOrgByTarget(target) ?? undefined)
-					) as Error & { status?: number };
-					err.status = 401;
-					throw err;
-				}
-				throw retryErr;
-			}
+			// Session error. First re-read what the CLI has now (it may already hold a fresh token, e.g. after
+			// `sf org open`); only then force the refresh-token flow. Never resends the rejected token.
+			const done = await recoverSession(auth, {
+				reread: async (failedToken) => {
+					const cur = this.getValidFromCache(key);
+					if (cur && cur.accessToken !== failedToken) return cur;
+					// Concurrent / late 401s with the same failed token share ONE re-read instead of each
+					// spawning `sf org display`: the entry read since that failure is reused as is.
+					const refreshing = this.refreshLocks.get(key);
+					if (refreshing) {
+						await refreshing; // a CLI refresh is running: wait for it, then use what it wrote
+						return this.getAuthInfoForOrg(key);
+					}
+					const inflight = this.fetchLocks.get(key);
+					if (inflight) return inflight;
+					if (cur && this.rereadFrom.get(key) === failedToken) return cur;
+					this.rereadFrom.set(key, failedToken);
+					this.invalidateOrg(key);
+					return this.getAuthInfoForOrg(key);
+				},
+				invalidate: () => this.invalidateOrg(key),
+				read: () => this.getAuthInfoForOrg(key),
+				execute,
+				isSessionErr,
+				// Single-flight: concurrent 401s for this org share one CLI refresh.
+				refresh: (failedToken) => this.refreshOnce(key, failedToken),
+				noCreds: () => new Error(noCreds()),
+				sessionError: (rr) => buildSessionError(rr, reauthHint()),
+				onRecovered: (a, via) =>
+					outputChannel.appendLine(
+						via === "reread"
+							? `AuthInfo: ${a.username} token was stale; recovered with the CLI's current token`
+							: `AuthInfo: ${a.username} token was stale; recovered after a CLI token refresh`
+					),
+			});
+			return ok(done.result, done.auth);
 		}
 	}
 
@@ -452,3 +560,5 @@ export class AuthInfo {
 		return result;
 	}
 }
+
+setCliCompletionHook((argv) => AuthInfo.onCliCompleted(argv));

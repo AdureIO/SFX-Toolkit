@@ -4,6 +4,7 @@
  * logs from environments other than the default).
  */
 import { AuthInfo } from "./authInfo";
+import { parseUserId, USERINFO_PATH } from "./authHealthPure";
 import { getToolingApiVersion, getQuickTraceDuration, getQuickTraceDebugLevel } from "./constants";
 import { outputChannel } from "./outputChannel";
 
@@ -122,8 +123,8 @@ export async function deleteAllApexLogs(org: string | null): Promise<{ deleted: 
 /** Current user's Id for an org (via the OAuth userinfo endpoint). */
 async function currentUserId(org: string | null): Promise<string | null> {
 	try {
-		const { body } = await AuthInfo.get(org, (a) => `${base(a)}/services/oauth2/userinfo`);
-		return (JSON.parse(body).user_id as string) || null;
+		const { body } = await AuthInfo.get(org, (a) => `${base(a)}${USERINFO_PATH}`);
+		return parseUserId(body) ?? null;
 	} catch {
 		return null;
 	}
@@ -137,7 +138,7 @@ async function currentUserId(org: string | null): Promise<string | null> {
 export async function createUserTrace(org: string | null, durationMinutes?: number): Promise<boolean> {
 	const version = getToolingApiVersion();
 	const userId = await currentUserId(org);
-	if (!userId || !/^[a-zA-Z0-9]{15,18}$/.test(userId)) {
+	if (!userId) {
 		outputChannel.appendLine("apexLogApi: createUserTrace — could not resolve current user id");
 		return false;
 	}

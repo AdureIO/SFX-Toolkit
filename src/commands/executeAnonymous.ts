@@ -96,30 +96,25 @@ function parseSoapAnon(xml: string): { result: AnonResult; log: string } {
  */
 async function soapExecuteAnonymous(org: string | null, code: string): Promise<{ result: AnonResult; log: string }> {
   const version = getToolingApiVersion().replace(/^v/i, ""); // "v59.0" → "59.0"
-  const send = async (): Promise<string> => {
-    const auth = await AuthInfo.getAuthInfoForOrg(org);
-    if (!auth) throw new Error("Not authenticated. Run: sf org login web");
-    const endpoint = `${auth.instanceUrl.replace(/\/$/, "")}/services/Soap/s/${version}`;
-    return httpsPost(endpoint, buildSoapEnvelope(auth.accessToken, code), {
-      "Content-Type": "text/xml; charset=UTF-8",
-      SOAPAction: '""',
-    }, getExecuteAnonymousTimeout());
-  };
-  let body: string;
-  try {
-    body = await send();
-  } catch (e: any) {
-    // An expired session comes back as a SOAP fault (HTTP 500) whose body carries
-    // INVALID_SESSION_ID. Only that is worth a retry — any other 500 (e.g. a server
-    // fault) would just fail again. `sf org display` alone returns the same stale
-    // token, so force the CLI refresh-token flow first.
-    if (/INVALID_SESSION_ID/.test(String(e?.message ?? e))) {
-      await AuthInfo.refreshAuth(org);
-      body = await send();
-    } else {
+  const endpointPath = `/services/Soap/s/${version}`;
+  // Through AuthInfo.withAuth: an expired session comes back as a SOAP fault (HTTP 500) carrying
+  // INVALID_SESSION_ID, which withAuth treats like a 401 — single-flight CLI refresh, retry with the
+  // NEW token, and only a refresh the CLI itself reports as failed surfaces as "session expired".
+  // A success also clears a stale "connection invalid" status.
+  const body = await AuthInfo.withAuth(org, async (auth) => {
+    const endpoint = `${auth.instanceUrl.replace(/\/$/, "")}${endpointPath}`;
+    try {
+      return await httpsPost(endpoint, buildSoapEnvelope(auth.accessToken, code), {
+        "Content-Type": "text/xml; charset=UTF-8",
+        SOAPAction: '""',
+      }, getExecuteAnonymousTimeout());
+    } catch (e: any) {
+      const msg = String(e?.message ?? e);
+      // Any other 500 (a server fault) would just fail again: only the session fault is retried.
+      if (/INVALID_SESSION_ID/.test(msg)) throw new Error(`HTTP 401: ${msg}`);
       throw e;
     }
-  }
+  });
   return parseSoapAnon(body);
 }
 
