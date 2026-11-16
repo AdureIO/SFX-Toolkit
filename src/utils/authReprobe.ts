@@ -7,6 +7,7 @@
 import { AuthInfo } from "./authInfo";
 import { AuthReprobeScheduler } from "./authHealthPure";
 import { allSchemaProblems, NO_ORG_KEY } from "./schemaHealth";
+import { getToolingApiVersion } from "./constants";
 import { outputChannel } from "./outputChannel";
 
 const TICK_MS = 30_000;
@@ -24,7 +25,8 @@ export function startAuthReprobe(): () => void {
 				.map((p) => p.orgKey);
 			for (const key of scheduler.due(keys)) {
 				try {
-					await AuthInfo.get(key, (a) => `${a.instanceUrl.replace(/\/$/, "")}/services/oauth2/userinfo`);
+					const v = getToolingApiVersion();
+					await AuthInfo.get(key, (a) => `${a.instanceUrl.replace(/\/$/, "")}/services/data/${/^v/i.test(v) ? v : "v" + v}/limits`);
 					outputChannel.appendLine(`AuthReprobe: ${key} answers again`);
 				} catch {
 					/* still broken: the next window retries */
