@@ -144,3 +144,153 @@ export function healthKeyCandidates(...spellings: (string | null | undefined)[])
 	}
 	return out;
 }
+
+// ─── Session recovery (re-read before refresh) ──────────────────────────────────
+
+export interface RecoverDeps<A extends { accessToken: string }, T> {
+	/**
+	 * The CLI's current auth, other than `failedToken` when it has one: the cached entry if it already
+	 * differs, an in-flight read if there is one, else drop the cache and re-read `sf org display`.
+	 */
+	reread(failedToken: string): Promise<A | null>;
+	/** Drop the cached entry so the next read goes to `sf org display`. */
+	invalidate(): void;
+	/** Read auth (cache, else `sf org display`). */
+	read(): Promise<A | null>;
+	execute(a: A): Promise<T>;
+	isSessionErr(e: unknown): boolean;
+	/** Force the CLI refresh-token flow. `failedToken` lets the caller skip a refresh already done for it. */
+	refresh(failedToken: string | undefined): Promise<CliRefreshResult>;
+	noCreds(): Error;
+	sessionError(rr: CliRefreshResult): Error;
+	/** The retry worked with a token other than the failed one. */
+	onRecovered(a: A, via: "reread" | "refresh"): void;
+}
+
+/**
+ * A request failed with a session error using `failed`. Order matters:
+ *  1. re-read the CLI's current token (an `sf org open`, deploy or another tool may have refreshed it
+ *     already) and retry when it differs from the failed one;
+ *  2. only then force a CLI refresh, re-read and retry;
+ *  3. a token that was already rejected is never sent again.
+ */
+export async function recoverSession<A extends { accessToken: string }, T>(
+	failed: A,
+	d: RecoverDeps<A, T>
+): Promise<{ result: T; auth: A }> {
+	const tried = new Set<string>([failed.accessToken]);
+	const attempt = async (a: A): Promise<{ result: T; auth: A } | null> => {
+		tried.add(a.accessToken);
+		try {
+			return { result: await d.execute(a), auth: a };
+		} catch (e) {
+			d.invalidate();
+			if (!d.isSessionErr(e)) throw e;
+			return null;
+		}
+	};
+
+	// 1. Re-read before refreshing.
+	const cur = await d.reread(failed.accessToken);
+	if (cur && !tried.has(cur.accessToken)) {
+		const r = await attempt(cur);
+		if (r) {
+			d.onRecovered(cur, "reread");
+			return r;
+		}
+	}
+
+	// 2. Force the CLI refresh (skipped inside `refresh` when this token was already refreshed away from).
+	const rr = await d.refresh(cur?.accessToken ?? failed.accessToken);
+	if (!rr.ok) {
+		d.invalidate();
+		throw d.sessionError(rr);
+	}
+	let next = await d.read();
+	if (!next) throw d.noCreds();
+	if (tried.has(next.accessToken)) {
+		// The refresh did not change the token: force one more, never resend a rejected token.
+		const rr2 = await d.refresh(undefined);
+		if (!rr2.ok) throw d.sessionError(rr2);
+		next = await d.read();
+		if (!next) throw d.noCreds();
+		if (tried.has(next.accessToken)) throw d.sessionError({ ok: true });
+	}
+	const r = await attempt(next);
+	if (r) {
+		d.onRecovered(next, "refresh");
+		return r;
+	}
+	throw d.sessionError({ ok: true });
+}
+
+// ─── CLI commands that may rewrite the stored token ─────────────────────────────
+
+/** `sf` subcommands (first word) that authenticate and so can refresh the stored access token. */
+const TOKEN_REFRESHING_TOPICS = new Set(["project", "apex", "data", "package", "sobject", "schema", "limits", "lightning", "deploy", "retrieve", "force"]);
+
+/**
+ * Does this `sf` invocation possibly refresh the org's stored token? Returns the org it targeted
+ * (`--target-org` / `-o` / `-u` / `--targetusername`), `null` when it used the default org.
+ * `org open` / `org resume` count; `org display` (our own auth read) and the rest of `org` do not.
+ */
+export function cliRefreshesToken(argvOrCommand: string[] | string): { match: boolean; org: string | null } {
+	const parts = (Array.isArray(argvOrCommand) ? argvOrCommand : argvOrCommand.trim().split(/\s+/)).map((p) => p.replace(/^['"]|['"]$/g, ""));
+	let i = 0;
+	if (/^(?:.*[\\/])?(sf|sfdx)(\.cmd)?$/i.test(parts[0] ?? "")) i = 1;
+	else return { match: false, org: null };
+	const topic = parts[i];
+	const sub = parts[i + 1];
+	const match = topic === "org" ? sub === "open" || sub === "resume" : TOKEN_REFRESHING_TOPICS.has(topic ?? "");
+	if (!match) return { match: false, org: null };
+	let org: string | null = null;
+	for (let j = i; j < parts.length; j++) {
+		const p = parts[j];
+		if (/^(--target-org|-o|-u|--targetusername)$/.test(p) && parts[j + 1]) org = parts[j + 1];
+		else {
+			const m = /^(?:--target-org|--targetusername)=(.+)$/.exec(p);
+			if (m) org = m[1];
+		}
+	}
+	return { match: true, org };
+}
+
+// ─── Sliding session expiry ─────────────────────────────────────────────────────
+
+export const MIN_SESSION_MS = 5 * 60 * 1000;
+export const MAX_SESSION_MS = 12 * 60 * 60 * 1000;
+
+/** Session timeout to use: clamped to [5 min, 12 h]; unknown / invalid falls back to the 10-min default. */
+export function clampSessionTimeoutMs(ms: number | undefined): number {
+	if (ms === undefined || !Number.isFinite(ms) || ms <= 0) return AUTH_VALID_MS;
+	return Math.min(MAX_SESSION_MS, Math.max(MIN_SESSION_MS, ms));
+}
+
+/**
+ * New expiry of a cached token after a successful request. A Salesforce session lives until its timeout
+ * passes WITHOUT activity, so each use slides it forward to `now + timeout - margin` (margin = 10 % or 2 min,
+ * whichever is smaller). Only ever extends; an explicit CLI `accessTokenExpiration` (`cliCap`) caps it.
+ */
+export function slidingExpiry(opts: { now: number; current: number; sessionTimeoutMs?: number; cliCap?: number }): number {
+	const timeout = clampSessionTimeoutMs(opts.sessionTimeoutMs);
+	const margin = Math.min(timeout * 0.1, 2 * 60 * 1000);
+	let next = Math.max(opts.current, opts.now + timeout - margin);
+	if (opts.cliCap !== undefined && !Number.isNaN(opts.cliCap)) next = Math.min(next, opts.cliCap);
+	return next;
+}
+
+/** `NumSecondsValid` of the first AuthSession record in a SOQL response body -> clamped ms; undefined when absent. */
+export function parseSessionTimeout(body: string): number | undefined {
+	try {
+		const n = Number(JSON.parse(body)?.records?.[0]?.NumSecondsValid);
+		return Number.isFinite(n) && n > 0 ? clampSessionTimeoutMs(n * 1000) : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** SOQL for the org's OAuth session timeout of a user; undefined when the id does not look like a user Id. */
+export function sessionTimeoutQuery(userId: string | undefined): string | undefined {
+	if (!userId || !/^[a-zA-Z0-9]{15,18}$/.test(userId)) return undefined;
+	return `SELECT NumSecondsValid FROM AuthSession WHERE UsersId = '${userId}' AND SessionType = 'Oauth2' ORDER BY LastModifiedDate DESC LIMIT 1`;
+}

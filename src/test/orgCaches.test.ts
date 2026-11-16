@@ -528,6 +528,7 @@ describe("OrgMetadataCache.getObjectListStrict", () => {
 	beforeEach(() => {
 		invalidateOrgKeyCache();
 		AuthInfo.clearCache();
+		AuthInfo.sessionTimeoutLookup = false;
 		OrgMetadataCache.clearAll();
 		DescribeStore.configurePersistence(undefined);
 		commandRunner.runCommandArgs = async () =>
@@ -572,6 +573,7 @@ describe("AuthInfo — single-flight 401 refresh", () => {
 	});
 
 	it("concurrent 401s share one CLI token refresh; auth spawns are capped and canonical", async () => {
+		AuthInfo.sessionTimeoutLookup = false;
 		invalidateOrgKeyCache();
 		AuthInfo.clearCache();
 		let token = "t0";
@@ -602,7 +604,7 @@ describe("AuthInfo — single-flight 401 refresh", () => {
 		assert.strictEqual(refreshes, 1, "one refresh for six concurrent 401s");
 		assert.ok(displayCalls.every((c) => c.timeout === AUTH_CLI_TIMEOUT_MS), "sf org display capped");
 		assert.ok(displayCalls.every((c) => c.args.includes("--target-org") && c.args.includes(USER)), "canonical username passed to the CLI");
-		assert.ok(displayCalls.length <= 2, `auth fetched once before and once after the refresh (got ${displayCalls.length})`);
+		assert.ok(displayCalls.length <= 3, `auth read once before, once re-read (shared), once after the refresh (got ${displayCalls.length})`);
 
 		// A late 401 carrying the already-replaced token must not trigger another refresh.
 		await AuthInfo.get(null, (a) => `${a.instanceUrl}/x`);
