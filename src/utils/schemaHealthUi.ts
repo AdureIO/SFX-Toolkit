@@ -23,6 +23,7 @@ import { getOrgByTarget, onOrgListUpdated } from "./orgListCache";
 import { primaryProjectRoot, isSalesforceProject } from "./projectUtils";
 import { onDidChangeDefaultOrg, onDidChangeProjectDefaultOrg } from "./defaultOrgEvents";
 import { checkExpiredScratch, checkNoDefaultOrg, knownProjectDirs, noteProjectDir, noteProjectOfFile } from "./schemaHealthMonitor";
+import { startAuthReprobe } from "./authReprobe";
 import { chooseDefaultOrg, reauthenticateOrg } from "../commands/orgCommands";
 
 export const SCHEMA_HEALTH_ACTIONS_COMMAND = "adure-sfx-toolkit.schemaHealthActions";
@@ -158,6 +159,7 @@ export function registerSchemaHealthUi(context: vscode.ExtensionContext): void {
 		item,
 		actionsCommand,
 		new vscode.Disposable(() => setSchemaHealthSink(undefined)),
+		new vscode.Disposable(startAuthReprobe()),
 		onDidChangeDefaultOrg(onDefaultChanged),
 		onDidChangeProjectDefaultOrg((dir) => {
 			noteProjectDir(dir);

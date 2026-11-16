@@ -6,9 +6,8 @@ import { formatWarmupFailure } from "./authInfoPure";
 import { formatReauthHint } from "./reauthArgsPure";
 import { getOrgByTarget } from "./orgListCache";
 import { isWorkspaceUsable } from "./projectUtils";
-
-/** Default: consider token expired after 55 minutes so we refresh before typical 2h OAuth expiry. */
-const AUTH_VALID_MS = 55 * 60 * 1000;
+import { healAuthProblem } from "./schemaHealth";
+import { buildSessionError, classifyRefreshOutcome, computeExpiresAt, healthKeyCandidates, CliRefreshResult } from "./authHealthPure";
 
 /**
  * Cap on the `sf org display` spawn used for auth (the generic runner default is 5 min).
@@ -37,7 +36,8 @@ function parseExpiration(result: { accessTokenExpiration?: string }): number | u
 }
 
 function buildOrgAuth(parsed: any): OrgAuth {
-	const expiresAt = parseExpiration(parsed) ?? Date.now() + AUTH_VALID_MS;
+	// Capped at AUTH_VALID_MS: the CLI's expiration is the OAuth token's, not the org's (shorter) session timeout.
+	const expiresAt = computeExpiresAt(parseExpiration(parsed), Date.now());
 	return {
 		accessToken: parsed.accessToken,
 		instanceUrl: parsed.instanceUrl,
@@ -76,7 +76,7 @@ export class AuthInfo {
 	 * Kept separate from fetchLocks so invalidateOrg() (which the refresh itself
 	 * calls) cannot drop it and let the next 401 spawn a second refresh.
 	 */
-	private static refreshLocks = new Map<string, Promise<void>>();
+	private static refreshLocks = new Map<string, Promise<CliRefreshResult>>();
 	/** Per org: the access token most recently refreshed away from (late 401s with it skip the refresh). */
 	private static refreshedFrom = new Map<string, string>();
 	/** Per `--target-org` argument ("" = CLI default): why the last `sf org display` gave no credentials. */
@@ -227,8 +227,15 @@ export class AuthInfo {
 	 * our cached copy, so the next getAuthInfoForOrg returns the new token. Use after
 	 * an INVALID_SESSION_ID / 401 from a call that does not go through withRetry.
 	 */
-	public static async refreshAuth(org: string | null): Promise<void> {
-		await this.refreshOnce(this.cacheKey(org), undefined);
+	public static async refreshAuth(org: string | null): Promise<CliRefreshResult> {
+		return this.refreshOnce(this.cacheKey(org), undefined);
+	}
+
+	/** An authenticated request succeeded for `org`: clear any stale auth problem shown for it. */
+	public static markHealthy(org: string | null): void {
+		const key = this.cacheKey(org);
+		const rec = getOrgByTarget(key);
+		healAuthProblem(healthKeyCandidates(key, org, orgArgForKey(key), rec?.username, rec?.alias));
 	}
 
 	/**
@@ -236,16 +243,16 @@ export class AuthInfo {
 	 * flight, and skips it when `failedToken` was already refreshed away from (a
 	 * late 401 from a request that started before the previous refresh).
 	 */
-	private static refreshOnce(key: string, failedToken: string | undefined): Promise<void> {
+	private static refreshOnce(key: string, failedToken: string | undefined): Promise<CliRefreshResult> {
 		const inflight = this.refreshLocks.get(key);
 		if (inflight) return inflight;
 		if (failedToken !== undefined) {
-			if (this.refreshedFrom.get(key) === failedToken) return Promise.resolve();
+			if (this.refreshedFrom.get(key) === failedToken) return Promise.resolve({ ok: true });
 			const current = this.getValidFromCache(key);
-			if (current && current.accessToken !== failedToken) return Promise.resolve();
+			if (current && current.accessToken !== failedToken) return Promise.resolve({ ok: true });
 			this.refreshedFrom.set(key, failedToken);
 		}
-		const p: Promise<void> = this.forceCliAuthRefresh(key).finally(() => {
+		const p: Promise<CliRefreshResult> = this.forceCliAuthRefresh(key).finally(() => {
 			if (this.refreshLocks.get(key) === p) this.refreshLocks.delete(key);
 		});
 		this.refreshLocks.set(key, p);
@@ -261,22 +268,26 @@ export class AuthInfo {
 	 * accessTokenExpiration timestamp. After this returns, `sf org display` will serve
 	 * the newly-written token.
 	 */
-	private static async forceCliAuthRefresh(key: string): Promise<void> {
+	private static async forceCliAuthRefresh(key: string): Promise<CliRefreshResult> {
 		// Clear both cache and any in-flight dedup fetch so getAuthInfoForOrg always
 		// starts a fresh sf org display call after the CLI refresh completes.
 		this.invalidateOrg(key);
 		const org = orgArgForKey(key);
 		const args = ["org", "display", "user", "--json"];
 		if (org) args.push("--target-org", org);
+		let failure: unknown;
 		try {
 			await runCommandArgs("sf", args, undefined, undefined, false, AUTH_CLI_TIMEOUT_MS);
-		} catch {
-			// Ignore — if the CLI refresh fails the subsequent getAuthInfoForOrg will
-			// also fail, which is handled by the caller.
+		} catch (e) {
+			// Not swallowed: the caller classifies it (genuine refresh-token error vs. timeout / lock).
+			failure = e ?? new Error("sf org display user failed");
 		}
 		// Evict whatever was written to cache during the CLI call so getAuthInfoForOrg
 		// re-reads the auth file with the token the CLI just refreshed.
 		this.invalidateOrg(key);
+		const result = classifyRefreshOutcome(failure);
+		if (!result.ok) outputChannel.appendLine(`AuthInfo: CLI token refresh failed (${key}${result.authError ? ", auth error" : ", transient"}): ${result.error}`);
+		return result;
 	}
 
 	/**
@@ -299,39 +310,56 @@ export class AuthInfo {
 			const c = cause();
 			return c ? `${NO_CREDS_BASE} (${c})` : NO_CREDS_BASE;
 		};
+		const isSessionErr = (e: any) => /HTTP 401|INVALID_SESSION_ID/i.test(String(e?.message ?? ""));
+		const reauthHint = () => {
+			const target = orgArgForKey(key);
+			return formatReauthHint(target, getOrgByTarget(target) ?? undefined);
+		};
+		const ok = <R>(result: R, a: OrgAuth) => {
+			this.markHealthy(key);
+			return { result, auth: a };
+		};
 		let auth = await this.getAuthInfoForOrg(key);
 		if (!auth) throw new Error(noCreds());
 		try {
-			const result = await execute(auth);
-			return { result, auth };
+			return ok(await execute(auth), auth);
 		} catch (e: any) {
-			if (!(/HTTP 401/i.test(String(e?.message ?? "")))) throw e;
+			if (!isSessionErr(e)) throw e;
 
-			// 401: run a CLI command that makes a real authenticated API call so that
+			// Session error: run a CLI command that makes a real authenticated API call so that
 			// @salesforce/core triggers its refresh-token flow and updates the auth store,
 			// then re-fetch the now-fresh token and retry.
 			// Single-flight: concurrent 401s for this org share one CLI refresh.
-			await this.refreshOnce(key, auth.accessToken);
+			const failedToken = auth.accessToken;
+			const rr = await this.refreshOnce(key, failedToken);
+			if (!rr.ok) {
+				this.invalidateOrg(key);
+				throw buildSessionError(rr, reauthHint());
+			}
 			auth = await this.getAuthInfoForOrg(key);
 			if (!auth) throw new Error(noCreds());
 
 			try {
-				const result = await execute(auth);
-				return { result, auth };
+				return ok(await execute(auth), auth);
 			} catch (retryErr: any) {
-				// Retry also failed — evict the bad token so the next call does not serve
-				// it from cache for the next 55 minutes.
 				this.invalidateOrg(key);
-				if (/HTTP 401/i.test(String(retryErr?.message ?? ""))) {
-					const target = orgArgForKey(key);
-					const err = new Error(
-						"Salesforce session expired or revoked. Re-authenticate your org: " +
-							formatReauthHint(target, getOrgByTarget(target) ?? undefined)
-					) as Error & { status?: number };
-					err.status = 401;
-					throw err;
+				if (!isSessionErr(retryErr)) throw retryErr;
+				// The CLI refresh succeeded but the request is still rejected. If the token did not
+				// change the refresh did not rewrite the auth file: force one more refresh and retry.
+				if (auth.accessToken === failedToken) {
+					const rr2 = await this.refreshOnce(key, undefined);
+					if (!rr2.ok) throw buildSessionError(rr2, reauthHint());
+					const auth3 = await this.getAuthInfoForOrg(key);
+					if (!auth3) throw new Error(noCreds());
+					try {
+						return ok(await execute(auth3), auth3);
+					} catch (e3: any) {
+						this.invalidateOrg(key);
+						if (!isSessionErr(e3)) throw e3;
+					}
 				}
-				throw retryErr;
+				// CLI says the credentials are fine: a transient problem, not a broken connection.
+				throw buildSessionError({ ok: true }, reauthHint());
 			}
 		}
 	}

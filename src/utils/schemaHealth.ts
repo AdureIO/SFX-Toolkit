@@ -90,6 +90,9 @@ function statusOf(e: unknown, msg: string): number | undefined {
 
 function classifyCore(e: unknown): { kind: SchemaFailureKind; scratchExpired: boolean } {
 	const msg = String((e as { message?: string } | undefined)?.message ?? e ?? "");
+	// A session error the host could not confirm as bad (the CLI refresh worked or only failed
+	// transiently) must not flag the org as broken.
+	if ((e as { authTransient?: boolean } | undefined)?.authTransient) return { kind: "transient", scratchExpired: false };
 	const status = statusOf(e, msg);
 	if (status === 404) return { kind: "notFound", scratchExpired: false };
 	if (NO_DEFAULT_RE.test(msg)) return { kind: "noDefaultOrg", scratchExpired: false };
@@ -251,6 +254,20 @@ export function reportSchemaSuccess(orgKey: string): void {
 		/* ignore */
 	}
 	fireChange();
+}
+
+/**
+ * An authenticated request succeeded for an org: any auth / reachability problem recorded under
+ * one of its spellings (`keys`: canonical key, alias, username …) is stale. `noDefaultOrg` stays.
+ */
+export function healAuthProblem(keys: (string | null | undefined)[]): void {
+	if (!problems.size) return;
+	const wanted = keys.filter((k): k is string => !!k).map((k) => k.toLowerCase());
+	if (!wanted.length) return;
+	for (const p of [...problems.values()]) {
+		if (p.state !== "authInvalid" && p.state !== "unreachable") continue;
+		if (wanted.includes(p.orgKey.toLowerCase())) reportSchemaSuccess(p.orgKey);
+	}
 }
 
 /** The default org of some project changed: what was recorded for "no default org" is stale. */
