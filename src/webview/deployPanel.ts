@@ -1376,7 +1376,8 @@ window.addEventListener("message", (ev) => {
 		}
 		case "modifiedKeys": {
 			if (m.error) {
-				setStatus("Git: " + m.error);
+				// Only an explicit "select changed" is worth a message; the background status stays quiet outside a repository.
+				if (m.select) setStatus("Git: " + m.error);
 				break;
 			}
 			const have = new Set(idx.comps.map((c) => c.t + ":" + c.n));
