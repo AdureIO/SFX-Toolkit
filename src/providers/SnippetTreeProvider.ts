@@ -1,6 +1,12 @@
 import * as vscode from 'vscode';
-import { loadSnippets, ApexSnippet, onDidChangeSnippets, createSnippetsWatcher } from '../commands/apexSnippets';
+import {
+    loadSnippets, ApexSnippet, onDidChangeSnippets, createSnippetsWatcher,
+    getSnippetFilter, initSnippetFilterStore, pickSnippetFilter,
+} from '../commands/apexSnippets';
 import { isWorkspaceUsable } from '../utils/projectUtils';
+import { onDidChangeProjects, projects } from '../utils/projectRegistry';
+import { ALL_PROJECTS, filterSnippets } from '../utils/snippetsPure';
+import { samePath } from '../utils/projectDiscoveryPure';
 
 /** Tree item for one snippet in the Apex Snippets sidebar view. */
 export class SnippetItem extends vscode.TreeItem {
@@ -11,7 +17,8 @@ export class SnippetItem extends vscode.TreeItem {
     ) {
         super(snippet.name, collapsibleState);
         this.description = snippet.description || undefined;
-        this.tooltip = snippet.code.length > 200 ? snippet.code.substring(0, 197) + '...' : snippet.code;
+        const code = snippet.code.length > 200 ? snippet.code.substring(0, 197) + '...' : snippet.code;
+        this.tooltip = snippet.projectName && snippet.description ? `${snippet.projectName}\n\n${code}` : code;
         this.contextValue = index >= 0 ? 'snippetItem' : 'snippetPlaceholder';
         this.iconPath = new vscode.ThemeIcon(index >= 0 ? 'code' : 'info');
         if (index >= 0) {
@@ -28,13 +35,40 @@ export class SnippetTreeProvider implements vscode.TreeDataProvider<SnippetItem>
     private _onDidChangeTreeData = new vscode.EventEmitter<SnippetItem | undefined | null | void>();
     readonly onDidChangeTreeData: vscode.Event<SnippetItem | undefined | null | void> = this._onDidChangeTreeData.event;
     private readonly _disposables: vscode.Disposable[] = [];
+    private _view?: vscode.TreeView<SnippetItem>;
 
-    constructor() {
+    /** @param state workspaceState that persists the project filter (the view lists the snippets of all projects). */
+    constructor(state?: vscode.Memento) {
+        if (state) initSnippetFilterStore(state);
         // Add/delete from the overview panel, the palette, or on disk all land here.
-        this._disposables.push(onDidChangeSnippets(() => this.refresh()), createSnippetsWatcher());
+        this._disposables.push(
+            onDidChangeSnippets(() => this.refresh()),
+            createSnippetsWatcher(),
+            // Projects came or went: the badge / filter / watched folders change.
+            onDidChangeProjects(() => this.refresh())
+        );
+    }
+
+    /** Show the active filter next to the view title. */
+    attachView(view: vscode.TreeView<SnippetItem>): void {
+        this._view = view;
+        this._updateDescription();
+    }
+
+    /** View-title command: choose "All projects" or one project. */
+    async pickFilter(): Promise<void> {
+        if (await pickSnippetFilter()) this.refresh();
+    }
+
+    private _updateDescription(): void {
+        if (!this._view) return;
+        const filter = getSnippetFilter();
+        const p = filter === ALL_PROJECTS ? undefined : projects().find((x) => samePath(x.dir, filter));
+        this._view.description = p ? p.name : undefined;
     }
 
     refresh(): void {
+        this._updateDescription();
         this._onDidChangeTreeData.fire();
     }
 
@@ -58,7 +92,7 @@ export class SnippetTreeProvider implements vscode.TreeDataProvider<SnippetItem>
             )];
         }
 
-        const snippets = await loadSnippets();
+        const snippets = filterSnippets(await loadSnippets(), getSnippetFilter());
         if (!snippets.length) {
             return [new SnippetItem(
                 { name: 'No snippets yet', code: '', description: 'Use Add Snippet or Open Snippets Folder to create one.' },

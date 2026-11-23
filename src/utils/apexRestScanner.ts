@@ -20,10 +20,14 @@ const ANNOTATION_TO_VERB: Record<string, string> = {
  * verbs they expose, so the REST Explorer can list them as ready-to-call
  * endpoints. Best-effort, regex-based — no full Apex parse needed.
  */
-export async function scanApexRestResources(): Promise<ApexRestResource[]> {
+export async function scanApexRestResources(projectDir?: string): Promise<ApexRestResource[]> {
   let files: vscode.Uri[];
   try {
-    files = await vscode.workspace.findFiles("**/classes/*.cls", "**/node_modules/**", 2000);
+    files = await vscode.workspace.findFiles(
+      projectDir ? new vscode.RelativePattern(projectDir, "**/classes/*.cls") : "**/classes/*.cls",
+      "**/node_modules/**",
+      2000
+    );
   } catch {
     return [];
   }

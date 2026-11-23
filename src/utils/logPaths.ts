@@ -1,7 +1,7 @@
-import * as vscode from 'vscode';
 import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
+import { primaryProjectRoot } from './projectUtils';
 
 /** Directory name under project root so logs live in project context for IDE/tooling (e.g. Cursor). */
 const ASFX_DIR = '.sfdx/asfx';
@@ -17,13 +17,19 @@ Debug logs from the Salesforce org are stored here as \`.log\` files (e.g. by lo
 Keeping logs inside the project folder allows tools like Cursor to use them in the context of this project for analysis and search.
 `;
 
+/** `projectDir` when given, else the active project, else the first workspace folder. */
+function projectRoot(projectDir?: string): string | undefined {
+    return projectDir ?? primaryProjectRoot();
+}
+
 /**
  * Returns the directory where log files are stored.
- * Uses project folder <workspace>/.sfdx/asfx so logs are in project context for IDEs and tools (e.g. Cursor).
+ * Uses the project folder <project>/.sfdx/asfx (the active project unless `projectDir` is given) so logs are in
+ * project context for IDEs and tools (e.g. Cursor).
  * Falls back to system temp only when no workspace is open.
  */
-export function getLogDirectory(): string {
-    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+export function getLogDirectory(projectDir?: string): string {
+    const workspaceRoot = projectRoot(projectDir);
     if (workspaceRoot) {
         return path.join(workspaceRoot, ASFX_DIR);
     }
@@ -34,8 +40,8 @@ export function getLogDirectory(): string {
  * Returns the directory where Salesforce extensions store debug logs.
  * Use this to list and open logs (we do not download/cache logs ourselves).
  */
-export function getSalesforceLogDirectory(): string | null {
-    const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+export function getSalesforceLogDirectory(projectDir?: string): string | null {
+    const workspaceRoot = projectRoot(projectDir);
     if (!workspaceRoot) return null;
     return path.join(workspaceRoot, SF_DEBUG_LOGS_DIR);
 }

@@ -10,6 +10,8 @@ import { Logger } from "../utils/outputChannel";
 import { DEFAULT_ORG_KEY, canonicalOrgKey, orgArgForKey } from "../utils/orgKey";
 import { getOrgByTarget, getOrgListForPicker, onOrgListUpdated } from "../utils/orgListCache";
 import { primaryProjectRoot, isSalesforceProject } from "../utils/projectUtils";
+import { PanelProjectBinding } from "../utils/panelProject";
+import { PROJECT_SELECTOR_CSS, projectSelectorMarkup, projectSelectorScript } from "../utils/panelProjectUi";
 import { confirmOverwrite, revertOpenEditors } from "../utils/retrieveSafety";
 import { retrieveComponents } from "../utils/retrieveEngine";
 import { getRetrieveTimes } from "../utils/retrieveLog";
@@ -78,6 +80,30 @@ export class OrgBrowserPanelProvider {
 	private static listedAt = 0;
 	private static typeListedAt: Record<string, number> = {};
 	private static local: LocalIndex | undefined;
+	/** The project the panel shows (project selector); follows the active project until the user picks another. */
+	private static binding: PanelProjectBinding | undefined;
+
+	/** Dir of the project the panel works on. */
+	private static projectDir(): string | undefined {
+		return this.binding?.current() ?? primaryProjectRoot();
+	}
+
+	/** The panel's project is an SFDX project (retrieve and the local index need source format). */
+	private static hasSfdxProject(): boolean {
+		const p = this.binding?.currentProject();
+		return p ? p.kind === "sfdx" : isSalesforceProject();
+	}
+
+	/** The project of the panel changed: rebuild everything bound to it, as if the panel were newly opened. */
+	private static async onProjectChanged(): Promise<void> {
+		if (!this.panel) return;
+		this.userPicked = false;
+		for (const d of this.watchers) d.dispose();
+		this.watchers = [];
+		this.setupWatchers();
+		await this.sendInit();
+		await this.loadOrg(null);
+	}
 
 	/** Call once on activation. */
 	public static init(context: vscode.ExtensionContext): void {
@@ -108,7 +134,12 @@ export class OrgBrowserPanelProvider {
 		panel.webview.html = this.getHtml(panel.webview, ctx.extensionUri);
 
 		const initialOrg: string | null = org ?? null;
+		const binding = new PanelProjectBinding();
+		this.binding = binding;
 		this.disposables.push(
+			binding,
+			binding.attach(panel.webview),
+			binding.onDidChange(() => void this.onProjectChanged().catch((e) => Logger.error("Org Browser project switch failed", e))),
 			panel.webview.onDidReceiveMessage((msg) => void this.onMessage(msg, () => initialOrg).catch((e) => Logger.error("Org Browser message failed", e))),
 			onDidChangeDefaultOrg(async () => {
 				await this.sendOrgs();
@@ -130,6 +161,7 @@ export class OrgBrowserPanelProvider {
 		this.watchers = [];
 		if (this.watchTimer) clearTimeout(this.watchTimer);
 		this.panel = undefined;
+		this.binding = undefined;
 		// Release the (potentially 50k-row) listing.
 		this.comps = [];
 		this.compMap = new Map();
@@ -212,7 +244,7 @@ export class OrgBrowserPanelProvider {
 
 	private static async orgOptions(): Promise<OrgOpt[]> {
 		const list = await getOrgListForPicker().catch(() => []);
-		const def = getDefaultOrgSync()?.username ?? null;
+		const def = getDefaultOrgSync(this.projectDir())?.username ?? null;
 		const out: OrgOpt[] = [];
 		for (const o of list) {
 			const rec = getOrgByTarget(o.username);
@@ -223,14 +255,14 @@ export class OrgBrowserPanelProvider {
 	}
 
 	private static async sendInit(): Promise<void> {
-		const root = primaryProjectRoot();
+		const root = this.projectDir();
 		const orgs = await this.orgOptions();
-		const key = canonicalOrgKey(null);
+		const key = canonicalOrgKey(null, root);
 		this.post({
 			type: "init",
 			orgs,
 			org: key === DEFAULT_ORG_KEY ? null : key,
-			hasProject: !!root && isSalesforceProject(),
+			hasProject: !!root && this.hasSfdxProject(),
 			projectName: root ? path.basename(root) : "",
 			ui: this.ctx?.workspaceState.get(UI_STATE_KEY) ?? null,
 		});
@@ -262,7 +294,7 @@ export class OrgBrowserPanelProvider {
 		if (!this.panel) return;
 		const gen = ++this.gen;
 		if (this.run) this.run.cancelled = true;
-		const key = canonicalOrgKey(org);
+		const key = canonicalOrgKey(org, this.projectDir());
 		this.orgKey = key;
 		this.orgArg = orgArgForKey(key);
 		this.setComps([]);
@@ -394,7 +426,7 @@ export class OrgBrowserPanelProvider {
 			Logger.error("Org Browser: listing failed", msg);
 			const label =
 				this.orgKey === DEFAULT_ORG_KEY
-					? getDefaultOrgSync()?.displayName || "the default org"
+					? getDefaultOrgSync(this.projectDir())?.displayName || "the default org"
 					: getOrgByTarget(this.orgKey)?.alias || this.orgKey;
 			let state: string = health.state;
 			let text: string;
@@ -419,8 +451,8 @@ export class OrgBrowserPanelProvider {
 	private static async refreshLocal(): Promise<void> {
 		if (!this.panel) return;
 		const gen = this.gen;
-		const root = primaryProjectRoot();
-		if (!root || !isSalesforceProject()) {
+		const root = this.projectDir();
+		if (!root || !this.hasSfdxProject()) {
 			this.post({ type: "local", keys: [], partial: [], retrieved: {}, hasProject: false });
 			return;
 		}
@@ -436,7 +468,7 @@ export class OrgBrowserPanelProvider {
 	}
 
 	private static setupWatchers(): void {
-		const root = primaryProjectRoot();
+		const root = this.projectDir();
 		if (!root) return;
 		const rescan = () => {
 			if (this.watchTimer) clearTimeout(this.watchTimer);
@@ -457,8 +489,8 @@ export class OrgBrowserPanelProvider {
 	 *   the user is asked whether to retrieve the hidden ones too. Omitted for single-row retrieves.
 	 */
 	private static async retrieve(components: { type: string; fullName: string }[], visibleKeys?: ReadonlySet<string>): Promise<void> {
-		const root = primaryProjectRoot();
-		if (!root || !isSalesforceProject()) {
+		const root = this.projectDir();
+		if (!root || !this.hasSfdxProject()) {
 			this.post({ type: "toast", text: "Open an SFDX project to retrieve.", kind: "warn" });
 			this.post({ type: "retrieveResult", results: [], cancelled: true });
 			return;
@@ -493,7 +525,7 @@ export class OrgBrowserPanelProvider {
 		}
 		const label =
 				this.orgKey === DEFAULT_ORG_KEY
-					? getDefaultOrgSync()?.displayName || "the default org"
+					? getDefaultOrgSync(this.projectDir())?.displayName || "the default org"
 					: getOrgByTarget(this.orgKey)?.alias || this.orgKey;
 		let outcome: Awaited<ReturnType<typeof retrieveComponents>> | undefined;
 		let cancelled = false;
@@ -588,11 +620,14 @@ export class OrgBrowserPanelProvider {
 <title>Org Browser</title>
 <style>
 ${CSS}
+${PROJECT_SELECTOR_CSS}
+.top .asfx-project { margin-left: 0; }
 </style>
 </head>
 <body>
 <div id="app">
   <div class="top">
+    ${projectSelectorMarkup()}
     <select id="org" aria-label="Org"></select>
     <div class="search">
       <input id="search" type="text" spellcheck="false" autocomplete="off" aria-label="Search metadata"
@@ -663,6 +698,7 @@ ${CSS}
 <div id="menu" class="menu" role="menu" hidden></div>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 <script nonce="${nonce}" src="${scriptUri}"></script>
+<script nonce="${nonce}">${projectSelectorScript("window.__asfxApi")}</script>
 </body>
 </html>`;
 	}

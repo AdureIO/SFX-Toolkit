@@ -21,6 +21,15 @@ export function primaryProjectRoot(): string | undefined {
 }
 
 /**
+ * A `findFiles` include pattern limited to the ACTIVE project (the plain glob when there is none), so a
+ * view that follows the active project never lists files of the other projects in the workspace.
+ */
+export function inActiveProject(glob: string): vscode.GlobPattern {
+    const root = activeProject()?.dir;
+    return root ? new vscode.RelativePattern(root, glob) : glob;
+}
+
+/**
  * Walk up from a file path to the nearest directory containing sfdx-project.json.
  * Lets nested/sub-projects (e.g. billing/force-app/...) resolve their own org/config
  * instead of always using the workspace root. Returns null if none is found.

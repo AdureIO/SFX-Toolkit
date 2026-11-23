@@ -572,10 +572,11 @@ export function activate(context: vscode.ExtensionContext) {
     const deployHistoryCmd = register("adure-sfx-toolkit.deployHistory", () => DeployHistoryProvider.show());
 
     // 16. Apex Snippets (sidebar view like Debug Traces + quick pick + overview panel)
-    const snippetProvider = new SnippetTreeProvider();
+    const snippetProvider = new SnippetTreeProvider(context.workspaceState);
     const snippetsTreeView = vscode.window.createTreeView("adure-sfx-toolkit.snippets", {
       treeDataProvider: snippetProvider
     });
+    snippetProvider.attachView(snippetsTreeView);
     context.subscriptions.push(
       snippetProvider,
       snippetsTreeView,
@@ -609,6 +610,7 @@ export function activate(context: vscode.ExtensionContext) {
       snippetProvider.refresh();
     });
     const refreshSnippetsCmd = register("adure-sfx-toolkit.refreshSnippets", () => snippetProvider.refresh());
+    const filterSnippetsCmd = register("adure-sfx-toolkit.filterSnippetsByProject", () => snippetProvider.pickFilter());
     const editSnippetCmd = register(
       "adure-sfx-toolkit.editSnippet",
       (snippetOrItem?: { snippet?: ApexSnippet; name?: string; code?: string }) => {
@@ -756,6 +758,7 @@ export function activate(context: vscode.ExtensionContext) {
       showSnippetsCmd,
       openSnippetsPanelCmd,
       refreshSnippetsCmd,
+      filterSnippetsCmd,
       runSnippetCmd,
       runSnippetFromTreeCmd,
       addSnippetCmd,

@@ -5,16 +5,58 @@ import { executeAnonymousApex } from "./executeAnonymous";
 import { getCachedOrgList, getOrgListForPicker } from "../utils/orgListCache";
 import { Logger } from "../utils/outputChannel";
 import { isWorkspaceUsable } from "../utils/projectUtils";
+import { activeProject, projects, SfProject } from "../utils/projectRegistry";
+import { samePath } from "../utils/projectDiscoveryPure";
+import { resolveDefaultTargetOrgUsername } from "../utils/defaultOrg";
+import { orgPickerForProject } from "../utils/panelProject";
+import {
+  ALL_PROJECTS,
+  SNIPPETS_REL_DIR,
+  SnippetFilter,
+  activeFirst,
+  addSnippetTarget,
+  effectiveFilter,
+  legacyMigrationSource,
+  showProjectBadge,
+  snippetsDirOf
+} from "../utils/snippetsPure";
 
-const SNIPPETS_DIR_NAME = "apex-snippets";
 const LEGACY_SNIPPETS_FILE = ".vscode/apex-snippets.json";
+/** workspaceState key of the snippet view's project filter ("all" or a project dir). */
+export const SNIPPET_FILTER_STATE_KEY = "asfx.snippetFilter";
 
 export interface ApexSnippet {
   name: string;
   code: string;
+  /** The project name when more than one project exists (shown as the tree item's description). */
   description?: string;
   /** Absolute path of the backing .apex file — the snippet's real identity (display names are lossy). */
   filePath?: string;
+  /** Dir of the project the snippet belongs to (its default org is the snippet's default org). */
+  projectDir?: string;
+  projectName?: string;
+}
+
+// --- Per-project snippet storage + view filter ---
+
+let filterState: vscode.Memento | undefined;
+
+/** Hand the module the workspaceState that persists the view filter (called once by the tree provider). */
+export function initSnippetFilterStore(state: vscode.Memento): void {
+  filterState = state;
+}
+
+/** The project filter of the snippets view: "all" (default) or one project's dir. */
+export function getSnippetFilter(): SnippetFilter {
+  return effectiveFilter(filterState?.get<string>(SNIPPET_FILTER_STATE_KEY), projects().map((p) => p.dir));
+}
+
+export async function setSnippetFilter(filter: SnippetFilter): Promise<void> {
+  try {
+    await filterState?.update(SNIPPET_FILTER_STATE_KEY, filter);
+  } catch {
+    /* persistence is best effort */
+  }
 }
 
 // --- Change notifications (tree view + overview panel both listen) ---
@@ -33,22 +75,20 @@ export function notifySnippetsChanged(): void {
   }, 100);
 }
 
-/** Watch the snippets folder so files created/deleted/saved outside the UI refresh tree + panel. */
+/** Watch the snippet folders of every project so files created/deleted/saved outside the UI refresh tree + panel. */
 export function createSnippetsWatcher(): vscode.Disposable {
-  const folder = vscode.workspace.workspaceFolders?.[0];
-  if (!folder) return new vscode.Disposable(() => undefined);
-  const watcher = vscode.workspace.createFileSystemWatcher(
-    new vscode.RelativePattern(folder, `.vscode/${SNIPPETS_DIR_NAME}/*.apex`)
-  );
-  const subs = [
-    watcher.onDidCreate(notifySnippetsChanged),
-    watcher.onDidDelete(notifySnippetsChanged),
-    watcher.onDidChange(notifySnippetsChanged)
-  ];
-  return new vscode.Disposable(() => {
-    subs.forEach((d) => d.dispose());
-    watcher.dispose();
-  });
+  const watchers: vscode.Disposable[] = [];
+  const pattern = `**/${SNIPPETS_REL_DIR.split(path.sep).join("/")}/*.apex`;
+  for (const folder of vscode.workspace.workspaceFolders ?? []) {
+    const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(folder, pattern));
+    watchers.push(
+      watcher,
+      watcher.onDidCreate(notifySnippetsChanged),
+      watcher.onDidDelete(notifySnippetsChanged),
+      watcher.onDidChange(notifySnippetsChanged)
+    );
+  }
+  return new vscode.Disposable(() => watchers.forEach((d) => d.dispose()));
 }
 
 /** Release the module-level emitter/timer (extension deactivate). */
@@ -58,10 +98,11 @@ export function disposeSnippetEvents(): void {
   snippetsChangedEmitter.dispose();
 }
 
-function getSnippetsDir(): string | null {
-  const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+/** Snippets folder of a project (default: the active project); null with no project. */
+function getSnippetsDir(projectDir?: string): string | null {
+  const root = projectDir ?? activeProject()?.dir ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   if (!root) return null;
-  return path.join(root, ".vscode", SNIPPETS_DIR_NAME);
+  return snippetsDirOf(root);
 }
 
 /** Sanitize display name to a safe filename stem for NEW files (e.g. "My Snippet" -> "My_Snippet", "v1.2" stays "v1.2"). */
@@ -79,13 +120,32 @@ function filenameToName(stem: string): string {
   return stem.replace(/_/g, " ");
 }
 
+/** Copy the pre-multi-project snippets of the workspace folder into the project that owns them. The old files stay. */
+function migrateFromWorkspaceFolderIfNeeded(project: SfProject): void {
+  try {
+    const source = legacyMigrationSource({
+      workspaceFolder: project.workspaceFolder,
+      projectDirs: projects().map((p) => p.dir),
+      projectDir: project.dir,
+      legacyDirExists: fs.existsSync(snippetsDirOf(project.workspaceFolder)),
+      projectDirHasSnippetsDir: fs.existsSync(snippetsDirOf(project.dir))
+    });
+    if (!source) return;
+    const target = snippetsDirOf(project.dir);
+    fs.mkdirSync(target, { recursive: true });
+    for (const f of fs.readdirSync(source).filter((n) => n.endsWith(".apex"))) {
+      fs.copyFileSync(path.join(source, f), path.join(target, f), fs.constants.COPYFILE_EXCL);
+    }
+  } catch {
+    // ignore migration errors
+  }
+}
+
 /** One-time migration from legacy JSON to .apex files. */
-async function migrateFromJsonIfNeeded(): Promise<void> {
-  const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  if (!root) return;
-  const jsonPath = path.join(root, LEGACY_SNIPPETS_FILE);
-  const dir = getSnippetsDir();
-  if (!dir || !fs.existsSync(jsonPath)) return;
+async function migrateFromJsonIfNeeded(project: SfProject): Promise<void> {
+  const jsonPath = path.join(project.dir, LEGACY_SNIPPETS_FILE);
+  const dir = snippetsDirOf(project.dir);
+  if (!fs.existsSync(jsonPath)) return;
   if (fs.existsSync(dir) && fs.readdirSync(dir).filter((f) => f.endsWith(".apex")).length > 0) return;
 
   try {
@@ -105,10 +165,12 @@ async function migrateFromJsonIfNeeded(): Promise<void> {
   }
 }
 
-export async function loadSnippets(): Promise<ApexSnippet[]> {
-  await migrateFromJsonIfNeeded();
-  const dir = getSnippetsDir();
-  if (!dir || !fs.existsSync(dir)) return [];
+/** The snippets of one project (no badge description). */
+async function loadProjectSnippets(project: SfProject): Promise<ApexSnippet[]> {
+  migrateFromWorkspaceFolderIfNeeded(project);
+  await migrateFromJsonIfNeeded(project);
+  const dir = snippetsDirOf(project.dir);
+  if (!fs.existsSync(dir)) return [];
 
   const files = fs.readdirSync(dir).filter((f) => f.endsWith(".apex"));
   const snippets: ApexSnippet[] = [];
@@ -121,38 +183,55 @@ export async function loadSnippets(): Promise<ApexSnippet[]> {
       snippets.push({
         name: filenameToName(stem),
         code,
-        filePath
+        filePath,
+        projectDir: project.dir,
+        projectName: project.name
       });
     } catch {
       // skip unreadable files
     }
   }
-  snippets.sort((a, b) => a.name.localeCompare(b.name));
   return snippets;
 }
 
-/** Path to the .apex file for a snippet (by display name). Prefer {@link snippetFilePath} for loaded snippets. */
-export function getSnippetFilePath(snippetName: string): string | null {
-  const dir = getSnippetsDir();
+/**
+ * The snippets of every project (or of `projectDir` only), by name. With more than one project each
+ * snippet's `description` is its project's name (the badge).
+ */
+export async function loadSnippets(projectDir?: string): Promise<ApexSnippet[]> {
+  const all = projects();
+  const scope = projectDir ? all.filter((p) => samePath(p.dir, projectDir)) : all;
+  const badge = showProjectBadge(all.length);
+  const out: ApexSnippet[] = [];
+  for (const p of scope) {
+    for (const s of await loadProjectSnippets(p)) out.push(badge ? { ...s, description: p.name } : s);
+  }
+  out.sort((a, b) => a.name.localeCompare(b.name) || (a.projectName ?? "").localeCompare(b.projectName ?? ""));
+  return out;
+}
+
+/** Path to the .apex file for a snippet (by display name) in a project (default: the active one). Prefer {@link snippetFilePath} for loaded snippets. */
+export function getSnippetFilePath(snippetName: string, projectDir?: string): string | null {
+  const dir = getSnippetsDir(projectDir);
   if (!dir) return null;
   return path.join(dir, nameToFilename(snippetName) + ".apex");
 }
 
 /** The snippet's real backing file: its loaded filePath, else derived from its display name (legacy callers). */
-export function snippetFilePath(snippet: Pick<ApexSnippet, "name" | "filePath">): string | null {
-  return snippet.filePath || getSnippetFilePath(snippet.name || "");
+export function snippetFilePath(snippet: Pick<ApexSnippet, "name" | "filePath" | "projectDir">): string | null {
+  return snippet.filePath || getSnippetFilePath(snippet.name || "", snippet.projectDir);
 }
 
-/** True when filePath is a .apex file directly inside the snippets folder (guards paths coming from webviews). */
+/** True when filePath is a .apex file directly inside a project's snippets folder (guards paths coming from webviews). */
 function isInSnippetsDir(filePath: string): boolean {
-  const dir = getSnippetsDir();
-  if (!dir || !filePath.endsWith(".apex")) return false;
-  return path.dirname(path.resolve(filePath)) === path.resolve(dir);
+  if (!filePath.endsWith(".apex")) return false;
+  const parent = path.dirname(path.resolve(filePath));
+  return projects().some((p) => path.resolve(snippetsDirOf(p.dir)) === parent);
 }
 
 /** Read the snippet's current code from disk (falls back to the in-memory code). */
-function currentSnippetCode(snippet: { code?: string; name?: string; filePath?: string }): string {
-  const filePath = snippet.filePath || getSnippetFilePath(snippet.name || "");
+function currentSnippetCode(snippet: { code?: string; name?: string; filePath?: string; projectDir?: string }): string {
+  const filePath = snippet.filePath || getSnippetFilePath(snippet.name || "", snippet.projectDir);
   if (filePath && fs.existsSync(filePath)) {
     try {
       return fs.readFileSync(filePath, "utf8");
@@ -161,6 +240,39 @@ function currentSnippetCode(snippet: { code?: string; name?: string; filePath?: 
     }
   }
   return snippet.code ?? "";
+}
+
+/**
+ * Org a snippet runs against by default: its OWN project's default org. Undefined = let the run use the
+ * active project's default (the snippet is in the active project). `ok: false` = the snippet's project is
+ * not the active one and has no default org (running would silently hit another project's org).
+ */
+async function snippetDefaultOrg(snippet: { projectDir?: string; projectName?: string }): Promise<{ ok: true; targetOrg?: string } | { ok: false }> {
+  if (!snippet.projectDir || samePath(snippet.projectDir, activeProject()?.dir)) return { ok: true };
+  const username = await resolveDefaultTargetOrgUsername(snippet.projectDir);
+  if (!username) {
+    vscode.window.showWarningMessage(
+      `Project "${snippet.projectName ?? snippet.projectDir}" has no default org. Set one (or run the snippet with "select org").`
+    );
+    return { ok: false };
+  }
+  return { ok: true, targetOrg: username };
+}
+
+/** Pick the project for a new snippet / the snippets folder (see addSnippetTarget). */
+async function chooseProjectForNew(): Promise<SfProject | undefined> {
+  const all = projects();
+  const target = addSnippetTarget(getSnippetFilter(), all.map((p) => p.dir));
+  if (target.kind === "none") return undefined;
+  if (target.kind === "dir") return all.find((p) => samePath(p.dir, target.dir));
+  const ordered = activeFirst(all.map((p) => p.dir), activeProject()?.dir);
+  type ProjectPick = vscode.QuickPickItem & { project: SfProject };
+  const items: ProjectPick[] = ordered.map((dir) => {
+    const p = all.find((x) => x.dir === dir) as SfProject;
+    return { label: p.name, description: samePath(p.dir, activeProject()?.dir) ? "active project" : undefined, detail: p.dir, project: p };
+  });
+  const picked = await vscode.window.showQuickPick(items, { placeHolder: "Project for the new snippet" });
+  return picked?.project;
 }
 
 /** Open the .apex file for a snippet in the editor (code completion, Cursor chat). */
@@ -222,6 +334,9 @@ export async function addSnippet(): Promise<void> {
     initialCode = editor.document.getText(editor.selection);
   }
 
+  const project = await chooseProjectForNew();
+  if (!project) return;
+
   const name = await vscode.window.showInputBox({
     prompt: "Snippet name (will be the .apex file name)",
     placeHolder: "e.g. Reset Account Flags",
@@ -229,8 +344,7 @@ export async function addSnippet(): Promise<void> {
   });
   if (!name) return;
 
-  const dir = getSnippetsDir();
-  if (!dir) return;
+  const dir = snippetsDirOf(project.dir);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
   const fileName = nameToFilename(name.trim()) + ".apex";
@@ -253,8 +367,9 @@ export async function addSnippet(): Promise<void> {
 
 /** Open the snippets folder: reveal in Explorer and open first .apex if any. */
 export async function editSnippetFile(): Promise<void> {
-  const dir = getSnippetsDir();
-  if (!dir) return;
+  const project = await chooseProjectForNew();
+  if (!project) return;
+  const dir = snippetsDirOf(project.dir);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   const uri = vscode.Uri.file(dir);
   await vscode.commands.executeCommand("revealInExplorer", uri);
@@ -266,9 +381,15 @@ export async function editSnippetFile(): Promise<void> {
   }
 }
 
-/** Run a specific snippet from the tree sidebar — shows an org selector first. */
+/** Run a specific snippet from the tree sidebar — shows an org selector first (its project's default org first). */
 export async function runSnippetFromTree(snippet: ApexSnippet): Promise<void> {
-  const orgs = getCachedOrgList() ?? (await getOrgListForPicker());
+  const inActive = !snippet.projectDir || samePath(snippet.projectDir, activeProject()?.dir);
+  let orgs: { label: string; username: string }[];
+  if (snippet.projectDir && !inActive) {
+    orgs = (await orgPickerForProject(snippet.projectDir)).orgs;
+  } else {
+    orgs = getCachedOrgList() ?? (await getOrgListForPicker());
+  }
 
   let targetOrg: string | undefined;
   if (orgs.length === 0) {
@@ -278,15 +399,19 @@ export async function runSnippetFromTree(snippet: ApexSnippet): Promise<void> {
       "Cancel"
     );
     if (action !== "Run") return;
+    const def = await snippetDefaultOrg(snippet);
+    if (!def.ok) return;
+    targetOrg = def.targetOrg;
   } else {
     type OrgPick = vscode.QuickPickItem & { username: string };
     const items: OrgPick[] = orgs.map((o) => ({ label: o.label, username: o.username }));
     const picked = await vscode.window.showQuickPick(items, {
-      placeHolder: `Select target org for "${snippet.name}"`
+      placeHolder: `Select target org for "${snippet.name}"${snippet.projectName && !inActive ? ` (${snippet.projectName})` : ""}`
     });
     if (!picked) return;
-    // If user picked the default org option, leave targetOrg undefined (no -o flag)
-    targetOrg = picked.label.endsWith("(default)") ? undefined : picked.username;
+    // The active project's default org: leave targetOrg undefined (no -o flag). Another project's default
+    // is passed explicitly, since "no org" would resolve to the active project's.
+    targetOrg = picked.label.endsWith("(default)") && inActive ? undefined : picked.username;
   }
 
   const codeToRun = currentSnippetCode(snippet);
@@ -296,7 +421,7 @@ export async function runSnippetFromTree(snippet: ApexSnippet): Promise<void> {
   }
 }
 
-export async function runSnippet(snippet?: ApexSnippet | { code?: string; name?: string; filePath?: string }): Promise<void> {
+export async function runSnippet(snippet?: ApexSnippet | { code?: string; name?: string; filePath?: string; projectDir?: string; projectName?: string }): Promise<void> {
   if (!snippet || !snippet.code) {
     const snippets = await loadSnippets();
     if (snippets.length === 0) {
@@ -325,8 +450,11 @@ export async function runSnippet(snippet?: ApexSnippet | { code?: string; name?:
     snippet = picked.snippet;
   }
 
+  // The snippet runs against ITS project's default org.
+  const def = await snippetDefaultOrg(snippet);
+  if (!def.ok) return;
   const codeToRun = currentSnippetCode(snippet);
-  const result = await executeAnonymousApex(codeToRun, { name: snippet.name });
+  const result = await executeAnonymousApex(codeToRun, { targetOrg: def.targetOrg, name: snippet.name });
   if (!result.success) {
     Logger.error(`Snippet "${snippet.name || "unnamed"}" failed`);
   }
@@ -367,7 +495,7 @@ export async function deleteSnippet(target?: ApexSnippet | { snippet?: ApexSnipp
   if (filePath) await deleteSnippetByPath(filePath);
 }
 
-/** Delete the snippet stored at filePath (must be inside the snippets folder). Returns true if deleted. */
+/** Delete the snippet stored at filePath (must be inside a project's snippets folder). Returns true if deleted. */
 export async function deleteSnippetByPath(filePath: string): Promise<boolean> {
   if (!isInSnippetsDir(filePath) || !fs.existsSync(filePath)) return false;
   fs.unlinkSync(filePath);
@@ -385,4 +513,24 @@ export async function deleteSnippetByIndex(index: number): Promise<boolean> {
   if (index < 0 || index >= snippets.length) return false;
   const filePath = snippetFilePath(snippets[index]);
   return filePath ? deleteSnippetByPath(filePath) : false;
+}
+
+/** Quick pick for the snippets view's project filter ("All projects" plus each project). */
+export async function pickSnippetFilter(): Promise<boolean> {
+  const all = projects();
+  const current = getSnippetFilter();
+  type FilterPick = vscode.QuickPickItem & { filter: SnippetFilter };
+  const items: FilterPick[] = [
+    { label: "All projects", description: current === ALL_PROJECTS ? "current" : undefined, filter: ALL_PROJECTS },
+    ...all.map((p) => ({
+      label: p.name,
+      description: samePath(p.dir, current) ? "current" : undefined,
+      detail: p.dir,
+      filter: p.dir
+    }))
+  ];
+  const picked = await vscode.window.showQuickPick(items, { placeHolder: "Show snippets of…" });
+  if (!picked) return false;
+  await setSnippetFilter(picked.filter);
+  return true;
 }
