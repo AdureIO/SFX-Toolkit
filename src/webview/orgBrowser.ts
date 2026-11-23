@@ -21,6 +21,7 @@ import {
 	sortIndices,
 } from "../utils/orgBrowser/filter";
 import { splitByVisibility } from "../utils/orgBrowser/selection";
+import { $, REFRESH_ICON, createFilterBar, esc, toggleIn, FilterBar } from "./shared/filterBar";
 import { Comp, ListFailure, STATUS_CHANGED, STATUS_LOCAL, STATUS_PARTIAL, TypeInfo, compKey } from "../utils/orgBrowser/types";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -63,9 +64,6 @@ const api = acquireVsCodeApi();
 const post = (msg: unknown) => api.postMessage(msg);
 // The shared project selector (panelProjectUi.ts) posts through this handle.
 (window as unknown as { __asfxApi: unknown }).__asfxApi = api;
-const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
-const esc = (t: unknown) =>
-	String(t ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 const ROW_H = 28;
 const HEAD_H = 30;
@@ -106,7 +104,7 @@ let facets: Facets | null = null;
 let terms: string[] = [];
 let active = -1;
 let anchor = -1;
-let typeFilterText = "";
+let bar: FilterBar;
 let first = -1;
 let last = -1;
 
@@ -231,7 +229,7 @@ const ICON = {
 	diff: '<svg viewBox="0 0 16 16" width="14" height="14"><path fill="currentColor" d="M2 4h9.600l-2-2 .7-.7 3.200 3.200-3.200 3.200-.7-.7 2-2H2zm12 8H4.400l2 2-.7.700L2.500 11.500l3.200-3.200.7.700-2 2H14z"/></svg>',
 	folder: '<svg viewBox="0 0 16 16" width="14" height="14"><path fill="currentColor" d="M1.500 3h5l1 1.500h7V13h-13zm1 1v8h11V5.500H7z"/></svg>',
 	copy: '<svg viewBox="0 0 16 16" width="14" height="14"><path fill="currentColor" d="M4 4V1.500h10V12h-2.500v2.500H1.500V4zm1 0h6.500v7H13V2.500H5zM2.500 5v8.500h8V5z"/></svg>',
-	refresh: '<svg viewBox="0 0 16 16" width="13" height="13"><path fill="currentColor" d="M13.500 8A5.500 5.500 0 112.800 5.800l-1.200-.5L2 4.400l3.600 1.200-.4 3.600-.9-.2.3-1.600A4.500 4.500 0 1012.500 8z"/></svg>',
+	refresh: REFRESH_ICON,
 	chevron: '<svg viewBox="0 0 16 16" width="12" height="12"><path fill="currentColor" d="M6 4l4.500 4L6 12z"/></svg>',
 };
 
@@ -379,74 +377,6 @@ function renderListed(): void {
 	}
 }
 
-function facetRow(kind: string, value: string, label: string, count: number, checked: boolean, extra = ""): string {
-	return (
-		`<label class="frow${count === 0 && !checked ? " zero" : ""}" data-kind="${kind}" data-value="${esc(value)}">` +
-		`<input type="checkbox" ${checked ? "checked" : ""}><span class="fl">${esc(label)}</span>${extra}<span class="fc">${count.toLocaleString()}</span></label>`
-	);
-}
-
-function renderFacets(): void {
-	if (!facets) return;
-	const f = ui.filter;
-	// Local status
-	$("fStatus").innerHTML = (
-		[
-			["not-local", "Not in project", facets.status[0]],
-			["local", "In project", facets.status[1]],
-			["changed", "Changed in org", facets.status[2]],
-			["partial", "Partly in project", facets.status[3]],
-		] as [string, string, number][]
-	)
-		.map(([v, l, c]) => facetRow("status", v, l, c, f.status.includes(v as never)))
-		.join("");
-
-	// Types
-	const names = new Set<string>(facets.types.keys());
-	for (const t of f.types) names.add(t);
-	const q = typeFilterText.trim().toLowerCase();
-	const list = [...names].filter((t) => !q || t.toLowerCase().includes(q));
-	list.sort((a, b) => (facets!.types.get(b) ?? 0) - (facets!.types.get(a) ?? 0) || a.localeCompare(b));
-	$("typeList").innerHTML =
-		list
-			.map((t) =>
-				facetRow(
-					"type",
-					t,
-					t,
-					facets!.types.get(t) ?? 0,
-					f.types.includes(t),
-					`<button class="only" data-only="${esc(t)}" title="Show only ${esc(t)}">only</button><button class="tref" data-tref="${esc(t)}" title="Re-list ${esc(t)} only">${ICON.refresh}</button>`
-				)
-			)
-			.join("") || '<div class="muted pad">No matching types</div>';
-	$("typeCount").textContent = f.types.length ? `${f.types.length} selected` : "all";
-
-	// Namespaces
-	const nsNames = [...facets.namespaces.keys()].filter((n) => n !== "").sort((a, b) => (facets!.namespaces.get(b) ?? 0) - (facets!.namespaces.get(a) ?? 0) || a.localeCompare(b));
-	const unmanagedCount = facets.namespaces.get("") ?? 0;
-	$("fNs").innerHTML =
-		`<div class="chips"><button class="chip${f.nsMode === "all" ? " on" : ""}" data-ns="all">All</button>` +
-		`<button class="chip${f.nsMode === "unmanaged" ? " on" : ""}" data-ns="unmanaged">Unmanaged only <span class="fc">${unmanagedCount.toLocaleString()}</span></button></div>` +
-		nsNames.map((n) => facetRow("ns", n, n, facets!.namespaces.get(n) ?? 0, f.nsMode === "specific" && f.namespaces.includes(n))).join("");
-
-	// Manageable state
-	const stNames = [...facets.states.keys()].sort((a, b) => (facets!.states.get(b) ?? 0) - (facets!.states.get(a) ?? 0));
-	$("fState").innerHTML = stNames.map((s) => facetRow("state", s, s || "(unknown)", facets!.states.get(s) ?? 0, f.states.includes(s))).join("");
-
-	($("fMine") as HTMLInputElement).checked = f.mine;
-	($("fMine") as HTMLInputElement).disabled = me.ids.length === 0 && !me.name;
-	($("fMine").parentElement as HTMLElement).title = me.ids.length === 0 && !me.name ? "Current user not resolved yet" : "";
-	($("fWithin") as HTMLSelectElement).value = f.within;
-	$("fCustom").hidden = f.within !== "custom";
-	($("fFrom") as HTMLInputElement).value = f.from ? new Date(f.from).toISOString().slice(0, 10) : "";
-	($("fTo") as HTMLInputElement).value = f.to ? new Date(f.to).toISOString().slice(0, 10) : "";
-
-	const activeCount =
-		(f.types.length ? 1 : 0) + (f.nsMode !== "all" ? 1 : 0) + (f.states.length ? 1 : 0) + (f.status.length ? 1 : 0) + (f.mine ? 1 : 0) + (f.within !== "any" ? 1 : 0);
-	$("clearFilters").hidden = activeCount === 0 && !f.query;
-}
-
 function renderOverlay(): void {
 	const ov = $("overlay");
 	const banner = $("banner");
@@ -513,7 +443,7 @@ function renderOrgSelect(): void {
 
 function renderAll(): void {
 	renderTop();
-	renderFacets();
+	bar.renderFacets();
 	renderGridChrome();
 	renderOverlay();
 	invalidateRows();
@@ -662,67 +592,47 @@ function hideMenu(): void {
 
 // ── Events ─────────────────────────────────────────────────────────────────────
 
-function setQuery(q: string, immediate = false): void {
-	ui.filter.query = q;
-	const run = () => {
-		recompute(true);
-		saveUi();
-	};
-	if (immediate || idx.comps.length < 8000) run();
-	else {
-		window.clearTimeout((setQuery as unknown as { t?: number }).t);
-		(setQuery as unknown as { t?: number }).t = window.setTimeout(run, 90);
-	}
-}
-
-function clearFilters(): void {
-	const sel = ui.filter.onlySelected;
-	ui.filter = { ...DEFAULT_FILTER, onlySelected: sel && selected.size > 0 };
-	($("search") as HTMLInputElement).value = "";
-	recompute(true);
-	saveUi();
-}
-
-function toggleIn<T>(arr: T[], v: T): T[] {
-	return arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v];
-}
-
 function setupEvents(): void {
 	const search = $("search") as HTMLInputElement;
-	search.addEventListener("input", () => setQuery(search.value));
-	search.addEventListener("keydown", (e) => {
-		if (e.key === "Escape" && search.value) {
-			search.value = "";
-			setQuery("", true);
-			e.stopPropagation();
-		} else if (e.key === "ArrowDown") {
-			e.preventDefault();
+	bar = createFilterBar({
+		filter: () => ui.filter,
+		facets: () => facets,
+		rowCount: () => idx.comps.length,
+		statusOptions: [
+			{ value: "not-local", label: "Not in project" },
+			{ value: "local", label: "In project" },
+			{ value: "changed", label: "Changed in org" },
+			{ value: "partial", label: "Partly in project" },
+		],
+		me: () => me,
+		onChange: () => {
+			recompute(true);
+			saveUi();
+		},
+		onRefreshType: (t) => post({ command: "refreshTypes", types: [t] }),
+		onSearchArrowDown: () => {
 			$("scroller").focus();
 			if (active < 0 && items.length) setActive(0);
-		}
-	});
-	search.addEventListener("paste", (e) => {
-		const text = e.clipboardData?.getData("text") ?? "";
-		if (!/\r?\n/.test(text.trim())) return;
-		const known = new Set(types.map((t) => t.name));
-		for (const c of idx.comps) known.add(c.t);
-		const pairs = parsePastedPairs(text, known);
-		if (!pairs) return;
-		e.preventDefault();
-		const { indices, missing } = matchPairs(idx, pairs);
-		for (const i of indices) selected.add(keyAt(i));
-		ui.filter = { ...ui.filter, query: "", onlySelected: selected.size > 0 };
-		search.value = "";
-		recompute(true);
-		toast(
-			`Selected ${indices.length} of ${pairs.length} pasted component${pairs.length === 1 ? "" : "s"}` + (missing.length ? ` (${missing.length} not found)` : ""),
-			missing.length ? "warn" : "info"
-		);
-	});
-	$("clearSearch").addEventListener("click", () => {
-		search.value = "";
-		setQuery("", true);
-		search.focus();
+		},
+		onSearchPaste: (e) => {
+			const text = e.clipboardData?.getData("text") ?? "";
+			if (!/\r?\n/.test(text.trim())) return;
+			const known = new Set(types.map((t) => t.name));
+			for (const c of idx.comps) known.add(c.t);
+			const pairs = parsePastedPairs(text, known);
+			if (!pairs) return;
+			e.preventDefault();
+			const { indices, missing } = matchPairs(idx, pairs);
+			for (const i of indices) selected.add(keyAt(i));
+			ui.filter = { ...ui.filter, query: "", onlySelected: selected.size > 0 };
+			search.value = "";
+			recompute(true);
+			toast(
+				`Selected ${indices.length} of ${pairs.length} pasted component${pairs.length === 1 ? "" : "s"}` + (missing.length ? ` (${missing.length} not found)` : ""),
+				missing.length ? "warn" : "info"
+			);
+		},
+		preserveOnClear: () => ({ onlySelected: ui.filter.onlySelected && selected.size > 0 }),
 	});
 
 	($("org") as HTMLSelectElement).addEventListener("change", (e) => {
@@ -746,7 +656,7 @@ function setupEvents(): void {
 	});
 	$("selHiddenShow").addEventListener("click", () => {
 		ui.filter = { ...DEFAULT_FILTER, onlySelected: true };
-		($("search") as HTMLInputElement).value = "";
+		bar.syncSearchInput();
 		recompute(true);
 		saveUi();
 	});
@@ -763,7 +673,6 @@ function setupEvents(): void {
 		recompute(true);
 		saveUi();
 	});
-	$("clearFilters").addEventListener("click", clearFilters);
 	$("collapseAll").addEventListener("click", () => {
 		if (!ui.group) return;
 		const all = new Set(rows.map((i) => idx.comps[i].t));
@@ -802,85 +711,6 @@ function setupEvents(): void {
 			window.addEventListener("mouseup", up);
 		});
 	}
-
-	// Sidebar (delegated)
-	$("side").addEventListener("click", (e) => {
-		const t = e.target as HTMLElement;
-		const only = t.closest<HTMLElement>("[data-only]");
-		if (only) {
-			e.preventDefault();
-			ui.filter.types = [only.dataset.only!];
-			recompute(true);
-			saveUi();
-			return;
-		}
-		const tref = t.closest<HTMLElement>("[data-tref]");
-		if (tref) {
-			e.preventDefault();
-			post({ command: "refreshTypes", types: [tref.dataset.tref] });
-			return;
-		}
-		const ns = t.closest<HTMLElement>("[data-ns]");
-		if (ns) {
-			ui.filter.nsMode = ns.dataset.ns === "unmanaged" ? "unmanaged" : "all";
-			ui.filter.namespaces = [];
-			recompute(true);
-			saveUi();
-			return;
-		}
-		const row = t.closest<HTMLElement>(".frow");
-		if (row && t.tagName !== "INPUT") {
-			// The label forwards the click to its checkbox; handle alt-click ("only this") here.
-			if ((e as MouseEvent).altKey && row.dataset.kind === "type") {
-				e.preventDefault();
-				ui.filter.types = [row.dataset.value!];
-				recompute(true);
-				saveUi();
-			}
-		}
-	});
-	$("side").addEventListener("change", (e) => {
-		const t = e.target as HTMLInputElement;
-		const row = t.closest<HTMLElement>(".frow");
-		if (row) {
-			const v = row.dataset.value!;
-			const f = ui.filter;
-			switch (row.dataset.kind) {
-				case "type":
-					f.types = toggleIn(f.types, v);
-					break;
-				case "ns":
-					f.namespaces = toggleIn(f.nsMode === "specific" ? f.namespaces : [], v);
-					f.nsMode = f.namespaces.length ? "specific" : "all";
-					break;
-				case "state":
-					f.states = toggleIn(f.states, v);
-					break;
-				case "status":
-					f.status = toggleIn(f.status, v as never);
-					break;
-			}
-			recompute(true);
-			saveUi();
-			return;
-		}
-		if (t.id === "fMine") {
-			ui.filter.mine = t.checked;
-		} else if (t.id === "fWithin") {
-			ui.filter.within = (t as unknown as HTMLSelectElement).value as FilterState["within"];
-		} else if (t.id === "fFrom" || t.id === "fTo") {
-			const v = (t as HTMLInputElement).value;
-			const ms = v ? Date.parse(v + (t.id === "fTo" ? "T23:59:59" : "T00:00:00")) : undefined;
-			if (t.id === "fFrom") ui.filter.from = ms;
-			else ui.filter.to = ms;
-		} else return;
-		recompute(true);
-		saveUi();
-	});
-	($("typeSearch") as HTMLInputElement).addEventListener("input", (e) => {
-		typeFilterText = (e.target as HTMLInputElement).value;
-		renderFacets();
-	});
 
 	// Grid (delegated)
 	const rowsEl = $("rowsEl");
@@ -1129,7 +959,7 @@ window.addEventListener("message", (ev) => {
 			projectName = m.projectName ?? "";
 			noOrg = orgs.length === 0;
 			mergeUi((m.ui as UiState | null) ?? (api.getState() as UiState | null));
-			($("search") as HTMLInputElement).value = ui.filter.query;
+			bar.syncSearchInput();
 			applyWidths();
 			renderOrgSelect();
 			recompute();
@@ -1217,7 +1047,7 @@ window.addEventListener("message", (ev) => {
 			break;
 		case "me":
 			me = { ids: m.ids ?? [], name: m.name ?? "" };
-			renderFacets();
+			bar.renderFacets();
 			if (ui.filter.mine) recompute();
 			break;
 		case "retrieveResult": {

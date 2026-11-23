@@ -12,6 +12,7 @@ import { getOrgByTarget, getOrgListForPicker, onOrgListUpdated } from "../utils/
 import { primaryProjectRoot, isSalesforceProject } from "../utils/projectUtils";
 import { PanelProjectBinding } from "../utils/panelProject";
 import { PROJECT_SELECTOR_CSS, projectSelectorMarkup, projectSelectorScript } from "../utils/panelProjectUi";
+import { FILTER_BAR_CSS, FILTER_BAR_VARS, filterGroupsMarkup, filterSearchMarkup } from "../utils/filterBarUi";
 import { confirmOverwrite, revertOpenEditors } from "../utils/retrieveSafety";
 import { retrieveComponents } from "../utils/retrieveEngine";
 import { getRetrieveTimes } from "../utils/retrieveLog";
@@ -629,11 +630,7 @@ ${PROJECT_SELECTOR_CSS}
   <div class="top">
     ${projectSelectorMarkup()}
     <select id="org" aria-label="Org"></select>
-    <div class="search">
-      <input id="search" type="text" spellcheck="false" autocomplete="off" aria-label="Search metadata"
-        placeholder="Search name or type…   type:ApexClass  ns:abc  by:smith  status:changed  Acc*Handler  ApexClass:Foo   ( / )">
-      <button id="clearSearch" class="x" title="Clear (Esc)" aria-label="Clear search">×</button>
-    </div>
+    ${filterSearchMarkup("Search name or type…   type:ApexClass  ns:abc  by:smith  status:changed  Acc*Handler  ApexClass:Foo   ( / )")}
     <span id="listedInfo" class="muted"></span>
     <button id="refreshBtn" class="ghost" title="Re-list every type from the org">↻ Refresh</button>
     <span class="spacer"></span>
@@ -644,26 +641,7 @@ ${PROJECT_SELECTOR_CSS}
   <div id="progress" class="progress" hidden><div id="progressBar"></div></div>
   <div id="banner"></div>
   <div class="main">
-    <aside id="side" aria-label="Filters">
-      <div class="fgroup"><h4>Local status</h4><div id="fStatus"></div></div>
-      <div class="fgroup">
-        <h4>Metadata type <span id="typeCount" class="muted"></span></h4>
-        <input id="typeSearch" type="text" placeholder="Find a type…" spellcheck="false" autocomplete="off">
-        <div id="typeList" class="typelist"></div>
-        <div class="hint">Alt-click a type for “only this”</div>
-      </div>
-      <div class="fgroup"><h4>Namespace</h4><div id="fNs"></div></div>
-      <div class="fgroup"><h4>Manageable state</h4><div id="fState"></div></div>
-      <div class="fgroup">
-        <h4>Modified</h4>
-        <label class="frow2"><input type="checkbox" id="fMine"> Modified by me</label>
-        <select id="fWithin" aria-label="Modified within">
-          <option value="any">Any time</option><option value="24h">Last 24 hours</option><option value="7d">Last 7 days</option>
-          <option value="30d">Last 30 days</option><option value="custom">Custom range…</option>
-        </select>
-        <div id="fCustom" class="custom" hidden><input type="date" id="fFrom" aria-label="From"><input type="date" id="fTo" aria-label="To"></div>
-      </div>
-      <button id="clearFilters" class="linkbtn" hidden>Clear all filters</button>
+    <aside id="side" aria-label="Filters">${filterGroupsMarkup({ statusTitle: "Local status" })}
     </aside>
     <section class="center">
       <div class="gridbar">
@@ -705,16 +683,10 @@ ${PROJECT_SELECTOR_CSS}
 }
 
 const CSS = `
+${FILTER_BAR_CSS}
 *,*::before,*::after { box-sizing: border-box; }
 :root {
-  --ob-border: color-mix(in srgb, var(--vscode-foreground) 16%, transparent);
-  --ob-border-strong: color-mix(in srgb, var(--vscode-foreground) 30%, transparent);
-  --ob-surface: var(--vscode-sideBar-background, var(--vscode-editor-background));
-  --ob-hover: var(--vscode-list-hoverBackground);
-  --ob-accent: var(--vscode-focusBorder, #4c8bf5);
-  --ob-ok: var(--vscode-testing-iconPassed, #3fb950);
-  --ob-bad: var(--vscode-errorForeground, #f14c4c);
-  --ob-warn: var(--vscode-editorWarning-foreground, #d29922);
+  ${FILTER_BAR_VARS}
   --cols: 34px minmax(180px,1fr) 150px 90px 150px 120px 130px 132px;
   --minw: 986px;
 }
@@ -725,23 +697,15 @@ body { margin: 0; font-family: var(--vscode-font-family); font-size: 13px; color
 button { font: inherit; color: inherit; cursor: pointer; }
 button:disabled { opacity: .5; cursor: default; }
 :focus-visible { outline: 1px solid var(--ob-accent); outline-offset: 1px; }
-.muted { color: var(--vscode-descriptionForeground); }
-.pad { padding: 6px 4px; }
 .spacer { flex: 1; min-width: 8px; }
 .top { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid var(--ob-border); flex-wrap: wrap; flex-shrink: 0; }
 select, input[type="text"], input[type="date"] { height: 28px; padding: 0 8px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); border: 1px solid var(--vscode-input-border, var(--ob-border)); border-radius: 4px; font: inherit; }
 select { max-width: 240px; }
 select:focus, input:focus { outline: 1px solid var(--ob-accent); outline-offset: -1px; }
-.search { position: relative; flex: 1 1 320px; min-width: 220px; max-width: 760px; }
-.search input { width: 100%; padding-right: 26px; }
-.search .x { position: absolute; right: 2px; top: 2px; height: 24px; width: 24px; border: 0; background: transparent; opacity: .6; font-size: 16px; line-height: 1; }
-.search .x:hover { opacity: 1; }
 button.primary { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: 1px solid transparent; border-radius: 4px; height: 28px; padding: 0 14px; font-weight: 600; }
 button.primary:hover:not(:disabled) { background: var(--vscode-button-hoverBackground); }
 button.ghost { background: transparent; border: 1px solid var(--ob-border); border-radius: 4px; height: 28px; padding: 0 10px; }
 button.ghost:hover:not(:disabled) { background: var(--ob-hover); }
-button.linkbtn { background: none; border: 0; color: var(--vscode-textLink-foreground); padding: 0 4px; font-size: 12px; }
-button.linkbtn:hover { text-decoration: underline; }
 .selhidden { font-size: 11px; color: var(--vscode-descriptionForeground); margin-right: 6px; white-space: nowrap; }
 .selhidden .link { background: transparent; border: 0; padding: 0; color: var(--vscode-textLink-foreground); cursor: pointer; text-decoration: underline; font: inherit; }
 .selchip { display: inline-flex; align-items: center; border: 1px solid var(--ob-border-strong); border-radius: 999px; overflow: hidden; }
@@ -756,27 +720,6 @@ button.linkbtn:hover { text-decoration: underline; }
 .bn button { margin-left: 8px; }
 .main { flex: 1; display: flex; min-height: 0; }
 #side { width: 248px; flex-shrink: 0; overflow-y: auto; border-right: 1px solid var(--ob-border); background: var(--ob-surface); padding: 6px 10px 12px; }
-.fgroup { padding: 8px 0 10px; border-bottom: 1px solid var(--ob-border); }
-.fgroup:last-of-type { border-bottom: 0; }
-.fgroup h4 { margin: 0 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--vscode-descriptionForeground); display: flex; gap: 6px; align-items: baseline; }
-#typeSearch { width: 100%; margin-bottom: 4px; height: 26px; }
-.typelist { max-height: 280px; overflow-y: auto; }
-.hint { font-size: 11px; color: var(--vscode-descriptionForeground); margin-top: 4px; }
-.frow, .frow2 { display: flex; align-items: center; gap: 6px; padding: 2px 2px; border-radius: 3px; cursor: pointer; min-height: 22px; }
-.frow:hover { background: var(--ob-hover); }
-.frow.zero { opacity: .5; }
-.frow .fl { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.fc { font-size: 11px; color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; }
-.frow .only, .frow .tref { visibility: hidden; border: 0; background: transparent; font-size: 11px; color: var(--vscode-textLink-foreground); padding: 0 3px; }
-.frow .tref { opacity: .8; }
-.frow:hover .only, .frow:hover .tref { visibility: visible; }
-.frow input, .frow2 input { margin: 0; }
-.chips { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 4px; }
-.chip { background: transparent; border: 1px solid var(--ob-border-strong); border-radius: 999px; padding: 1px 9px; font-size: 12px; }
-.chip.on { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border-color: transparent; }
-.custom { display: flex; gap: 4px; margin-top: 4px; }
-.custom input { flex: 1; min-width: 0; }
-#fWithin { width: 100%; margin-top: 4px; }
 .center { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .gridbar { display: flex; align-items: center; gap: 10px; padding: 5px 12px; border-bottom: 1px solid var(--ob-border); font-size: 12px; flex-shrink: 0; }
 .inl { display: inline-flex; gap: 5px; align-items: center; cursor: pointer; }

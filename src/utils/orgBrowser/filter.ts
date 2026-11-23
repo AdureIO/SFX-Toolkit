@@ -8,10 +8,61 @@
  *   type:ApexClass       type equals (wildcards allowed); several type: tokens are ORed
  *   ns:abc  ns:none      namespace prefix equals; `ns:none` / `ns:` = unmanaged; ORed
  *   by:smith  by:"Jo Do" last-modified-by name contains; ORed
- *   status:not-local|local|changed|partial   local status; ORed
+ *   status:not-local|local|changed|partial   status of the panel's vocabulary (see StatusVocab); ORed
  *   ApexClass:Foo        `Type:Name` (type equals, name contains / wildcard)
  */
-import { Comp, STATUS_CHANGED, STATUS_LOCAL, STATUS_NAMES, STATUS_NOT_LOCAL, STATUS_PARTIAL, StatusName, compKey } from "./types";
+import { Comp, STATUS_NAMES, compKey } from "./types";
+
+// ── Status vocabulary ──────────────────────────────────────────────────────────
+
+/**
+ * What `status:` and the status facet mean in a panel. The Org Browser has ONE local status per row
+ * (a code, an index into `names`); the Deploy panel has several at once (a bitmask, bit i = names[i]),
+ * e.g. changed-in-org + modified-locally. Each panel passes its vocabulary in `FilterContext.vocab`.
+ */
+export interface StatusVocab {
+	/** Facet names, in display order. */
+	names: readonly string[];
+	/** false: the row value is one code (index into `names`); true: a bitmask (bit i = `names[i]`). */
+	flags: boolean;
+	/** Lower-case `status:` value → facet name. */
+	aliases: Record<string, string>;
+	/** Query-only shorthands over the raw row value (e.g. `conflict` = two flags set). */
+	shorthands?: Record<string, (v: number) => boolean>;
+}
+
+/** The Org Browser's local status (not-local / local / changed / partial). */
+export const ORG_BROWSER_VOCAB: StatusVocab = {
+	names: STATUS_NAMES,
+	flags: false,
+	aliases: {
+		"not-local": "not-local",
+		notlocal: "not-local",
+		missing: "not-local",
+		local: "local",
+		"in-project": "local",
+		inproject: "local",
+		changed: "changed",
+		partial: "partial",
+		"partly-in-project": "partial",
+	},
+};
+
+/** Does a row value carry the status `name`? (`false` for a name the vocabulary does not know.) */
+export function statusTest(vocab: StatusVocab, name: string): (v: number) => boolean {
+	const bit = vocab.names.indexOf(name);
+	if (bit < 0) return () => false;
+	return vocab.flags ? (v) => (v & (1 << bit)) !== 0 : (v) => v === bit;
+}
+
+/** The predicate a `status:<value>` token stands for, or null when the vocabulary does not know it. */
+function resolveStatusQuery(vocab: StatusVocab, raw: string): ((v: number) => boolean) | null {
+	const key = raw.toLowerCase();
+	const shorthand = vocab.shorthands?.[key];
+	if (shorthand) return shorthand;
+	const name = vocab.aliases[key] ?? (vocab.names.includes(key) ? key : undefined);
+	return name ? statusTest(vocab, name) : null;
+}
 
 // ── Search index ───────────────────────────────────────────────────────────────
 
@@ -56,8 +107,8 @@ export interface FilterState {
 	namespaces: string[];
 	/** manageableState values (empty = all). */
 	states: string[];
-	/** Local status values (empty = all). */
-	status: StatusName[];
+	/** Status facet names of the panel's vocabulary (empty = all). Not shared between panels. */
+	status: string[];
 	/** Only rows last modified by the current user. */
 	mine: boolean;
 	within: ModifiedWithin;
@@ -82,8 +133,10 @@ export const DEFAULT_FILTER: FilterState = {
 
 export interface FilterContext {
 	now: number;
-	/** Local status per row index (0 not-local, 1 local, 2 changed); null = unknown (all not-local). */
+	/** Status per row index: a code (Org Browser: 0 not-local, 1 local, 2 changed, 3 partial) or a bitmask, per `vocab`; null = 0 for every row. */
 	status: ArrayLike<number> | null;
+	/** The panel's status vocabulary (default: the Org Browser's). */
+	vocab?: StatusVocab;
 	/** Selected row keys (`Type:fullName`). */
 	selected?: ReadonlySet<string>;
 	/** Current user: ids (lastModifiedById) and/or display name. */
@@ -136,24 +189,12 @@ export interface ParsedQuery {
 	/** Lower-cased namespace prefixes ("" = unmanaged). */
 	ns: Clause<string>[];
 	by: Clause<Pattern>[];
-	status: Clause<number>[];
+	status: Clause<(v: number) => boolean>[];
 	/** `Type:Name` tokens. */
 	typeNames: Clause<{ type: Pattern; name: Pattern }>[];
 }
 
 const OPERATORS = new Set(["type", "ns", "by", "status"]);
-
-const STATUS_ALIASES: Record<string, number> = {
-	"not-local": STATUS_NOT_LOCAL,
-	notlocal: STATUS_NOT_LOCAL,
-	missing: STATUS_NOT_LOCAL,
-	local: STATUS_LOCAL,
-	"in-project": STATUS_LOCAL,
-	inproject: STATUS_LOCAL,
-	changed: STATUS_CHANGED,
-	partial: STATUS_PARTIAL,
-	"partly-in-project": STATUS_PARTIAL,
-};
 
 function stripQuotes(s: string): string {
 	return s.replace(/"/g, "");
@@ -164,7 +205,7 @@ export function tokenize(q: string): string[] {
 	return q.match(/(?:[^\s"]+|"[^"]*"?)+/g) ?? [];
 }
 
-export function parseQuery(q: string): ParsedQuery {
+export function parseQuery(q: string, vocab: StatusVocab = ORG_BROWSER_VOCAB): ParsedQuery {
 	const parsed: ParsedQuery = { terms: [], types: [], ns: [], by: [], status: [], typeNames: [] };
 	for (let tok of tokenize(q)) {
 		let neg = false;
@@ -187,8 +228,8 @@ export function parseQuery(q: string): ParsedQuery {
 					if (rest) parsed.by.push({ neg, value: makePattern(rest) });
 					break;
 				case "status": {
-					const code = STATUS_ALIASES[rest.toLowerCase()];
-					if (code !== undefined) parsed.status.push({ neg, value: code });
+					const test = resolveStatusQuery(vocab, rest);
+					if (test) parsed.status.push({ neg, value: test });
 					break;
 				}
 			}
@@ -232,7 +273,7 @@ function compileQuery(p: ParsedQuery, idx: SearchIndex, status: ArrayLike<number
 	orGroup(p.types, (v, i) => patternEquals(v, idx.lt[i]));
 	orGroup(p.ns, (v, i) => idx.lns[i] === v);
 	orGroup(p.by, (v, i) => patternTest(v, idx.lby[i]));
-	orGroup(p.status, (v, i) => (status ? status[i] : STATUS_NOT_LOCAL) === v);
+	orGroup(p.status, (v, i) => v(status ? status[i] : 0));
 	if (tests.length === 0) return null;
 	if (tests.length === 1) return tests[0];
 	return (i) => {
@@ -256,7 +297,8 @@ const always: RowTest = () => true;
 
 function buildPredicates(idx: SearchIndex, state: FilterState, ctx: FilterContext): Predicates {
 	const comps = idx.comps;
-	const parsed = parseQuery(state.query);
+	const vocab = ctx.vocab ?? ORG_BROWSER_VOCAB;
+	const parsed = parseQuery(state.query, vocab);
 	const q = compileQuery(parsed, idx, ctx.status);
 	const baseTests: RowTest[] = [];
 	if (q) baseTests.push(q);
@@ -312,8 +354,11 @@ function buildPredicates(idx: SearchIndex, state: FilterState, ctx: FilterContex
 	}
 	let status = always;
 	if (state.status.length > 0) {
-		const set = new Set(state.status.map((s) => STATUS_NAMES.indexOf(s)));
-		status = (i) => set.has(ctx.status ? ctx.status[i] : STATUS_NOT_LOCAL);
+		const tests = state.status.map((s) => statusTest(vocab, s));
+		status = (i) => {
+			const v = ctx.status ? ctx.status[i] : 0;
+			return tests.some((t) => t(v));
+		};
 	}
 	return { base, type, ns, ms, status };
 }
@@ -333,8 +378,8 @@ export interface Facets {
 	/** Rows per namespace ("" = unmanaged). */
 	namespaces: Map<string, number>;
 	states: Map<string, number>;
-	/** Rows per local status code: [not-local, local, changed, partial]. */
-	status: [number, number, number, number];
+	/** Rows per status of the vocabulary (Org Browser: [not-local, local, changed, partial]); a row with several flags counts for each. */
+	status: number[];
 }
 
 /** Facet counts in a single pass; each facet ignores its own filter only. */
@@ -343,7 +388,9 @@ export function computeFacets(idx: SearchIndex, state: FilterState, ctx: FilterC
 	const types = new Map<string, number>();
 	const namespaces = new Map<string, number>();
 	const states = new Map<string, number>();
-	const status: [number, number, number, number] = [0, 0, 0, 0];
+	const vocab = ctx.vocab ?? ORG_BROWSER_VOCAB;
+	const nStatus = vocab.names.length;
+	const status: number[] = new Array(nStatus).fill(0);
 	const n = idx.comps.length;
 	for (let i = 0; i < n; i++) {
 		if (!p.base(i)) continue;
@@ -355,7 +402,12 @@ export function computeFacets(idx: SearchIndex, state: FilterState, ctx: FilterC
 		if (pn && pm && ps) types.set(c.t, (types.get(c.t) ?? 0) + 1);
 		if (pt && pm && ps) namespaces.set(c.ns, (namespaces.get(c.ns) ?? 0) + 1);
 		if (pt && pn && ps) states.set(c.ms, (states.get(c.ms) ?? 0) + 1);
-		if (pt && pn && pm) status[ctx.status ? (ctx.status[i] as 0 | 1 | 2 | 3) : 0]++;
+		if (pt && pn && pm) {
+			const v = ctx.status ? ctx.status[i] : 0;
+			if (vocab.flags) {
+				for (let b = 0; b < nStatus; b++) if (v & (1 << b)) status[b]++;
+			} else if (v >= 0 && v < nStatus) status[v]++;
+		}
 	}
 	return { types, namespaces, states, status };
 }
