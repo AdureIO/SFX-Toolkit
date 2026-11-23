@@ -96,11 +96,10 @@ function asfxEnv(baseCommand: string, pathOverride?: string): NodeJS.ProcessEnv 
     ...process.env,
     ASFX: "1",
     ASFX_CMD: baseCommand,
-    // Recent Salesforce CLI releases hide secrets (incl. the access token) from
-    // `sf org display --json`. Without the token, every authenticated call fails
-    // with a misleading "session expired / revoked" error. This env var restores
-    // the token in the JSON output (the CLI's own documented workaround). Honor an
-    // existing user-set value if present.
+    // Only relevant for old Salesforce CLIs without `sf org auth show-access-token`: there it
+    // makes `sf org display --json` include the access token (used as AuthInfo's fallback).
+    // Newer CLIs get the token via `show-access-token` and ignore this. Honor an existing
+    // user-set value if present.
     SF_TEMP_SHOW_SECRETS: process.env.SF_TEMP_SHOW_SECRETS ?? "true"
   };
   if (pathOverride) env.PATH = pathOverride;

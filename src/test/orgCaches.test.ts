@@ -590,6 +590,7 @@ describe("AuthInfo — single-flight 401 refresh", () => {
 		AuthInfo.clearCache();
 		let displays = 0;
 		commandRunner.runCommandArgs = async (_c: string, args: string[]) => {
+			if (args[1] === "auth") return JSON.stringify({ status: 0, result: { accessToken: "t-" + (args.includes(OTHER) ? OTHER : USER) } });
 			displays++;
 			const user = args.includes(OTHER) ? OTHER : USER;
 			return JSON.stringify({ status: 0, result: { accessToken: "t-" + user, instanceUrl: "https://x.my.salesforce.com", username: user, id: "00D1" } });
@@ -621,6 +622,7 @@ describe("AuthInfo — single-flight 401 refresh", () => {
 				token = "t1";
 				return "{}";
 			}
+			if (args[1] === "auth") return JSON.stringify({ status: 0, result: { accessToken: token } });
 			displayCalls.push({ args, timeout: timeoutMs });
 			return JSON.stringify({ status: 0, result: { accessToken: token, instanceUrl: "https://x.my.salesforce.com", username: USER, id: "00D1" } });
 		};
