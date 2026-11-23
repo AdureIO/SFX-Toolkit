@@ -178,6 +178,21 @@ export class DeployMetadataPanelProvider {
     let liveData = initialData;
     let projectSwitched = false;
     let reloadSeq = 0;
+    // Deploys / validations in flight, and a project switch deferred until they finish.
+    let inFlight = 0;
+    let switchPending = false;
+    const trackDeploy = async <T>(run: () => PromiseLike<T>): Promise<T> => {
+      inFlight++;
+      try {
+        return await run();
+      } finally {
+        inFlight--;
+        if (inFlight === 0 && switchPending) {
+          switchPending = false;
+          applyProjectSwitch();
+        }
+      }
+    };
     // Dispose previous listener/watcher when re-attaching (e.g. on revive) to avoid leaking listeners and large closures.
     const previousCleanup = DeployMetadataPanelProvider.cleanupByPanel.get(panel);
     if (previousCleanup) {
@@ -242,6 +257,12 @@ export class DeployMetadataPanelProvider {
         state?: DeployPanelState;
         suiteName?: string;
       }) => {
+        // A message from a webview load that a project switch has since replaced: its root / paths are stale.
+        const msgSeq = (msg as { seq?: unknown }).seq;
+        if (typeof msgSeq === "number" && msgSeq !== reloadSeq) {
+          Logger.info(`Deploy panel: dropped stale '${msg.command}' message (webview load ${msgSeq}, current ${reloadSeq})`);
+          return;
+        }
         // Snapshot: a project switch mid-flight (deploy, git status) must not redirect running work.
         const workspaceRoot = liveRoot;
         const dataPromise = liveData;
@@ -360,7 +381,7 @@ export class DeployMetadataPanelProvider {
         if (msg.command !== "deploy" || !msg.sourcePaths || !msg.testLevel) return;
         const dryRun = msg.dryRun === true;
         const prodAction = dryRun ? "validate a deployment against" : "deploy metadata to";
-        if (!(await confirmProductionOrgOperation(prodAction, msg.targetOrg || undefined))) {
+        if (!(await confirmProductionOrgOperation(prodAction, msg.targetOrg || undefined, workspaceRoot))) {
           return;
         }
         const testLevel = msg.testLevel;
@@ -400,7 +421,7 @@ export class DeployMetadataPanelProvider {
         const deployOpLabel = dryRun ? "Validation" : "Deploy";
         const operationHandle = OperationPanelProvider.beginOperation(deployOpLabel, msg.targetOrg || undefined);
 
-        const outcome: FinalOutcome = await vscode.window.withProgress(
+        const outcome: FinalOutcome = await trackDeploy(() => vscode.window.withProgress(
           {
             location: vscode.ProgressLocation.Notification,
             title: dryRun ? "Validating deployment…" : "Deploying",
@@ -463,7 +484,7 @@ export class DeployMetadataPanelProvider {
               return runCliStreaming();
             }
           }
-        );
+        ));
 
         const durationMs = Date.now() - deployStartTime;
 
@@ -569,7 +590,7 @@ export class DeployMetadataPanelProvider {
     // Project selector: the header dropdown (or the active project, while not pinned) switched the
     // panel's project. Reload everything project-bound as if the panel were newly opened.
     const selectorSub = binding.attach(panel.webview);
-    const projectSub = binding.onDidChange(() => {
+    const applyProjectSwitch = (): void => {
       const next = binding.current();
       if (!next || next === liveRoot) return;
       liveRoot = next;
@@ -579,6 +600,17 @@ export class DeployMetadataPanelProvider {
       updateFileWatcher(false);
       // A distinct HTML string forces a reload (identical html is ignored); the panelReady handshake re-inits.
       panel.webview.html = DeployMetadataPanelProvider.getHtml(++reloadSeq);
+    };
+    const projectSub = binding.onDidChange(() => {
+      const next = binding.current();
+      if (!next || next === liveRoot) return;
+      // Reloading the webview mid-deploy would drop its progress / result: apply after it finishes.
+      if (inFlight > 0) {
+        switchPending = true;
+        void panel.webview.postMessage({ command: "projectSwitchPending" });
+        return;
+      }
+      applyProjectSwitch();
     });
 
     DeployMetadataPanelProvider.cleanupByPanel.set(panel, () => {
@@ -847,6 +879,7 @@ export class DeployMetadataPanelProvider {
 	<div class="panel-right">
 		<div class="section">
 			<div class="section-title"><span class="st-icon" aria-hidden="true">⚡</span><span>Deployment</span>${projectSelectorMarkup()}</div>
+			<div id="switch-note" style="display:none;margin:4px 0;font-size:11px;opacity:.8" role="status">Project switch applies after this deploy.</div>
 			<div class="rp-body">
 				<div class="card">
 					<div class="field-row">
@@ -942,7 +975,9 @@ export class DeployMetadataPanelProvider {
 		}
 		var vsCodeApi = null;
 		try { if (typeof acquireVsCodeApi !== 'undefined') vsCodeApi = acquireVsCodeApi(); } catch (e) { console.error('acquireVsCodeApi failed', e); }
-		function postToHost(payload) { try { if (vsCodeApi) vsCodeApi.postMessage(payload); } catch (err) { console.error('postMessage failed', err); } }
+		// Stamped with the webview load number: the host drops messages of a load a project switch replaced.
+		var LOAD_SEQ = ${reload};
+		function postToHost(payload) { try { if (vsCodeApi) { payload.seq = LOAD_SEQ; vsCodeApi.postMessage(payload); } } catch (err) { console.error('postMessage failed', err); } }
 		// ── panel-right (sidebar) horizontal resizer ─────────────────────────────
 		(function(){
 			var sp = document.getElementById('panelSplit');
@@ -1358,6 +1393,11 @@ export class DeployMetadataPanelProvider {
 			var data = event.data;
 			if (!data || !data.command) return;
 			var statusEl = safeGet('deploy-status');
+			if (data.command === 'projectSwitchPending') {
+				var note = safeGet('switch-note');
+				if (note) note.style.display = 'block';
+				return;
+			}
 			if (data.command === 'deployStart') {
 				var bar = safeGet('deploy-result-bar');
 				if (bar) { bar.className = 'deploy-result-bar running'; bar.textContent = data.dryRun ? 'Validating…' : 'Deploying…'; bar.style.display = 'block'; }
