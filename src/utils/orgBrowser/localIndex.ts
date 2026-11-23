@@ -228,6 +228,20 @@ export function mapSourceFile(rel: string, table: TypeTable): MappedFile | null 
 	return null;
 }
 
+/**
+ * The part of a source file's path inside its metadata type folder (`classes/Foo.cls` → `Foo.cls`;
+ * `objects/Account/fields/X.field-meta.xml` → `Account/fields/X.field-meta.xml`; `lwc/foo/foo.js` → `foo/foo.js`).
+ * The same component has the same inner paths wherever it was written (project package dir, retrieve output dir).
+ * `rel` is relative to a package directory (or an output dir), forward slashes. null when it is not in a type folder.
+ */
+export function typeFolderInnerPath(rel: string, table: TypeTable): string | null {
+	const seg = rel.split("/").filter(Boolean);
+	for (let i = 0; i < seg.length - 1; i++) {
+		if (table.byDir.has(seg[i]) || BUNDLE_DIRS[seg[i]]) return seg.slice(i + 1).join("/");
+	}
+	return null;
+}
+
 // ── Project scan ───────────────────────────────────────────────────────────────
 
 export interface LocalEntry {

@@ -63,6 +63,23 @@ export function chunkPaths(paths: string[], maxChars: number = MAX_COMMAND_CHARS
 	return chunks;
 }
 
+export interface RetrieveArgOptions {
+	/** `--output-dir`: write the files there instead of into the project's package directories. */
+	outputDir?: string;
+	/** `--ignore-conflicts`: skip the source-tracking conflict check (a read-only copy has no use for it). */
+	ignoreConflicts?: boolean;
+}
+
+/** The argument list of one `sf project retrieve start` run for `items` (`-m Type:Name` or `-d path`). */
+export function buildRetrieveArgs(org: string | null, kind: "metadata" | "path", items: string[], o: RetrieveArgOptions = {}): string[] {
+	const args = ["project", "retrieve", "start", "--json"];
+	if (org) args.push("--target-org", org);
+	if (o.outputDir) args.push("--output-dir", o.outputDir);
+	if (o.ignoreConflicts) args.push("--ignore-conflicts");
+	for (const it of items) args.push(kind === "metadata" ? "-m" : "-d", it);
+	return args;
+}
+
 export interface CliFile {
 	fullName?: string;
 	type?: string;
