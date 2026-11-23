@@ -20,10 +20,10 @@ import { classifyHealth } from "../utils/schemaHealth";
 import { reauthenticateOrg } from "../commands/orgCommands";
 import { metadataDiffForFile } from "../commands/metadataDiff";
 import {
-	FOLDER_TYPES,
 	ListCancelled,
 	ListingCache,
 	ListProgress,
+	expandOnlyTypes,
 	listOrgMetadata,
 	loadListingCache,
 	mergeTypeRefresh,
@@ -42,16 +42,6 @@ interface OrgOpt {
 	label: string;
 	username: string;
 	isDefault: boolean;
-}
-
-/** Types touched by a per-type refresh: the folder type travels with its content type and vice versa. */
-function expandOnly(only: string[]): string[] {
-	const out = new Set(only);
-	for (const [content, f] of Object.entries(FOLDER_TYPES)) {
-		if (out.has(content)) out.add(f.folderType);
-		if (out.has(f.folderType)) out.add(content);
-	}
-	return [...out];
 }
 
 /**
@@ -362,7 +352,7 @@ export class OrgBrowserPanelProvider {
 		const run = { cancelled: false };
 		this.run = run;
 		const isCancelled = () => run.cancelled || gen !== this.gen;
-		const expanded = only ? expandOnly(only) : undefined;
+		const expanded = only ? expandOnlyTypes(only) : undefined;
 
 		this.post({ type: "loadStart", mode: only ? "types" : this.comps.length > 0 ? "refresh" : "live", only: expanded });
 

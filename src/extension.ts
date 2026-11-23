@@ -291,6 +291,7 @@ export function activate(context: vscode.ExtensionContext) {
     initDeployHistory(context);
     initRetrieveLog(context.workspaceState);
     OrgBrowserPanelProvider.init(context);
+    DeployMetadataPanelProvider.init(context);
 
     // Org-aware SOQL language server (JVM-free). Safe no-op outside SFDX projects.
     try {

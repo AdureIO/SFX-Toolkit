@@ -40,11 +40,11 @@ export function hiddenTypeLines(hidden: Iterable<string>, maxLines = 5): string[
 	return [...shown.map((s) => `${s.count} ${s.type}`), `${restCount} in ${rest.length} other types`];
 }
 
-/** Title + detail of the "hidden selection" modal. */
-export function hiddenSelectionPrompt(total: number, hiddenKeys: string[]): { message: string; detail: string } {
+/** Title + detail of the "hidden selection" modal (`verb`: the action being confirmed). */
+export function hiddenSelectionPrompt(total: number, hiddenKeys: string[], verb = "Retrieve"): { message: string; detail: string } {
 	const n = hiddenKeys.length;
 	return {
-		message: `Retrieve ${total} component${total === 1 ? "" : "s"}?`,
+		message: `${verb} ${total} component${total === 1 ? "" : "s"}?`,
 		detail: `${n} of them ${n === 1 ? "is" : "are"} hidden by the current filter:\n${hiddenTypeLines(hiddenKeys).join("\n")}`,
 	};
 }

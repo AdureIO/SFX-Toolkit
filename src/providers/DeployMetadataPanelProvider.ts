@@ -1,9 +1,7 @@
 import * as vscode from "vscode";
+import * as path from "path";
 import {
-  getMetadataTreeByPackage,
   getTestClassItems,
-  resolveSourcePaths,
-  filterPathsToPackageDirs,
   buildDeployCommand,
   createDeployProgressHandler,
   getPackageDirectories,
@@ -11,43 +9,59 @@ import {
   DEPLOY_TYPE_RUN_ALL,
   DEPLOY_TYPE_RUN_RELEVANT,
   DEPLOY_TYPE_SPECIFIED,
-  DEPLOY_TYPE_NO_TESTS,
-  type DeployTreePackageNode
+  DEPLOY_TYPE_NO_TESTS
 } from "../commands/deployMetadata";
 import { confirmProductionOrgOperation } from "../utils/orgSafety";
 import { loadPresets, addPreset, type DeployPreset, type DeployTypeKey } from "../utils/deployPresets";
 import { PanelProjectBinding, orgPickerForProject } from "../utils/panelProject";
 import { PROJECT_SELECTOR_CSS, projectSelectorMarkup, projectSelectorScript } from "../utils/panelProjectUi";
+import { FILTER_BAR_CSS, FILTER_BAR_VARS, filterGroupsMarkup, filterSearchMarkup } from "../utils/filterBarUi";
+import { getNonce } from "../utils/htmlUtils";
 import { onDidChangeDefaultOrg } from "../utils/defaultOrgEvents";
 import { runCommand } from "../utils/commandRunner";
 import { Logger, DeployLog } from "../utils/outputChannel";
 import { cleanDeployOutput, parseDeployStats, parseCoverageData } from "../commands/devCommands";
 import { addDeployHistoryEntry } from "../commands/deployHistory";
 import { clearDeployDiagnostics, setDeployDiagnosticsFromFailure, setDeployDiagnosticsFromApiResult, formatApiDeployResultForLog, componentFailuresOf, withSyntheticTestFailures } from "../utils/deployDiagnostics";
-import { DEPLOY_SELECTION_SOURCE } from "../utils/deploySelectionPure";
+import { deployPathsForComponents, pathsToComponents, presetComponents, relativeFilesOf, type RelComponent } from "../utils/deployComponentsPure";
+import { hiddenSelectionPrompt, splitByVisibility } from "../utils/orgBrowser/selection";
 import { runJsonDeploy } from "../utils/deployEngine";
 import { statsFromResult, coverageFromResult, toApiDeployResult, formatStatus, formatElapsed, formatResultSummary, type DeployStats, type CoverageRow } from "../utils/deployStatusMap";
 import { AuthInfo } from "../utils/authInfo";
 import { OperationPanelProvider } from "./OperationPanelProvider";
+import { DeployPanelHost } from "./DeployPanelHost";
 import { reportError, reportSuccess } from "../utils/reportError";
 import { upsertTestSuite, deleteTestSuite as deleteTestSuiteEntry, loadTestSuites, type TestSuite } from "../utils/testSuites";
 
 /** Panel state we persist in the extension so it survives webview HTML replacement (tab switch/revive). */
 export interface DeployPanelState {
-  sourcePaths: string[];
+  /** Selected components (`Type:fullName`), leaves only. */
+  components: string[];
   presetName?: string | null;
   deployType?: string;
   testClassNames?: string[];
   testSuiteName?: string | null;
   targetOrg?: string | null;
-  treeSearch?: string;
   filterOnlySelected?: boolean;
   autoGitSelect?: boolean;
   validateOnly?: boolean;
+  /** Webview UI state (filter, collapsed groups, filter panel). */
+  ui?: unknown;
+}
+
+/** A preset as the webview sees it: components, whatever the file stored. */
+interface WebPreset {
+  name: string;
+  components: string[];
+  deployType: DeployTypeKey;
+  testClassNames: string[];
+  targetOrg?: string;
+  validateOnly?: boolean;
+  /** Paths of an old preset that matched no component. */
+  unmatched: number;
 }
 
 interface DeployInitData {
-  tree: DeployTreePackageNode[];
   testClasses: { label: string; description: string }[];
   presets: DeployPreset[];
   orgs: { label: string; username: string }[];
@@ -58,19 +72,18 @@ interface DeployInitData {
 export class DeployMetadataPanelProvider {
   public static readonly viewType = "adure-sfx-toolkit.deployMetadataPanel";
 
+  private static ctx: vscode.ExtensionContext | undefined;
+
+  /** Call once on activation. */
+  public static init(context: vscode.ExtensionContext): void {
+    this.ctx = context;
+  }
+
   /** Panel state per workspace so selection survives when webview content is recreated on tab switch. */
   private static panelStateByWorkspace: Record<string, DeployPanelState> = {};
 
-  /** Cached init data for the current workspace so tab restore (revive) is instant instead of re-running tree/org list. */
-  private static initCache: {
-    workspaceRoot: string;
-    tree: DeployTreePackageNode[];
-    testClasses: { label: string; description: string }[];
-    presets: DeployPreset[];
-    orgs: { label: string; username: string }[];
-    defaultOrg: string;
-    testSuites: TestSuite[];
-  } | null = null;
+  /** Cached init data for the current workspace so tab restore (revive) is instant instead of re-running the test-class scan / org list. */
+  private static initCache: ({ workspaceRoot: string } & DeployInitData) | null = null;
 
   /**
    * Per-panel cleanup (message listener, file watcher + debounce timer, default-org subscription).
@@ -81,25 +94,44 @@ export class DeployMetadataPanelProvider {
   private static panelsWithDisposeRegistered = new WeakSet<vscode.WebviewPanel>();
   /** Singleton: one Deploy panel (and one retained renderer) at most. */
   private static _panel: vscode.WebviewPanel | undefined;
+  /** The singleton's project / org state. */
+  private static _host: DeployPanelHost | undefined;
 
   /** Everything the panel loads for a project, in parallel (the init message awaits it). */
   private static loadInitData(workspaceRoot: string): Promise<DeployInitData> {
     return Promise.allSettled([
-      Promise.resolve().then(() => getMetadataTreeByPackage(workspaceRoot)),
       Promise.resolve().then(() => getTestClassItems(workspaceRoot)),
       loadPresets(vscode.Uri.file(workspaceRoot)),
       orgPickerForProject(workspaceRoot),
       Promise.resolve().then(() => loadTestSuites(workspaceRoot))
-    ]).then(([treeR, testR, presetsR, orgsR, suitesR]) => {
-      const tree = treeR.status === "fulfilled" ? treeR.value : ([] as DeployTreePackageNode[]);
+    ]).then(([testR, presetsR, orgsR, suitesR]) => {
       const testClasses = testR.status === "fulfilled" ? testR.value : ([] as { label: string; description: string }[]);
       const presets = presetsR.status === "fulfilled" ? presetsR.value : ([] as DeployPreset[]);
       const orgs = orgsR.status === "fulfilled" ? orgsR.value.orgs : ([] as { label: string; username: string }[]);
       // The project's default org; with none, the first org of the list (as before).
       const defaultOrg = (orgsR.status === "fulfilled" ? orgsR.value.defaultOrg : "") || (orgs.length > 0 ? orgs[0].username : "");
       const testSuites = suitesR.status === "fulfilled" ? suitesR.value : ([] as TestSuite[]);
-      return { tree, testClasses, presets, orgs, defaultOrg, testSuites };
+      return { testClasses, presets, orgs, defaultOrg, testSuites };
     });
+  }
+
+  private static webviewOptions(): vscode.WebviewOptions & vscode.WebviewPanelOptions {
+    const roots = this.ctx ? [vscode.Uri.joinPath(this.ctx.extensionUri, "resources")] : undefined;
+    return { enableScripts: true, localResourceRoots: roots, retainContextWhenHidden: true };
+  }
+
+  /** A stored preset as the webview sees it (old path presets are mapped to components through the local index). */
+  private static toWebPreset(p: DeployPreset & { validateOnly?: boolean }, rel: readonly RelComponent[]): WebPreset {
+    const r = presetComponents(p, rel);
+    return {
+      name: p.name,
+      components: r.keys,
+      deployType: p.deployType,
+      testClassNames: Array.isArray(p.testClassNames) ? p.testClassNames : [],
+      targetOrg: p.targetOrg,
+      validateOnly: p.validateOnly,
+      unmatched: r.unmatched.length
+    };
   }
 
   public static async show(initialPreset?: DeployPreset): Promise<void> {
@@ -116,18 +148,19 @@ export class DeployMetadataPanelProvider {
     if (existing) {
       binding.dispose();
       existing.reveal(column);
-      if (initialPreset) void existing.webview.postMessage({ command: "applyPresetFromHost", preset: initialPreset });
+      if (initialPreset) {
+        const host = DeployMetadataPanelProvider._host;
+        await host?.ready;
+        void existing.webview.postMessage({ command: "applyPresetFromHost", preset: this.toWebPreset(initialPreset, host?.relComponents() ?? []) });
+      }
       return;
     }
 
-    const panel = vscode.window.createWebviewPanel(DeployMetadataPanelProvider.viewType, "Deploy Metadata", column, {
-      enableScripts: true,
-      retainContextWhenHidden: true  // selection tree + in-flight deploy state live in the DOM; kept, but only one panel exists
-    });
+    const panel = vscode.window.createWebviewPanel(DeployMetadataPanelProvider.viewType, "Deploy Metadata", column, this.webviewOptions());
 
     // Render HTML immediately — panel is visible with "Loading…" while data loads in parallel.
     try {
-      panel.webview.html = this.getHtml();
+      panel.webview.html = this.getHtml(panel.webview);
     } catch (e) {
       binding.dispose();
       vscode.window.showErrorMessage(
@@ -154,15 +187,26 @@ export class DeployMetadataPanelProvider {
     }
 
     // Render HTML immediately — visible at once regardless of cache hit/miss.
-    panel.webview.options = { enableScripts: true };
-    panel.webview.html = this.getHtml();
+    panel.webview.options = this.webviewOptions();
+    panel.webview.html = this.getHtml(panel.webview);
 
     const cache = DeployMetadataPanelProvider.initCache;
     const dataPromise: Promise<DeployInitData> = (cache && cache.workspaceRoot === workspaceRoot)
-      ? Promise.resolve({ tree: cache.tree, testClasses: cache.testClasses, presets: cache.presets, orgs: cache.orgs, defaultOrg: cache.defaultOrg, testSuites: cache.testSuites ?? [] })
+      ? Promise.resolve({ testClasses: cache.testClasses, presets: cache.presets, orgs: cache.orgs, defaultOrg: cache.defaultOrg, testSuites: cache.testSuites ?? [] })
       : DeployMetadataPanelProvider.loadInitData(workspaceRoot);
 
     this.attachMessageHandler(panel, null, dataPromise, binding, workspaceRoot);
+  }
+
+  private static createHost(panel: vscode.WebviewPanel, root: string): DeployPanelHost {
+    const host = new DeployPanelHost({
+      ctx: this.ctx!,
+      root,
+      post: (m) => void panel.webview.postMessage(m),
+      gitStatusPaths: (r) => DeployMetadataPanelProvider.runGitStatusSfdxPaths(r)
+    });
+    DeployMetadataPanelProvider._host = host;
+    return host;
   }
 
   private static attachMessageHandler(
@@ -203,51 +247,14 @@ export class DeployMetadataPanelProvider {
     if (DeployMetadataPanelProvider._panel && DeployMetadataPanelProvider._panel !== panel) DeployMetadataPanelProvider._panel.dispose();
     DeployMetadataPanelProvider._panel = panel;
 
-    // ── FileSystemWatcher for auto-git ──────────────────────────────────────
-    // Created/destroyed based on the autoGitSelect panel-state flag. Fires with
-    // 600ms debounce so rapid saves during a batch write don't spam git status.
-    let fileWatcher: vscode.FileSystemWatcher | null = null;
-    let watcherDebounce: ReturnType<typeof setTimeout> | null = null;
-
-    const updateFileWatcher = (enabled: boolean): void => {
-      if (fileWatcher) { fileWatcher.dispose(); fileWatcher = null; }
-      if (watcherDebounce) { clearTimeout(watcherDebounce); watcherDebounce = null; }
-      if (!enabled) return;
-
-      // Scoped to the SFDX package directories, not the whole workspace — a watcher on "**/*"
-      // fires for every save anywhere (build output, .sf tracking internals, unrelated files),
-      // each one triggering a git-status call and a selection re-merge that has nothing to do
-      // with deployable metadata.
-      const packageDirs = getPackageDirectories(liveRoot)
-        .map((d) => d.replace(/\\/g, "/").replace(/\/$/, ""))
-        .filter(Boolean);
-      const watchPattern = packageDirs.length > 0
-        ? new vscode.RelativePattern(liveRoot, packageDirs.length === 1 ? `${packageDirs[0]}/**/*` : `{${packageDirs.join(",")}}/**/*`)
-        : new vscode.RelativePattern(liveRoot, "**/*");
-
-      const watcher = vscode.workspace.createFileSystemWatcher(watchPattern, false, false, false);
-      const onChange = () => {
-        if (watcherDebounce) clearTimeout(watcherDebounce);
-        watcherDebounce = setTimeout(async () => {
-          try {
-            const paths = await DeployMetadataPanelProvider.runGitStatusSfdxPaths(liveRoot);
-            panel.webview.postMessage({ command: "setChangedPaths", paths });
-          } catch (e) {
-            panel.webview.postMessage({ command: "setChangedPaths", paths: [], error: String(e) });
-          }
-        }, 600);
-      };
-      watcher.onDidCreate(onChange);
-      watcher.onDidChange(onChange);
-      watcher.onDidDelete(onChange);
-      fileWatcher = watcher;
-    };
-    // ── end FileSystemWatcher ────────────────────────────────────────────────
+    // Local component index, git status and org status of the shown project (file watchers included).
+    let host = DeployMetadataPanelProvider.createHost(panel, liveRoot);
 
     const listenerDisposable = panel.webview.onDidReceiveMessage(
       async (msg: {
         command: string;
-        sourcePaths?: string[];
+        components?: string[];
+        visible?: string[];
         testLevel?: string;
         testClassNames?: string[];
         dryRun?: boolean;
@@ -256,6 +263,10 @@ export class DeployMetadataPanelProvider {
         deployType?: DeployTypeKey;
         state?: DeployPanelState;
         suiteName?: string;
+        org?: string | null;
+        types?: string[];
+        key?: string;
+        legacyState?: { sourcePaths?: string[] } & Partial<DeployPanelState>;
       }) => {
         // A message from a webview load that a project switch has since replaced: its root / paths are stale.
         const msgSeq = (msg as { seq?: unknown }).seq;
@@ -266,28 +277,65 @@ export class DeployMetadataPanelProvider {
         // Snapshot: a project switch mid-flight (deploy, git status) must not redirect running work.
         const workspaceRoot = liveRoot;
         const dataPromise = liveData;
+        const hostNow = host;
         if (msg.command === "persistPanelState" && msg.state !== null && msg.state !== undefined) {
           DeployMetadataPanelProvider.panelStateByWorkspace[workspaceRoot] = msg.state;
-          updateFileWatcher(msg.state.autoGitSelect ?? false);
+          hostNow.setAutoGit(msg.state.autoGitSelect ?? false);
           return;
         }
         if (msg.command === "panelReady") {
-          const { tree, testClasses, presets, orgs, defaultOrg, testSuites } = await dataPromise;
-          DeployMetadataPanelProvider.initCache = { workspaceRoot, tree, testClasses, presets, orgs, defaultOrg, testSuites };
+          const { testClasses, presets, orgs, defaultOrg, testSuites } = await dataPromise;
+          await hostNow.ready;
+          DeployMetadataPanelProvider.initCache = { workspaceRoot, testClasses, presets, orgs, defaultOrg, testSuites };
+          const rel = hostNow.relComponents();
           // After a project switch the webview must not fall back to its own getState() (the previous
           // project's selection): an empty state restores "nothing selected".
-          const savedState = DeployMetadataPanelProvider.panelStateByWorkspace[workspaceRoot] ?? (projectSwitched ? ({ sourcePaths: [] } as DeployPanelState) : null);
+          let savedState: DeployPanelState | null = DeployMetadataPanelProvider.panelStateByWorkspace[workspaceRoot] ?? null;
+          // A webview state written by an older version stores file paths: map them to components.
+          const legacy = msg.legacyState;
+          if (!savedState && legacy && Array.isArray(legacy.sourcePaths) && !projectSwitched) {
+            const { sourcePaths, ...rest } = legacy;
+            savedState = { ...rest, components: pathsToComponents(sourcePaths, rel).keys };
+          }
+          if (!savedState && projectSwitched) savedState = { components: [] };
           AuthInfo.warmAuthForOrg((savedState?.targetOrg ?? defaultOrg) || null);
-          updateFileWatcher(savedState?.autoGitSelect ?? false);
-          panel.webview.postMessage({ command: "init", tree, testClasses, presets, initialPreset, orgs, defaultOrg, savedState, testSuites });
+          hostNow.setAutoGit(savedState?.autoGitSelect ?? false);
+          panel.webview.postMessage({
+            command: "init",
+            comps: hostNow.comps,
+            hasProject: hostNow.hasProject,
+            testClasses,
+            presets: presets.map((p) => DeployMetadataPanelProvider.toWebPreset(p, rel)),
+            initialPreset: initialPreset ? DeployMetadataPanelProvider.toWebPreset(initialPreset, rel) : null,
+            orgs,
+            defaultOrg,
+            savedState,
+            testSuites
+          });
+          void hostNow.refreshModified(false);
+          return;
+        }
+        if (msg.command === "orgChanged") {
+          void hostNow.setTargetOrg(typeof msg.org === "string" && msg.org ? msg.org : null);
+          return;
+        }
+        if (msg.command === "refreshOrgStatus") {
+          void hostNow.refreshOrg(Array.isArray(msg.types) && msg.types.length > 0 ? msg.types.map(String) : undefined);
+          return;
+        }
+        if (msg.command === "compare" || msg.command === "openFile" || msg.command === "reveal") {
+          if (typeof msg.key === "string") await hostNow.rowAction(msg.command, msg.key);
           return;
         }
         if (msg.command === "savePreset") {
           const workspaceUri = vscode.Uri.file(workspaceRoot);
           const deployType = (msg.deployType || "RunRelevantTests") as DeployTypeKey;
-          const sourcePaths = Array.isArray(msg.sourcePaths) ? msg.sourcePaths : [];
+          const components = Array.isArray(msg.components) ? msg.components.filter((k): k is string => typeof k === "string") : [];
+          // Next to the authoritative component list, the files they stand for (what older versions of the panel read).
+          const sourcePaths = relativeFilesOf(components, hostNow.entries, workspaceRoot);
           const testClassNames = Array.isArray(msg.testClassNames) ? msg.testClassNames : [];
           const targetOrg = msg.targetOrg || undefined;
+          const webPresets = async () => (await loadPresets(workspaceUri)).map((p) => DeployMetadataPanelProvider.toWebPreset(p, hostNow.relComponents()));
           try {
             const name = (msg.presetName || "").trim();
             if (!name) {
@@ -300,35 +348,35 @@ export class DeployMetadataPanelProvider {
                 panel.webview.postMessage({
                   command: "presetSaved",
                   error: "Cancelled",
-                  presets: await loadPresets(workspaceUri)
+                  presets: await webPresets()
                 });
                 return;
               }
               await addPreset(workspaceUri, {
                 name: newName.trim(),
                 sourcePaths,
+                components,
                 deployType,
                 testClassNames,
                 targetOrg
               });
-              const updated = await loadPresets(workspaceUri);
               panel.webview.postMessage({
                 command: "presetSaved",
                 name: newName.trim(),
                 isNew: true,
-                presets: updated
+                presets: await webPresets()
               });
               vscode.window.showInformationMessage(`Preset "${newName.trim()}" saved.`);
             } else {
               await addPreset(workspaceUri, {
                 name,
                 sourcePaths,
+                components,
                 deployType,
                 testClassNames,
                 targetOrg
               });
-              const updated = await loadPresets(workspaceUri);
-              panel.webview.postMessage({ command: "presetSaved", name, isNew: false, presets: updated });
+              panel.webview.postMessage({ command: "presetSaved", name, isNew: false, presets: await webPresets() });
               vscode.window.showInformationMessage(`Preset "${name}" updated.`);
             }
           } catch (e) {
@@ -338,7 +386,7 @@ export class DeployMetadataPanelProvider {
               panel.webview.postMessage({
                 command: "presetSaved",
                 error: errMsg,
-                presets: await loadPresets(workspaceUri)
+                presets: await webPresets()
               });
             } catch {
               // ignore
@@ -347,12 +395,7 @@ export class DeployMetadataPanelProvider {
           return;
         }
         if (msg.command === "getChangedFiles") {
-          try {
-            const paths = await DeployMetadataPanelProvider.runGitStatusSfdxPaths(workspaceRoot);
-            panel.webview.postMessage({ command: "setChangedPaths", paths });
-          } catch (e) {
-            panel.webview.postMessage({ command: "setChangedPaths", paths: [], error: String(e) });
-          }
+          await hostNow.refreshModified(true);
           return;
         }
         if (msg.command === "saveTestSuite") {
@@ -378,8 +421,33 @@ export class DeployMetadataPanelProvider {
           panel.webview.postMessage({ command: "testSuitesUpdated", suites });
           return;
         }
-        if (msg.command !== "deploy" || !msg.sourcePaths || !msg.testLevel) return;
+        if (msg.command !== "deploy" || !Array.isArray(msg.components) || !msg.testLevel) return;
         const dryRun = msg.dryRun === true;
+        await hostNow.ready;
+        // The selection is a set of components: each deploys exactly its own files (never a folder).
+        let keys = msg.components.filter((k): k is string => typeof k === "string");
+        // Selected components the current filter hides are never deployed by accident: ask.
+        if (Array.isArray(msg.visible)) {
+          const { visible, hidden } = splitByVisibility(keys, new Set(msg.visible.map(String)));
+          if (hidden.length > 0) {
+            const { message, detail } = hiddenSelectionPrompt(keys.length, hidden, dryRun ? "Validate" : "Deploy");
+            const all = `${dryRun ? "Validate" : "Deploy"} all ${keys.length}`;
+            const only = `${dryRun ? "Validate" : "Deploy"} visible ${visible.length} only`;
+            const choice = await vscode.window.showWarningMessage(message, { modal: true, detail }, all, ...(visible.length > 0 ? [only] : []));
+            if (choice === only) keys = visible;
+            else if (choice !== all) return;
+          }
+        }
+        const { paths: absPaths, missing } = deployPathsForComponents(keys, hostNow.entries);
+        if (missing.length > 0) Logger.info(`Deploy panel: ${missing.length} selected component(s) are not in the project any more: ${missing.slice(0, 10).join(", ")}`);
+        if (absPaths.length === 0) {
+          const error = "None of the selected components is in the project any more.";
+          panel.webview.postMessage({ command: "deployResult", success: false, cancelled: false, dryRun, components: 0, componentErrors: 0, testsPassed: 0, testsFailed: 0, durationMs: 0, targetOrg: msg.targetOrg ?? "", error });
+          vscode.window.showErrorMessage(`${dryRun ? "Validation" : "Deploy"} not started: ${error}`);
+          return;
+        }
+        const deployedKeys = keys.filter((k) => !missing.includes(k));
+        const sourcePathsForHistory = relativeFilesOf(deployedKeys, hostNow.entries, workspaceRoot);
         const prodAction = dryRun ? "validate a deployment against" : "deploy metadata to";
         if (!(await confirmProductionOrgOperation(prodAction, msg.targetOrg || undefined, workspaceRoot))) {
           return;
@@ -390,8 +458,6 @@ export class DeployMetadataPanelProvider {
           msg.testLevel === "RunSpecifiedTests" && Array.isArray(msg.testClassNames)
             ? msg.testClassNames.filter((t): t is string => typeof t === "string" && t.trim() !== "")
             : [];
-        const resolved = resolveSourcePaths(msg.sourcePaths, workspaceRoot);
-        const absPaths = filterPathsToPackageDirs(workspaceRoot, resolved);
         const targetOrg = msg.targetOrg || null;
         try {
           // Validate up front so invalid input is reported, not an unhandled rejection mid-deploy.
@@ -490,7 +556,7 @@ export class DeployMetadataPanelProvider {
 
         if (outcome.kind === "cancelled") {
           panel.webview.postMessage({ command: "deployResult", success: false, cancelled: true, dryRun, components: 0, componentErrors: 0, testsPassed: 0, testsFailed: 0, durationMs, targetOrg: msg.targetOrg ?? "" });
-          addDeployHistoryEntry({ timestamp: deployStartTime, status: "Cancelled", dryRun, components: 0, componentErrors: 0, testsPassed: 0, testsFailed: 0, durationMs, targetOrg: msg.targetOrg ?? "", sourcePaths: msg.sourcePaths ?? [], presetName: msg.presetName ?? null, deployType: msg.deployType, testClassNames: msg.testClassNames });
+          addDeployHistoryEntry({ timestamp: deployStartTime, status: "Cancelled", dryRun, components: 0, componentErrors: 0, testsPassed: 0, testsFailed: 0, durationMs, targetOrg: msg.targetOrg ?? "", sourcePaths: sourcePathsForHistory, presetName: msg.presetName ?? null, deployType: msg.deployType, testClassNames: msg.testClassNames });
           vscode.window.showInformationMessage(dryRun ? "Validation cancelled." : "Deploy cancelled.");
           operationHandle.dispose();
           return;
@@ -503,7 +569,7 @@ export class DeployMetadataPanelProvider {
             DeployLog.line(formatApiDeployResultForLog(apiResult, `${dryRun ? "Validation" : "Deploy"} succeeded (${formatElapsed(durationMs)}):`));
           }
           panel.webview.postMessage({ command: "deployResult", success: true, cancelled: false, dryRun, ...stats, coverage, durationMs, targetOrg: msg.targetOrg ?? "" });
-          addDeployHistoryEntry({ timestamp: deployStartTime, status: "Succeeded", dryRun, ...stats, durationMs, targetOrg: msg.targetOrg ?? "", sourcePaths: msg.sourcePaths ?? [], presetName: msg.presetName ?? null, deployType: msg.deployType, testClassNames: msg.testClassNames });
+          addDeployHistoryEntry({ timestamp: deployStartTime, status: "Succeeded", dryRun, ...stats, durationMs, targetOrg: msg.targetOrg ?? "", sourcePaths: sourcePathsForHistory, presetName: msg.presetName ?? null, deployType: msg.deployType, testClassNames: msg.testClassNames });
           const okSummary = apiResult ? formatResultSummary(apiResult) : "";
           reportSuccess({
             operation: deployOpLabel,
@@ -522,7 +588,7 @@ export class DeployMetadataPanelProvider {
         // focus to a different view the user didn't ask for.
         const { stats, coverage, apiResult, errorText } = outcome;
         panel.webview.postMessage({ command: "deployResult", success: false, cancelled: false, dryRun, ...stats, coverage, durationMs, targetOrg: msg.targetOrg ?? "" });
-        addDeployHistoryEntry({ timestamp: deployStartTime, status: "Failed", dryRun, ...stats, durationMs, targetOrg: msg.targetOrg ?? "", sourcePaths: msg.sourcePaths ?? [], presetName: msg.presetName ?? null, deployType: msg.deployType, testClassNames: msg.testClassNames });
+        addDeployHistoryEntry({ timestamp: deployStartTime, status: "Failed", dryRun, ...stats, durationMs, targetOrg: msg.targetOrg ?? "", sourcePaths: sourcePathsForHistory, presetName: msg.presetName ?? null, deployType: msg.deployType, testClassNames: msg.testClassNames });
         const failSummary = apiResult ? formatResultSummary(apiResult) : "";
         void vscode.window
           .withProgress(
@@ -597,9 +663,11 @@ export class DeployMetadataPanelProvider {
       projectSwitched = true;
       DeployMetadataPanelProvider.initCache = null;
       liveData = DeployMetadataPanelProvider.loadInitData(next);
-      updateFileWatcher(false);
+      // New project: its own local index, git status, org status and watchers.
+      host.dispose();
+      host = DeployMetadataPanelProvider.createHost(panel, next);
       // A distinct HTML string forces a reload (identical html is ignored); the panelReady handshake re-inits.
-      panel.webview.html = DeployMetadataPanelProvider.getHtml(++reloadSeq);
+      panel.webview.html = DeployMetadataPanelProvider.getHtml(panel.webview, ++reloadSeq);
     };
     const projectSub = binding.onDidChange(() => {
       const next = binding.current();
@@ -614,7 +682,7 @@ export class DeployMetadataPanelProvider {
     });
 
     DeployMetadataPanelProvider.cleanupByPanel.set(panel, () => {
-      updateFileWatcher(false); // dispose watcher + debounce timer
+      host.dispose(); // watchers, debounce timers, running org listing
       listenerDisposable.dispose();
       defaultOrgSub.dispose();
       projectSub.dispose();
@@ -631,7 +699,8 @@ export class DeployMetadataPanelProvider {
         }
         if (DeployMetadataPanelProvider._panel === panel) {
           DeployMetadataPanelProvider._panel = undefined;
-          // Only the singleton's close releases the cached tree/test data.
+          DeployMetadataPanelProvider._host = undefined;
+          // Only the singleton's close releases the cached test data.
           DeployMetadataPanelProvider.initCache = null;
         }
       });
@@ -662,7 +731,15 @@ export class DeployMetadataPanelProvider {
       }
     }
     const seen = new Set<string>();
-    const unique = paths.filter((p) => { if (seen.has(p)) return false; seen.add(p); return true; });
+    const all = paths.filter((p) => { if (seen.has(p)) return false; seen.add(p); return true; });
+    // `--porcelain` paths are relative to the repository root; the project may be a subfolder of it (multi-project workspaces).
+    let prefix = "";
+    try {
+      const out2 = await runCommand("git rev-parse --show-prefix", workspaceRoot, undefined, false, undefined, 5000);
+      const line = (out2 || "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean).pop() ?? "";
+      if (/^[^\s:*?"<>|]+\/$/.test(line)) prefix = line.replace(/\\/g, "/");
+    } catch { /* not a repository: the status above failed already */ }
+    const unique = prefix ? all.filter((p) => p.startsWith(prefix)).map((p) => p.slice(prefix.length)) : all;
     const packageDirs = getPackageDirectories(workspaceRoot);
     return packageDirs.length > 0
       ? unique.filter((p) => packageDirs.some((dir) => {
@@ -672,7 +749,17 @@ export class DeployMetadataPanelProvider {
       : unique;
   }
 
-  private static getHtml(reload = 0): string {
+  private static getHtml(webview: vscode.Webview, reload = 0): string {
+    const extensionUri = this.ctx!.extensionUri;
+    const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, "resources", "webview", "deployPanel.js"));
+    const nonce = getNonce();
+    const csp = [
+      "default-src 'none'",
+      `img-src ${webview.cspSource} data:`,
+      `style-src ${webview.cspSource} 'unsafe-inline'`,
+      `font-src ${webview.cspSource}`,
+      `script-src 'nonce-${nonce}'`
+    ].join("; ");
     const testLevels = [
       { value: "NoTestRun", label: DEPLOY_TYPE_NO_TESTS },
       { value: "RunAllTestsInOrg", label: DEPLOY_TYPE_RUN_ALL },
@@ -686,7 +773,7 @@ export class DeployMetadataPanelProvider {
 	<meta charset="UTF-8">
 	<!-- reload ${reload} -->
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
-	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+	<meta http-equiv="Content-Security-Policy" content="${csp}">
 	<style>
 		${PROJECT_SELECTOR_CSS}
 		* { box-sizing: border-box; margin: 0; padding: 0; }
@@ -704,6 +791,7 @@ export class DeployMetadataPanelProvider {
 			--asfx-ok: #3fb950;
 			--asfx-warn: var(--vscode-editorWarning-foreground, #d29922);
 			--asfx-err: var(--vscode-errorForeground, #f85149);
+			${FILTER_BAR_VARS}
 		}
 
 		/* ── Scrollbars ──────────────────────────────────────────────────────────── */
@@ -859,20 +947,79 @@ export class DeployMetadataPanelProvider {
 		.modal-btn:hover { background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground)); }
 		.modal-save { background: var(--asfx-accent); color: var(--vscode-button-foreground); border-color: transparent; font-weight: 600; }
 		.modal-save:hover { filter: brightness(1.12); background: var(--asfx-accent); }
+
+		/* ── Component list (same look as the Org Browser grid) ──────────────────── */
+		${FILTER_BAR_CSS}
+		.panel-left .section-title .org-info { font-size: 11px; font-weight: 400; text-transform: none; letter-spacing: 0; color: var(--vscode-descriptionForeground); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+		.org-info.err { color: var(--asfx-warn); }
+		.org-info.busy::before { content: "⟳ "; }
+		#banner { padding: 6px 12px; font-size: 12px; background: color-mix(in srgb, var(--asfx-warn) 14%, transparent); border-bottom: 1px solid var(--asfx-border); flex-shrink: 0; }
+		#banner[hidden], #noRows[hidden], #side[hidden], #selHidden[hidden] { display: none; }
+		.tree-search-row { flex-wrap: wrap; }
+		.tree-search-row .search { flex: 1 1 150px; min-width: 120px; }
+		#filtersToggle { width: auto; padding: 0 9px; gap: 4px; }
+		#filtersToggle.on { background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); border-color: var(--asfx-border); opacity: 1; }
+		#side { max-height: 46%; overflow-y: auto; flex-shrink: 0; padding: 2px 12px 8px; border-bottom: 1px solid var(--asfx-border); background: var(--vscode-sideBar-background, var(--vscode-editor-background)); }
+		#selHidden { padding: 4px 12px; font-size: 11px; color: var(--vscode-descriptionForeground); border-bottom: 1px solid var(--asfx-border); flex-shrink: 0; }
+		#selHidden button { background: transparent; border: 0; padding: 0; color: var(--vscode-textLink-foreground); cursor: pointer; text-decoration: underline; font: inherit; }
+		.gridbar { display: flex; align-items: center; gap: 10px; padding: 4px 12px; border-bottom: 1px solid var(--asfx-border); font-size: 12px; flex-shrink: 0; }
+		.gridbar .spacer { flex: 1; }
+		.gridwrap { position: relative; flex: 1; min-height: 0; }
+		.scroller { position: absolute; inset: 0; overflow: auto; outline: none; }
+		.vspacer { position: relative; }
+		.rowsEl { position: absolute; left: 0; right: 0; top: 0; will-change: transform; }
+		#noRows { padding: 18px 16px; color: var(--vscode-descriptionForeground); font-size: 12px; text-align: center; }
+		.drow { display: flex; align-items: center; gap: 6px; height: 28px; padding-right: 8px; border-bottom: 1px solid color-mix(in srgb, var(--vscode-foreground) 6%, transparent); }
+		.drow:hover { background: var(--ob-hover); }
+		.drow.sel { background: color-mix(in srgb, var(--ob-accent) 14%, transparent); }
+		.drow.active { outline: 1px solid var(--ob-accent); outline-offset: -1px; }
+		.drow.conflict { box-shadow: inset 3px 0 0 var(--ob-bad); }
+		.drow .c { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+		.drow .cb { display: flex; justify-content: center; width: 18px; flex-shrink: 0; }
+		.drow .cb input { margin: 0; accent-color: var(--asfx-accent); cursor: pointer; }
+		.drow .nm { flex: 1; min-width: 60px; font-weight: 500; }
+		.drow .st { flex-shrink: 0; display: flex; gap: 4px; }
+		.drow .md { flex-shrink: 0; max-width: 170px; font-size: 11px; color: var(--vscode-descriptionForeground); }
+		.drow .acts { display: flex; gap: 1px; visibility: hidden; flex-shrink: 0; }
+		.drow:hover .acts, .drow.active .acts, .drow:focus-within .acts { visibility: visible; }
+		.acts button { background: transparent; border: 0; border-radius: 4px; width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; opacity: .8; cursor: pointer; color: inherit; }
+		.acts button:hover { background: color-mix(in srgb, var(--vscode-foreground) 16%, transparent); opacity: 1; }
+		.drow.grp { background: color-mix(in srgb, var(--vscode-foreground) 5%, transparent); cursor: pointer; font-weight: 600; }
+		.gname { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+		.chev { display: inline-flex; transition: transform .12s; opacity: .8; }
+		.chev.open { transform: rotate(90deg); }
+		.gcount { font-weight: 400; color: var(--vscode-descriptionForeground); font-size: 12px; }
+		mark { background: color-mix(in srgb, var(--ob-warn) 45%, transparent); color: inherit; border-radius: 2px; padding: 0 1px; }
+		.badge { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px; border: 1px solid var(--ob-border); white-space: nowrap; }
+		.badge.new { color: var(--ob-accent); border-color: color-mix(in srgb, var(--ob-accent) 50%, transparent); }
+		.badge.inorg { color: var(--ob-ok); border-color: color-mix(in srgb, var(--ob-ok) 50%, transparent); }
+		.badge.changed { color: var(--ob-warn); border-color: color-mix(in srgb, var(--ob-warn) 55%, transparent); background: color-mix(in srgb, var(--ob-warn) 12%, transparent); }
+		.badge.modified { color: var(--vscode-charts-blue, #3794ff); border-color: color-mix(in srgb, var(--vscode-charts-blue, #3794ff) 55%, transparent); }
+		.badge.unknown { color: var(--vscode-descriptionForeground); border-style: dashed; }
+		@media (forced-colors: active) { .badge { border-color: CanvasText; } }
+
 	</style>
 </head>
 <body>
 	<div class="panel-left">
 		<div class="section">
-			<div class="section-title"><span class="st-icon" aria-hidden="true">📦</span><span>Metadata to deploy</span></div>
+			<div class="section-title"><span class="st-icon" aria-hidden="true">📦</span><span>Metadata to deploy</span><span class="st-spacer"></span><span id="orgInfo" class="org-info" role="status"></span><button type="button" class="btn-tree-toolbar" id="orgRefresh" title="Re-list this project's metadata types in the target org" aria-label="Refresh org status">↻</button></div>
+			<div id="banner" hidden></div>
 			<div class="tree-search-row">
-				<button type="button" class="btn-tree-toolbar" id="btn-expand-all" title="Expand all" aria-label="Expand all">▼</button>
-				<button type="button" class="btn-tree-toolbar" id="btn-collapse-all" title="Collapse all" aria-label="Collapse all">▶</button>
-				<button type="button" class="btn-select-deselect-all" id="btn-select-deselect-all" title="Select all" aria-label="Select all"><span class="btn-select-deselect-icon" aria-hidden="true">☑</span></button>
-				<input type="text" id="tree-search" class="tree-search-input" placeholder="Search metadata…" aria-label="Search metadata files" />
+				<button type="button" class="btn-select-deselect-all" id="btn-select-deselect-all" title="Select all filtered" aria-label="Select all filtered"><span class="btn-select-deselect-icon" aria-hidden="true">☑</span></button>
+				${filterSearchMarkup("Search…  type:ApexClass  status:conflict  by:smith  Acc*Handler   ( / )")}
+				<button type="button" class="btn-tree-toolbar" id="filtersToggle" title="Show / hide the filters" aria-expanded="false">Filters</button>
 				<label class="tree-filter-only-selected"><input type="checkbox" id="filter-only-selected" aria-label="Only show selected" /> Selected <span id="sel-count-badge"></span></label>
 			</div>
-			<div class="tree-wrap" id="tree-wrap"></div>
+			<aside id="side" aria-label="Filters" hidden>${filterGroupsMarkup({ statusTitle: "Status in the org", namespace: true, state: false, modified: false })}</aside>
+			<div id="selHidden" hidden><span id="selHiddenText"></span> <button type="button" id="selHiddenShow" title="Reset the filters and show only the selected components">show</button> · <button type="button" id="selHiddenClear" title="Deselect the selected components the current filter hides">clear hidden</button></div>
+			<div class="gridbar"><span id="countInfo" class="muted"></span><span class="spacer"></span><button type="button" id="collapseAll" class="linkbtn" title="Collapse / expand all groups">Collapse all</button></div>
+			<div class="gridwrap">
+				<div id="scroller" class="scroller" tabindex="0" role="grid" aria-label="Metadata components">
+					<div id="spacer" class="vspacer"><div id="rowsEl" class="rowsEl"></div></div>
+				</div>
+				<div id="noRows" hidden></div>
+			</div>
 		</div>
 	</div>
 	<div id="panelSplit" title="Drag to resize"><span></span></div>
@@ -918,7 +1065,7 @@ export class DeployMetadataPanelProvider {
 						<input type="checkbox" id="auto-git-select" aria-label="Auto select changed files in Git">
 						<span>Auto-select Git changes<span class="opt-sub">Watch file saves and update the selection automatically</span></span>
 					</label>
-					<button type="button" class="btn-git-select" id="btn-git-select" title="Select files changed in Git">Select changed (Git)</button>
+					<button type="button" class="btn-git-select" id="btn-git-select" title="Select components changed in Git">Select changed (Git)</button>
 				</div>
 				<div class="deploy-result-bar" id="deploy-result-bar"></div>
 				<div id="coverage-panel" class="coverage-panel" style="display:none;"></div>
@@ -952,1222 +1099,9 @@ export class DeployMetadataPanelProvider {
 			</div>
 		</div>
 	</div>
-	<script>
-		${DEPLOY_SELECTION_SOURCE}
-		var treeData = [], testClassesData = [], presetsData = [], initialPreset = null, orgsData = [], defaultOrgVal = '';
-		var testSuitesData = [];
-		var lastRenderedTreeData = null;
-		var extraPaths = [], loadedPresetName = null, dirty = false, pendingPresetIndex = null;
-		// Persistent selection snapshot — survives filter/re-render cycles.
-		// Contains normalized leaf file paths that are currently selected.
-		// Single source of truth; DOM is restored from this on every re-render.
-		var _selSS = new Set();
-		// Selection = leaf snapshot + extra (git/preset) paths. Folder checkboxes never feed this.
-		function currentSelection() {
-			var s = new Set(_selSS);
-			extraPaths.forEach(function(p) { var np = dsNorm(p); if (np) s.add(np); });
-			return s;
-		}
-		var _treeIdxFor = null, _treeIdx = null;
-		function getTreeIndex() {
-			if (_treeIdxFor !== treeData || !_treeIdx) { _treeIdx = dsBuildIndex(treeData || []); _treeIdxFor = treeData; }
-			return _treeIdx;
-		}
-		var vsCodeApi = null;
-		try { if (typeof acquireVsCodeApi !== 'undefined') vsCodeApi = acquireVsCodeApi(); } catch (e) { console.error('acquireVsCodeApi failed', e); }
-		// Stamped with the webview load number: the host drops messages of a load a project switch replaced.
-		var LOAD_SEQ = ${reload};
-		function postToHost(payload) { try { if (vsCodeApi) { payload.seq = LOAD_SEQ; vsCodeApi.postMessage(payload); } } catch (err) { console.error('postMessage failed', err); } }
-		// ── panel-right (sidebar) horizontal resizer ─────────────────────────────
-		(function(){
-			var sp = document.getElementById('panelSplit');
-			var right = document.querySelector('.panel-right');
-			if (!sp || !right) return;
-			var drag = false, sx = 0, sw = 0;
-			sp.addEventListener('mousedown', function(e){ drag = true; sx = e.clientX; sw = right.getBoundingClientRect().width; document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none'; e.preventDefault(); });
-			window.addEventListener('mousemove', function(e){ if (!drag) return; var max = Math.max(300, window.innerWidth - 360); right.style.width = Math.min(max, Math.max(300, sw + (sx - e.clientX))) + 'px'; });
-			window.addEventListener('mouseup', function(){ drag = false; document.body.style.cursor = ''; document.body.style.userSelect = ''; });
-		})();
-		var saveStateTimer = null;
-		function saveState() {
-			try {
-				var s = getCurrentPresetState();
-				var searchEl = safeGet('tree-search');
-				var filterEl = safeGet('filter-only-selected');
-				var autoGitEl = safeGet('auto-git-select');
-				var validateEl = safeGet('validate-only-check');
-				var suiteEl = safeGet('suite-select');
-				var state = {
-					sourcePaths: s.sourcePaths,
-					presetName: loadedPresetName || null,
-					deployType: s.deployType,
-					testClassNames: s.testClassNames || [],
-					targetOrg: s.targetOrg || null,
-					treeSearch: (searchEl && searchEl.value) ? searchEl.value : '',
-					filterOnlySelected: !!(filterEl && filterEl.checked),
-					autoGitSelect: !!(autoGitEl && autoGitEl.checked),
-					validateOnly: !!(validateEl && validateEl.checked),
-					testSuiteName: (suiteEl && suiteEl.value) ? suiteEl.value : null
-				};
-				if (vsCodeApi && typeof vsCodeApi.setState === 'function') vsCodeApi.setState(state);
-				postToHost({ command: 'persistPanelState', state: state });
-			} catch (e) { console.error('saveState failed', e); }
-		}
-		function scheduleSaveState() {
-			clearTimeout(saveStateTimer);
-			saveStateTimer = setTimeout(saveState, 400);
-		}
-		// Persist selection when user leaves the tab so it's not lost on revive
-		document.addEventListener('visibilitychange', function() {
-			if (document.hidden) {
-				clearTimeout(saveStateTimer);
-				saveStateTimer = null;
-				saveState();
-			}
-		});
-		function restoreState(state) {
-			if (!state || !Array.isArray(state.sourcePaths)) return;
-			loadedPresetName = state.presetName || null;
-			extraPaths = [];
-			document.querySelectorAll('.path-check').forEach(function(cb) { cb.checked = false; });
-			var pathSet = new Set((state.sourcePaths || []).map(norm));
-			pathSet.forEach(function(p) {
-				document.querySelectorAll('.path-check').forEach(function(cb) {
-					var nodePath = norm(cb.getAttribute('data-path'));
-					if (nodePath !== p) return;
-					cb.checked = true;
-					if (cb.classList.contains('folder-check')) {
-						var folderNode = cb.closest('.folder-node, .package-node');
-						if (folderNode) checkFolderAndDescendants(folderNode);
-					}
-				});
-			});
-			pathSet.forEach(function(p) {
-				var found = false;
-				document.querySelectorAll('.path-check').forEach(function(cb) { if (norm(cb.getAttribute('data-path')) === p) found = true; });
-				if (!found) extraPaths.push(p);
-			});
-			var deployType = state.deployType || 'RunRelevantTests';
-			var legacyValidate = false;
-			// Legacy: "ValidateOnly" used to be a test level — migrate it to the dry-run option.
-			if (deployType === 'ValidateOnly') { legacyValidate = true; deployType = 'NoTestRun'; }
-			var radio = document.querySelector('input[name="testLevel"][value="' + deployType + '"]');
-			if (radio) { radio.checked = true; var w = safeGet('specified-tests-wrap'); if (w) w.classList.toggle('visible', deployType === 'RunSpecifiedTests'); }
-			document.querySelectorAll('.test-class').forEach(function(cb) { cb.checked = Array.isArray(state.testClassNames) && state.testClassNames.indexOf(cb.value) !== -1; });
-			var orgSel = safeGet('org-select');
-			if (orgSel && state.targetOrg) { var found = Array.from(orgSel.options).find(function(o){ return o.value === state.targetOrg; }); if (found) orgSel.value = state.targetOrg; }
-			var presetSel = safeGet('preset-select');
-			if (presetSel && loadedPresetName) {
-				var idx = (presetsData || []).findIndex(function(p){ return p.name === loadedPresetName; });
-				if (idx >= 0) presetSel.value = String(idx); else presetSel.value = '';
-			}
-			// Rebuild persistent snapshot BEFORE folder tri-state (folder display derives from it)
-			_selSS = new Set();
-			document.querySelectorAll('.path-check:not(.folder-check):checked').forEach(function(cb) {
-				var p = norm(cb.getAttribute('data-path') || '');
-				if (p) _selSS.add(p);
-			});
-			extraPaths.forEach(function(p) { var np = norm(p); if (np) _selSS.add(np); });
-			document.querySelectorAll('.folder-node, .package-node').forEach(function(f) { updateFolderCheckboxState(f); });
-			updateSelectAllButtonState();
-			var searchEl = safeGet('tree-search');
-			if (searchEl && state.hasOwnProperty('treeSearch')) searchEl.value = state.treeSearch || '';
-			var filterEl = safeGet('filter-only-selected');
-			if (filterEl && state.hasOwnProperty('filterOnlySelected')) filterEl.checked = !!state.filterOnlySelected;
-			var autoGitEl = safeGet('auto-git-select');
-			if (autoGitEl && state.hasOwnProperty('autoGitSelect')) {
-				autoGitEl.checked = !!state.autoGitSelect;
-				// FileSystemWatcher is managed host-side; no timer needed here.
-			}
-			var validateEl = safeGet('validate-only-check');
-			if (validateEl) validateEl.checked = legacyValidate || !!state.validateOnly;
-			var suiteEl = safeGet('suite-select');
-			if (suiteEl && state.testSuiteName) {
-				suiteEl.value = state.testSuiteName;
-				var delBtn = safeGet('btn-delete-suite');
-				if (delBtn) delBtn.style.display = suiteEl.value ? '' : 'none';
-			}
-			filterTree();
-			updateSelectionStatus();
-		}
-
-		function safeGet(id) { return document.getElementById(id); }
-		function norm(p) {
-			if (!p) return '';
-			var s = p.trim().replace(/\\\\/g, '/').replace(/^\\.\\//, '');
-			return s.split('/').filter(Boolean).join('/');
-		}
-		function setDirty() { dirty = true; scheduleSaveState(); }
-
-		function pathToMetadataType(path) {
-			if (!path) return 'Other';
-			var p = path.toLowerCase();
-			var last = p.split('/').pop() || '';
-			if (last.endsWith('.cls') || p.includes('.cls-meta.xml')) return 'Apex Class';
-			if (last.endsWith('.trigger') || p.includes('.trigger-meta.xml')) return 'Apex Trigger';
-			if (p.includes('.object-meta.xml') || p.includes('/objects/')) return 'Custom Object';
-			if (p.includes('.layout-meta.xml') || p.includes('/layouts/')) return 'Layout';
-			if (last.endsWith('.page') || p.includes('.page-meta.xml')) return 'Apex Page';
-			if (p.includes('/aura/') || (p.includes('.component-meta.xml') && p.includes('aura'))) return 'Aura Component';
-			if (p.includes('.app-meta.xml')) return 'Aura App';
-			if (p.includes('/lwc/')) return 'LWC';
-			if (p.includes('.flow-meta.xml') || p.includes('.flowdefinition-meta.xml')) return 'Flow';
-			if (p.includes('.permissionset-meta.xml')) return 'Permission Set';
-			if (p.includes('.profile-meta.xml')) return 'Profile';
-			if (p.includes('.custommetadata-meta.xml')) return 'Custom Metadata';
-			if (p.includes('.tab-meta.xml')) return 'Tab';
-			if (p.includes('.flexipage-meta.xml')) return 'Flexi Page';
-			if (p.includes('.labels-meta.xml')) return 'Custom Labels';
-			if (p.includes('.workflow-meta.xml')) return 'Workflow';
-			if (p.includes('.report-meta.xml')) return 'Report';
-			if (p.includes('.dashboard-meta.xml')) return 'Dashboard';
-			if (p.includes('.field-meta.xml')) return 'Custom Field';
-			if (p.includes('.customapplication-meta.xml')) return 'Custom App';
-			if (p.includes('.connectedapp-meta.xml')) return 'Connected App';
-			if (p.includes('.namedcredential-meta.xml')) return 'Named Credential';
-			if (p.includes('.duplicaterule-meta.xml')) return 'Duplicate Rule';
-			if (p.includes('.matchingrule-meta.xml')) return 'Matching Rule';
-			if (p.includes('.reporttype-meta.xml')) return 'Report Type';
-			if (last === 'classes' || p.endsWith('/classes')) return 'Apex Class';
-			if (last === 'triggers' || p.endsWith('/triggers')) return 'Apex Trigger';
-			if (last === 'objects' || p.endsWith('/objects')) return 'Custom Object';
-			if (last === 'layouts' || p.endsWith('/layouts')) return 'Layout';
-			if (last === 'flows' || p.endsWith('/flows')) return 'Flow';
-			if (last === 'aura' || p.endsWith('/aura')) return 'Aura';
-			if (last === 'lwc' || p.endsWith('/lwc')) return 'LWC';
-			return 'Other';
-		}
-
-		function updateSelectionStatus() {
-			var statusEl = safeGet('deploy-status');
-			if (!statusEl) return;
-			// Count: use _selSS (leaf paths, includes items hidden by filter) + extra paths not already in snapshot
-			var selLeaves = dsCountByLeaf(currentSelection());
-			var totalCount = selLeaves.length;
-			var badge = safeGet('sel-count-badge');
-			if (badge) { badge.textContent = totalCount > 0 ? String(totalCount) : ''; badge.style.display = totalCount > 0 ? 'inline' : 'none'; }
-			if (totalCount === 0) { statusEl.textContent = 'Ready. No metadata selected.'; return; }
-			var byType = {};
-			selLeaves.forEach(function(p) {
-				var t = pathToMetadataType(p);
-				byType[t] = (byType[t] || 0) + 1;
-			});
-			var plural = { 'Apex Class': 'Apex classes', 'Apex Trigger': 'Apex triggers', 'Custom Object': 'Custom objects', 'Layout': 'Layouts', 'Apex Page': 'Apex pages', 'Aura Component': 'Aura components', 'Aura App': 'Aura apps', 'Flow': 'Flows', 'Permission Set': 'Permission sets', 'Profile': 'Profiles', 'Custom Metadata': 'Custom metadata', 'Tab': 'Tabs', 'Flexi Page': 'Flexi pages', 'Custom Labels': 'Custom labels', 'Report': 'Reports', 'Dashboard': 'Dashboards', 'Custom Field': 'Custom fields', 'Custom App': 'Custom apps', 'Connected App': 'Connected apps', 'Named Credential': 'Named credentials', 'Duplicate Rule': 'Duplicate rules', 'Matching Rule': 'Matching rules', 'Report Type': 'Report types', 'Workflow': 'Workflows', 'LWC': 'LWC', 'Other': 'Other' };
-			var parts = [];
-			var order = ['Apex Class', 'Apex Trigger', 'Custom Object', 'Layout', 'Apex Page', 'LWC', 'Aura Component', 'Aura App', 'Flow', 'Permission Set', 'Profile', 'Custom Metadata', 'Tab', 'Flexi Page', 'Custom Labels', 'Report', 'Dashboard', 'Custom Field', 'Custom App', 'Connected App', 'Named Credential', 'Duplicate Rule', 'Matching Rule', 'Report Type', 'Workflow', 'Other'];
-			order.forEach(function(t) {
-				if (!byType[t]) return;
-				var label = (byType[t] === 1 ? t : (plural[t] || t + 's'));
-				parts.push(byType[t] + ' ' + label);
-			});
-			Object.keys(byType).forEach(function(t) { if (order.indexOf(t) === -1) parts.push(byType[t] + ' ' + (byType[t] === 1 ? t : (plural[t] || t + 's'))); });
-			var testLevel = (document.querySelector('input[name="testLevel"]:checked') || {}).value;
-			if (testLevel === 'RunSpecifiedTests') {
-				var testCount = document.querySelectorAll('.test-class:checked').length;
-				parts.push(testCount === 1 ? '1 test to run' : testCount + ' tests to run');
-			}
-			statusEl.textContent = 'Ready. ' + (parts.length ? parts.join(', ') + '.' : 'No metadata selected.');
-		}
-
-		function getAllPathsFromTreeData(data) {
-			var paths = [];
-			function walk(nodes) {
-				if (!nodes || !nodes.length) return;
-				nodes.forEach(function(n) {
-					if (n.path) paths.push(n.path);
-					if (n.children && n.children.length) walk(n.children);
-				});
-			}
-			(data || []).forEach(function(pkg) {
-				if (pkg.path) paths.push(pkg.path);
-				if (pkg.children && pkg.children.length) walk(pkg.children);
-			});
-			return paths;
-		}
-		function getLeafPathsFromTreeData(data) {
-			var paths = [];
-			function walk(nodes) {
-				if (!nodes || !nodes.length) return;
-				nodes.forEach(function(n) {
-					if (!n.children || n.children.length === 0) { if (n.path) paths.push(n.path); return; }
-					walk(n.children);
-				});
-			}
-			(data || []).forEach(function(pkg) {
-				if (!pkg.children || pkg.children.length === 0) { if (pkg.path) paths.push(pkg.path); return; }
-				walk(pkg.children);
-			});
-			return paths;
-		}
-		function expandToFilePathsForDeploy(minimalPaths) {
-			if (!minimalPaths || !minimalPaths.length) return [];
-			var leaves = getLeafPathsFromTreeData(treeData || []);
-			var leafSet = new Set(leaves.map(norm));
-			var out = new Set();
-			minimalPaths.forEach(function(p) {
-				var q = norm(p);
-				if (leafSet.has(q)) { out.add(q); return; }
-				var under = leaves.filter(function(leaf) { var l = norm(leaf); return l === q || l.indexOf(q + '/') === 0; });
-				if (under.length) under.forEach(function(leaf) { out.add(norm(leaf)); });
-				else out.add(q);
-			});
-			return Array.from(out);
-		}
-		function matchGitPathsToTreePaths(gitPaths, treePaths) {
-			var pathSet = new Set((gitPaths || []).map(norm));
-			var matched = new Set();
-			var exact = 0, byBasename = 0;
-			var normTree = function(p) { return (p || '').replace(/\\\\/g, '/').trim(); };
-			(treePaths || []).forEach(function(tp) {
-				var p = normTree(tp);
-				if (pathSet.has(p)) { matched.add(p); pathSet.delete(p); exact++; }
-			});
-			pathSet.forEach(function(gitPath) {
-				var base = (gitPath.split('/').pop() || '').trim();
-				if (!base) return;
-				var found = (treePaths || []).find(function(tp) {
-					var nodePath = normTree(tp);
-					return !matched.has(nodePath) && nodePath.split('/').pop() === base;
-				});
-				if (found) { var p = normTree(found); matched.add(p); pathSet.delete(gitPath); byBasename++; }
-			});
-			return { matched: matched, matchedExact: exact, matchedByBasename: byBasename };
-		}
-		function filterTreeDataToVisible(nodes, search, onlySelected, selectedSet) {
-			if (!nodes || !nodes.length) return [];
-			return nodes.map(function(node) {
-				if (!node.children || node.children.length === 0) {
-					var pathNorm = (node.path || '').replace(/\\\\/g, '/').toLowerCase();
-					var matchSearch = !search || pathNorm.indexOf(search) !== -1;
-					var pathOrig = (node.path || '').replace(/\\\\/g, '/').trim();
-					var matchSelected = !onlySelected || selectedSet.has(pathOrig);
-					if (!matchSearch || !matchSelected) return null;
-					return { label: node.label, path: node.path };
-				}
-				var filteredChildren = filterTreeDataToVisible(node.children, search, onlySelected, selectedSet);
-				if (filteredChildren.length === 0) return null;
-				return { label: node.label, path: node.path, children: filteredChildren };
-			}).filter(Boolean);
-		}
-		/** Inline folders with 0 or 1 child into their parent (filter may leave such folders); then collapse single-child chains. */
-		function mergeFewChildFoldersIntoParent(nodes) {
-			if (!nodes || !nodes.length) return nodes;
-			return nodes.map(function(node) {
-				if (!node.children || node.children.length === 0) return node;
-				var children = mergeFewChildFoldersIntoParent(node.children);
-				var newChildren = [];
-				children.forEach(function(c) {
-					if (!c.children) { newChildren.push(c); return; }
-					if (c.children.length === 0) return;
-					if (c.children.length === 1) {
-						newChildren.push(c.children[0]);
-					} else {
-						newChildren.push(c);
-					}
-				});
-				return { label: node.label, path: node.path, children: newChildren };
-			});
-		}
-		function collapseSingleChildInTree(nodes) {
-			if (!nodes || !nodes.length) return nodes;
-			return nodes.map(function(node) {
-				if (!node.children || node.children.length === 0) return node;
-				if (node.children.length !== 1) {
-					return { label: node.label, path: node.path, children: collapseSingleChildInTree(node.children) };
-				}
-				var only = node.children[0];
-				if (!only.children || only.children.length === 0) return { label: node.label, path: node.path, children: node.children };
-				var collapsed = collapseSingleChildInTree([only])[0];
-				return {
-					label: node.label + '/' + collapsed.label,
-					path: collapsed.path,
-					children: collapsed.children || []
-				};
-			});
-		}
-		function filterTree() {
-			var searchEl = safeGet('tree-search'), wrap = safeGet('tree-wrap');
-			var onlySelected = (safeGet('filter-only-selected') && safeGet('filter-only-selected').checked) || false;
-			if (!wrap) return;
-			var search = (searchEl && searchEl.value) ? searchEl.value.trim().toLowerCase() : '';
-			// Sync currently-visible leaf checkboxes into the persistent snapshot before any re-render.
-			// This captures explicit unchecks on visible items while preserving selections on hidden items.
-			document.querySelectorAll('#tree-wrap .path-check:not(.folder-check)').forEach(function(cb) {
-				var p = norm(cb.getAttribute('data-path') || '');
-				if (p) { if (cb.checked) _selSS.add(p); else _selSS.delete(p); }
-			});
-			if (!search && !onlySelected) {
-				if (lastRenderedTreeData !== treeData) {
-					renderTreeWithData(treeData, _selSS, false);
-				} else {
-					// Just un-hide everything; re-apply snapshot to nodes that were hidden.
-					wrap.querySelectorAll('.package-node, .folder-node, .file-node').forEach(function(n) { n.style.display = ''; });
-					wrap.querySelectorAll('.path-check:not(.folder-check)').forEach(function(cb) {
-						var p = norm(cb.getAttribute('data-path') || '');
-						if (p && _selSS.has(p)) cb.checked = true;
-					});
-					document.querySelectorAll('.folder-node, .package-node').forEach(function(f) { updateFolderCheckboxState(f); });
-					updateSelectAllButtonState();
-					updateSelectionStatus();
-				}
-				return;
-			}
-			var filtered = (treeData || []).map(function(pkg) {
-				var visibleChildren = filterTreeDataToVisible(pkg.children || [], search, onlySelected, _selSS);
-				if (visibleChildren.length === 0) return null;
-				visibleChildren = mergeFewChildFoldersIntoParent(visibleChildren);
-				visibleChildren = collapseSingleChildInTree(visibleChildren);
-				if (visibleChildren.length === 1 && visibleChildren[0].children) {
-					var only = visibleChildren[0];
-					return { label: pkg.label + '/' + only.label, path: only.path, children: only.children || [] };
-				}
-				return { label: pkg.label, path: pkg.path, children: visibleChildren };
-			}).filter(Boolean);
-			renderTreeWithData(filtered, _selSS, true);
-		}
-
-		/** Minimal deploy paths from the LEAF selection vs the FULL tree. Never reads folder checkbox state. */
-		function getMinimalSourcePaths() {
-			// Flush visible leaf checkboxes into the snapshot (captures explicit unchecks) - leaves only.
-			document.querySelectorAll('#tree-wrap .path-check:not(.folder-check)').forEach(function(cb) {
-				var p = norm(cb.getAttribute('data-path') || '');
-				if (p) { if (cb.checked) _selSS.add(p); else _selSS.delete(p); }
-			});
-			return dsMinimalPaths(treeData || [], currentSelection());
-		}
-
-		function getCurrentPresetState() {
-			var sourcePaths = getMinimalSourcePaths();
-			var deployType = (document.querySelector('input[name="testLevel"]:checked') || {}).value || 'RunRelevantTests';
-			var testClassNames = deployType === 'RunSpecifiedTests' ? (function(){ var n=[]; document.querySelectorAll('.test-class:checked').forEach(function(c){ n.push(c.value); }); return n; })() : [];
-			var sel = safeGet('org-select');
-			return { sourcePaths: sourcePaths, deployType: deployType, testClassNames: testClassNames, targetOrg: sel && sel.value ? sel.value : undefined };
-		}
-
-		function applyChangedPaths(paths) {
-			var allTreePaths = getAllPathsFromTreeData(treeData);
-			var matchResult = matchGitPathsToTreePaths(paths, allTreePaths);
-			var matchedTreePaths = matchResult.matched;
-			// Merge matched paths into the persistent snapshot first
-			matchedTreePaths.forEach(function(p) { _selSS.add(p); });
-			var newSelectedSet = new Set(_selSS);
-			var onlyShowSelected = !!(safeGet('filter-only-selected') && safeGet('filter-only-selected').checked);
-			var searchEl = safeGet('tree-search');
-			var search = (searchEl && searchEl.value) ? searchEl.value.trim().toLowerCase() : '';
-			extraPaths = [];
-			if (onlyShowSelected && matchedTreePaths.size > 0) {
-				var filtered = (treeData || []).map(function(pkg) {
-					var visibleChildren = filterTreeDataToVisible(pkg.children || [], search, true, newSelectedSet);
-					if (visibleChildren.length === 0) return null;
-					visibleChildren = mergeFewChildFoldersIntoParent(visibleChildren);
-					visibleChildren = collapseSingleChildInTree(visibleChildren);
-					if (visibleChildren.length === 1 && visibleChildren[0].children) {
-						var only = visibleChildren[0];
-						return { label: pkg.label + '/' + only.label, path: only.path, children: only.children || [] };
-					}
-					return { label: pkg.label, path: pkg.path, children: visibleChildren };
-				}).filter(Boolean);
-				lastRenderedTreeData = filtered;
-				renderTreeWithData(filtered, newSelectedSet, true);
-			} else {
-				document.querySelectorAll('.path-check').forEach(function(cb) {
-					var p = norm(cb.getAttribute('data-path'));
-					if (newSelectedSet.has(p)) cb.checked = true;
-				});
-				document.querySelectorAll('.folder-node, .package-node').forEach(function(f) { updateFolderCheckboxState(f); });
-				updateSelectAllButtonState();
-				updateSelectionStatus();
-				filterTree();
-			}
-			// Only paths that actually match something already shown in the tree are selectable —
-			// the tree is already the one place that knows what's real, deployable metadata (built
-			// from the actual project structure), so a git-changed path with no match there (not a
-			// recognized metadata item, or not part of any package directory) is reported as
-			// unmatched but never silently added to the selection/deploy payload as an "extra" path.
-			var pathSet = new Set((paths || []).map(norm));
-			matchedTreePaths.forEach(function(p) { pathSet.delete(p); });
-			return { total: (paths && paths.length) || 0, matchedExact: matchResult.matchedExact, matchedByBasename: matchResult.matchedByBasename, unmatched: pathSet.size };
-		}
-
-		window.addEventListener('message', function(event) {
-			var data = event.data;
-			if (!data || !data.command) return;
-			var statusEl = safeGet('deploy-status');
-			if (data.command === 'projectSwitchPending') {
-				var note = safeGet('switch-note');
-				if (note) note.style.display = 'block';
-				return;
-			}
-			if (data.command === 'deployStart') {
-				var bar = safeGet('deploy-result-bar');
-				if (bar) { bar.className = 'deploy-result-bar running'; bar.textContent = data.dryRun ? 'Validating…' : 'Deploying…'; bar.style.display = 'block'; }
-				return;
-			}
-			if (data.command === 'defaultOrgChanged') {
-				orgsData = Array.isArray(data.orgs) ? data.orgs : orgsData;
-				defaultOrgVal = (data.defaultOrg != null && data.defaultOrg !== '') ? String(data.defaultOrg) : '';
-				renderOrgSelect();
-				return;
-			}
-			if (data.command === 'applyPresetFromHost') {
-				if (data.preset) applyPreset(data.preset);
-				return;
-			}
-			if (data.command === 'testSuitesUpdated') {
-				testSuitesData = data.suites || [];
-				renderSuiteSelect();
-				return;
-			}
-			if (data.command === 'deployResult') {
-				var bar = safeGet('deploy-result-bar');
-				if (!bar) return;
-				var covPanel = safeGet('coverage-panel');
-				if (data.cancelled) {
-					bar.style.display = 'none';
-					if (covPanel) { covPanel.style.display = 'none'; covPanel.innerHTML = ''; }
-					return;
-				}
-				var success = !!data.success;
-				bar.className = 'deploy-result-bar ' + (success ? 'success' : 'failure');
-				var icon = success ? '✅' : '❌';
-				var verb = data.dryRun ? (success ? 'Validation passed' : 'Validation failed') : (success ? 'Deploy succeeded' : 'Deploy failed');
-				var parts = [icon + ' ' + verb];
-				if (data.components > 0) parts.push(data.components + ' component' + (data.components !== 1 ? 's' : ''));
-				if (data.componentErrors > 0) parts.push(data.componentErrors + ' error' + (data.componentErrors !== 1 ? 's' : ''));
-				if (data.testsPassed > 0 || data.testsFailed > 0) {
-					var tf = data.testsFailed > 0 ? (', ' + data.testsFailed + ' failed') : '';
-					parts.push('Tests: ' + data.testsPassed + ' passed' + tf);
-				}
-				if (data.durationMs) { var s = Math.round(data.durationMs / 1000); parts.push(s >= 60 ? Math.floor(s / 60) + 'm ' + (s % 60) + 's' : s + 's'); }
-				if (data.error) parts.push(String(data.error));
-				bar.textContent = parts.join(' · ');
-				bar.style.display = 'block';
-				// ── Coverage table ───────────────────────────────────────────────────────
-				if (covPanel) {
-					var cov = (data.coverage && Array.isArray(data.coverage) && success) ? data.coverage : [];
-					if (cov.length > 0) {
-						var avg = Math.round(cov.reduce(function(acc, e) { return acc + e.pct; }, 0) / cov.length);
-						var avgCls = avg < 75 ? 'cov-red' : avg < 85 ? 'cov-amber' : 'cov-green';
-						covPanel.innerHTML = '<div class="coverage-toggle" id="cov-toggle">📊 Coverage — <span class="cov-avg ' + avgCls + '">' + avg + '%</span> avg <span class="cov-chev">▾</span></div><div class="coverage-list" id="cov-list">' +
-							cov.map(function(e) { var c = e.pct < 75 ? 'cov-red' : e.pct < 85 ? 'cov-amber' : 'cov-green'; return '<div class="cov-row"><span class="cov-name">' + escapeHtml(e.name) + '</span><span class="cov-pct ' + c + '">' + e.pct + '%</span></div>'; }).join('') +
-							'</div>';
-						var togEl = document.getElementById('cov-toggle');
-						if (togEl) togEl.onclick = function() { var l = document.getElementById('cov-list'); if (!l) return; var h = l.style.display === 'none'; l.style.display = h ? '' : 'none'; var ch = this.querySelector('.cov-chev'); if (ch) ch.textContent = h ? '▾' : '▸'; };
-						covPanel.style.display = 'block';
-					} else {
-						covPanel.style.display = 'none';
-						covPanel.innerHTML = '';
-					}
-				}
-				return;
-			}
-			if (data.command === 'setChangedPaths') {
-				if (data.error) { if (statusEl) statusEl.textContent = 'Git: ' + data.error; return; }
-				var paths = data.paths || [];
-				var stats = applyChangedPaths(paths);
-				setDirty();
-				saveState();
-				if (!stats.total) {
-					if (statusEl) statusEl.textContent = 'No changed files in Git.';
-				} else {
-					var m = stats.matchedExact + stats.matchedByBasename;
-					if (m === 0) {
-						if (statusEl) statusEl.textContent = 'Git: ' + stats.total + ' changed file(s). None matched the metadata tree (paths may be outside package dirs).';
-					} else {
-						var detail = [stats.matchedExact ? stats.matchedExact + ' exact' : '', stats.matchedByBasename ? stats.matchedByBasename + ' by name' : ''].filter(Boolean).join(', ');
-						if (statusEl) statusEl.textContent = 'Git: ' + stats.total + ' changed. Selected ' + m + ' in tree' + (detail ? ' (' + detail + ').' : '.');
-					}
-				}
-				return;
-			}
-			if (data.command === 'presetSaved') {
-				dirty = false;
-				if (data.name) loadedPresetName = data.name;
-				if (data.presets && Array.isArray(data.presets)) { presetsData.length = 0; presetsData.push.apply(presetsData, data.presets); refreshPresetDropdown(); }
-				if (data.error) {
-					if (statusEl) statusEl.textContent = 'Preset save failed: ' + data.error;
-				} else if (data.name) {
-					if (statusEl) statusEl.textContent = data.isNew ? "Preset '" + data.name + "' saved." : "Preset '" + data.name + "' updated.";
-				}
-			}
-		});
-
-		function escapeHtml(s) { return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-		function escapeAttr(s) { return (s || '').replace(/"/g,'&quot;').replace(/</g,'&lt;'); }
-
-		function checkFolderAndDescendants(folderNode) {
-			var folderCheck = folderNode.querySelector('.path-check.folder-check');
-			if (folderCheck) folderCheck.checked = true;
-			folderNode.querySelectorAll('.path-check').forEach(function(c) { c.checked = true; });
-		}
-		function applyPreset(preset) {
-			if (!preset) return;
-			loadedPresetName = preset.name;
-			dirty = false;
-			var pathSet = new Set(Array.isArray(preset.sourcePaths) ? preset.sourcePaths.map(norm) : []);
-			extraPaths = [];
-			var filterEl = safeGet('filter-only-selected');
-			var searchEl = safeGet('tree-search');
-			var savedOnlyShowSelected = !!(filterEl && filterEl.checked);
-			var savedSearch = (searchEl && searchEl.value) ? searchEl.value : '';
-			if (savedOnlyShowSelected || savedSearch) {
-				if (filterEl) filterEl.checked = false;
-				if (searchEl) searchEl.value = '';
-				filterTree();
-			}
-			document.querySelectorAll('.path-check').forEach(function(cb) {
-				cb.checked = false;
-			});
-			pathSet.forEach(function(p) {
-				document.querySelectorAll('.path-check').forEach(function(cb) {
-					var nodePath = norm(cb.getAttribute('data-path'));
-					if (nodePath !== p) return;
-					cb.checked = true;
-					if (cb.classList.contains('folder-check')) {
-						var folderNode = cb.closest('.folder-node, .package-node');
-						if (folderNode) checkFolderAndDescendants(folderNode);
-					}
-				});
-			});
-			pathSet.forEach(function(p) {
-				var found = false;
-				document.querySelectorAll('.path-check').forEach(function(cb) {
-					if (norm(cb.getAttribute('data-path')) === p) found = true;
-				});
-				if (!found) extraPaths.push(p);
-			});
-			var deployType = preset.deployType || 'RunRelevantTests';
-			var presetValidate = false;
-			if (deployType === 'ValidateOnly') { presetValidate = true; deployType = 'NoTestRun'; }
-			if (preset.validateOnly) presetValidate = true;
-			var radio = document.querySelector('input[name="testLevel"][value="' + deployType + '"]');
-			if (radio) { radio.checked = true; var w = safeGet('specified-tests-wrap'); if (w) w.classList.toggle('visible', deployType === 'RunSpecifiedTests'); }
-			var presetValidateEl = safeGet('validate-only-check');
-			if (presetValidateEl) presetValidateEl.checked = presetValidate;
-			document.querySelectorAll('.test-class').forEach(function(cb) { cb.checked = Array.isArray(preset.testClassNames) && preset.testClassNames.indexOf(cb.value) !== -1; });
-			var orgSel = safeGet('org-select');
-			if (orgSel && preset.targetOrg) { var found = Array.from(orgSel.options).find(function(o){ return o.value === preset.targetOrg; }); if (found) orgSel.value = preset.targetOrg; }
-			// Rebuild persistent snapshot from current leaf checkboxes + extra paths (before folder tri-state / status)
-			_selSS = new Set();
-			document.querySelectorAll('.path-check:not(.folder-check):checked').forEach(function(cb) {
-				var p = norm(cb.getAttribute('data-path') || '');
-				if (p) _selSS.add(p);
-			});
-			extraPaths.forEach(function(p) { var np = norm(p); if (np) _selSS.add(np); });
-			document.querySelectorAll('.folder-node, .package-node').forEach(function(f) { updateFolderCheckboxState(f); });
-			updateSelectAllButtonState();
-			updateSelectionStatus();
-			if (savedOnlyShowSelected || savedSearch) {
-				if (filterEl) filterEl.checked = savedOnlyShowSelected;
-				if (searchEl) searchEl.value = savedSearch;
-				filterTree();
-			}
-			saveState();
-		}
-
-		function renderOrgSelect() {
-			var sel = safeGet('org-select');
-			if (!sel) return;
-			if (!orgsData || orgsData.length === 0) { sel.innerHTML = '<option value="">No orgs found</option>'; return; }
-			sel.innerHTML = orgsData.map(function(o) { return '<option value="' + escapeAttr(o.username) + '">' + escapeHtml(o.label) + '</option>'; }).join('');
-			sel.value = defaultOrgVal || (orgsData[0] && orgsData[0].username) || '';
-		}
-
-		function refreshPresetDropdown() {
-			var sel = safeGet('preset-select');
-			if (!sel) return;
-			var curVal = sel.value;
-			sel.innerHTML = '<option value="">— None —</option>' + (presetsData || []).map(function(p, i) { return '<option value="' + i + '">' + escapeHtml(p.name) + '</option>'; }).join('');
-			if (loadedPresetName) { var idx = (presetsData || []).findIndex(function(p){ return p.name === loadedPresetName; }); if (idx !== -1) sel.value = String(idx); } else sel.value = curVal || '';
-		}
-
-		function renderPresetSelect() {
-			var sel = safeGet('preset-select');
-			if (!sel) return;
-			sel.innerHTML = '<option value="">— None —</option>' + (presetsData || []).map(function(p, i) { return '<option value="' + i + '">' + escapeHtml(p.name) + '</option>'; }).join('');
-			sel.onchange = function() {
-				var idx = this.value;
-				var newIndex = idx === '' ? null : parseInt(idx, 10);
-				if (dirty && loadedPresetName) {
-					pendingPresetIndex = newIndex;
-					var msg = safeGet('preset-modal-message');
-					if (msg) msg.textContent = "Preset '" + loadedPresetName + "' was modified. Save changes?";
-					var overlay = safeGet('preset-modal-overlay');
-					if (overlay) overlay.style.display = 'flex';
-					var curIdx = (presetsData || []).findIndex(function(p){ return p.name === loadedPresetName; });
-					sel.value = curIdx >= 0 ? String(curIdx) : '';
-					return;
-				}
-				loadedPresetName = null;
-				dirty = false;
-				if (idx === '') { extraPaths = []; return; }
-				var p = presetsData[newIndex];
-				if (p) applyPreset(p);
-			};
-			if (initialPreset) {
-				var idx = (presetsData || []).findIndex(function(p){ return p.name === initialPreset.name; });
-				// Apply the object we were given (e.g. a history entry carrying validateOnly/tests), not a same-named saved preset.
-				if (idx !== -1) sel.value = String(idx);
-				applyPreset(initialPreset);
-			}
-		}
-
-		function finishPresetSwitch() {
-			var sel = safeGet('preset-select');
-			var idx = pendingPresetIndex;
-			pendingPresetIndex = null;
-			var overlay = safeGet('preset-modal-overlay');
-			if (overlay) overlay.style.display = 'none';
-			if (idx === null || idx === undefined) { loadedPresetName = null; extraPaths = []; if (sel) sel.value = ''; return; }
-			var p = (presetsData || [])[idx];
-			if (sel) sel.value = String(idx);
-			if (p) applyPreset(p); else loadedPresetName = null;
-		}
-
-		function countNodes(n) {
-			if (!n.children || n.children.length === 0) return 1;
-			return 1 + n.children.reduce(function(s, c) { return s + countNodes(c); }, 0);
-		}
-
-		function renderNode(node) {
-			var isFolder = Array.isArray(node.children);
-			if (isFolder) {
-				if (!node.children || node.children.length === 0) return '';
-				var count = countNodes(node);
-				var out = '<div class="tree-node folder-node">';
-				out += '<div class="folder-row"><label class="row-label"><input type="checkbox" class="path-check folder-check" data-path="' + escapeAttr(node.path) + '"><span class="folder-icon" aria-hidden="true">📁</span><span class="label-text">' + escapeHtml(node.label) + ' (' + count + ')</span></label><button type="button" class="btn-toggle" title="Expand/Collapse">▼</button></div>';
-				out += '<div class="node-children">';
-				(node.children || []).forEach(function(c) { out += renderNode(c); });
-				out += '</div></div>';
-				return out;
-			}
-			return '<label class="tree-node file-node"><input type="checkbox" class="path-check" data-path="' + escapeAttr(node.path) + '"><span class="file-icon" aria-hidden="true">📄</span><span class="label-text">' + escapeHtml(node.label) + '</span></label>';
-		}
-
-		/** Display only: checked iff ALL leaves under the folder in the FULL tree are selected; indeterminate if some (visible or hidden). */
-		function updateFolderCheckboxState(folderNode) {
-			var folderCheck = folderNode.querySelector('.path-check.folder-check');
-			if (!folderCheck) return;
-			var st = dsFolderState(getTreeIndex(), currentSelection(), folderCheck.getAttribute('data-path') || '');
-			folderCheck.checked = st === 'checked';
-			folderCheck.indeterminate = st === 'indeterminate';
-		}
-
-		function updateAncestorCheckboxes(startFrom) {
-			var el = startFrom;
-			while (el) {
-				var folder = el.closest('.folder-node, .package-node');
-				if (!folder) break;
-				updateFolderCheckboxState(folder);
-				el = folder.parentElement;
-			}
-			updateSelectAllButtonState();
-		}
-
-		function updateSelectAllButtonState() {
-			var btn = safeGet('btn-select-deselect-all');
-			var iconSpan = btn && btn.querySelector('.btn-select-deselect-icon');
-			if (!btn || !iconSpan) return;
-			var wrap = safeGet('tree-wrap');
-			if (!wrap) return;
-			var all = wrap.querySelectorAll('.path-check:not(.folder-check)');
-			var checked = wrap.querySelectorAll('.path-check:not(.folder-check):checked');
-			var allSelected = all.length > 0 && checked.length === all.length;
-			if (allSelected) {
-				iconSpan.textContent = '☐';
-				btn.title = 'Deselect all';
-				btn.setAttribute('aria-label', 'Deselect all');
-			} else {
-				iconSpan.textContent = '☑';
-				btn.title = 'Select all';
-				btn.setAttribute('aria-label', 'Select all');
-			}
-		}
-
-		function buildTreeHtml(data) {
-			if (!data || !data.length) return '<p>No metadata files found.</p>';
-			var html = '';
-			data.forEach(function(pkg) {
-				var children = pkg.children || [];
-				if (children.length === 0) return;
-				var hasChildren = true;
-				var pkgCount = 1 + children.reduce(function(s, c) { return s + countNodes(c); }, 0);
-				html += '<div class="tree-node package-node">';
-				html += '<div class="package-row"><label class="row-label"><input type="checkbox" class="path-check folder-check" data-path="' + escapeAttr(pkg.path) + '"><span class="folder-icon" aria-hidden="true">📂</span><span class="label-text">' + escapeHtml(pkg.label) + (hasChildren ? ' (' + pkgCount + ')' : '') + '</span></label><button type="button" class="btn-toggle" title="Expand/Collapse">▼</button></div>';
-				html += '<div class="package-children">';
-				children.forEach(function(c) { html += renderNode(c); });
-				html += '</div></div>';
-			});
-			return html || '<p>No metadata files found in package directories.</p>';
-		}
-		function restoreCheckboxesFromSet(checkedSet) {
-			if (!checkedSet || !checkedSet.size) return;
-			var norm = function(p) { return (p || '').replace(/\\\\/g, '/').trim(); };
-			document.querySelectorAll('.path-check').forEach(function(cb) {
-				var p = norm(cb.getAttribute('data-path'));
-				cb.checked = checkedSet.has(p);
-			});
-		}
-		function attachTreeContentHandlers(wrap) {
-			if (!wrap) return;
-			wrap.querySelectorAll('.btn-toggle').forEach(function(btn) {
-				btn.onclick = function() {
-					var row = this.closest('.package-row, .folder-row');
-					var node = row && row.closest('.tree-node');
-					var children = node && (node.querySelector('.package-children') || node.querySelector('.node-children'));
-					if (!children) return;
-					var isHidden = children.style.display === 'none';
-					children.style.display = isHidden ? 'block' : 'none';
-					this.textContent = isHidden ? '▼' : '▶';
-				};
-			});
-			wrap.querySelectorAll('.package-row .row-label, .folder-row .row-label').forEach(function(lbl) {
-				lbl.onclick = function(e) {
-					if (e.target && e.target.type === 'checkbox') return;
-					e.preventDefault();
-					e.stopPropagation();
-					var row = this.closest('.package-row, .folder-row');
-					var btn = row && row.querySelector('.btn-toggle');
-					if (btn) btn.click();
-				};
-			});
-			wrap.querySelectorAll('.path-check.folder-check').forEach(function(cb) {
-				cb.onchange = function() {
-					setDirty();
-					var folderNode = this.closest('.folder-node, .package-node');
-					if (!folderNode) return;
-					// An indeterminate/unchecked folder click checks; a checked one unchecks.
-					var check = this.checked;
-					// Only leaves currently rendered (= visible under the active filter) are affected.
-					var visibleLeaves = [];
-					folderNode.querySelectorAll('.path-check:not(.folder-check)').forEach(function(c) {
-						c.checked = check;
-						visibleLeaves.push(c.getAttribute('data-path') || '');
-					});
-					_selSS = dsApplyFolderToggle(_selSS, visibleLeaves, check);
-					folderNode.querySelectorAll('.folder-node, .package-node').forEach(function(f) { updateFolderCheckboxState(f); });
-					updateFolderCheckboxState(folderNode);
-					updateAncestorCheckboxes(folderNode.parentElement);
-					updateSelectAllButtonState();
-					updateSelectionStatus();
-				};
-			});
-			// Only attach to file checkboxes so we don't overwrite the folder-check handler above
-			wrap.querySelectorAll('.path-check:not(.folder-check)').forEach(function(cb) {
-				cb.onchange = function() {
-					var p = norm(this.getAttribute('data-path') || '');
-					if (p) { if (this.checked) _selSS.add(p); else _selSS.delete(p); }
-					setDirty();
-					var node = this.closest('.tree-node');
-					if (!node) return;
-					updateAncestorCheckboxes(node.parentElement);
-					updateSelectAllButtonState();
-					updateSelectionStatus();
-				};
-			});
-			document.querySelectorAll('.folder-node, .package-node').forEach(function(f) { updateFolderCheckboxState(f); });
-			updateSelectAllButtonState();
-			updateSelectionStatus();
-		}
-		function renderTreeWithData(data, checkedSet, isFiltered) {
-			var wrap = safeGet('tree-wrap');
-			if (!wrap) return;
-			lastRenderedTreeData = data;
-			if (!data || data.length === 0) {
-				wrap.innerHTML = isFiltered ? '<p>No matching metadata.</p>' : '<p>No package directories found. Add packageDirectories in sfdx-project.json.</p>';
-				return;
-			}
-			wrap.innerHTML = buildTreeHtml(data);
-			if (checkedSet && checkedSet.size > 0) restoreCheckboxesFromSet(checkedSet);
-			attachTreeContentHandlers(wrap);
-		}
-		function renderTree() {
-			var wrap = safeGet('tree-wrap');
-			if (!wrap) return;
-			if (!treeData || treeData.length === 0) { wrap.innerHTML = '<p>No package directories found. Add packageDirectories in sfdx-project.json.</p>'; return; }
-			lastRenderedTreeData = treeData;
-			renderTreeWithData(treeData, null);
-			var searchEl = safeGet('tree-search');
-			if (searchEl) searchEl.oninput = function() { filterTree(); scheduleSaveState(); };
-			var filterOnlySel = safeGet('filter-only-selected');
-			if (filterOnlySel) filterOnlySel.onchange = function() { filterTree(); scheduleSaveState(); };
-			var btnExpandAll = safeGet('btn-expand-all');
-			if (btnExpandAll) btnExpandAll.onclick = function() {
-				wrap.querySelectorAll('.package-children, .node-children').forEach(function(el) { el.style.display = 'block'; });
-				wrap.querySelectorAll('.btn-toggle').forEach(function(btn) { btn.textContent = '▼'; });
-			};
-			var btnCollapseAll = safeGet('btn-collapse-all');
-			if (btnCollapseAll) btnCollapseAll.onclick = function() {
-				wrap.querySelectorAll('.package-children, .node-children').forEach(function(el) { el.style.display = 'none'; });
-				wrap.querySelectorAll('.btn-toggle').forEach(function(btn) { btn.textContent = '▶'; });
-			};
-			var btnSelectDeselectAll = safeGet('btn-select-deselect-all');
-			if (btnSelectDeselectAll) btnSelectDeselectAll.onclick = function() {
-				setDirty();
-				var wrap = safeGet('tree-wrap');
-				if (!wrap) return;
-				// Leaf checkboxes only: under a filter, folder boxes can be indeterminate (hidden siblings).
-				var all = wrap.querySelectorAll('.path-check:not(.folder-check)');
-				var checked = wrap.querySelectorAll('.path-check:not(.folder-check):checked');
-				var allSelected = all.length > 0 && checked.length === all.length;
-				var newState = !allSelected;
-				wrap.querySelectorAll('.path-check').forEach(function(cb) { cb.checked = newState; cb.indeterminate = false; });
-				// Sync visible leaf paths into the persistent snapshot
-				wrap.querySelectorAll('.path-check:not(.folder-check)').forEach(function(cb) {
-					var p = norm(cb.getAttribute('data-path') || '');
-					if (p) { if (newState) _selSS.add(p); else _selSS.delete(p); }
-				});
-				document.querySelectorAll('.folder-node, .package-node').forEach(function(f) { updateFolderCheckboxState(f); });
-				updateSelectAllButtonState();
-				updateSelectionStatus();
-				scheduleSaveState();
-				filterTree();
-			};
-			updateSelectAllButtonState();
-		}
-
-		/** Build test tree as object (key-based), then convert to same array shape as metadata tree and apply same collapse logic. */
-		function buildTestTreeAsArray(items) {
-			var root = { children: {} };
-			items.forEach(function(t) {
-				var path = (t.description || t.label || '').replace(/\\\\/g, '/').split('/').filter(Boolean);
-				var curr = root;
-				for (var i = 0; i < path.length; i++) {
-					var seg = path[i];
-					var isLeaf = i === path.length - 1;
-					if (isLeaf) {
-						curr.children[seg] = { label: t.label, path: path.join('/'), leaf: true };
-					} else {
-						if (!curr.children[seg] || curr.children[seg].leaf) curr.children[seg] = { children: {} };
-						curr = curr.children[seg];
-					}
-				}
-			});
-			var arr = convertTestObjectToArray(root);
-			arr = mergeFewChildFoldersIntoParent(arr);
-			arr = collapseSingleChildInTree(arr);
-			return arr;
-		}
-		function convertTestObjectToArray(objRoot) {
-			var out = [];
-			Object.keys(objRoot.children || {}).sort().forEach(function(k) {
-				var node = convertTestChildToNode(objRoot.children[k], k, '');
-				if (node) out.push(node);
-			});
-			return out;
-		}
-		function convertTestChildToNode(objNode, segment, pathSoFar) {
-			var path = pathSoFar ? pathSoFar + '/' + segment : segment;
-			if (objNode.leaf) return { label: objNode.label, path: objNode.path };
-			var children = [];
-			Object.keys(objNode.children || {}).sort().forEach(function(k) {
-				var n = convertTestChildToNode(objNode.children[k], k, path);
-				if (n) children.push(n);
-			});
-			return { label: segment, path: path, children: children };
-		}
-		/** Same structure as metadata tree HTML but with test-class / test-folder-check and data-search-text for filter. */
-		function buildTestTreeHtml(data) {
-			if (!data || !data.length) return '<p>No test classes found.</p>';
-			var html = '';
-			data.forEach(function(pkg) {
-				var children = pkg.children || [];
-				if (children.length === 0) return;
-				var pkgCount = 1 + children.reduce(function(s, c) { return s + countNodes(c); }, 0);
-				html += '<div class="tree-node package-node" data-search-text="' + escapeAttr((pkg.path || pkg.label || '').toLowerCase()) + '">';
-				html += '<div class="package-row"><label class="row-label"><input type="checkbox" class="test-folder-check" aria-label="Select all in folder"><span class="folder-icon" aria-hidden="true">📂</span><span class="label-text">' + escapeHtml(pkg.label) + ' (' + pkgCount + ')</span></label><button type="button" class="btn-toggle" title="Expand/Collapse">▼</button></div>';
-				html += '<div class="package-children">';
-				children.forEach(function(c) { html += renderNodeForTest(c); });
-				html += '</div></div>';
-			});
-			return html || '<p>No test classes found.</p>';
-		}
-		function renderNodeForTest(node) {
-			if (!node.children || node.children.length === 0) {
-				var searchText = (node.path || '').toLowerCase();
-				return '<label class="tree-node file-node" data-search-text="' + escapeAttr(searchText) + '"><input type="checkbox" class="test-class" value="' + escapeAttr(node.label) + '"><span class="file-icon" aria-hidden="true">📄</span><span class="label-text">' + escapeHtml(node.label) + '</span></label>';
-			}
-			var count = 1 + (node.children || []).reduce(function(s, c) { return s + countNodes(c); }, 0);
-			var out = '<div class="tree-node folder-node" data-search-text="' + escapeAttr((node.path || node.label || '').toLowerCase()) + '">';
-			out += '<div class="folder-row"><label class="row-label"><input type="checkbox" class="test-folder-check" aria-label="Select all in folder"><span class="folder-icon" aria-hidden="true">📁</span><span class="label-text">' + escapeHtml(node.label) + ' (' + count + ')</span></label><button type="button" class="btn-toggle" title="Expand/Collapse">▼</button></div>';
-			out += '<div class="node-children">';
-			(node.children || []).forEach(function(c) { out += renderNodeForTest(c); });
-			out += '</div></div>';
-			return out;
-		}
-		function filterTestList() {
-			var list = safeGet('test-list');
-			var searchEl = safeGet('test-search');
-			if (!list || !searchEl) return;
-			var search = (searchEl.value || '').trim().toLowerCase();
-			var nodes = list.querySelectorAll('.tree-node');
-			if (!search) {
-				nodes.forEach(function(n) { n.style.display = ''; });
-				return;
-			}
-			nodes.forEach(function(n) { n.style.display = 'none'; });
-			function showAncestors(el) {
-				while (el) {
-					el.style.display = '';
-					el = el.parentElement && el.classList.contains('tree-node') ? el.parentElement.closest('.tree-node') : null;
-				}
-			}
-			function showDescendants(el) {
-				el.style.display = '';
-				el.querySelectorAll('.tree-node').forEach(function(n) { n.style.display = ''; });
-			}
-			list.querySelectorAll('.tree-node.file-node[data-search-text]').forEach(function(n) {
-				var text = (n.getAttribute('data-search-text') || '');
-				if (text.indexOf(search) !== -1) showAncestors(n);
-			});
-			list.querySelectorAll('.tree-node.folder-node[data-search-text]').forEach(function(n) {
-				var text = (n.getAttribute('data-search-text') || '');
-				if (text.indexOf(search) !== -1) { showAncestors(n); showDescendants(n); }
-			});
-		}
-		function renderTestList() {
-			var list = safeGet('test-list');
-			if (!list) return;
-			if (!testClassesData.length) { list.innerHTML = '<p>No test classes found.</p>'; return; }
-			var data = buildTestTreeAsArray(testClassesData);
-			list.innerHTML = buildTestTreeHtml(data);
-			list.querySelectorAll('.btn-toggle').forEach(function(btn) {
-				btn.onclick = function() {
-					var row = this.closest('.package-row, .folder-row');
-					var node = row && row.closest('.tree-node');
-					var children = node && (node.querySelector('.package-children') || node.querySelector('.node-children'));
-					if (!children) return;
-					var isHidden = children.style.display === 'none';
-					children.style.display = isHidden ? 'block' : 'none';
-					this.textContent = isHidden ? '▼' : '▶';
-				};
-			});
-			list.querySelectorAll('.package-row .row-label, .folder-row .row-label').forEach(function(lbl) {
-				lbl.onclick = function(e) {
-					if (e.target && e.target.type === 'checkbox') return;
-					e.preventDefault();
-					e.stopPropagation();
-					var row = this.closest('.package-row, .folder-row');
-					var btn = row && row.querySelector('.btn-toggle');
-					if (btn) btn.click();
-				};
-			});
-			list.querySelectorAll('.test-folder-check').forEach(function(cb) {
-				cb.onchange = function() {
-					setDirty();
-					var folderNode = this.closest('.folder-node, .package-node');
-					if (!folderNode) return;
-					var check = this.checked;
-					folderNode.querySelectorAll('.test-class').forEach(function(c) { c.checked = check; });
-				};
-			});
-			list.querySelectorAll('.test-class').forEach(function(cb) {
-				cb.onchange = setDirty;
-			});
-		}
-
-		document.querySelectorAll('input[name="testLevel"]').forEach(function(r) {
-			r.onchange = function() {
-				setDirty();
-				var w = safeGet('specified-tests-wrap');
-				if (w) w.classList.toggle('visible', this.value === 'RunSpecifiedTests');
-			};
-		});
-		var testSearchEl = safeGet('test-search');
-		if (testSearchEl) testSearchEl.oninput = filterTestList;
-		var orgSel = safeGet('org-select');
-		if (orgSel) orgSel.onchange = setDirty;
-
-		var deployBtn = safeGet('deploy-btn');
-		if (deployBtn) deployBtn.onclick = function() {
-			var minimalPaths = getMinimalSourcePaths();
-			var st = safeGet('deploy-status');
-			if (minimalPaths.length === 0) { if (st) st.textContent = 'Select at least one metadata path.'; return; }
-			var sourcePaths = expandToFilePathsForDeploy(minimalPaths);
-			var testLevel = (document.querySelector('input[name="testLevel"]:checked') || {}).value || 'RunRelevantTests';
-			var testClassNames = [];
-			if (testLevel === 'RunSpecifiedTests') {
-				document.querySelectorAll('.test-class:checked').forEach(function(cb) { testClassNames.push(cb.value); });
-				if (testClassNames.length === 0) { if (st) st.textContent = 'Select at least one test class for Run Specified Tests.'; return; }
-			}
-			if (st) st.textContent = '';
-			postToHost({
-				command: 'deploy',
-				sourcePaths: sourcePaths,
-				testLevel: testLevel,
-				testClassNames: testClassNames.length ? testClassNames : undefined,
-				dryRun: !!(safeGet('validate-only-check') && safeGet('validate-only-check').checked),
-				targetOrg: (function(){ var s = safeGet('org-select'); return s && s.value ? s.value : undefined; })(),
-				presetName: loadedPresetName || undefined
-			});
-		};
-
-		// Auto-git is now driven by a FileSystemWatcher on the host side.
-		// The webview only needs to: (a) trigger an immediate git-status on enable, (b) save state.
-		var gitBtn = safeGet('btn-git-select');
-		if (gitBtn) gitBtn.onclick = function() {
-			postToHost({ command: 'getChangedFiles' });
-			var st = safeGet('deploy-status');
-			if (st) st.textContent = 'Reading Git status…';
-		};
-		var autoGitCheck = safeGet('auto-git-select');
-		if (autoGitCheck) {
-			autoGitCheck.onchange = function() {
-				if (this.checked) {
-					// Trigger an immediate git-status when first enabled so the user sees results right away.
-					var st = safeGet('deploy-status');
-					if (st) st.textContent = 'Reading Git status…';
-					postToHost({ command: 'getChangedFiles' });
-				}
-				scheduleSaveState();
-			};
-		}
-
-		// ── Test suite helpers ──────────────────────────────────────────────────────
-		function renderSuiteSelect() {
-			var sel = safeGet('suite-select');
-			if (!sel) return;
-			var curVal = sel.value;
-			sel.innerHTML = '<option value="">— No suite —</option>' + (testSuitesData || []).map(function(s) {
-				return '<option value="' + escapeAttr(s.name) + '">' + escapeHtml(s.name) + ' (' + (s.testClassNames || []).length + ')</option>';
-			}).join('');
-			if (curVal) sel.value = curVal;
-			var delBtn = safeGet('btn-delete-suite');
-			if (delBtn) delBtn.style.display = (sel.value) ? '' : 'none';
-		}
-		var suiteSelectEl = safeGet('suite-select');
-		if (suiteSelectEl) {
-			suiteSelectEl.onchange = function() {
-				var name = this.value;
-				var delBtn = safeGet('btn-delete-suite');
-				if (delBtn) delBtn.style.display = name ? '' : 'none';
-				if (!name) return;
-				var suite = (testSuitesData || []).find(function(s) { return s.name === name; });
-				if (!suite) return;
-				document.querySelectorAll('.test-class').forEach(function(cb) { cb.checked = false; });
-				(suite.testClassNames || []).forEach(function(cn) {
-					document.querySelectorAll('.test-class').forEach(function(cb) { if (cb.value === cn) cb.checked = true; });
-				});
-				setDirty();
-				scheduleSaveState();
-			};
-		}
-		var saveSuiteBtn = safeGet('btn-save-suite');
-		if (saveSuiteBtn) saveSuiteBtn.onclick = function() {
-			var tcNames = [];
-			document.querySelectorAll('.test-class:checked').forEach(function(cb) { tcNames.push(cb.value); });
-			var st = safeGet('deploy-status');
-			if (!tcNames.length) { if (st) st.textContent = 'Select test classes to save as a suite.'; return; }
-			var sel = safeGet('suite-select');
-			postToHost({ command: 'saveTestSuite', suiteName: (sel && sel.value) ? sel.value : '', testClassNames: tcNames });
-		};
-		var deleteSuiteBtn = safeGet('btn-delete-suite');
-		if (deleteSuiteBtn) deleteSuiteBtn.onclick = function() {
-			var sel = safeGet('suite-select');
-			var name = sel && sel.value ? sel.value : '';
-			if (!name) return;
-			postToHost({ command: 'deleteTestSuite', suiteName: name });
-		};
-
-		var savePresetBtn = safeGet('btn-save-preset');
-		if (savePresetBtn) savePresetBtn.onclick = function() {
-			var state = getCurrentPresetState();
-			var st = safeGet('deploy-status');
-			if (loadedPresetName) {
-				postToHost({
-					command: 'savePreset',
-					presetName: loadedPresetName,
-					sourcePaths: state.sourcePaths,
-					deployType: state.deployType,
-					testClassNames: state.testClassNames,
-					targetOrg: state.targetOrg
-				});
-				if (st) st.textContent = 'Saving preset…';
-			} else {
-				var overlay = safeGet('new-preset-modal-overlay');
-				var input = safeGet('new-preset-name-input');
-				if (overlay && input) { input.value = ''; overlay.style.display = 'flex'; input.focus(); }
-			}
-		};
-		var newPresetSave = safeGet('new-preset-modal-save');
-		var newPresetCancel = safeGet('new-preset-modal-cancel');
-		var newPresetInput = safeGet('new-preset-name-input');
-		if (newPresetSave && newPresetInput) newPresetSave.onclick = function() {
-			var name = (newPresetInput.value || '').trim();
-			if (!name) return;
-			safeGet('new-preset-modal-overlay').style.display = 'none';
-			var state = getCurrentPresetState();
-			postToHost({
-				command: 'savePreset',
-				presetName: name,
-				sourcePaths: state.sourcePaths,
-				deployType: state.deployType,
-				testClassNames: state.testClassNames,
-				targetOrg: state.targetOrg
-			});
-			var st = safeGet('deploy-status');
-			if (st) st.textContent = 'Saving preset…';
-		};
-		if (newPresetCancel) newPresetCancel.onclick = function() {
-			var o = safeGet('new-preset-modal-overlay');
-			if (o) o.style.display = 'none';
-		};
-
-		var modalSave = safeGet('preset-modal-save');
-		if (modalSave) modalSave.onclick = function() {
-			var state = getCurrentPresetState();
-			postToHost({
-				command: 'savePreset',
-				presetName: loadedPresetName || '',
-				sourcePaths: state.sourcePaths,
-				deployType: state.deployType,
-				testClassNames: state.testClassNames,
-				targetOrg: state.targetOrg
-			});
-			finishPresetSwitch();
-		};
-		var modalDont = safeGet('preset-modal-dont');
-		if (modalDont) modalDont.onclick = function() { dirty = false; finishPresetSwitch(); };
-		var modalCancel = safeGet('preset-modal-cancel');
-		if (modalCancel) modalCancel.onclick = function() {
-			pendingPresetIndex = null;
-			var o = safeGet('preset-modal-overlay');
-			if (o) o.style.display = 'none';
-		};
-
-		var statusEl = safeGet('deploy-status');
-		if (statusEl) statusEl.textContent = 'Loading…';
-
-		window.addEventListener('message', function(event) {
-			var data = event.data;
-			if (!data || data.command !== 'init') return;
-			treeData = Array.isArray(data.tree) ? data.tree : [];
-			testClassesData = Array.isArray(data.testClasses) ? data.testClasses : [];
-			presetsData = Array.isArray(data.presets) ? data.presets : [];
-			testSuitesData = Array.isArray(data.testSuites) ? data.testSuites : [];
-			initialPreset = data.initialPreset || null;
-			orgsData = Array.isArray(data.orgs) ? data.orgs : [];
-			defaultOrgVal = (data.defaultOrg != null && data.defaultOrg !== '') ? String(data.defaultOrg) : '';
-			try {
-				var radio = document.querySelector('input[name="testLevel"][value="RunRelevantTests"]');
-				if (radio) radio.checked = true;
-				renderOrgSelect();
-				renderTree();
-				renderTestList();
-				renderPresetSelect();
-				renderSuiteSelect();
-				var savedState = (data.savedState != null && Array.isArray(data.savedState.sourcePaths))
-					? data.savedState
-					: (vsCodeApi && typeof vsCodeApi.getState === 'function' ? vsCodeApi.getState() : null);
-				if (savedState && Array.isArray(savedState.sourcePaths)) restoreState(savedState);
-				updateSelectionStatus();
-			} catch (e) {
-				if (statusEl) statusEl.textContent = 'Error: ' + (e && e.message ? e.message : String(e));
-			}
-		});
-		postToHost({ command: 'panelReady' });
-	</script>
-	<script>${projectSelectorScript("vsCodeApi")}</script>
+	<script nonce="${nonce}">window.__asfxLoadSeq = ${reload};</script>
+	<script nonce="${nonce}" src="${scriptUri}"></script>
+	<script nonce="${nonce}">${projectSelectorScript("window.__asfxApi")}</script>
 </body>
 </html>`;
   }

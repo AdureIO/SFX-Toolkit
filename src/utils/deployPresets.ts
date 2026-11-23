@@ -9,7 +9,15 @@ export type DeployTypeKey =
 
 export interface DeployPreset {
   name: string;
-  /** Paths to deploy: dirs (e.g. force-app/main/default) or files. Empty = entire project. */
+  /**
+   * The components to deploy (`Type:fullName`), exactly: each deploys its own files. Written by the Deploy
+   * panel; a preset without it (older versions) is mapped from `sourcePaths` through the local index on load.
+   */
+  components?: string[];
+  /**
+   * Old: paths to deploy (dirs or files). New presets still write the files of their components here
+   * (what older versions of the panel read); `components` is authoritative when present.
+   */
   sourcePaths: string[];
   /** @deprecated Use sourcePaths. Migrated on load when present. */
   classPaths?: string[];
@@ -73,6 +81,7 @@ export async function addPreset(workspaceRoot: vscode.Uri, preset: DeployPreset)
   const normalized: DeployPreset = {
     name: preset.name.trim(),
     sourcePaths: Array.isArray(preset.sourcePaths) ? preset.sourcePaths : [],
+    ...(Array.isArray(preset.components) ? { components: preset.components } : {}),
     deployType: preset.deployType || "RunRelevantTests",
     testClassNames: Array.isArray(preset.testClassNames) ? preset.testClassNames : [],
     targetOrg: preset.targetOrg || undefined
