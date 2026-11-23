@@ -25,7 +25,12 @@ import { FileEventBatcher } from "./utils/fileEventBatcher";
 import { MetadataBufferSync, isMetadataBufferPath } from "./utils/metadataBufferSync";
 import { apexFeaturesEnabled } from "./utils/apexProviderSuppression";
 import { ServerSettingsRestarter, Throttle, CONFIG_SECTION } from "./utils/serverSettingsRestart";
-import { onDidChangeProjectDefaultOrg } from "./utils/defaultOrgEvents";
+import { onDidChangeProjectDefaultOrg, onDidChangeDefaultOrg } from "./utils/defaultOrgEvents";
+import { onDidChangeProjects, onDidChangeActiveProject, projects as registryProjects, activeProject } from "./utils/projectRegistry";
+import { canonicalOrgKey } from "./utils/orgKey";
+import { getBufferOrgOverride } from "./utils/bufferOrgOverride";
+import { findSfdxProjectDir } from "./utils/projectUtils";
+import { buildProjectMap, NOTE_PROJECTS } from "./utils/lsProjectMap";
 import { scheduleStubSync, cleanRestartApex, getInitialSyncState, disposeStubSync } from "./utils/sobjectStubSync";
 import { outputChannel } from "./utils/outputChannel";
 import { registerApexQuickFixCommands } from "./commands/apexQuickFixCommands";
@@ -43,6 +48,8 @@ const GENERATED_PATH = /[\\/](?:\.sfdx|\.sf|node_modules)[\\/]/;
 let client: LanguageClient | undefined;
 /** Workspace folders the running client was started for (detects project switches). */
 let clientRootsKey: string | undefined;
+/** Re-sends the project map to the running server (set per client; used by buffer/org changes). */
+let sendProjectMap: (() => void) | undefined;
 /** Resolves once the current client has started (or failed to). */
 let clientStarted: Promise<void> | undefined;
 /** Per-client listeners/watchers — disposed when that client stops (restart-safe). */
@@ -257,6 +264,45 @@ function startClient(context: vscode.ExtensionContext): void {
 	const schemaHost = registerSchemaHostHandlers(lc);
 	disposables.push(schemaHost);
 
+	// Project map -> server: partitions its symbol index by each project's default org, and carries
+	// per-project namespaces, the active project and pinned workbench-buffer partitions. Applied
+	// live on the server (no restart); an unchanged map is a no-op there.
+	let mapTimer: NodeJS.Timeout | undefined;
+	const pushProjectMap = () => {
+		mapTimer = undefined;
+		if (client !== lc || !lc.isRunning()) return;
+		try {
+			void lc.sendNotification(NOTE_PROJECTS, collectProjectMap()).catch(() => {});
+		} catch (e: any) {
+			outputChannel.appendLine(`languageClient: project map failed: ${e?.message ?? e}`);
+		}
+	};
+	const scheduleProjectMap = () => {
+		if (mapTimer) clearTimeout(mapTimer);
+		mapTimer = setTimeout(pushProjectMap, 100);
+	};
+	sendProjectMap = scheduleProjectMap;
+	const knownExtraDirs = new Set<string>();
+	disposables.push(
+		{ dispose: () => { if (mapTimer) clearTimeout(mapTimer); mapTimer = undefined; if (sendProjectMap === scheduleProjectMap) sendProjectMap = undefined; } },
+		onDidChangeProjects(scheduleProjectMap),
+		onDidChangeActiveProject(scheduleProjectMap),
+		onDidChangeDefaultOrg(scheduleProjectMap),
+		onDidChangeProjectDefaultOrg(scheduleProjectMap),
+		lc.onDidChangeState((e) => {
+			if (e.newState === State.Running) pushProjectMap();
+		}),
+		// A document in a project nested deeper than discovery looks: its dir joins the map once.
+		vscode.workspace.onDidOpenTextDocument((d) => {
+			if (d.uri.scheme !== "file") return;
+			const dir = findSfdxProjectDir(d.uri.fsPath);
+			if (dir && !knownExtraDirs.has(dir)) {
+				knownExtraDirs.add(dir);
+				if (!registryProjects().some((p) => p.dir === dir)) scheduleProjectMap();
+			}
+		}),
+	);
+
 	// When the org switches or metadata is refreshed, drop the host-side describe
 	// cache and tell the server to drop its own.
 	const unsubscribe = OrgMetadataCache.onChange((org, change) => {
@@ -282,6 +328,7 @@ function startClient(context: vscode.ExtensionContext): void {
 		SoqlSchemaProvider.invalidateDescriptions(org);
 		schemaHost.clearProjectDirCache();
 		if (lc.isRunning()) void lc.sendNotification(NOTE_REFRESH).catch(() => {});
+		scheduleProjectMap(); // the default org (hence the partition) may have changed
 		// Don't trust any stub.
 		scheduleStubSync({ force: true });
 	});
@@ -318,6 +365,7 @@ function startClient(context: vscode.ExtensionContext): void {
 
 	clientStarted = lc.start().then(
 		() => {
+			pushProjectMap();
 			// A restarted server starts with an empty ephemeral set — re-send it.
 			if (ephemeralBufferUris.size && client === lc) {
 				void lc.sendNotification(NOTE_EPHEMERAL, { uris: [...ephemeralBufferUris] }).catch(() => {});
@@ -332,6 +380,28 @@ function startClient(context: vscode.ExtensionContext): void {
 const DEFAULT_SERVER_HEAP_MB = 512;
 
 /** The language server's V8 heap cap in MB (setting, clamped to a sane range). */
+/** The project map for the server: registered projects + nested SFDX projects of open documents. */
+function collectProjectMap() {
+	const regs = registryProjects();
+	const known = new Set(regs.map((p) => p.dir));
+	const extraDirs = new Set<string>();
+	for (const d of vscode.workspace.textDocuments) {
+		if (d.uri.scheme !== "file") continue;
+		const dir = findSfdxProjectDir(d.uri.fsPath);
+		if (dir && !known.has(dir)) extraDirs.add(dir);
+	}
+	return buildProjectMap({
+		projects: regs,
+		activeDir: activeProject()?.dir,
+		extraDirs: [...extraDirs],
+		orgKeyOf: (dir) => canonicalOrgKey(null, dir),
+		buffers: [...ephemeralBufferUris].map((uri) => {
+			const ov = getBufferOrgOverride(vscode.Uri.parse(uri).fsPath);
+			return { uri, overrideOrgKey: ov.has && ov.org ? canonicalOrgKey(ov.org) : undefined };
+		}),
+	});
+}
+
 function languageServerHeapMB(): number {
 	const v = vscode.workspace
 		.getConfiguration("adure-sfx-toolkit")
@@ -485,6 +555,7 @@ const ephemeralBufferUris = new Set<string>();
 export function setEphemeralBuffers(uris: string[]): void {
 	for (const u of uris) ephemeralBufferUris.add(u);
 	if (client?.isRunning()) void client.sendNotification(NOTE_EPHEMERAL, { uris: [...ephemeralBufferUris] }).catch(() => {});
+	sendProjectMap?.(); // the buffers' partitions
 }
 
 /**
@@ -727,4 +798,5 @@ export function closeVirtualDocument(uri: string): void {
 export function refreshLanguageServerSchemaFor(uris: string[]): void {
 	if (!uris.length) return;
 	void client?.sendNotification(NOTE_REFRESH, { uris }).catch(() => {});
+	sendProjectMap?.(); // a buffer's org override may have moved it to another partition
 }

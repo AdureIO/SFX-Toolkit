@@ -45,16 +45,21 @@ const inFlight = new Map<string, Promise<StubInfo | null>>();
 // Bumped by clearStubs/setStubRoot so an in-flight load can't resurrect a cleared entry.
 let cacheGeneration = 0;
 
-function remember(sobject: string, info: StubInfo): void {
-    cache.delete(sobject);
-    cache.set(sobject, info);
+const KEY_SEP = '\u0000';
+/** Cache key: stubs are per project root, so the same object in two projects is two entries. */
+const cacheKey = (root: string, sobject: string): string => `${root}${KEY_SEP}${sobject}`;
+
+function remember(key: string, info: StubInfo): void {
+    cache.delete(key);
+    cache.set(key, info);
     while (cache.size > MAX_STUB_CACHE) {
         const oldest = cache.keys().next().value;
         if (oldest === undefined) break;
         cache.delete(oldest);
     }
 }
-let stubbedNames: Set<string> | null = null;
+/** Stub-name sets per stub root (one per project). */
+const stubbedNamesByRoot = new Map<string, Set<string>>();
 
 /**
  * Lower-cased names of every SObject we've generated a stub for (from the stub
@@ -62,10 +67,12 @@ let stubbedNames: Set<string> | null = null;
  * SObject" for schema validation — no describe/API call. Cached; call
  * invalidateStubbedNames() after a sync. Empty when stub generation is disabled.
  */
-export function stubbedObjectNames(): Set<string> {
-    if (stubbedNames) return stubbedNames;
+export function stubbedObjectNames(docUri?: string): Set<string> {
+    const root = stubRootFor(docUri);
+    const cached = stubbedNamesByRoot.get(root);
+    if (cached) return cached;
     const set = new Set<string>();
-    const base = path.join(rootDir ?? os.tmpdir(), '.sfdx', 'tools', 'sobjects');
+    const base = path.join(root, '.sfdx', 'tools', 'sobjects');
     for (const sub of ['standardObjects', 'customObjects']) {
         try {
             for (const f of fs.readdirSync(path.join(base, sub))) {
@@ -75,17 +82,37 @@ export function stubbedObjectNames(): Set<string> {
             /* directory may not exist yet */
         }
     }
-    stubbedNames = set;
+    stubbedNamesByRoot.set(root, set);
     return set;
 }
 
 export function invalidateStubbedNames(): void {
-    stubbedNames = null;
+    stubbedNamesByRoot.clear();
+}
+
+/**
+ * The project directory whose `.sfdx/tools/sobjects` serves a document: its project from
+ * the host's map (else the nearest SFDX / MDAPI project root), falling back to the single
+ * root set by `setStubRoot`, else the temp dir. Stubs are per project — the host writes
+ * them per project dir.
+ */
+export function stubRootFor(docUri?: string): string {
+    if (docUri && projectDirResolver) {
+        const dir = projectDirResolver(docUri);
+        if (dir) return dir;
+    }
+    return rootDir ?? os.tmpdir();
+}
+
+let projectDirResolver: ((docUri: string) => string | undefined) | undefined;
+/** Wire the document → project directory lookup (the server passes its project map). */
+export function setProjectDirResolver(fn: ((docUri: string) => string | undefined) | undefined): void {
+    projectDirResolver = fn;
 }
 
 export function setStubRoot(dir: string | null): void {
     rootDir = dir;
-    stubbedNames = null;
+    stubbedNamesByRoot.clear();
     cache.clear(); // locations belong to the previous root
     inFlight.clear();
     cacheGeneration++;
@@ -105,8 +132,9 @@ export function clearStubs(objects?: string[]): void {
     cacheGeneration++;
     if (!objects) { cache.clear(); inFlight.clear(); return; }
     const lower = new Set(objects.map((o) => o.toLowerCase()));
-    for (const k of [...cache.keys()]) if (lower.has(k.toLowerCase())) cache.delete(k);
-    for (const k of [...inFlight.keys()]) if (lower.has(k.toLowerCase())) inFlight.delete(k);
+    const objectOf = (k: string) => k.slice(k.indexOf(KEY_SEP) + 1).toLowerCase();
+    for (const k of [...cache.keys()]) if (lower.has(objectOf(k))) cache.delete(k);
+    for (const k of [...inFlight.keys()]) if (lower.has(objectOf(k))) inFlight.delete(k);
 }
 
 function isCustomObject(name: string): boolean {
@@ -143,8 +171,8 @@ function apexType(t: string, f: StubField): string {
     }
 }
 
-function stubFilePath(sobject: string): string {
-    const base = path.join(rootDir ?? os.tmpdir(), '.sfdx', 'tools', 'sobjects');
+function stubFilePath(sobject: string, root: string): string {
+    const base = path.join(root, '.sfdx', 'tools', 'sobjects');
     const sub = isCustomObject(sobject) ? 'customObjects' : 'standardObjects';
     return path.join(base, sub, `${sobject}.cls`);
 }
@@ -195,29 +223,31 @@ function generate(sobject: string, d: StubDescribe): { content: string; classLin
  * never written on the server's main thread synchronously; concurrent lookups for the
  * same object share one in-flight promise (one read/write).
  */
-export function getStub(sobject: string, d: StubDescribe): Promise<StubInfo | null> {
-    const cached = cache.get(sobject);
+export function getStub(sobject: string, d: StubDescribe, docUri?: string): Promise<StubInfo | null> {
+    const root = stubRootFor(docUri);
+    const key = cacheKey(root, sobject);
+    const cached = cache.get(key);
     if (cached) {
-        remember(sobject, cached); // refresh LRU position
+        remember(key, cached); // refresh LRU position
         return Promise.resolve(cached);
     }
-    const pending = inFlight.get(sobject);
+    const pending = inFlight.get(key);
     if (pending) return pending;
-    const p = loadStub(sobject, d).finally(() => {
-        if (inFlight.get(sobject) === p) inFlight.delete(sobject);
+    const p = loadStub(sobject, d, root, key).finally(() => {
+        if (inFlight.get(key) === p) inFlight.delete(key);
     });
-    inFlight.set(sobject, p);
+    inFlight.set(key, p);
     return p;
 }
 
-async function loadStub(sobject: string, d: StubDescribe): Promise<StubInfo | null> {
+async function loadStub(sobject: string, d: StubDescribe, root: string, key: string): Promise<StubInfo | null> {
     const gen0 = cacheGeneration;
     // A clearStubs()/setStubRoot() that lands while we await must not be undone by
     // re-adding this (possibly stale) entry to the cache.
     const store = (info: StubInfo): void => {
-        if (gen0 === cacheGeneration) remember(sobject, info);
+        if (gen0 === cacheGeneration) remember(key, info);
     };
-    const file = stubFilePath(sobject);
+    const file = stubFilePath(sobject, root);
 
     // Prefer the existing file (background sync / Salesforce) so navigation matches
     // what's on disk; read its line numbers directly.

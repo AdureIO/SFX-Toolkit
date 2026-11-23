@@ -15,6 +15,7 @@ import type { ServerContext } from './context';
 import { resolveVarType } from './apexSymbols';
 import { validateFieldAccesses } from './apexSemantics';
 import { WorkspaceIndex } from './workspaceIndex';
+import { Partitions } from './partitions';
 import { stubbedObjectNames } from './sobjectStub';
 import { stdTypeName } from './apexStdlib';
 import { isApex, braceDepthAt } from './textUtil';
@@ -183,11 +184,11 @@ const STANDARD_SOBJECTS = new Set([
  * describe API: generics/arrays/qualified names, the abstract `SObject`, Apex system
  * types, and any class/trigger defined in the workspace.
  */
-function isNonSObjectName(name: string): boolean {
+function isNonSObjectName(name: string, part: string): boolean {
     if (!name || /[<>[\]\s.,()]/.test(name)) return true; // generics, arrays, qualified, calls
     if (name.toLowerCase() === 'sobject') return true;    // the abstract base type
     if (stdTypeName(name)) return true;                   // System/Database/… and value types
-    if (WorkspaceIndex.hasType(name)) return true;        // a class/trigger defined in this project
+    if (WorkspaceIndex.hasType(name, part)) return true;        // a class/trigger defined in this project
     return false;
 }
 
@@ -211,10 +212,11 @@ async function runSchemaValidation(ctx: ServerContext, uri: string): Promise<voi
         //     objects the org actually uses, beyond the built-in list).
         //   • otherwise, a known standard object from the built-in list.
         const localTypes = new Set([...parse.index.types.keys()].map((t) => t.toLowerCase()));
-        const stubbed = stubbedObjectNames();
+        const stubbed = stubbedObjectNames(uri);
+        const part = Partitions.partitionOfUri(uri);
         const shouldDescribe = (s: string): boolean => {
             const l = s.toLowerCase();
-            if (isNonSObjectName(s) || localTypes.has(l)) return false;
+            if (isNonSObjectName(s, part) || localTypes.has(l)) return false;
             return CUSTOM_SOBJECT_SUFFIX.test(s) || stubbed.has(l) || STANDARD_SOBJECTS.has(l);
         };
 

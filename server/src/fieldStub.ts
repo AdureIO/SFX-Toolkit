@@ -7,6 +7,7 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
+import { Partitions } from './partitions';
 
 export interface FieldStubPlan {
     /** Absolute path of the new field-meta.xml. */
@@ -118,7 +119,9 @@ export function planFieldStub(docPath: string, object: string, field: string, na
     if (!f) return undefined;
     // An object from another package keeps its namespace in the folder name.
     const o = ownName(object, namespace) ?? object;
-    const projectDir = findProjectDir(path.dirname(docPath));
+    // The document's project from the host's map (else the nearest sfdx-project.json).
+    const mapped = Partitions.projectDirOf(docPath);
+    const projectDir = mapped && fs.existsSync(path.join(mapped, 'sfdx-project.json')) ? mapped : findProjectDir(path.dirname(docPath));
     if (!projectDir) return undefined;
     const pkgs = packageDirs(projectDir).filter((p) => fs.existsSync(p));
     if (!pkgs.length) return undefined;

@@ -72,4 +72,25 @@ describe("sobjectStub (async generation)", () => {
     assert.notStrictEqual(second, await first);
     assert.strictEqual(writes, 1);
   });
+
+  it("keeps stubs and stub names per project: the document's project wins, the root is the fallback", async () => {
+    const pa = fs.mkdtempSync(path.join(os.tmpdir(), "asfx-stubproj-a-"));
+    const pb = fs.mkdtempSync(path.join(os.tmpdir(), "asfx-stubproj-b-"));
+    mod.setProjectDirResolver((u: string) => (u.includes("/a/") ? pa : u.includes("/b/") ? pb : undefined));
+    const ua = "file:///a/X.cls";
+    const ub = "file:///b/Y.cls";
+    const [sa, sb, sr] = await Promise.all([mod.getStub("Widget__c", DESCRIBE, ua), mod.getStub("Widget__c", DESCRIBE, ub), mod.getStub("Widget__c", DESCRIBE)]);
+    const file = (dir: string) => path.join(dir, ".sfdx", "tools", "sobjects", "customObjects", "Widget__c.cls");
+    assert.strictEqual(sa.uri, pathToFileURL(file(pa)).href);
+    assert.strictEqual(sb.uri, pathToFileURL(file(pb)).href);
+    assert.strictEqual(sr.uri, pathToFileURL(file(root)).href, "no document / unknown project → the single fallback root");
+    assert.ok(mod.stubbedObjectNames(ua).has("widget__c") && mod.stubbedObjectNames(ub).has("widget__c"));
+    fs.rmSync(file(pb));
+    mod.invalidateStubbedNames();
+    assert.ok(mod.stubbedObjectNames(ua).has("widget__c"));
+    assert.ok(!mod.stubbedObjectNames(ub).has("widget__c"), "B's stub names are its own");
+    // A targeted clear drops that object in every project.
+    mod.clearStubs(["Widget__c"]);
+    assert.notStrictEqual(await mod.getStub("Widget__c", DESCRIBE, ua), sa);
+  });
 });

@@ -16,6 +16,7 @@
 import { Connection, Location } from 'vscode-languageserver/node';
 import type { ServerContext } from './context';
 import { orCancelled } from './cancel';
+import { Partitions } from './partitions';
 import { REQ_APEX_DEFINITION, REQ_APEX_REFERENCES } from './protocol';
 import { SearchSession, resolveByName, findOccurrences, declarationOf, sameRange } from './symbolSearch';
 
@@ -24,17 +25,23 @@ interface ByName {
     member?: string;
     prefer?: 'aura' | 'invocable';
     includeDeclaration?: boolean;
+    /** The document the request comes from (picks the index partition); the active project's when absent. */
+    uri?: string;
 }
 
 function valid(p: ByName | undefined): p is ByName {
     return !!p && typeof p.className === 'string' && /^[A-Za-z_]\w*$/.test(p.className) && (p.member === undefined || /^[A-Za-z_]\w*$/.test(p.member));
 }
 
+function partitionFor(p: ByName): string | undefined {
+    return typeof p.uri === 'string' && p.uri ? Partitions.partitionOfUri(p.uri) : Partitions.activePartition();
+}
+
 export function register(connection: Connection, ctx: ServerContext): void {
     connection.onRequest(REQ_APEX_DEFINITION, (params: ByName, token) =>
         orCancelled<Location | null>(null, async () => {
             if (!valid(params)) return null;
-            const s = new SearchSession(ctx, token);
+            const s = new SearchSession(ctx, token, partitionFor(params));
             const sym = await resolveByName(s, params.className, params.member, params.prefer);
             const d = sym && declarationOf(s, sym);
             return d ? Location.create(d.uri, d.range) : null;
@@ -43,7 +50,7 @@ export function register(connection: Connection, ctx: ServerContext): void {
     connection.onRequest(REQ_APEX_REFERENCES, (params: ByName, token) =>
         orCancelled<Location[]>([], async () => {
             if (!valid(params)) return [];
-            const s = new SearchSession(ctx, token);
+            const s = new SearchSession(ctx, token, partitionFor(params));
             const sym = await resolveByName(s, params.className, params.member, params.prefer);
             if (!sym) return [];
             const occ = await findOccurrences(s, sym, 'references');

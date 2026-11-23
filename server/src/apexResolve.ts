@@ -27,6 +27,7 @@ import type { ServerContext } from './context';
 import { ApexMember, ApexTypeDecl, ApexIndex, resolveScopedVarType, enclosingClass, visibleVars, VarDecl } from './apexSymbols';
 import type { ParseView } from './parseCache';
 import { WorkspaceIndex, FileTypes, membersNamed } from './workspaceIndex';
+import { Partitions } from './partitions';
 import { stdClass, StdClass, StdMember, ENUM_INSTANCE_MEMBERS, enumStaticMethods, stdNestedTypes } from './apexStdlib';
 import type { HostDescribe, HostField } from './schema';
 import { throwIfCancelled } from './cancel';
@@ -522,6 +523,11 @@ export class Resolver {
         this.local = { file, types, decls };
     }
 
+    /** The index partition of the document this resolver works for (types of other partitions are invisible). */
+    get part(): string {
+        return Partitions.partitionOfUri(this.doc.uri);
+    }
+
     /** Positions of the cursor in each view (latest first). */
     get views(): { index: ApexIndex; line: number; character: number }[] {
         return this.positions;
@@ -564,9 +570,10 @@ export class Resolver {
         }
         const own = findDecl(from, base);
         if (own) return { k: 'user', ft: from, decl: own, local: from === this.local };
-        if (!WorkspaceIndex.hasType(base) && !WorkspaceIndex.scanComplete) await waitForIndex();
-        if (WorkspaceIndex.hasType(base)) {
-            const ft = await WorkspaceIndex.typeFile(base);
+        const part = this.part;
+        if (!WorkspaceIndex.hasType(base, part) && !WorkspaceIndex.scanComplete) await waitForIndex();
+        if (WorkspaceIndex.hasType(base, part)) {
+            const ft = await WorkspaceIndex.typeFile(base, part);
             throwIfCancelled(this.token);
             const decl = ft && findDecl(ft, base, undefined, true);
             if (ft && decl) return { k: 'user', ft, decl, local: false };
