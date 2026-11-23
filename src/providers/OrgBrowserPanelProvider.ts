@@ -593,7 +593,7 @@ export class OrgBrowserPanelProvider {
 			vscode.window.setStatusBarMessage(`Opening ${name} in Setup…`, 3000);
 		}
 		try {
-			await runCommandArgs("sf", args, undefined, undefined, false);
+			await runCommandArgs("sf", args, this.projectDir(), undefined, false);
 		} catch (e: any) {
 			vscode.window.showErrorMessage(`Couldn’t open Setup: ${String(e?.message ?? e).slice(0, 300)}`);
 		}

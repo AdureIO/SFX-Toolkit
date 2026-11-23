@@ -5,7 +5,7 @@ import { executeAnonymousApex } from "./executeAnonymous";
 import { getCachedOrgList, getOrgListForPicker } from "../utils/orgListCache";
 import { Logger } from "../utils/outputChannel";
 import { isWorkspaceUsable } from "../utils/projectUtils";
-import { activeProject, projects, SfProject } from "../utils/projectRegistry";
+import { activeProject, onDidChangeProjects, projects, SfProject } from "../utils/projectRegistry";
 import { samePath } from "../utils/projectDiscoveryPure";
 import { resolveDefaultTargetOrgUsername } from "../utils/defaultOrg";
 import { orgPickerForProject } from "../utils/panelProject";
@@ -75,20 +75,41 @@ export function notifySnippetsChanged(): void {
   }, 100);
 }
 
-/** Watch the snippet folders of every project so files created/deleted/saved outside the UI refresh tree + panel. */
+/**
+ * Watch the snippet folders of every project so files created/deleted/saved outside the UI refresh tree + panel.
+ * The watchers are recreated (old ones disposed) when workspace folders or the project set change.
+ */
 export function createSnippetsWatcher(): vscode.Disposable {
-  const watchers: vscode.Disposable[] = [];
+  let watchers: vscode.Disposable[] = [];
   const pattern = `**/${SNIPPETS_REL_DIR.split(path.sep).join("/")}/*.apex`;
-  for (const folder of vscode.workspace.workspaceFolders ?? []) {
-    const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(folder, pattern));
-    watchers.push(
-      watcher,
-      watcher.onDidCreate(notifySnippetsChanged),
-      watcher.onDidDelete(notifySnippetsChanged),
-      watcher.onDidChange(notifySnippetsChanged)
-    );
-  }
-  return new vscode.Disposable(() => watchers.forEach((d) => d.dispose()));
+  const disposeWatchers = () => {
+    for (const d of watchers) {
+      try { d.dispose(); } catch { /* ignore */ }
+    }
+    watchers = [];
+  };
+  const create = () => {
+    disposeWatchers();
+    for (const folder of vscode.workspace.workspaceFolders ?? []) {
+      const watcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(folder, pattern));
+      watchers.push(
+        watcher,
+        watcher.onDidCreate(notifySnippetsChanged),
+        watcher.onDidDelete(notifySnippetsChanged),
+        watcher.onDidChange(notifySnippetsChanged)
+      );
+    }
+  };
+  create();
+  const recreate = () => {
+    create();
+    notifySnippetsChanged(); // a new folder / project may already hold snippets
+  };
+  const subs = [vscode.workspace.onDidChangeWorkspaceFolders(recreate), onDidChangeProjects(recreate)];
+  return new vscode.Disposable(() => {
+    subs.forEach((d) => d.dispose());
+    disposeWatchers();
+  });
 }
 
 /** Release the module-level emitter/timer (extension deactivate). */

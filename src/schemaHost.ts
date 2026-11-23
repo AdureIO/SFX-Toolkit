@@ -12,7 +12,7 @@ import * as vscode from "vscode";
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { ResponseError } = require("vscode-jsonrpc") as { ResponseError: typeof import("vscode-languageclient/node").ResponseError };
 import { SoqlSchemaProvider } from "./utils/soqlSchemaProvider";
-import { findSfdxProjectDir } from "./utils/projectUtils";
+import { findSfdxProjectDir, projectDirOfFile } from "./utils/projectUtils";
 import { onDidChangeProjects, projectOfFile } from "./utils/projectRegistry";
 import { canonicalOrgKey, orgArgForKey } from "./utils/orgKey";
 import { SchemaUnavailableError } from "./utils/describeStore";
@@ -50,7 +50,8 @@ export function registerSchemaHostHandlers(lc: RequestRegistrar): SchemaHost {
 			const fsPath = vscode.Uri.parse(uri).fsPath;
 			// A webview buffer (ASFX Workbench) may pin its IntelliSense to a chosen org.
 			const ov = getBufferOrgOverride(fsPath);
-			if (ov.has) return orgArgForKey(canonicalOrgKey(ov.org));
+			// `null` = "the default org" of the buffer's OWN project (<project>/.sfdx/asfx/…), not the active one.
+			if (ov.has) return orgArgForKey(canonicalOrgKey(ov.org, ov.org ? undefined : projectDirOfFile(fsPath)));
 			const dir = path.dirname(fsPath);
 			let projectDir = projectDirCache.get(dir);
 			if (projectDir === undefined) {

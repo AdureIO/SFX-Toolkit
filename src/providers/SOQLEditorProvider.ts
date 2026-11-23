@@ -143,7 +143,9 @@ export class SOQLEditorProvider {
     const saved = SOQLEditorProvider.loadSavedQueries();
     panel.webview.html = this._getHtmlForWebview(panel.webview, extensionUri, initialQuery || lastQuery, history, saved, initialOrg);
 
-    AuthInfo.warmAuthForOrg(null);
+    // Pinned to a non-active project: warm THAT project's default org, not the active one's.
+    const warmDir = binding.current();
+    AuthInfo.warmAuthForOrg(binding.pinned && warmDir ? resolveDefaultTargetOrgUsernameSync(warmDir) : null);
     OrgMetadataCache.warmDefaultOrg();
     warmOrgListCache();
 

@@ -86,7 +86,8 @@ export class ProcessMapPanelProvider {
         try {
             const metadata = await fetchProcessMetadata(
                 org,
-                (p) => panel.webview.postMessage({ command: "progress", label: p.label, completed: p.completed, total: p.total })
+                (p) => panel.webview.postMessage({ command: "progress", label: p.label, completed: p.completed, total: p.total }),
+                primaryProjectRoot() // the active project's CLI context, fixed for the whole fetch
             );
             panel.webview.postMessage({ command: "progress", label: "Building graph", completed: 1, total: 1, phase: "build" });
             const scoped = seeds.length ? scopeMetadataToObjects(metadata, seeds) : metadata;

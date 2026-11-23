@@ -7,6 +7,7 @@ import { AuthInfo } from "../utils/authInfo";
 import { SchemaCache } from "../utils/schemaCache";
 import { refreshOrgListCache, warmOrgListCache } from "../utils/orgListCache";
 import { onDidChangeDefaultOrg } from "../utils/defaultOrgEvents";
+import { resolveDefaultTargetOrgUsernameSync } from "../utils/defaultOrg";
 import { PanelProjectBinding, orgPickerForProject } from "../utils/panelProject";
 import { PROJECT_SELECTOR_CSS, projectSelectorMarkup, projectSelectorScript } from "../utils/panelProjectUi";
 import { generateApexDataFactory, recommendedSelectFields, type RefMapping } from "../utils/apexDataFactory";
@@ -262,7 +263,8 @@ export class DataToolsPanelProvider {
 
     // Warm caches in background on panel open
     warmOrgListCache();
-    AuthInfo.warmAuthForOrg(null);
+    // Pinned to a non-active project: warm THAT project's default org, not the active one's.
+    AuthInfo.warmAuthForOrg(binding.pinned ? resolveDefaultTargetOrgUsernameSync(liveRoot) : null);
 
     const messageListener = panel.webview.onDidReceiveMessage(async (msg: {
       command: string;
