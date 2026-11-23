@@ -27,6 +27,7 @@ import { raceCancel, throwIfCancelled, isCancelled } from './cancel';
 import { REQ_OBJECT_LIST, REQ_DESCRIBE, REQ_DESCRIBE_MANY, REQ_PROJECT_INFO, REQ_OBJECT_INFO } from './protocol';
 import { hasNamespacePrefix, nameMatchesNsOptional } from './textUtil';
 import { stdTypeName } from './apexStdlib';
+import { Partitions } from './partitions';
 
 export interface HostField {
     name: string;
@@ -432,6 +433,9 @@ export class SchemaService {
     // ─── project namespace / object description ─────────────────────────────────
 
     async projectNamespace(docUri: string, token?: CancellationToken): Promise<string | null> {
+        // The host's project map knows each project's namespace: the answer for THIS document's project.
+        const mapped = Partitions.namespaceOfUri(docUri);
+        if (mapped !== undefined) return mapped;
         if (this.namespaceCache.has(docUri)) return this.namespaceCache.get(docUri) ?? null;
         throwIfCancelled(token);
         let p = this.namespaceInflight.get(docUri);

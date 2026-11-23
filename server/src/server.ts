@@ -40,12 +40,13 @@ import {
 import { fileURLToPath } from 'url';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { createServerContext, ServerSettings } from './context';
-import { NOTE_REFRESH, NOTE_EPHEMERAL, NOTE_METADATA_BUFFER } from './protocol';
+import { NOTE_REFRESH, NOTE_EPHEMERAL, NOTE_METADATA_BUFFER, NOTE_PROJECTS, ProjectMapParams } from './protocol';
+import { Partitions } from './partitions';
 import { MetadataOverlay } from './metadataOverlay';
 import { isApex } from './textUtil';
 import { WorkspaceIndex } from './workspaceIndex';
 import { TokenIndex } from './tokenIndex';
-import { setStubRoot, clearStubs, invalidateStubbedNames } from './sobjectStub';
+import { setStubRoot, clearStubs, invalidateStubbedNames, setProjectDirResolver } from './sobjectStub';
 import * as completion from './completion';
 import * as hover from './hover';
 import * as definition from './definition';
@@ -64,6 +65,8 @@ import { ParseWorker } from './parseWorkerClient';
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments(TextDocument);
 const ctx = createServerContext(connection, documents);
+// Stubs live in the document's own project (`<project>/.sfdx/tools/sobjects`).
+setProjectDirResolver((uri) => Partitions.projectDirOfUri(uri));
 
 /** The server capabilities, given the settings negotiated in `initialize`. */
 function capabilitiesFor(s: ServerSettings): ServerCapabilities {
@@ -125,7 +128,8 @@ connection.onInitialize((params): InitializeResult => {
         roots.push(params.rootUri);
     }
     WorkspaceIndex.setRoots(roots);
-    // Write SObject stubs under the first workspace root (gitignored .sfdx area).
+    // Fallback stub root (first workspace root) for documents outside every known project; stubs
+    // of a document in a project live in THAT project's `.sfdx/tools/sobjects` (see stubRootFor).
     if (roots[0]) {
         try {
             setStubRoot(fileURLToPath(roots[0]));
@@ -202,6 +206,15 @@ connection.onNotification(NOTE_EPHEMERAL, (params: { uris?: string[] }) => {
     for (const u of params?.uris ?? []) ctx.ephemeralDocs.add(u);
 });
 
+// Host → server: the project map (dir, default-org partition, namespace) + the active project.
+// Applies live — no restart: partitions are looked up per request, so a project-set or
+// default-org change only re-publishes diagnostics / semantic tokens against the new visibility.
+connection.onNotification(NOTE_PROJECTS, (params?: ProjectMapParams) => {
+    if (!Partitions.set(params)) return;
+    invalidateStubbedNames(); // stub roots are per project
+    ctx.fireSchemaRefresh();
+});
+
 // Unsaved LWC / Aura / VF / Flow text for the metadata reference scanners (see metadataOverlay.ts).
 connection.onNotification(NOTE_METADATA_BUFFER, (params: { uri?: string; text?: string | null }) => {
     if (typeof params?.uri === 'string') MetadataOverlay.set(params.uri, params.text);
@@ -234,6 +247,7 @@ ctx.onRelease(() => {
     WorkspaceIndex.clear();
     TokenIndex.clear();
     MetadataOverlay.clear();
+    Partitions.clear();
 });
 connection.onShutdown(() => {
     ctx.releaseAll();

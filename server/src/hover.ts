@@ -7,6 +7,7 @@ import type { TextDocument } from 'vscode-languageserver-textdocument';
 import type { ServerContext } from './context';
 import type { HostDescribe, HostField } from './schema';
 import { WorkspaceIndex } from './workspaceIndex';
+import { Partitions } from './partitions';
 import { stdTypeName } from './apexStdlib';
 import { soqlRegionAt, mainFromObject, relationshipSegmentsBeforeCursor, scopeObjectAt } from './soql';
 import { orCancelled, throwIfCancelled } from './cancel';
@@ -129,7 +130,7 @@ async function apexHover(
     const d = await ctx.schema.describe(doc.uri, word, token);
     if (d) return objectHover(word, d, await ctx.schema.objectDescription(doc.uri, word, token));
     // Workspace user class / Salesforce standard-library type.
-    if (WorkspaceIndex.findTypeMembers(word)) return codeHover(`class ${word}`);
+    if (WorkspaceIndex.findTypeMembers(word, Partitions.partitionOfUri(doc.uri))) return codeHover(`class ${word}`);
     const std = stdTypeName(word);
     if (std) return codeHover(`${std} — Salesforce system type`);
     return null;

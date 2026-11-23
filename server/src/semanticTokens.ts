@@ -50,6 +50,7 @@ import { isApex } from './textUtil';
 import { stdTypeName } from './apexStdlib';
 import { stubbedObjectNames } from './sobjectStub';
 import { WorkspaceIndex } from './workspaceIndex';
+import { Partitions } from './partitions';
 import { MAX_DESCRIBE_CACHE } from './schema';
 import type { HostDescribe } from './schema';
 
@@ -1478,11 +1479,12 @@ export function register(connection: Connection, ctx: ServerContext): void {
         const uri = doc.uri;
         const orgCtx = ctx.schema.orgContext(uri);
         const list = objectLists.get(orgCtx);
-        const stubs = stubbedObjectNames();
+        const stubs = stubbedObjectNames(uri);
+        const part = Partitions.partitionOfUri(uri);
         let started = 0;
         const env: TokenEnv = {
             isSObject: (lc) => !!list?.has(lc) || stubs.has(lc),
-            isWorkspaceType: (lc) => WorkspaceIndex.hasType(lc),
+            isWorkspaceType: (lc) => WorkspaceIndex.hasType(lc, part),
             describe: (sobject, fetch) => {
                 const key = `${orgCtx}|${sobject.toLowerCase()}`;
                 const hit = idxGet(key);

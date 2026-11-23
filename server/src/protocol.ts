@@ -21,3 +21,18 @@ export const NOTE_METADATA_BUFFER = 'sfx/metadataBuffer';
 // Host → server requests (LWC / Aura / Visualforce navigation into Apex; see apexLinks.ts).
 export const REQ_APEX_DEFINITION = 'sfx/apexDefinition'; // ({ className, member?, prefer? }) => Location | null
 export const REQ_APEX_REFERENCES = 'sfx/apexReferences'; // ({ className, member?, prefer?, includeDeclaration? }) => Location[]
+
+// Host → server: the project map that partitions the symbol index by default org (see partitions.ts).
+export const NOTE_PROJECTS = 'asfx/projects';
+export interface ProjectEntry {
+    dir: string;                 // absolute project root
+    partition: string;           // `org:<username>` or `dir:<dir>` (no resolvable default org)
+    namespace?: string | null;   // sfdx-project.json namespace (null = none); undefined = unknown
+    name?: string;               // display name (workspace-symbol container)
+}
+export interface ProjectMapParams {
+    projects: ProjectEntry[];
+    activeDir?: string | null;   // the active project (workspace symbols, ephemeral-buffer fallback)
+    /** Document URIs whose partition the host pins (workbench buffers): uri → partition. */
+    buffers?: Record<string, string>;
+}

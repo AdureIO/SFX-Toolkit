@@ -19,6 +19,7 @@ import { blankNonCode } from '../../src/utils/apexReferences';
 import { throwIfCancelled } from './cancel';
 import { ParseWorker } from './parseWorkerClient';
 import { metadataKindOf } from '../../src/utils/sfMetadataRefs';
+import { Partitions } from './partitions';
 
 /** The type index of one Apex file: members per type (simple name) + type declarations. */
 export interface FileTypes {
@@ -263,10 +264,18 @@ class WorkspaceIndexImpl {
         this.notify(file, kind);
     }
 
-    /** Every indexed Salesforce metadata file that may refer to Apex by name. */
-    metadataFiles(): string[] {
+    /** Whether `file` is visible from partition `part` (undefined = no filtering). */
+    private inPart(file: string, part: string | undefined): boolean {
+        return part === undefined || Partitions.partitionOfPath(file) === part;
+    }
+
+    /** Every indexed Salesforce metadata file that may refer to Apex by name (of partition `part`). */
+    metadataFiles(part?: string): string[] {
         void this.ready();
-        return [...this.meta];
+        if (part === undefined) return [...this.meta];
+        const out: string[] = [];
+        for (const f of this.meta) if (this.inPart(f, part)) out.push(f);
+        return out;
     }
 
     /** Cache a file's type headers from text already read elsewhere (no-op when cached). */
@@ -274,18 +283,23 @@ class WorkspaceIndexImpl {
         if (!this.headerCache.has(file)) this.setHeaders(file, extractTypeHeaders(text));
     }
 
-    /** Every indexed Apex file path — used for workspace-wide reference search. */
-    allFiles(): string[] {
+    /** Every indexed Apex file path (of partition `part`) — used for workspace-wide reference search. */
+    allFiles(part?: string): string[] {
         void this.ready();
         const out: string[] = [];
-        for (const list of this.files.values()) out.push(...list);
+        for (const list of this.files.values()) for (const f of list) if (this.inPart(f, part)) out.push(f);
         return out;
     }
 
-    /** All known top-level Apex type (class/trigger) names, original-cased. */
-    allTypeNames(): string[] {
+    /** All known top-level Apex type (class/trigger) names of partition `part`, original-cased. */
+    allTypeNames(part?: string): string[] {
         void this.ready();
-        return [...this.names.values()];
+        if (part === undefined) return [...this.names.values()];
+        const out: string[] = [];
+        for (const [key, list] of this.files) {
+            if (list.some((f) => this.inPart(f, part))) out.push(this.names.get(key) ?? key);
+        }
+        return out;
     }
 
     /**
@@ -293,15 +307,22 @@ class WorkspaceIndexImpl {
      * Before the initial scan finishes this only knows open/saved documents; callers that
      * need a definitive answer should `await ready()` first.
      */
-    hasType(name: string): boolean {
+    hasType(name: string, part?: string): boolean {
         void this.ready();
-        return this.files.has(name.toLowerCase());
+        return this.fileFor(name, part, true) !== undefined;
     }
 
-    /** The file declaring a workspace type (filename lookup only). */
-    fileFor(name: string): string | undefined {
-        void this.ready();
-        return this.files.get(name.toLowerCase())?.[0];
+    /**
+     * The file declaring a workspace type (filename lookup only). With a partition, only
+     * that partition's files count — same-named classes of other partitions are invisible.
+     */
+    fileFor(name: string, part?: string, quiet = false): string | undefined {
+        if (!quiet) void this.ready();
+        const list = this.files.get(name.toLowerCase());
+        if (!list) return undefined;
+        if (part === undefined) return list[0];
+        for (const f of list) if (this.inPart(f, part)) return f;
+        return undefined;
     }
 
     /**
@@ -310,8 +331,8 @@ class WorkspaceIndexImpl {
      * existing callers): serves an open buffer's parse or the cache, and only parses the
      * file on the calling thread on a cache miss. Completion uses `typeFile` instead.
      */
-    findTypeMembers(name: string): ApexMember[] | undefined {
-        const file = this.fileFor(name);
+    findTypeMembers(name: string, part?: string): ApexMember[] | undefined {
+        const file = this.fileFor(name, part);
         if (!file) return undefined;
         let ft = this.cachedFile(file);
         if (!ft) {
@@ -331,8 +352,8 @@ class WorkspaceIndexImpl {
      * file is named). An open document's current buffer wins over disk; disk files are
      * cached by path+mtime (LRU) and parsed OFF the request thread (parse worker).
      */
-    typeFile(name: string): Promise<FileTypes | undefined> {
-        const file = this.fileFor(name);
+    typeFile(name: string, part?: string): Promise<FileTypes | undefined> {
+        const file = this.fileFor(name, part);
         if (!file) return Promise.resolve(undefined);
         return this.typeFileAt(file);
     }
@@ -343,8 +364,8 @@ class WorkspaceIndexImpl {
      * not known yet — the file's headers are then scanned in the background (regex, no
      * parse) so later requests can tell.
      */
-    constructableHint(name: string): boolean | undefined {
-        const file = this.fileFor(name);
+    constructableHint(name: string, part?: string): boolean | undefined {
+        const file = this.fileFor(name, part);
         if (!file) return undefined;
         const ln = name.toLowerCase();
         const fromDecl = (d: { kind: string; modifiers: string[] } | undefined) =>
@@ -367,8 +388,8 @@ class WorkspaceIndexImpl {
     }
 
     /** Like `typeFile`, but only what's available without parsing (open buffer / cache). */
-    cachedTypeFile(name: string): FileTypes | undefined {
-        const file = this.fileFor(name);
+    cachedTypeFile(name: string, part?: string): FileTypes | undefined {
+        const file = this.fileFor(name, part);
         return file ? this.cachedFile(file) : undefined;
     }
 
@@ -431,25 +452,25 @@ class WorkspaceIndexImpl {
      * Pre-load the type files of workspace types an open document references (and their
      * supertypes), so the first `x.` on a cross-file type needs no parse at all.
      */
-    prewarm(names: Iterable<string>): void {
+    prewarm(names: Iterable<string>, part?: string): void {
         const seen = new Set<string>();
         const queue: string[] = [];
         for (const n of names) {
             const lc = n.toLowerCase();
-            if (seen.has(lc) || !this.files.has(lc)) continue;
+            if (seen.has(lc) || !this.hasType(lc, part)) continue;
             seen.add(lc);
             queue.push(n);
             if (queue.length >= MAX_PREWARM) break;
         }
         const load = (n: string, depth: number): void => {
-            void this.typeFile(n).then((ft) => {
+            void this.typeFile(n, part).then((ft) => {
                 if (!ft || depth >= 4) return;
                 for (const d of ft.decls) {
                     for (const sup of [d.extendsType, ...d.implementsTypes]) {
                         if (!sup) continue;
                         const top = sup.split('.')[0];
                         const lc = top.toLowerCase();
-                        if (seen.has(lc) || !this.files.has(lc) || seen.size >= MAX_PREWARM) continue;
+                        if (seen.has(lc) || !this.hasType(lc, part) || seen.size >= MAX_PREWARM) continue;
                         seen.add(lc);
                         load(top, depth + 1);
                     }
@@ -504,8 +525,8 @@ class WorkspaceIndexImpl {
     }
 
     /** Location of a type's declaration — parses only that one file to land on the name. */
-    findType(name: string): Location | undefined {
-        const file = this.fileFor(name);
+    findType(name: string, part?: string): Location | undefined {
+        const file = this.fileFor(name, part);
         if (!file) return undefined;
         return { uri: pathToFileURL(file).href, range: declarationRange(file, name) };
     }
@@ -519,14 +540,15 @@ class WorkspaceIndexImpl {
     async typeGraph(
         openTexts: Map<string, string> = new Map(),
         token?: { isCancellationRequested: boolean },
+        part?: string,
     ): Promise<TypeGraph> {
         await this.ready();
         throwIfCancelled(token as any);
         const entries: [string, TypeHeader[]][] = [];
         const seen = new Set<string>();
         let n = 0;
-        for (const file of [...this.allFiles(), ...openTexts.keys()]) {
-            if (seen.has(file)) continue;
+        for (const file of [...this.allFiles(part), ...openTexts.keys()]) {
+            if (seen.has(file) || !this.inPart(file, part)) continue;
             seen.add(file);
             if (!APEX_FILE.test(file) || isIgnoredPath(file)) continue;
             const open = openTexts.get(file);

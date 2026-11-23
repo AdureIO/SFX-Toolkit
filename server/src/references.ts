@@ -20,6 +20,7 @@ import { symbolAt, findReferencesInText } from '../../src/utils/apexReferences';
 import { isApex } from './textUtil';
 import { orCancelled } from './cancel';
 import { TokenIndex } from './tokenIndex';
+import { Partitions } from './partitions';
 import { SearchSession, resolveAt, findOccurrences, declarationOf, sameRange, contentModified } from './symbolSearch';
 
 export function register(connection: Connection, ctx: ServerContext): void {
@@ -70,11 +71,13 @@ async function textReferences(
         /* non-file buffer */
     }
     const lc = ref.name.toLowerCase();
-    const files = new Set(TokenIndex.lookup(lc).filter((f) => /\.(cls|trigger)$/i.test(f)));
+    const part = Partitions.partitionOfUri(doc.uri);
+    const files = new Set(TokenIndex.lookup(lc, part).filter((f) => /\.(cls|trigger)$/i.test(f)));
     for (const d of ctx.documents.all()) {
         if (!isApex(d.uri) || !d.uri.startsWith('file:')) continue;
         try {
             const p = fileURLToPath(d.uri);
+            if (Partitions.partitionOfPath(p) !== part) continue; // another org's project
             if (d.getText().toLowerCase().includes(lc)) files.add(p);
             else files.delete(p);
         } catch {

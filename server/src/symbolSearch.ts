@@ -45,6 +45,7 @@
 import { CancellationToken, LSPErrorCodes, Range, ResponseError } from 'vscode-languageserver/node';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import * as fs from 'fs';
+import * as path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import type { ServerContext } from './context';
 import type { ApexIndex, ApexMemberDecl, ApexParseResult, ApexTypeDecl, VarDecl } from './apexSymbols';
@@ -58,6 +59,7 @@ import { baseTypeName, isApex } from './textUtil';
 import { lruGet, lruSet } from './caches';
 import { ParseWorker } from './parseWorkerClient';
 import { TokenIndex } from './tokenIndex';
+import { Partitions } from './partitions';
 import { Resolver, receiverExprBefore, splitGeneric, typeLabel } from './apexResolve';
 import type { ParseView } from './parseCache';
 import { metadataOccurrences } from './metadataRefs';
@@ -242,14 +244,17 @@ export class SearchSession {
     readonly openByPath = new Map<string, TextDocument>();
     private graphP: Promise<TypeGraph> | undefined;
     private models = new Map<string, FileModel>();
-    private nsP: Promise<string | null> | undefined;
+    private nsPs = new Map<string, Promise<string | null>>();
+    /** Index partition this request searches within (set from the requesting document; undefined = unfiltered). */
+    partition: string | undefined;
     private docs = new Map<string, TextDocument>();
     private openSrcs = new Map<string, { version: number; src: ClosedSrc }>();
     private srcPs = new Map<string, Promise<ClosedSrc | undefined>>();
     /** Set when a resolver consulted the flat variable table of a partial model (see `indexOf`). */
     partialTouched = false;
 
-    constructor(readonly ctx: ServerContext, readonly token?: CancellationToken) {
+    constructor(readonly ctx: ServerContext, readonly token?: CancellationToken, partition?: string) {
+        this.partition = partition;
         for (const d of ctx.documents.all()) {
             if (isApex(d.uri) && d.languageId !== 'soql') this.openByPath.set(pathOfUri(d.uri), d);
         }
@@ -263,19 +268,44 @@ export class SearchSession {
         if (!this.graphP) {
             const texts = new Map<string, string>();
             for (const [p, d] of this.openByPath) if (d.uri.startsWith('file:')) texts.set(p, d.getText());
-            this.graphP = WorkspaceIndex.typeGraph(texts, this.token);
+            this.graphP = WorkspaceIndex.typeGraph(texts, this.token, this.partition);
         }
         return this.graphP;
     }
 
-    /** The project namespace (sfdx-project.json via the host), or null. Asked once per request. */
-    namespace(): Promise<string | null> {
-        if (!this.nsP) {
-            const any = this.openByPath.values().next().value as TextDocument | undefined;
-            const uri = any?.uri ?? pathToFileURL(WorkspaceIndex.allFiles()[0] ?? '/').href;
-            this.nsP = this.ctx.schema.projectNamespace(uri, this.token).catch(() => null);
+    /** Bind the search to `doc`'s partition (the first binding wins). */
+    bindDoc(doc: TextDocument): void {
+        this.partition ??= Partitions.partitionOfUri(doc.uri);
+    }
+
+    /** Whether a file is visible from this search's partition. */
+    inPartition(file: string): boolean {
+        if (this.partition === undefined) return true;
+        const open = this.openByPath.get(file);
+        return (open ? Partitions.partitionOfUri(open.uri) : Partitions.partitionOfPath(file)) === this.partition;
+    }
+
+    /** Candidate files of `token` (token index), within this search's partition. */
+    lookup(token: string): string[] {
+        return TokenIndex.lookup(token, this.partition);
+    }
+
+    /**
+     * The namespace of the project the given file (URI or fs path) belongs to: the host's
+     * project map, else the host's `projectInfo` for that file. NOT the first open document's.
+     * Asked once per project per request.
+     */
+    namespace(target?: string): Promise<string | null> {
+        const uri = !target
+            ? this.openByPath.values().next().value?.uri ?? pathToFileURL('/').href
+            : path.isAbsolute(target) ? pathToFileURL(target).href : target;
+        const key = Partitions.projectDirOfUri(uri) ?? uri;
+        let p = this.nsPs.get(key);
+        if (!p) {
+            p = this.ctx.schema.projectNamespace(uri, this.token).catch(() => null);
+            this.nsPs.set(key, p);
         }
-        return this.nsP;
+        return p;
     }
 
     /**
@@ -648,7 +678,7 @@ async function stripNamespace(s: SearchSession, g: TypeGraph, m: FileModel, expr
     const mm = /^\s*([A-Za-z_]\w*)\s*\.\s*([A-Za-z_]\w*)/.exec(expr);
     if (!mm) return expr;
     if (!isNamespaceQualifier(m, g, mm[1], mm[2], pos)) return expr;
-    const ns = await s.namespace();
+    const ns = await s.namespace(m.uri);
     if (ns && ns.toLowerCase() !== mm[1].toLowerCase()) return expr;
     return expr.slice(expr.indexOf('.', mm.index + mm[1].length) + 1).trimStart();
 }
@@ -1064,6 +1094,7 @@ export async function resolveAt(
     doc: TextDocument,
     pos: { line: number; character: number },
 ): Promise<Resolution | undefined> {
+    s.bindDoc(doc);
     const m = await s.modelForDoc(doc);
     const offset = offsetOf(m, pos.line, pos.character);
     // Word under the cursor (in blanked code: nothing inside comments/strings resolves).
@@ -1112,7 +1143,7 @@ export async function resolveAt(
     const argsFn = call ? () => argTypesAt(s, m, end, sp) : undefined;
     const recv = receiverAt(m.code, start);
     const notWorkspace = (what?: string): Resolution => {
-        if (SCHEMA_SUFFIX.test(word) || stubbedObjectNames().has(lc)) return out(undefined, `'${word}' is part of the org schema (SObject/field) and can't be renamed here.`);
+        if (SCHEMA_SUFFIX.test(word) || stubbedObjectNames(m.uri).has(lc)) return out(undefined, `'${word}' is part of the org schema (SObject/field) and can't be renamed here.`);
         if (stdTypeName(word)) return out(undefined, `'${word}' is a standard Apex type.`);
         return out(undefined, what ?? `'${word}' is not declared in this workspace.`);
     };
@@ -1170,7 +1201,7 @@ export async function resolveAt(
                     startNodes = [tn];
                 } else if (!call && isNamespaceQualifier(m, g, r, word, sp)) {
                     // `ns.Type` — the type itself.
-                    const ns = await s.namespace();
+                    const ns = await s.namespace(m.uri);
                     const tn2 = g.resolve(word, m.path);
                     if (tn2 && (!ns || ns.toLowerCase() === rlc)) return out({ kind: 'type', name: tn2.header.name, node: tn2 });
                     return notWorkspace(`Can't resolve '${r}' to a workspace type.`);
@@ -1381,6 +1412,7 @@ async function candidateFiles(
         if (seen.has(f)) return;
         seen.add(f);
         if (isFsPath(f) && isIgnoredPath(f)) return;
+        if (isFsPath(f) && !s.inPartition(f)) return; // another org's project: invisible
         emit(f);
     };
     const open = s.openByPath;
@@ -1389,8 +1421,8 @@ async function candidateFiles(
     const openHas = (f: string, token: RegExp) => token.test(blankNonCode(open.get(f)!.getText()));
     for (const f of familyFiles) add(f);
     if (sym.kind === 'type') {
-        for (const f of TokenIndex.lookup(lc)) if (!open.has(f) && /\.(cls|trigger)$/i.test(f)) add(f);
-        for (const f of TokenIndex.lookup(`'${lc}`)) if (!open.has(f)) add(f);
+        for (const f of s.lookup(lc)) if (!open.has(f) && /\.(cls|trigger)$/i.test(f)) add(f);
+        for (const f of s.lookup(`'${lc}`)) if (!open.has(f)) add(f);
         for (const f of open.keys()) {
             const t = open.get(f)!.getText();
             if (re.test(blankNonCode(t)) || (/forName/i.test(t) && typeForNameRefs(t).some((r) => r.name.toLowerCase() === lc))) add(f);
@@ -1404,7 +1436,7 @@ async function candidateFiles(
         if (t.header.outer) famNames.add(t.header.outer.toLowerCase());
     }
     const mentionFiles = new Set<string>();
-    for (const n of famNames) for (const f of TokenIndex.lookup(n)) if (!open.has(f)) mentionFiles.add(f);
+    for (const n of famNames) for (const f of s.lookup(n)) if (!open.has(f)) mentionFiles.add(f);
     const famRes = [...famNames].map((n) => wordRe(n));
     for (const f of open.keys()) if (famRes.some((r) => openHas(f, r))) mentionFiles.add(f);
     // Mention files that use the name are candidates whatever the producers turn out to be:
@@ -1419,7 +1451,7 @@ async function candidateFiles(
     }
     const viaProducer = new Set<string>();
     for (const p of producers) {
-        for (const f of TokenIndex.lookup(p)) if (!open.has(f)) viaProducer.add(f);
+        for (const f of s.lookup(p)) if (!open.has(f)) viaProducer.add(f);
         const pr = wordRe(p);
         for (const f of open.keys()) if (openHas(f, pr)) viaProducer.add(f);
     }
@@ -1913,7 +1945,7 @@ async function classifyFile(
             if (recv.kind === 'ident') {
                 if (node.header.outer) hit = recv.name.toLowerCase() === node.header.outer.toLowerCase();
                 else if (isNamespaceQualifier(m, g, recv.name, sym.name, p) && g.resolve(sym.name, m.path) === node) {
-                    const ns = await s.namespace();
+                    const ns = await s.namespace(m.uri);
                     hit = !ns || ns.toLowerCase() === recv.name.toLowerCase();
                 }
             } else if (recv.kind === 'none') {
@@ -1994,7 +2026,7 @@ async function classifyFile(
 
     // `Type.forName('Cls')` strings.
     if (sym.kind === 'type' && !sym.node.header.outer && /forName/i.test(m.text)) {
-        const ns = await s.namespace();
+        const ns = await s.namespace(m.uri);
         for (const r of typeForNameRefs(m.text)) {
             if (classNameMatches(r.name, r.ns, sym.name, ns)) out.push({ range: toRange(m, r.start, r.end), role: 'typeforname' });
         }
