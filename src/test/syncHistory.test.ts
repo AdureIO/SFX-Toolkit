@@ -53,6 +53,13 @@ describe("history entries", () => {
 		assert.strictEqual(e.componentCount, 1500);
 	});
 
+	it("keeps the specified tests of a run (capped), and none when there are none", () => {
+		assert.ok(!("tests" in normalizeEntry(base({ tests: [] }), newId)));
+		assert.deepStrictEqual(normalizeEntry(base({ testLevel: "RunSpecifiedTests", tests: ["ATest", "BTest"] }), newId).tests, ["ATest", "BTest"]);
+		const many = Array.from({ length: 300 }, (_, i) => `T${i}`);
+		assert.strictEqual(normalizeEntry(base({ tests: many }), newId).tests!.length, 200);
+	});
+
 	it("adds newest first and caps at 200", () => {
 		let list: HistoryEntry[] = [];
 		for (let i = 0; i < 205; i++) list = addEntry(list, normalizeEntry(base({ at: i }), newId));

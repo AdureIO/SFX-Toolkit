@@ -74,6 +74,7 @@ export async function deleteFromOrg(o: DeleteFromOrgOptions): Promise<DeleteFrom
 			durationMs: res.durationMs,
 			components: o.components.map((c) => `${c.type}:${c.fullName}`),
 			testLevel: o.testLevel,
+			tests: o.testLevel === "RunSpecifiedTests" ? [...(o.specifiedTests ?? [])] : undefined,
 			deployId: out.deployId,
 			ok: out.kind === "success",
 			errors: out.kind === "failed" ? historyErrorsFromDeploy(out.apiResult, out.errorText) : undefined,

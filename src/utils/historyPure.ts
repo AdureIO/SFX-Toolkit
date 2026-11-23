@@ -27,6 +27,8 @@ export interface HistoryEntry {
 	/** Total components of the operation (≥ `components.length`). */
 	componentCount: number;
 	testLevel?: string;
+	/** Apex tests of a RunSpecifiedTests run (capped at `MAX_TESTS`): a re-run needs them. */
+	tests?: string[];
 	/** Deploy id (`0Af…`) of a deploy, validate or delete. */
 	deployId?: string;
 	ok: boolean;
@@ -42,6 +44,7 @@ export type NewHistoryEntry = Omit<HistoryEntry, "id" | "componentCount"> & { id
 export const MAX_ENTRIES = 200;
 export const MAX_ERRORS = 50;
 export const MAX_COMPONENTS = 1000;
+export const MAX_TESTS = 200;
 const MAX_MESSAGE = 600;
 
 const KINDS: readonly string[] = ["deploy", "validate", "retrieve", "delete"];
@@ -62,6 +65,7 @@ export function normalizeEntry(e: NewHistoryEntry, newId: () => string): History
 		components: e.components.slice(0, MAX_COMPONENTS),
 		componentCount: Math.max(e.componentCount ?? 0, e.components.length),
 		...(e.testLevel ? { testLevel: e.testLevel } : {}),
+		...(e.tests && e.tests.length > 0 ? { tests: e.tests.slice(0, MAX_TESTS) } : {}),
 		...(e.deployId ? { deployId: e.deployId } : {}),
 		ok: e.ok,
 		...(errors.length > 0 ? { errors } : {}),

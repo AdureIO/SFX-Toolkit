@@ -109,6 +109,9 @@ const OBJECT_CHILDREN: Record<string, DirType> = {
 	indexes: { type: "Index", suffix: "index" },
 };
 
+/** Metadata types of the decomposed children of a CustomObject (fields, record types …). */
+export const OBJECT_CHILD_TYPES: ReadonlySet<string> = new Set(Object.values(OBJECT_CHILDREN).map((c) => c.type));
+
 export interface TypeTable {
 	/** directory name → types stored there (distinguished by suffix). */
 	byDir: Map<string, DirType[]>;
