@@ -45,6 +45,7 @@ import { OrgBrowserPanelProvider } from "./providers/OrgBrowserPanelProvider";
 import { SharedMetadataFilter } from "./utils/sharedFilterState";
 import { initRetrieveLog, flushRetrieveLog } from "./utils/retrieveLog";
 import { initContentCompare } from "./utils/contentCompareHost";
+import { initSyncDiff } from "./utils/syncDiff";
 import { registerApexLogDecorator } from "./providers/ApexLogDecorator";
 import { ApexWorkbenchViewProvider } from "./providers/ApexWorkbenchViewProvider";
 import { Logger, outputChannel, registerOutputChannels } from "./utils/outputChannel";
@@ -293,6 +294,7 @@ export function activate(context: vscode.ExtensionContext) {
     initDeployHistory(context);
     initRetrieveLog(context.workspaceState);
     initContentCompare(context);
+    initSyncDiff(context);
     SharedMetadataFilter.init(context);
     OrgBrowserPanelProvider.init(context);
     DeployMetadataPanelProvider.init(context);

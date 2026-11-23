@@ -299,6 +299,120 @@ describe("content compare service", () => {
 	});
 });
 
+describe("content compare service: kept org copies", () => {
+	let f: Fixture;
+	beforeEach(() => {
+		f = fixture();
+	});
+	afterEach(() => {
+		fs.rmSync(f.root, { recursive: true, force: true });
+	});
+
+	it("keeps each compared component's org files under <cacheRoot>/org/<safe key>/<inner path>; only the run dir is removed", async () => {
+		const org = new FakeOrg();
+		const a = writeClass(f, "A", "local A");
+		const b = writeClass(f, "B", "local B");
+		org.copies.set("A", { cls: "org A" });
+		org.copies.set("B", { cls: "org B" });
+		const s = service(f, org);
+		s.request([a, b]);
+		await s.whenIdle();
+		const files = s.orgCopyFiles("ApexClass:A");
+		assert.ok(files);
+		assert.deepStrictEqual([...files!.keys()].sort(), ["A.cls", "A.cls-meta.xml"]);
+		assert.strictEqual(fs.readFileSync(files!.get("A.cls")!, "utf8"), "org A");
+		assert.ok(files!.get("A.cls")!.startsWith(path.join(f.cache, "org") + path.sep));
+		assert.strictEqual(fs.readFileSync(s.orgCopyFiles("ApexClass:B")!.get("B.cls")!, "utf8"), "org B");
+		assert.ok(!fs.existsSync(org.calls[0].outputDir), "the run dir is gone");
+		assert.strictEqual(s.orgCopyFiles("ApexClass:Nope"), undefined);
+		assert.strictEqual(fs.readdirSync(path.join(f.cache, "org")).length, 2);
+	});
+
+	it("a later compare replaces the previous copy", async () => {
+		const org = new FakeOrg();
+		const a = writeClass(f, "A", "x");
+		org.copies.set("A", { cls: "v1" });
+		const s = service(f, org);
+		s.request([a]);
+		await s.whenIdle();
+		assert.strictEqual(fs.readFileSync(s.orgCopyFiles("ApexClass:A")!.get("A.cls")!, "utf8"), "v1");
+		org.copies.set("A", { cls: "v2" });
+		s.request([{ ...a, orgLm: 2000 }]);
+		await s.whenIdle();
+		const files = s.orgCopyFiles("ApexClass:A")!;
+		assert.strictEqual(fs.readFileSync(files.get("A.cls")!, "utf8"), "v2");
+		assert.strictEqual(fs.readdirSync(path.join(f.cache, "org")).length, 1);
+	});
+
+	it("a component the org did not return keeps no copy", async () => {
+		const org = new FakeOrg();
+		const a = writeClass(f, "A", "x");
+		const s = service(f, org);
+		s.request([a]);
+		await s.whenIdle();
+		assert.strictEqual(s.orgCopyFiles("ApexClass:A"), undefined);
+	});
+
+	it("fetchOrgCopy retrieves one component on demand into the same store", async () => {
+		const org = new FakeOrg();
+		org.copies.set("Z", { cls: "org Z" });
+		const s = service(f, org);
+		const files = await s.fetchOrgCopy({ type: "ApexClass", name: "Z" });
+		assert.strictEqual(fs.readFileSync(files.get("Z.cls")!, "utf8"), "org Z");
+		assert.deepStrictEqual([...s.orgCopyFiles("ApexClass:Z")!.keys()].sort(), ["Z.cls", "Z.cls-meta.xml"]);
+		assert.deepStrictEqual(org.calls[0].components, [{ type: "ApexClass", fullName: "Z" }]);
+		assert.strictEqual(org.calls[0].cwd, path.join(f.cache, "stub"));
+		assert.ok(!fs.existsSync(org.calls[0].outputDir));
+		assert.deepStrictEqual(s.contentInfo(), {}, "an on-demand copy is no compare result");
+		assert.strictEqual(s.progress().state, "idle");
+	});
+
+	it("fetchOrgCopy rejects when the org does not return the component", async () => {
+		const org = new FakeOrg();
+		const s = service(f, org);
+		await assert.rejects(() => s.fetchOrgCopy({ type: "ApexClass", name: "Missing" }), /did not return ApexClass:Missing/);
+		assert.strictEqual(s.orgCopyFiles("ApexClass:Missing"), undefined);
+	});
+
+	it("fetchOrgCopy works for a Profile (never auto-compared) and leaves the compare index alone", async () => {
+		const calls: RetrieveRequest[] = [];
+		const retrieve = async (req: RetrieveRequest): Promise<RetrieveReply> => {
+			calls.push(req);
+			fs.mkdirSync(path.join(req.outputDir, "profiles"), { recursive: true });
+			fs.writeFileSync(path.join(req.outputDir, "profiles", "Admin.profile-meta.xml"), "<Profile/>");
+			return { retrieved: req.components, failed: [] };
+		};
+		const s = new ContentCompareService({ cacheRoot: f.cache, projectDir: f.project, retrieve, table: () => table, flushDelayMs: 0 });
+		s.request([{ key: "Profile:Admin", type: "Profile", name: "Admin", orgLm: 1, files: [] }]);
+		await s.whenIdle();
+		assert.strictEqual(calls.length, 0, "a Profile is excluded from the auto compare");
+		const files = await s.fetchOrgCopy({ type: "Profile", name: "Admin" });
+		assert.deepStrictEqual([...files.keys()], ["Admin.profile-meta.xml"]);
+		assert.strictEqual(calls.length, 1);
+		assert.deepStrictEqual(s.contentInfo(), {});
+		assert.deepStrictEqual([...s.orgCopyFiles("Profile:Admin")!.keys()], ["Admin.profile-meta.xml"]);
+	});
+
+	it("an on-demand fetch waits for a running chunk (one sf run at a time in the stub)", async () => {
+		const org = new FakeOrg();
+		org.copies.set("A", { cls: "A" });
+		org.copies.set("Z", { cls: "Z" });
+		let release!: () => void;
+		org.gate = new Promise<void>((r) => (release = r));
+		const a = writeClass(f, "A", "x");
+		const s = service(f, org);
+		s.request([a]);
+		for (let i = 0; i < 200 && org.calls.length === 0; i++) await new Promise((r) => setTimeout(r, 5));
+		const fetching = s.fetchOrgCopy({ type: "ApexClass", name: "Z" });
+		await new Promise((r) => setTimeout(r, 30));
+		assert.strictEqual(org.calls.length, 1, "no second sf run while a chunk is retrieving");
+		release();
+		await fetching;
+		assert.strictEqual(org.calls.length, 2);
+		assert.ok(s.orgCopyFiles("ApexClass:A"));
+	});
+});
+
 // A type check only: the injected token is what the real runner expects.
 const _t: CancelToken = { isCancellationRequested: false, onCancellationRequested: () => ({ dispose() {} }) };
 void _t;

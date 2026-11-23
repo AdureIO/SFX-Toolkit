@@ -9,6 +9,7 @@ import {
 	needsCompare,
 	nextEntry,
 	normalizeText,
+	orgCopyDirName,
 	requestNameOf,
 	verifiedSyncAt,
 } from "../utils/contentComparePure";
@@ -119,5 +120,24 @@ describe("content compare: index", () => {
 		assert.strictEqual(verifiedSyncAt(diff), 1000);
 		assert.strictEqual(verifiedSyncAt(nextEntry(undefined, 1, "h", "different", 5)), undefined);
 		assert.strictEqual(verifiedSyncAt(nextEntry(diff, 200, "h1", "same", 3000)), 3000);
+	});
+});
+
+describe("content compare: org copy directory names", () => {
+	it("is filesystem-safe: no separators, no reserved characters, bounded", () => {
+		const n = orgCopyDirName("Layout:Account-Account Layout");
+		assert.ok(/^[A-Za-z0-9._-]+$/.test(n), n);
+		const long = orgCopyDirName("ApexClass:" + "x".repeat(300));
+		assert.ok(long.length <= 72, String(long.length));
+		assert.ok(!orgCopyDirName("Report:Folder/Sub/My: Report?*").match(/[\\/:*?"<>|\s]/));
+		assert.ok(!orgCopyDirName("ApexClass:..").startsWith("."));
+	});
+	it("is collision-free where the readable part collides", () => {
+		assert.notStrictEqual(orgCopyDirName("Report:A/B"), orgCopyDirName("Report:A_B"));
+		assert.notStrictEqual(orgCopyDirName("ApexClass:Foo"), orgCopyDirName("ApexClass:foo"));
+		assert.notStrictEqual(orgCopyDirName("Layout:A B"), orgCopyDirName("Layout:A-B"));
+	});
+	it("both spellings of a key (percent-encoded local name, org name) are the same copy", () => {
+		assert.strictEqual(orgCopyDirName("Layout:Account-Account%20Layout"), orgCopyDirName("Layout:Account-Account Layout"));
 	});
 });

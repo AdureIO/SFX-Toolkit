@@ -24,11 +24,19 @@ import {
 	lookupKeyOf,
 	needsCompare,
 	nextEntry,
+	orgCopyDirName,
 	requestNameOf,
 	toWire,
 	verifiedSyncAt,
 } from "./contentComparePure";
 import { TypeTable } from "./orgBrowser/localIndex";
+
+/** The component an org copy is asked for (`fetchOrgCopy`). */
+export interface OrgCopyTarget {
+	type: string;
+	/** Name as the local index or the org listing has it (percent-encoded file names are decoded). */
+	name: string;
+}
 
 /** One local component that exists in the org too. */
 export interface CompareTarget {
@@ -138,6 +146,8 @@ export class ContentCompareService {
 	private readonly digestCache = new Map<string, { mtimeMs: number; size: number; digest: string }>();
 	private flushTimer: ReturnType<typeof setTimeout> | undefined;
 	private idleWaiters: (() => void)[] = [];
+	/** Tail of the chain that serializes the `sf` retrieves into the stub project (compare chunks, on-demand copies). */
+	private lockTail: Promise<void> = Promise.resolve();
 
 	constructor(private readonly deps: CompareServiceDeps) {}
 
@@ -496,12 +506,127 @@ export class ContentCompareService {
 		} catch {
 			/* no stub yet */
 		}
+		// Half-written org copies of an interrupted run.
+		try {
+			for (const n of await fs.promises.readdir(this.orgCopyRoot())) {
+				if (n.includes(".tmp-")) await fs.promises.rm(path.join(this.orgCopyRoot(), n), { recursive: true, force: true });
+			}
+		} catch {
+			/* no copies yet */
+		}
+	}
+
+	private locked<T>(fn: () => Promise<T>): Promise<T> {
+		const run = this.lockTail.then(fn, fn);
+		this.lockTail = run.then(
+			() => undefined,
+			() => undefined
+		);
+		return run;
+	}
+
+	// ── Org copies ───────────────────────────────────────────────────────────────
+
+	/** `<cacheRoot>/org`: the kept org copies, one directory per component. */
+	orgCopyRoot(): string {
+		return path.join(this.deps.cacheRoot, "org");
+	}
+
+	private orgCopyDir(key: string): string {
+		return path.join(this.orgCopyRoot(), orgCopyDirName(key));
+	}
+
+	/**
+	 * The org copy kept of a component by the last compare (or `fetchOrgCopy`): `inner path → absolute path`.
+	 * `key` is a row key in either form (`Layout:Account-Account%20Layout` and `Layout:Account-Account Layout` are the same copy).
+	 * undefined when there is none.
+	 */
+	orgCopyFiles(key: string): Map<string, string> | undefined {
+		const dir = this.orgCopyDir(key);
+		const out = new Map<string, string>();
+		const walk = (d: string, prefix: string): void => {
+			let ents: fs.Dirent[];
+			try {
+				ents = fs.readdirSync(d, { withFileTypes: true });
+			} catch {
+				return;
+			}
+			for (const e of ents) {
+				if (e.isDirectory()) walk(path.join(d, e.name), prefix + e.name + "/");
+				else if (e.isFile()) out.set(prefix + e.name, path.join(d, e.name));
+			}
+		};
+		walk(dir, "");
+		return out.size > 0 ? out : undefined;
+	}
+
+	/** Replace the kept copy of `key` with `files` (`inner → file in the run directory`); the files are moved. */
+	private async storeOrgCopy(key: string, files: ReadonlyMap<string, { abs: string }>): Promise<void> {
+		const dest = this.orgCopyDir(key);
+		const tmp = `${dest}.tmp-${process.pid}-${Math.floor(Math.random() * 1e9)}`;
+		await fs.promises.rm(tmp, { recursive: true, force: true });
+		await fs.promises.mkdir(tmp, { recursive: true });
+		try {
+			for (const [inner, f] of files) {
+				if (inner.split("/").includes("..")) continue;
+				const to = path.join(tmp, ...inner.split("/"));
+				await fs.promises.mkdir(path.dirname(to), { recursive: true });
+				try {
+					await fs.promises.rename(f.abs, to);
+				} catch {
+					await fs.promises.copyFile(f.abs, to);
+				}
+			}
+			await fs.promises.rm(dest, { recursive: true, force: true });
+			await fs.promises.rename(tmp, dest);
+		} catch (e) {
+			await fs.promises.rm(tmp, { recursive: true, force: true }).catch(() => undefined);
+			throw e;
+		}
+	}
+
+	/**
+	 * Retrieve ONE component's org copy now (a Profile, which is never auto-compared, or a component not
+	 * compared yet) into the kept copies and return its files. Not a compare result: the index and the
+	 * progress are untouched. Rejects when the org does not return the component.
+	 */
+	fetchOrgCopy(target: OrgCopyTarget): Promise<Map<string, string>> {
+		return this.locked(async () => {
+			const lookup = lookupKeyOf(target.type, target.name);
+			const stub = await this.ensureStub();
+			const outputDir = path.join(stub, `run-${this.now()}-${Math.floor(Math.random() * 1e6)}`);
+			await fs.promises.mkdir(outputDir, { recursive: true });
+			try {
+				const reply = await this.deps.retrieve({
+					components: [{ type: target.type, fullName: requestNameOf(target.type, target.name) }],
+					outputDir,
+					cwd: stub,
+					token: new SimpleToken(),
+				});
+				const files = (await walkFiles(outputDir)).map((abs) => ({ rel: toPosix(path.relative(outputDir, abs)), abs }));
+				const orgFiles = groupByComponent(files, this.deps.table()).get(lookup);
+				const ok = reply.retrieved.some((r) => lookupKeyOf(r.type, r.fullName) === lookup);
+				if (!ok || !orgFiles || orgFiles.size === 0) {
+					const why = reply.failed.find((f) => lookupKeyOf(f.type, f.fullName) === lookup)?.error;
+					throw new Error(`The org did not return ${lookup}${why ? `: ${why}` : "."}`);
+				}
+				await this.storeOrgCopy(lookup, orgFiles);
+				return this.orgCopyFiles(lookup) ?? new Map<string, string>();
+			} finally {
+				await fs.promises.rm(outputDir, { recursive: true, force: true }).catch(() => undefined);
+			}
+		});
 	}
 
 	// ── One chunk ────────────────────────────────────────────────────────────────
 
-	/** Retrieve the org copies of `group`, compare, record. Returns the keys that got a result. */
-	private async runChunk(group: Queued[], token: SimpleToken): Promise<string[]> {
+	/** Retrieve the org copies of `group`, compare, record, keep the org copies. Returns the keys that got a result. */
+	private runChunk(group: Queued[], token: SimpleToken): Promise<string[]> {
+		return this.locked(() => this.runChunkLocked(group, token));
+	}
+
+	private async runChunkLocked(group: Queued[], token: SimpleToken): Promise<string[]> {
+		if (token.isCancellationRequested) throw new Error("cancelled");
 		const stub = await this.ensureStub();
 		const outputDir = path.join(stub, `run-${this.now()}-${Math.floor(Math.random() * 1e6)}`);
 		await fs.promises.mkdir(outputDir, { recursive: true });
@@ -527,6 +652,8 @@ export class ContentCompareService {
 				}
 				const orgDigests = new Map<string, string>();
 				for (const [inner, f] of orgFiles) orgDigests.set(inner, digestContent(await fs.promises.readFile(f.abs)));
+				// The org copy stays (the diff opens it); only the run directory is removed below.
+				await this.storeOrgCopy(lookup, orgFiles).catch(() => undefined);
 				const local = await this.localDigests(q.target);
 				if (!local) {
 					this.failed++;

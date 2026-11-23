@@ -54,6 +54,18 @@ export function lookupKeyOf(type: string, name: string): string {
 	return orgLookupKey(type, name);
 }
 
+/**
+ * Directory name of a component's kept org copy: filesystem-safe (no separators, no characters Windows
+ * rejects, bounded length) and collision-free (a hash of the full lookup key is appended). Both spellings of a
+ * key (`A%20B` and `A B`) give the same name.
+ */
+export function orgCopyDirName(key: string): string {
+	const i = key.indexOf(":");
+	const lookup = i > 0 ? lookupKeyOf(key.slice(0, i), key.slice(i + 1)) : key;
+	const readable = lookup.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^[._]+/, "").slice(0, 60) || "component";
+	return `${readable}-${sha1(lookup).slice(0, 10)}`;
+}
+
 /** The file name part of the key sent to `sf` (`Layout:Account-Account Layout` → `Account-Account Layout`). */
 export function requestNameOf(type: string, name: string): string {
 	return orgLookupKey(type, name).slice(type.length + 1);
