@@ -46,6 +46,7 @@ import {
 import { $, FilterBar, createFilterBar, esc, toggleIn } from "./shared/filterBar";
 import { createSharedFilterSync } from "./shared/sharedFilter";
 import { filterTestList, mountTestTree } from "./shared/testTree";
+import { mountTestSuites, type TestSuite } from "./shared/testSuites";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -83,11 +84,6 @@ interface PanelState {
 	autoGitSelect?: boolean;
 	validateOnly?: boolean;
 	ui?: Partial<UiState>;
-}
-
-interface TestSuite {
-	name: string;
-	testClassNames: string[];
 }
 
 interface Group {
@@ -179,6 +175,7 @@ const sharedSync = createSharedFilterSync({
 let testClassesData: { label: string; description: string }[] = [];
 let presetsData: Preset[] = [];
 let testSuitesData: TestSuite[] = [];
+let suites: ReturnType<typeof mountTestSuites>;
 let orgsData: OrgOpt[] = [];
 let defaultOrgVal = "";
 let initialPreset: Preset | null = null;
@@ -230,7 +227,7 @@ function saveState(): void {
 			filterOnlySelected: ui.filter.onlySelected,
 			autoGitSelect: ($("auto-git-select") as HTMLInputElement).checked,
 			validateOnly: ($("validate-only-check") as HTMLInputElement).checked,
-			testSuiteName: ($("suite-select") as HTMLSelectElement).value || null,
+			testSuiteName: suites.selected() || null,
 			ui: { filter: { ...ui.filter, onlySelected: false }, collapsed: ui.collapsed, filtersCollapsed: ui.filtersCollapsed },
 		};
 		api.setState(state);
@@ -999,37 +996,16 @@ function renderTestList(): void {
 
 // Suites -----------------------------------------------------------------------
 
-function renderSuiteSelect(): void {
-	const sel = $("suite-select") as HTMLSelectElement;
-	const cur = sel.value;
-	sel.innerHTML = '<option value="">— No suite —</option>' + testSuitesData.map((s) => `<option value="${esc(s.name)}">${esc(s.name)} (${(s.testClassNames || []).length})</option>`).join("");
-	if (cur) sel.value = cur;
-	$("btn-delete-suite").style.display = sel.value ? "" : "none";
-}
-
 function setupSuites(): void {
-	const sel = $("suite-select") as HTMLSelectElement;
-	sel.onchange = () => {
-		const name = sel.value;
-		$("btn-delete-suite").style.display = name ? "" : "none";
-		if (!name) return;
-		const suite = testSuitesData.find((s) => s.name === name);
-		if (!suite) return;
-		for (const cb of document.querySelectorAll<HTMLInputElement>(".test-class")) cb.checked = (suite.testClassNames || []).includes(cb.value);
-		setDirty();
-		updateSelectionStatus();
-	};
-	$("btn-save-suite").onclick = () => {
-		const names = checkedValues(".test-class");
-		if (!names.length) {
-			setStatus("Select test classes to save as a suite.");
-			return;
-		}
-		post({ command: "saveTestSuite", suiteName: sel.value || "", testClassNames: names });
-	};
-	$("btn-delete-suite").onclick = () => {
-		if (sel.value) post({ command: "deleteTestSuite", suiteName: sel.value });
-	};
+	suites = mountTestSuites({
+		post,
+		checked: () => checkedValues(".test-class"),
+		onApplied: () => {
+			setDirty();
+			updateSelectionStatus();
+		},
+		setStatus,
+	});
 }
 
 // ── Deploy ─────────────────────────────────────────────────────────────────────
@@ -1197,11 +1173,7 @@ function restoreState(state: PanelState): void {
 	($("preset-select") as HTMLSelectElement).value = at >= 0 ? String(at) : "";
 	($("auto-git-select") as HTMLInputElement).checked = !!state.autoGitSelect;
 	($("validate-only-check") as HTMLInputElement).checked = legacyValidate || !!state.validateOnly;
-	const suiteEl = $("suite-select") as HTMLSelectElement;
-	if (state.testSuiteName) {
-		suiteEl.value = state.testSuiteName;
-		$("btn-delete-suite").style.display = suiteEl.value ? "" : "none";
-	}
+	if (state.testSuiteName) suites.select(state.testSuiteName);
 }
 
 // ── Host messages ──────────────────────────────────────────────────────────────
@@ -1224,7 +1196,7 @@ function onInit(m: Record<string, any>): void {
 		if (radio) radio.checked = true;
 		setOrgOptions();
 		renderTestList();
-		renderSuiteSelect();
+		suites.setSuites(testSuitesData);
 		renderPresetOptions();
 		idx = buildIndex(comps);
 		statusDirty = true;
@@ -1273,7 +1245,7 @@ window.addEventListener("message", (ev) => {
 			break;
 		case "testSuitesUpdated":
 			testSuitesData = m.suites || [];
-			renderSuiteSelect();
+			suites.setSuites(testSuitesData);
 			break;
 		case "localRows": {
 			comps = Array.isArray(m.comps) ? m.comps : [];

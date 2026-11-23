@@ -1,13 +1,23 @@
 import * as fs from "fs";
 import * as path from "path";
 
-export interface TestSuite {
-  name: string;
-  testClassNames: string[];
+import { TestSuite, parseSuites, removeSuite, upsertSuite } from "./testSuitesPure";
+
+export type { TestSuite } from "./testSuitesPure";
+
+type Listener = (workspaceRoot: string) => void;
+const listeners = new Set<Listener>();
+
+/** Subscribe to suite changes made through this store (the Deploy panel and the Center share one file per project). */
+export function onDidChangeTestSuites(listener: Listener): { dispose(): void } {
+  listeners.add(listener);
+  return { dispose: () => void listeners.delete(listener) };
 }
 
-interface SuitesFile {
-  suites: TestSuite[];
+function fire(workspaceRoot: string): void {
+  for (const l of [...listeners]) {
+    try { l(workspaceRoot); } catch { /* a listener never breaks a save */ }
+  }
 }
 
 function suitesFilePath(workspaceRoot: string): string {
@@ -18,8 +28,7 @@ export function loadTestSuites(workspaceRoot: string): TestSuite[] {
   try {
     const fp = suitesFilePath(workspaceRoot);
     if (!fs.existsSync(fp)) return [];
-    const raw = JSON.parse(fs.readFileSync(fp, "utf8")) as SuitesFile;
-    return Array.isArray(raw?.suites) ? raw.suites : [];
+    return parseSuites(JSON.parse(fs.readFileSync(fp, "utf8")));
   } catch {
     return [];
   }
@@ -33,15 +42,15 @@ function persistSuites(workspaceRoot: string, suites: TestSuite[]): void {
 }
 
 export function upsertTestSuite(workspaceRoot: string, suite: TestSuite): TestSuite[] {
-  const suites = loadTestSuites(workspaceRoot);
-  const idx = suites.findIndex((s) => s.name === suite.name);
-  if (idx >= 0) suites[idx] = suite; else suites.push(suite);
+  const suites = upsertSuite(loadTestSuites(workspaceRoot), suite);
   persistSuites(workspaceRoot, suites);
+  fire(workspaceRoot);
   return suites;
 }
 
 export function deleteTestSuite(workspaceRoot: string, name: string): TestSuite[] {
-  const suites = loadTestSuites(workspaceRoot).filter((s) => s.name !== name);
+  const suites = removeSuite(loadTestSuites(workspaceRoot), name);
   persistSuites(workspaceRoot, suites);
+  fire(workspaceRoot);
   return suites;
 }

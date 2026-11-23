@@ -29,7 +29,9 @@ import { AuthInfo } from "../utils/authInfo";
 import { DeployPanelHost } from "./DeployPanelHost";
 import { preDeployPrompt } from "../utils/deployStatusPure";
 import { SharedMetadataFilter } from "../utils/sharedFilterState";
-import { upsertTestSuite, deleteTestSuite as deleteTestSuiteEntry, loadTestSuites, type TestSuite } from "../utils/testSuites";
+import { loadTestSuites, type TestSuite } from "../utils/testSuites";
+import { testSuiteRowHtml } from "../utils/testSuitesHtml";
+import { handleSuiteMessage, subscribeSuites } from "./testSuitesHost";
 
 /** Panel state we persist in the extension so it survives webview HTML replacement (tab switch/revive). */
 export interface DeployPanelState {
@@ -398,29 +400,7 @@ export class DeployMetadataPanelProvider {
           await hostNow.refreshModified(true);
           return;
         }
-        if (msg.command === "saveTestSuite") {
-          const testClassNames = Array.isArray(msg.testClassNames) ? msg.testClassNames : [];
-          let suiteName = (msg.suiteName ?? "").trim();
-          if (!suiteName) {
-            const input = await vscode.window.showInputBox({
-              title: "Save test suite",
-              prompt: "Suite name",
-              validateInput: (v) => (!v?.trim() ? "Name is required" : null)
-            });
-            if (!input?.trim()) return;
-            suiteName = input.trim();
-          }
-          const suites = upsertTestSuite(workspaceRoot, { name: suiteName, testClassNames });
-          panel.webview.postMessage({ command: "testSuitesUpdated", suites });
-          return;
-        }
-        if (msg.command === "deleteTestSuite") {
-          const name = (msg.suiteName ?? "").trim();
-          if (!name) return;
-          const suites = deleteTestSuiteEntry(workspaceRoot, name);
-          panel.webview.postMessage({ command: "testSuitesUpdated", suites });
-          return;
-        }
+        if (await handleSuiteMessage(msg, workspaceRoot, (suites) => panel.webview.postMessage({ command: "testSuitesUpdated", suites }))) return;
         if (msg.command !== "deploy" || !Array.isArray(msg.components) || !msg.testLevel) return;
         // No background content compare while a deploy / validation runs; it continues afterwards.
         hostNow.pauseCompare();
@@ -556,6 +536,9 @@ export class DeployMetadataPanelProvider {
       });
     });
 
+    // Suites saved or deleted in the other panel (the Deploy & Retrieve Center) show up at once.
+    const suitesSub = subscribeSuites(() => liveRoot, (dir) => void panel.webview.postMessage({ command: "testSuitesUpdated", suites: loadTestSuites(dir) }));
+
     const sharedFilterSub = SharedMetadataFilter.subscribe("deploy", () => liveRoot, (f) => void panel.webview.postMessage({ command: "sharedFilter", query: f.query, types: f.types }));
 
     // Project selector: the header dropdown (or the active project, while not pinned) switched the
@@ -592,6 +575,7 @@ export class DeployMetadataPanelProvider {
       defaultOrgSub.dispose();
       sharedFilterSub.dispose();
       presetsSub.dispose();
+      suitesSub.dispose();
       projectSub.dispose();
       selectorSub.dispose();
       binding.dispose();
@@ -962,11 +946,7 @@ export class DeployMetadataPanelProvider {
 				</div>
 				<div class="card test-classes-block" id="specified-tests-wrap">
 					<div class="subtitle"><span aria-hidden="true">🧪</span> Test classes</div>
-					<div class="suite-row">
-						<select id="suite-select" class="tree-search-input suite-select" aria-label="Test suite"></select>
-						<button type="button" id="btn-save-suite" class="btn-suite" title="Save selected tests as a named suite">Save suite</button>
-						<button type="button" id="btn-delete-suite" class="btn-suite btn-suite-delete" title="Delete this suite" style="display:none;">🗑</button>
-					</div>
+					${testSuiteRowHtml("tree-search-input")}
 					<div class="test-search-row"><input type="text" id="test-search" class="tree-search-input" placeholder="Search tests…" aria-label="Search test classes" /></div>
 					<div class="test-list" id="test-list"></div>
 				</div>

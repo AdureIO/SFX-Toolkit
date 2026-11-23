@@ -4,6 +4,7 @@
  * VS Code variables.
  */
 import { FILTER_BAR_VARS, filterGroupsMarkup, filterSearchMarkup } from "../utils/filterBarUi";
+import { TEST_SUITE_CSS, testSuiteRowHtml } from "../utils/testSuitesHtml";
 import { GRID_CSS } from "../utils/orgBrowser/gridCss";
 import { PROJECT_SELECTOR_CSS, projectSelectorMarkup } from "../utils/panelProjectUi";
 
@@ -29,6 +30,7 @@ ${GRID_CSS}
 ${PROJECT_SELECTOR_CSS}
 .top .asfx-project { margin-left: 0; }
 ${CENTER_CSS}
+${TEST_SUITE_CSS}
 </style>
 </head>
 <body>
@@ -110,6 +112,7 @@ ${CENTER_CSS}
             </div>
             <div class="card" id="specified-tests-wrap">
               <div class="subtitle">Test classes</div>
+              ${testSuiteRowHtml()}
               <input type="text" id="test-search" placeholder="Search tests…" aria-label="Search test classes" />
               <div class="test-list" id="test-list"></div>
             </div>

@@ -58,6 +58,7 @@ import { WebPreset } from "../utils/presetsWebPure";
 import { $, REFRESH_ICON, createFilterBar, esc, toggleIn, FilterBar } from "./shared/filterBar";
 import { createSharedFilterSync } from "./shared/sharedFilter";
 import { filterTestList, mountTestTree } from "./shared/testTree";
+import { mountTestSuites } from "./shared/testSuites";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -186,6 +187,7 @@ let history: HistoryEntry[] = [];
 let historyOpen = false;
 const historyExpanded = new Set<string>();
 let presets: WebPreset[] = [];
+const suites = mountTestSuites({ post, checked: checkedTests, onApplied: () => renderRight(), setStatus });
 let testClasses: { label: string; description: string }[] = [];
 let statusText = "";
 /** The first listing of this org finished (a selection carried in by "open in the Center" survives the `reset` before it). */
@@ -741,7 +743,7 @@ function onHistoryClick(e: Event): void {
 			break;
 		}
 		case "rerun":
-			post({ command: "historyRerun", id });
+			post({ command: "historyRerun", id, testClassNames: checkedTests() });
 			break;
 		case "setup":
 			post({ command: "historyOpenSetup", id });
@@ -1687,6 +1689,9 @@ window.addEventListener("message", (ev) => {
 		case "history":
 			history = Array.isArray(m.entries) ? m.entries : [];
 			renderHistory();
+			break;
+		case "testSuites":
+			suites.setSuites(Array.isArray(m.suites) ? m.suites : []);
 			break;
 		case "presets":
 			presets = Array.isArray(m.presets) ? m.presets : [];

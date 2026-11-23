@@ -40,6 +40,9 @@ import { getOrgByTarget, onOrgListUpdated } from "../utils/orgListCache";
 import { PanelProjectBinding, orgPickerForProject } from "../utils/panelProject";
 import { projectSelectorScript } from "../utils/panelProjectUi";
 import { checkOrgBeforeDeploy } from "../utils/preDeployCheck";
+import { loadTestSuites } from "../utils/testSuites";
+import { resolveRunTests } from "../utils/testSuitesPure";
+import { handleSuiteMessage, subscribeSuites } from "./testSuitesHost";
 import { listPresets, onDidChangePresets, savePreset } from "../utils/presetsStore";
 import { toWebPreset } from "../utils/presetsWebPure";
 import { isSalesforceProject, primaryProjectRoot } from "../utils/projectUtils";
@@ -184,6 +187,7 @@ export class SyncCenterPanelProvider {
 			onDidChangePresets((dir) => {
 				if (dir === this.projectDir()) void this.postPresets();
 			}),
+			subscribeSuites(() => this.projectDir(), () => this.postSuites()),
 			SharedMetadataFilter.subscribe("syncCenter", () => this.projectDir(), (f) => this.post({ type: "sharedFilter", query: f.query, types: f.types }))
 		);
 		this.setupWatchers();
@@ -311,7 +315,7 @@ export class SyncCenterPanelProvider {
 				await this.savePresetFromWebview(msg);
 				break;
 			case "historyRerun":
-				await this.historyRerun(String(msg.id ?? ""));
+				await this.historyRerun(String(msg.id ?? ""), Array.isArray(msg.testClassNames) ? msg.testClassNames.map(String) : []);
 				break;
 			case "historyOpenSetup":
 				await this.historyOpenSetup(String(msg.id ?? ""));
@@ -329,6 +333,12 @@ export class SyncCenterPanelProvider {
 			case "uiState":
 				void this.ctx?.workspaceState.update(UI_STATE_KEY, msg.state);
 				break;
+			case "saveTestSuite":
+			case "deleteTestSuite": {
+				const dir = this.projectDir();
+				if (dir) await handleSuiteMessage(msg, dir, () => this.postSuites());
+				break;
+			}
 			case "sharedFilter":
 				SharedMetadataFilter.set(this.projectDir(), { query: msg.query, types: msg.types }, "syncCenter");
 				break;
@@ -359,6 +369,7 @@ export class SyncCenterPanelProvider {
 		});
 		this.postHistory();
 		void this.postPresets();
+		this.postSuites();
 	}
 
 	private static async sendOrgs(): Promise<void> {
@@ -377,6 +388,11 @@ export class SyncCenterPanelProvider {
 		const root = this.projectDir();
 		if (!root || !this.local) return [];
 		return [...this.local.entries.values()].map((e) => ({ key: e.key, files: e.files.map((f) => path.relative(root, f).split(path.sep).join("/")) }));
+	}
+
+	private static postSuites(): void {
+		const root = this.projectDir();
+		this.post({ type: "testSuites", suites: root ? loadTestSuites(root) : [] });
 	}
 
 	private static async postPresets(): Promise<void> {
@@ -1148,7 +1164,7 @@ export class SyncCenterPanelProvider {
 	}
 
 	/** Run an entry again: same kind, same components, same test level; asks first. A delete goes through the full delete confirmation. */
-	private static async historyRerun(id: string): Promise<void> {
+	private static async historyRerun(id: string, checkedTests: string[]): Promise<void> {
 		const e = this.entryOf(id);
 		if (!e || !this.local) return;
 		if (!this.sameOrg(e.org)) {
@@ -1157,8 +1173,10 @@ export class SyncCenterPanelProvider {
 		}
 		const n = Math.max(e.componentCount, e.components.length);
 		const verb = e.kind === "validate" ? "Validate" : e.kind === "deploy" ? "Deploy" : e.kind === "retrieve" ? "Retrieve" : "Delete";
+		// The tests the entry recorded; when it recorded none, the classes checked in the Deploy section.
+		const tests = resolveRunTests(e.tests, e.testLevel === "RunSpecifiedTests" ? checkedTests : []);
 		if (e.kind === "delete") {
-			await this.doDelete({ refs: e.components.map(refOfKey), testLevel: e.testLevel || "RunLocalTests", testNames: e.tests ?? [] });
+			await this.doDelete({ refs: e.components.map(refOfKey), testLevel: e.testLevel || "RunLocalTests", testNames: tests });
 			return;
 		}
 		const detail = `${n} component${n === 1 ? "" : "s"}${e.testLevel ? ` · ${e.testLevel}` : ""} · ${this.orgLabel()}`;
@@ -1175,11 +1193,11 @@ export class SyncCenterPanelProvider {
 			return;
 		}
 		if (r.missing > 0) this.status(`${r.missing} component${r.missing === 1 ? " is" : "s are"} not in the project any more and are left out.`);
-		if (e.testLevel === "RunSpecifiedTests" && !(e.tests && e.tests.length > 0)) {
-			void vscode.window.showWarningMessage("This entry ran specified tests that were not recorded. Pick the tests in the Deploy section and deploy from the list.");
+		if (e.testLevel === "RunSpecifiedTests" && tests.length === 0) {
+			void vscode.window.showWarningMessage("This entry ran specified tests that were not recorded. Check the test classes in the Deploy section (or pick a suite) and re-run.");
 			return;
 		}
-		await this.doDeploy({ localKeys: r.keys, testLevel: e.testLevel || "RunLocalTests", testNames: e.tests ?? [], dryRun: e.kind === "validate" });
+		await this.doDeploy({ localKeys: r.keys, testLevel: e.testLevel || "RunLocalTests", testNames: tests, dryRun: e.kind === "validate" });
 	}
 
 	// ── HTML ─────────────────────────────────────────────────────────────────────
