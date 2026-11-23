@@ -11,6 +11,7 @@ import {
 	historyRowKeys,
 	historyViews,
 	objectOfChild,
+	onlyOrgRefs,
 	overwriteLocalKeys,
 	partialDeployLocalKeys,
 	pruneConflictChoices,
@@ -291,6 +292,28 @@ describe("sync center ui rules", () => {
 				deploymentSetupPath("0AfXX0000000001"),
 				"/lightning/setup/DeployStatus/page?address=%2Fchangemgmt%2FmonitorDeploymentsDetails.apexp%3FasyncId%3D0AfXX0000000001"
 			);
+		});
+	});
+
+	describe("onlyOrgRefs", () => {
+		const keys = new Set(["ApexClass:A", "CustomObject:Account", "Layout:Account-Account Layout"]);
+		it("drops refs that exist locally and keeps the rest", () => {
+			const refs = [
+				{ type: "ApexClass", fullName: "A" },
+				{ type: "ApexClass", fullName: "B" },
+				{ type: "CustomObject", fullName: "Account" },
+				{ type: "Layout", fullName: "Account-Account Layout" },
+			];
+			const r = onlyOrgRefs(refs, keys);
+			assert.deepStrictEqual(r.keep, [{ type: "ApexClass", fullName: "B" }]);
+			assert.deepStrictEqual(r.dropped.map((x) => x.fullName), ["A", "Account", "Account-Account Layout"]);
+		});
+		it("keeps everything when nothing is local, and handles empty input", () => {
+			assert.strictEqual(onlyOrgRefs([{ type: "ApexClass", fullName: "Z" }], new Set()).keep.length, 1);
+			assert.deepStrictEqual(onlyOrgRefs([], keys), { keep: [], dropped: [] });
+		});
+		it("matches type and name, not the name alone", () => {
+			assert.strictEqual(onlyOrgRefs([{ type: "ApexTrigger", fullName: "A" }], keys).keep.length, 1);
 		});
 	});
 });

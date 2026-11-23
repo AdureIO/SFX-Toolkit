@@ -254,3 +254,15 @@ export function historyRowKeys(entry: Pick<HistoryEntry, "components">, rows: re
 	}
 	return { keys: [...new Set(keys)], missing };
 }
+
+/**
+ * Delete from org: only components that are not in the local project may go. `localKeys` are the row keys of the
+ * local index (`orgLookupKey` of every entry, plus the `CustomObject:<Obj>` keys of partly local objects). A ref
+ * is matched the way `buildSyncRows` matches an org component: `compKey(type, fullName)`.
+ */
+export function onlyOrgRefs<T extends { type: string; fullName: string }>(refs: readonly T[], localKeys: ReadonlySet<string>): { keep: T[]; dropped: T[] } {
+	const keep: T[] = [];
+	const dropped: T[] = [];
+	for (const r of refs) (localKeys.has(compKey(r.type, r.fullName)) ? dropped : keep).push(r);
+	return { keep, dropped };
+}

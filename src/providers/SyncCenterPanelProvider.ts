@@ -48,7 +48,7 @@ import { getRetrieveTimes, recordDeployed } from "../utils/retrieveLog";
 import { SharedMetadataFilter } from "../utils/sharedFilterState";
 import { getHistory, onDidChangeHistory, recordHistory } from "../utils/syncHistory";
 import { openComponentDiff } from "../utils/syncDiff";
-import { deploymentSetupPath, historyDeployLocalKeys, overwriteLocalKeys, refOfKey, rowKeyOf } from "../utils/syncCenterUiPure";
+import { deploymentSetupPath, historyDeployLocalKeys, onlyOrgRefs, overwriteLocalKeys, refOfKey, rowKeyOf } from "../utils/syncCenterUiPure";
 import { reauthenticateOrg } from "../commands/orgCommands";
 import { DeployMetadataPanelProvider } from "./DeployMetadataPanelProvider";
 import { OperationPanelProvider } from "./OperationPanelProvider";
@@ -964,11 +964,25 @@ export class SyncCenterPanelProvider {
 			this.post({ type: "toast", text: `A ${this.busy} is running.`, kind: "warn" });
 			return cancelled();
 		}
+		// Only components that are not in the project may be deleted; the webview (or a History re-run) can be stale.
+		if (!this.local) {
+			void vscode.window.showWarningMessage("Delete from org: Local project not scanned yet.");
+			return cancelled();
+		}
+		const localKeys = new Set<string>([...this.local.entries.values()].map((e) => orgLookupKey(e.type, e.name)));
+		for (const k of partialObjectKeys(this.local.entries)) localKeys.add(rowKeyOf(k));
+		const { keep, dropped } = onlyOrgRefs(p.refs, localKeys);
+		if (keep.length === 0) {
+			void vscode.window.showInformationMessage("Delete from org: nothing to delete, all selected components exist locally.");
+			return cancelled();
+		}
+		p = { ...p, refs: keep };
+		const skippedLine = dropped.length > 0 ? [`Skipped ${dropped.length} component(s) that exist locally: ${dropped.slice(0, 5).map((r) => `${r.type}:${r.fullName}`).join(", ")}${dropped.length > 5 ? ", …" : ""}`, ""] : [];
 		const org = this.orgArg;
 		const check = await checkOrgForDestructive(org, root);
 		const n = p.refs.length;
 		const who = check.username && check.username !== check.display ? `${check.display} (${check.username})` : check.display;
-		const detail = [`Org: ${who}`, "", ...deleteListing(p.refs, 20), "", "This deletes the components from the org. It cannot be undone."].join("\n");
+		const detail = [`Org: ${who}`, "", ...skippedLine, ...deleteListing(p.refs, 20), "", "This deletes the components from the org. It cannot be undone."].join("\n");
 		const go = "Delete from org";
 		const choice = await vscode.window.showWarningMessage(`Delete ${n} component${n === 1 ? "" : "s"} from ${check.display}?`, { modal: true, detail }, go);
 		if (choice !== go) return cancelled();
