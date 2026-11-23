@@ -35,3 +35,7 @@ yarn.lock
 
 # Claude Code (local only)
 .claude/
+
+# Salesforce CLI local state
+.sf/
+.sfdx/
