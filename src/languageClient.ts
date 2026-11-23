@@ -30,6 +30,7 @@ import { onDidChangeProjects, onDidChangeActiveProject, projects as registryProj
 import { canonicalOrgKey } from "./utils/orgKey";
 import { getBufferOrgOverride } from "./utils/bufferOrgOverride";
 import { findSfdxProjectDir } from "./utils/projectUtils";
+import { knownProjectDirs } from "./utils/schemaHealthMonitor";
 import { buildProjectMap, NOTE_PROJECTS } from "./utils/lsProjectMap";
 import { scheduleStubSync, cleanRestartApex, getInitialSyncState, disposeStubSync } from "./utils/sobjectStubSync";
 import { outputChannel } from "./utils/outputChannel";
@@ -282,7 +283,6 @@ function startClient(context: vscode.ExtensionContext): void {
 		mapTimer = setTimeout(pushProjectMap, 100);
 	};
 	sendProjectMap = scheduleProjectMap;
-	const knownExtraDirs = new Set<string>();
 	disposables.push(
 		{ dispose: () => { if (mapTimer) clearTimeout(mapTimer); mapTimer = undefined; if (sendProjectMap === scheduleProjectMap) sendProjectMap = undefined; } },
 		onDidChangeProjects(scheduleProjectMap),
@@ -294,13 +294,10 @@ function startClient(context: vscode.ExtensionContext): void {
 		}),
 		// A document in a project nested deeper than discovery looks: its dir joins the map once.
 		vscode.workspace.onDidOpenTextDocument((d) => {
-			if (d.uri.scheme !== "file") return;
-			const dir = findSfdxProjectDir(d.uri.fsPath);
-			if (dir && !knownExtraDirs.has(dir)) {
-				knownExtraDirs.add(dir);
-				if (!registryProjects().some((p) => p.dir === dir)) scheduleProjectMap();
-			}
+			if (noteNestedProjectOf(d)) scheduleProjectMap();
 		}),
+		// A closed buffer document no longer needs its pinned partition.
+		vscode.workspace.onDidCloseTextDocument((d) => releaseEphemeralBuffers([d.uri.toString()])),
 	);
 
 	// When the org switches or metadata is refreshed, drop the host-side describe
@@ -381,15 +378,35 @@ function startClient(context: vscode.ExtensionContext): void {
 const DEFAULT_SERVER_HEAP_MB = 512;
 
 /** The language server's V8 heap cap in MB (setting, clamped to a sane range). */
-/** The project map for the server: registered projects + nested SFDX projects of open documents. */
+/**
+ * Every nested SFDX project dir (deeper than discovery looks) seen this session. It never
+ * shrinks (a file's partition must not depend on which documents are open) except for dirs
+ * that disappeared from disk.
+ */
+const nestedProjectDirs = new Set<string>();
+
+/** Remember the nested SFDX project of a file document; true when it is a new, unregistered dir. */
+function noteNestedProjectOf(d: vscode.TextDocument): boolean {
+	if (d.uri.scheme !== "file") return false;
+	const dir = findSfdxProjectDir(d.uri.fsPath);
+	if (!dir || nestedProjectDirs.has(dir)) return false;
+	nestedProjectDirs.add(dir);
+	return !registryProjects().some((p) => p.dir === dir);
+}
+
+/** The project map for the server: registered projects + every nested SFDX project seen so far. */
 function collectProjectMap() {
 	const regs = registryProjects();
 	const known = new Set(regs.map((p) => p.dir));
+	for (const d of vscode.workspace.textDocuments) noteNestedProjectOf(d);
 	const extraDirs = new Set<string>();
-	for (const d of vscode.workspace.textDocuments) {
-		if (d.uri.scheme !== "file") continue;
-		const dir = findSfdxProjectDir(d.uri.fsPath);
-		if (dir && !known.has(dir)) extraDirs.add(dir);
+	for (const dir of [...nestedProjectDirs, ...knownProjectDirs()]) {
+		if (known.has(dir)) continue;
+		if (!fs.existsSync(path.join(dir, "sfdx-project.json"))) {
+			nestedProjectDirs.delete(dir); // the project disappeared
+			continue;
+		}
+		extraDirs.add(dir);
 	}
 	return buildProjectMap({
 		projects: regs,
@@ -557,6 +574,15 @@ export function setEphemeralBuffers(uris: string[]): void {
 	for (const u of uris) ephemeralBufferUris.add(u);
 	if (client?.isRunning()) void client.sendNotification(NOTE_EPHEMERAL, { uris: [...ephemeralBufferUris] }).catch(() => {});
 	sendProjectMap?.(); // the buffers' partitions
+}
+
+/** Forget pinned buffer URIs (buffer closed, or moved to another project) and re-send the map. */
+export function releaseEphemeralBuffers(uris: string[]): void {
+	let removed = false;
+	for (const u of uris) removed = ephemeralBufferUris.delete(u) || removed;
+	if (!removed) return;
+	if (client?.isRunning()) void client.sendNotification(NOTE_EPHEMERAL, { uris: [...ephemeralBufferUris] }).catch(() => {});
+	sendProjectMap?.();
 }
 
 /**

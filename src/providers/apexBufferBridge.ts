@@ -7,6 +7,7 @@ import {
 	lsRequest,
 	refreshLanguageServerSchemaFor,
 	setEphemeralBuffers,
+	releaseEphemeralBuffers,
 	syncVirtualDocument,
 } from '../languageClient';
 import { clearBufferOrgOverride, setBufferOrgOverride } from '../utils/bufferOrgOverride';
@@ -63,6 +64,7 @@ export class ApexBufferBridge {
 	private _listSeq = 0;
 	/** Buffer URI the server was told is ephemeral (a project switch moves the buffer: tell it again). */
 	private _ephemeralFor: string | undefined;
+	private _ephemeralUris: string[] = [];
 
 	/**
 	 * @param bufferRelativePath workspace-relative path of the (historic) buffer file
@@ -107,8 +109,11 @@ export class ApexBufferBridge {
 		const file = this.getBufferUri();
 		if (!file) return false;
 		if (this._ephemeralFor !== file.toString()) {
+			// The workbench moved the buffer (another project): drop the previous pins.
+			if (this._ephemeralUris.length) releaseEphemeralBuffers(this._ephemeralUris);
 			this._ephemeralFor = file.toString();
-			setEphemeralBuffers(this.getDocumentUris());
+			this._ephemeralUris = this.getDocumentUris();
+			setEphemeralBuffers(this._ephemeralUris);
 		}
 		const changed = setBufferOrgOverride(file.fsPath, org);
 		if (changed) refreshLanguageServerSchemaFor(this.getDocumentUris());

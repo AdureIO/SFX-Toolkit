@@ -21,6 +21,7 @@ import * as os from "os";
 import * as path from "path";
 import * as fs from "fs";
 import { pathToFileURL, fileURLToPath } from "url";
+import * as ts from "typescript";
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const rpc = require("vscode-jsonrpc/node");
 
@@ -389,5 +390,89 @@ describe("language server: index partitions by default org", function () {
 			assert.ok(!fs.existsSync(path.join(s.root, ".sfdx")), "nothing written at the workspace root");
 			assert.ok(!fs.existsSync(stub("projC")), "C never navigated: no stub of its own");
 		});
+	});
+});
+
+describe("partitions module (unit)", () => {
+	let tmp: string;
+	let P: any;
+
+	before(() => {
+		tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "sfx-partmod-")));
+		for (const f of ["partitions", "caches"]) {
+			const src = path.join(__dirname, "..", "..", "server", "src", `${f}.ts`);
+			const out = ts.transpileModule(fs.readFileSync(src, "utf8"), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } });
+			fs.writeFileSync(path.join(tmp, `${f}.js`), out.outputText);
+		}
+		P = require(path.join(tmp, "partitions.js")).Partitions;
+	});
+	after(() => fs.rmSync(tmp, { recursive: true, force: true }));
+	beforeEach(() => P.clear());
+
+	const mk = (rel: string, text = "{}") => {
+		const f = path.join(tmp, rel);
+		fs.mkdirSync(path.dirname(f), { recursive: true });
+		fs.writeFileSync(f, text);
+	};
+	const map = (projects: { dir: string; partition: string }[], activeDir?: string, buffers: Record<string, string> = {}) => ({
+		projects: projects.map((p) => ({ ...p, namespace: null })),
+		activeDir: activeDir ?? null,
+		buffers,
+	});
+
+	it("an active-dir change alone is silent: no change signal, no listener, no schema refresh", () => {
+		const a = path.join(tmp, "a");
+		const b = path.join(tmp, "b");
+		const projects = [{ dir: a, partition: "org:1" }, { dir: b, partition: "org:2" }];
+		let fired = 0;
+		P.onChange(() => fired++);
+		assert.strictEqual(P.set(map(projects, a)), true);
+		assert.strictEqual(fired, 1);
+		assert.strictEqual(P.set(map(projects, b)), false, "active switch → not a change");
+		assert.strictEqual(fired, 1);
+		assert.strictEqual(P.activePartition(), "org:2", "workspace symbols read the active partition live");
+		assert.strictEqual(P.set(map(projects.slice(0, 1), b)), true, "a project-set change still signals");
+	});
+
+	it("a nested project keeps its partition once mapped, whether or not its documents are open", () => {
+		const outer = path.join(tmp, "outer");
+		const nested = path.join(outer, "deep", "deeper", "nested");
+		mk("outer/sfdx-project.json");
+		mk("outer/deep/deeper/nested/sfdx-project.json");
+		const file = path.join(nested, "force-app", "classes", "X.cls");
+		// Not mapped yet: the mapped ancestor wins (host maps nested dirs as soon as it sees them).
+		P.set(map([{ dir: outer, partition: "org:1" }]));
+		assert.strictEqual(P.partitionOfPath(file), "org:1");
+		// The host maps it (and keeps it mapped after the document closes): its own org applies.
+		P.set(map([{ dir: outer, partition: "org:1" }, { dir: nested, partition: "org:2" }]));
+		assert.strictEqual(P.partitionOfPath(file), "org:2");
+		assert.strictEqual(P.projectDirOf(file), nested);
+		// Nothing about open documents is involved: the same answer on every later lookup.
+		assert.strictEqual(P.partitionOfPath(file), "org:2");
+		assert.strictEqual(P.partitionOfPath(path.join(outer, "force-app", "Y.cls")), "org:1");
+	});
+
+	it("MDAPI src/package.xml inside an SFDX project is not a project root", () => {
+		mk("sfdxp/sfdx-project.json");
+		mk("sfdxp/legacy/src/package.xml", "<Package/>");
+		mk("mdapi/src/package.xml", "<Package/>");
+		assert.strictEqual(P.partitionOfPath(path.join(tmp, "sfdxp", "legacy", "src", "classes", "A.cls")), `dir:${path.join(tmp, "sfdxp")}`);
+		assert.strictEqual(P.partitionOfPath(path.join(tmp, "mdapi", "src", "classes", "A.cls")), `dir:${path.join(tmp, "mdapi")}`);
+	});
+
+	it("checks mapped ancestors before touching the disk, and caches every visited ancestor", () => {
+		const proj = path.join(tmp, "nodisk", "proj");
+		P.set(map([{ dir: proj, partition: "org:z" }]));
+		const orig = fs.existsSync;
+		let calls = 0;
+		(fs as any).existsSync = (...a: any[]) => { calls++; return (orig as any)(...a); };
+		try {
+			assert.strictEqual(P.partitionOfPath(path.join(proj, "a", "b", "c", "X.cls")), "org:z");
+			assert.strictEqual(calls, 0, "mapped ancestor: no disk probe");
+			assert.strictEqual(P.partitionOfPath(path.join(proj, "a", "b", "Y.cls")), "org:z");
+			assert.strictEqual(calls, 0);
+		} finally {
+			(fs as any).existsSync = orig;
+		}
 	});
 });
