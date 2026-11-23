@@ -2,38 +2,33 @@ import * as vscode from "vscode";
 import {
   getTestClassItems,
   buildDeployCommand,
-  createDeployProgressHandler,
   getPackageDirectories,
-  DEPLOY_TIMEOUT_MS,
   DEPLOY_TYPE_RUN_ALL,
   DEPLOY_TYPE_RUN_RELEVANT,
   DEPLOY_TYPE_SPECIFIED,
   DEPLOY_TYPE_NO_TESTS
 } from "../commands/deployMetadata";
 import { confirmProductionOrgOperation } from "../utils/orgSafety";
-import { listPresets, savePreset, type DeployPreset, type DeployTypeKey } from "../utils/presetsStore";
+import { listPresets, onDidChangePresets, savePreset, type DeployPreset, type DeployTypeKey } from "../utils/presetsStore";
+import { WebPreset, toWebPreset } from "../utils/presetsWebPure";
 import { PanelProjectBinding, orgPickerForProject } from "../utils/panelProject";
 import { PROJECT_SELECTOR_CSS, projectSelectorMarkup, projectSelectorScript } from "../utils/panelProjectUi";
 import { FILTER_BAR_CSS, FILTER_BAR_VARS, filterGroupsMarkup, filterSearchMarkup } from "../utils/filterBarUi";
 import { getNonce } from "../utils/htmlUtils";
 import { onDidChangeDefaultOrg } from "../utils/defaultOrgEvents";
 import { runCommand } from "../utils/commandRunner";
-import { Logger, DeployLog } from "../utils/outputChannel";
-import { cleanDeployOutput, parseDeployStats, parseCoverageData } from "../commands/devCommands";
+import { Logger } from "../utils/outputChannel";
 import { addDeployHistoryEntry } from "../commands/deployHistory";
-import { clearDeployDiagnostics, setDeployDiagnosticsFromFailure, setDeployDiagnosticsFromApiResult, formatApiDeployResultForLog, componentFailuresOf, withSyntheticTestFailures } from "../utils/deployDiagnostics";
-import { deployPathsForComponents, pathsToComponents, presetComponents, relativeFilesOf, type RelComponent } from "../utils/deployComponentsPure";
+import { withSyntheticTestFailures } from "../utils/deployDiagnostics";
+import { deployPathsForComponents, pathsToComponents, relativeFilesOf, type RelComponent } from "../utils/deployComponentsPure";
 import { hiddenSelectionPrompt, splitByVisibility } from "../utils/orgBrowser/selection";
-import { runJsonDeploy } from "../utils/deployEngine";
+import { runDeploy, reportDeployOutcome } from "../utils/deployFlow";
 import { recordHistory } from "../utils/syncHistory";
 import { historyErrorsFromDeploy } from "../utils/historyPure";
-import { statsFromResult, coverageFromResult, toApiDeployResult, formatStatus, formatElapsed, formatResultSummary, type DeployStats, type CoverageRow } from "../utils/deployStatusMap";
 import { AuthInfo } from "../utils/authInfo";
-import { OperationPanelProvider } from "./OperationPanelProvider";
 import { DeployPanelHost } from "./DeployPanelHost";
 import { preDeployPrompt } from "../utils/deployStatusPure";
 import { SharedMetadataFilter } from "../utils/sharedFilterState";
-import { reportError, reportSuccess } from "../utils/reportError";
 import { upsertTestSuite, deleteTestSuite as deleteTestSuiteEntry, loadTestSuites, type TestSuite } from "../utils/testSuites";
 
 /** Panel state we persist in the extension so it survives webview HTML replacement (tab switch/revive). */
@@ -50,18 +45,6 @@ export interface DeployPanelState {
   validateOnly?: boolean;
   /** Webview UI state (filter, collapsed groups, filter panel). */
   ui?: unknown;
-}
-
-/** A preset as the webview sees it: components, whatever the file stored. */
-interface WebPreset {
-  name: string;
-  components: string[];
-  deployType: DeployTypeKey;
-  testClassNames: string[];
-  targetOrg?: string;
-  validateOnly?: boolean;
-  /** Paths of an old preset that matched no component. */
-  unmatched: number;
 }
 
 interface DeployInitData {
@@ -125,16 +108,7 @@ export class DeployMetadataPanelProvider {
 
   /** A stored preset as the webview sees it (old path presets are mapped to components through the local index). */
   private static toWebPreset(p: DeployPreset & { validateOnly?: boolean }, rel: readonly RelComponent[]): WebPreset {
-    const r = presetComponents(p, rel);
-    return {
-      name: p.name,
-      components: r.keys,
-      deployType: p.deployType,
-      testClassNames: Array.isArray(p.testClassNames) ? p.testClassNames : [],
-      targetOrg: p.targetOrg,
-      validateOnly: p.validateOnly,
-      unmatched: r.unmatched.length
-    };
+    return toWebPreset(p, rel);
   }
 
   public static async show(initialPreset?: DeployPreset): Promise<void> {
@@ -517,181 +491,35 @@ export class DeployMetadataPanelProvider {
         }
         panel.webview.postMessage({ command: "status", text: "" });
 
-        // Normalized result the post-processing consumes, whichever deploy path ran.
-        // `apiResult` (REST) feeds Problems directly; `errorText` (CLI fallback) is
-        // parsed for diagnostics the legacy way.
-        type FinalOutcome =
-          | { kind: "cancelled" }
-          | { kind: "success"; stats: DeployStats; coverage: CoverageRow[]; apiResult?: import("../utils/deployDiagnostics").ApiDeployResult; completedAt?: number; deployId?: string }
-          | { kind: "failed"; stats: DeployStats; coverage: CoverageRow[]; apiResult?: import("../utils/deployDiagnostics").ApiDeployResult; errorText?: string; deployId?: string };
-
-        const deployStartTime = Date.now();
         panel.webview.postMessage({ command: "deployStart", dryRun });
-
-        const liveStatus = vscode.workspace
-          .getConfiguration("adure-sfx-toolkit")
-          .get<boolean>("deploy.liveStatus", true);
-
-        const deployOpLabel = dryRun ? "Validation" : "Deploy";
-        const operationHandle = OperationPanelProvider.beginOperation(deployOpLabel, msg.targetOrg || undefined);
-
-        const outcome: FinalOutcome = await trackDeploy(() => vscode.window.withProgress(
-          {
-            location: vscode.ProgressLocation.Notification,
-            title: dryRun ? "Validating deployment…" : "Deploying",
-            cancellable: true
-          },
-          async (progress, token): Promise<FinalOutcome> => {
-            clearDeployDiagnostics();
-            progress.report({ message: "Preparing…" });
-
-            // ── CLI streaming fallback (original behavior), normalized to FinalOutcome ──
-            const runCliStreaming = async (): Promise<FinalOutcome> => {
-              const cmd = buildDeployCommand(absPaths, testLevel, testFlags, dryRun, workspaceRoot, msg.targetOrg || undefined);
-              const progressHandler = createDeployProgressHandler(
-                (message) => progress.report({ message }),
-                { onStatusFailed: () => progress.report({ message: "Status: Failed" }) }
-              );
-              try {
-                const result = await runCommand(cmd, workspaceRoot, progressHandler, false, token, DEPLOY_TIMEOUT_MS);
-                DeployLog.line(`Deploy result (from CLI output):\n${cleanDeployOutput(result)}`);
-                return { kind: "success", stats: parseDeployStats(result), coverage: parseCoverageData(result) };
-              } catch (e: unknown) {
-                const err = e as { cancelled?: boolean; message?: string };
-                if (err.cancelled) return { kind: "cancelled" };
-                const errorText = err.message ?? String(e);
-                return { kind: "failed", stats: parseDeployStats(errorText), coverage: [], errorText };
-              }
-            };
-
-            if (!liveStatus) return runCliStreaming();
-
-            // ── Synchronous --json deploy (updates source tracking) + live REST status ──
-            const submitCmd = buildDeployCommand(absPaths, testLevel, testFlags, dryRun, workspaceRoot, msg.targetOrg || undefined);
-            try {
-              const res = await runJsonDeploy({
-                submitCommand: submitCmd,
-                cwd: workspaceRoot,
-                org: targetOrg,
-                token,
-                timeoutMs: DEPLOY_TIMEOUT_MS,
-                onStatus: (s) => {
-                  progress.report({ message: formatStatus(s) });
-                  operationHandle.updateLiveStatus(s);
-                }
-              });
-              if (res.kind === "cancelled") return { kind: "cancelled" };
-              if (res.kind === "nothing") {
-                return { kind: "success", stats: { components: 0, componentErrors: 0, testsPassed: 0, testsFailed: 0 }, coverage: [] };
-              }
-              if (res.kind === "failed") {
-                const dr = res.result;
-                return dr
-                  ? { kind: "failed", stats: statsFromResult(dr), coverage: coverageFromResult(dr), apiResult: toApiDeployResult(dr), deployId: dr.id }
-                  : { kind: "failed", stats: { components: 0, componentErrors: 0, testsPassed: 0, testsFailed: 0 }, coverage: [], errorText: res.errorText };
-              }
-              const dr = res.result;
-              // The org's own completion time (server clock), for the retrieve / deploy log when the org reports no newer lastModifiedDate.
-              const completed = Date.parse(String((dr as { completedDate?: unknown }).completedDate ?? ""));
-              return { kind: "success", stats: statsFromResult(dr), coverage: coverageFromResult(dr), apiResult: toApiDeployResult(dr), completedAt: Number.isNaN(completed) ? undefined : completed, deployId: dr.id };
-            } catch (e: unknown) {
-              // Unexpected engine error → fall back to the classic CLI streaming path.
-              Logger.info(`Live deploy failed unexpectedly; falling back to CLI streaming: ${(e as { message?: string })?.message ?? String(e)}`);
-              return runCliStreaming();
-            }
-          }
-        ));
-
-        const durationMs = Date.now() - deployStartTime;
+        const run = await runDeploy({ absPaths, testLevel, testFlags, dryRun, root: workspaceRoot, targetOrg, track: trackDeploy });
+        const { outcome, startedAt: deployStartTime, durationMs } = run;
+        const report = () => reportDeployOutcome({ run, dryRun, root: workspaceRoot, targetOrg });
 
         if (outcome.kind === "cancelled") {
           panel.webview.postMessage({ command: "deployResult", success: false, cancelled: true, dryRun, components: 0, componentErrors: 0, testsPassed: 0, testsFailed: 0, durationMs, targetOrg: msg.targetOrg ?? "" });
           addDeployHistoryEntry({ timestamp: deployStartTime, status: "Cancelled", dryRun, components: 0, componentErrors: 0, testsPassed: 0, testsFailed: 0, durationMs, targetOrg: msg.targetOrg ?? "", sourcePaths: sourcePathsForHistory, presetName: msg.presetName ?? null, deployType: msg.deployType, testClassNames: msg.testClassNames });
-          vscode.window.showInformationMessage(dryRun ? "Validation cancelled." : "Deploy cancelled.");
-          operationHandle.dispose();
+          report();
           return;
         }
 
         if (outcome.kind === "success") {
           const { stats, coverage, apiResult } = outcome;
-          // Result summary (status, deployed components, tests) → deploy log.
-          if (apiResult) {
-            DeployLog.line(formatApiDeployResultForLog(apiResult, `${dryRun ? "Validation" : "Deploy"} succeeded (${formatElapsed(durationMs)}):`));
-          }
           panel.webview.postMessage({ command: "deployResult", success: true, cancelled: false, dryRun, ...stats, coverage, durationMs, targetOrg: msg.targetOrg ?? "" });
           // A real deploy: record the components with the org's new lastModifiedDate (our own deploy must not show as "changed in org") and re-list their types.
           if (!dryRun && (apiResult !== undefined || stats.components > 0)) void hostNow.afterDeploy(deployedKeys, outcome.completedAt ?? Date.now());
           addDeployHistoryEntry({ timestamp: deployStartTime, status: "Succeeded", dryRun, ...stats, durationMs, targetOrg: msg.targetOrg ?? "", sourcePaths: sourcePathsForHistory, presetName: msg.presetName ?? null, deployType: msg.deployType, testClassNames: msg.testClassNames });
           recordHistory(workspaceRoot, { kind: dryRun ? "validate" : "deploy", org: msg.targetOrg ?? "", at: deployStartTime, durationMs, components: deployedKeys, testLevel: testLevel, deployId: outcome.deployId, ok: true, source: "deployPanel" });
-          const okSummary = apiResult ? formatResultSummary(apiResult) : "";
-          reportSuccess({
-            operation: deployOpLabel,
-            org: msg.targetOrg || undefined,
-            summary: `${formatElapsed(durationMs)}${okSummary ? ` · ${okSummary}` : ""}`,
-            apiResult,
-            handle: operationHandle,
-            message: `${deployOpLabel} completed in ${formatElapsed(durationMs)}${okSummary ? ` · ${okSummary}` : ""}.`
-          });
+          report();
           return;
         }
 
         // outcome.kind === "failed"
-        // Not auto-opening the Output log here — everything is still written to it (DeployLog.line
-        // calls below), but "Show details" on the toast should open the Operation panel, not steal
-        // focus to a different view the user didn't ask for.
         const { stats, coverage, apiResult, errorText } = outcome;
         panel.webview.postMessage({ command: "deployResult", success: false, cancelled: false, dryRun, ...stats, coverage, durationMs, targetOrg: msg.targetOrg ?? "" });
         addDeployHistoryEntry({ timestamp: deployStartTime, status: "Failed", dryRun, ...stats, durationMs, targetOrg: msg.targetOrg ?? "", sourcePaths: sourcePathsForHistory, presetName: msg.presetName ?? null, deployType: msg.deployType, testClassNames: msg.testClassNames });
         recordHistory(workspaceRoot, { kind: dryRun ? "validate" : "deploy", org: msg.targetOrg ?? "", at: deployStartTime, durationMs, components: deployedKeys, testLevel: testLevel, deployId: outcome.deployId, ok: false, errors: historyErrorsFromDeploy(apiResult ? withSyntheticTestFailures(apiResult) : undefined, errorText), source: "deployPanel" });
-        const failSummary = apiResult ? formatResultSummary(apiResult) : "";
-        void vscode.window
-          .withProgress(
-            { location: vscode.ProgressLocation.Notification, title: "Parsing failure details…", cancellable: false },
-            async (p) => {
-              p.report({ message: "Setting diagnostics…" });
-              if (apiResult) {
-                // Structured failures straight from the Metadata API → Problems. Fold in code
-                // coverage warnings and Apex test failures — the API returns those in separate
-                // fields (details.runTestResult), not componentFailures, so a deploy that fails
-                // ONLY on org-wide coverage (clean component/test counts) would otherwise show
-                // nothing here at all.
-                setDeployDiagnosticsFromApiResult(workspaceRoot, withSyntheticTestFailures(apiResult));
-              } else {
-                await setDeployDiagnosticsFromFailure(workspaceRoot, errorText ?? "", targetOrg);
-              }
-            }
-          )
-          .then(() => {
-            const failures = apiResult ? componentFailuresOf(withSyntheticTestFailures(apiResult)) : [];
-            // "Show original error output" must be the actual unmodified payload, not a
-            // reformatted table and not the synthetic failures merged in above (those are
-            // derived, not what the API returned) — the human-readable summary already went to
-            // the Output log via setDeployDiagnosticsFromApiResult.
-            const raw = errorText || (apiResult ? JSON.stringify(apiResult, null, 2) : `${deployOpLabel} failed.`);
-            // Salesforce sometimes reports Status: Failed with clean component/test counts and no
-            // errorMessage/stateDetail at all (e.g. an org-wide requirement not tied to one
-            // component) — without a fallback here the pretty card has nothing to show.
-            const topError =
-              apiResult?.errorMessage ??
-              apiResult?.stateDetail ??
-              (apiResult && failures.length === 0
-                ? `${deployOpLabel} failed, but the org reported no error message, component failures, or test failures. See the original output below.`
-                : undefined);
-            reportError({
-              operation: deployOpLabel,
-              error: raw,
-              failures,
-              topError,
-              org: msg.targetOrg || undefined,
-              reauthOrg: msg.targetOrg || undefined,
-              handle: operationHandle,
-              message: `${deployOpLabel} failed after ${formatElapsed(durationMs)}${failSummary ? ` · ${failSummary}` : ""}.`,
-              extraButton: {
-                label: "Show diagnostics",
-                onClick: () => void vscode.commands.executeCommand("workbench.actions.view.problems")
-              }
-            });
-          });
+        report();
         } finally {
           hostNow.resumeCompare();
         }
@@ -708,6 +536,15 @@ export class DeployMetadataPanelProvider {
         if (DeployMetadataPanelProvider._panel !== panel || root !== liveRoot) return;
         void panel.webview.postMessage({ command: "defaultOrgChanged", orgs, defaultOrg: defaultOrg || (orgs[0]?.username ?? "") });
       } catch { /* keep the current list */ }
+    });
+
+    // Presets saved elsewhere (the Deploy & Retrieve Center) show up in the list at once.
+    const presetsSub = onDidChangePresets((dir) => {
+      if (dir !== liveRoot) return;
+      void listPresets(dir).then((list) => {
+        if (dir !== liveRoot) return;
+        void panel.webview.postMessage({ command: "presetsChanged", presets: list.map((p) => DeployMetadataPanelProvider.toWebPreset(p, host.relComponents())) });
+      });
     });
 
     const sharedFilterSub = SharedMetadataFilter.subscribe("deploy", () => liveRoot, (f) => void panel.webview.postMessage({ command: "sharedFilter", query: f.query, types: f.types }));
@@ -745,6 +582,7 @@ export class DeployMetadataPanelProvider {
       listenerDisposable.dispose();
       defaultOrgSub.dispose();
       sharedFilterSub.dispose();
+      presetsSub.dispose();
       projectSub.dispose();
       selectorSub.dispose();
       binding.dispose();

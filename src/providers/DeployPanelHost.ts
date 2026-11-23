@@ -9,8 +9,7 @@ import { getRetrieveTimes, recordDeployed } from "../utils/retrieveLog";
 import { metadataDiffForFile } from "../commands/metadataDiff";
 import { DeployOrgStatus } from "../utils/deployOrgStatus";
 import { RelComponent, folderRestriction, nameOfComponentKey, pathsToComponents, typeOfComponentKey } from "../utils/deployComponentsPure";
-import { OrgCompInfo, PreDeployDecision, evaluatePreDeploy, orgLookupKey } from "../utils/deployStatusPure";
-import { effectiveSyncedAt } from "../utils/compareStatusPure";
+import { PreDeployCheck, checkOrgBeforeDeploy } from "../utils/preDeployCheck";
 import { CompareTarget } from "../utils/contentCompare";
 import { innerFilesOfEntry, requestNameOf } from "../utils/contentComparePure";
 import { CompareLease, acquireCompare, compareMode } from "../utils/contentCompareHost";
@@ -20,17 +19,7 @@ import { LocalEntry, buildTypeTable, readPackageDirectories, scanProject } from 
 import { makeSoapCall } from "../utils/orgBrowser/soapTransport";
 import { Comp } from "../utils/orgBrowser/types";
 
-/** Result of the live check right before a deploy / validation. */
-export interface PreDeployCheck {
-	/** Null when the org could not be asked (the deploy still goes ahead). */
-	decision: PreDeployDecision | null;
-	/** Why the org could not be asked. */
-	error?: string;
-	/** Metadata types listed live, and the SOAP calls that took (for the log). */
-	types: string[];
-	soapCalls: number;
-	ms: number;
-}
+export type { PreDeployCheck };
 
 export interface DeployHostDeps {
 	ctx: vscode.ExtensionContext;
@@ -421,53 +410,24 @@ export class DeployPanelHost implements vscode.Disposable {
 
 	// ── Right before a deploy ────────────────────────────────────────────────────
 
-	/**
-	 * Ask the org NOW (never the cache) whether any selected component changed since this toolkit last
-	 * retrieved or deployed it. Lists live only the metadata types of the selected components (folder
-	 * types: only their folders), then decides with `evaluatePreDeploy`. An org that cannot be asked
-	 * (expired session, offline) does not block: the result has no decision and the deploy goes on.
-	 */
+	/** The live check right before a deploy / validation (see `checkOrgBeforeDeploy`); the rows get the fresher data too. */
 	async checkBeforeDeploy(keys: string[]): Promise<PreDeployCheck> {
-		const types = [...new Set(keys.map(typeOfComponentKey))];
-		const t0 = Date.now();
-		const calls0 = this.soapCalls;
-		const done = (decision: PreDeployDecision | null, error?: string): PreDeployCheck => ({ decision, error, types, soapCalls: this.soapCalls - calls0, ms: Date.now() - t0 });
-		if (!this.orgKey || this.orgKey === DEFAULT_ORG_KEY) return done(null, "no target org");
-		// A background refresh would race with this one over the same state.
-		if (this.run) this.run.cancelled = true;
-		const selected = keys.map((key) => ({ key, type: typeOfComponentKey(key), name: nameOfComponentKey(key) }));
-		try {
-			const outcome = await vscode.window.withProgress({ location: vscode.ProgressLocation.Window, title: "Checking the org for changes…" }, () =>
-				this.status.refresh(types, { onlyFolders: folderRestriction(keys) })
-			);
-			const orgComps = new Map<string, OrgCompInfo>();
-			for (const c of selected) {
-				const info = this.status.get(c.type, c.name);
-				if (info) orgComps.set(orgLookupKey(c.type, c.name), info);
-			}
-			// Last sync = retrieve / deploy log or the last content-verified "same"; verified-equal components never warn.
-			const log = getRetrieveTimes(this.orgArg);
-			const service = this.lease?.service;
-			const syncedAt: Record<string, number> = {};
-			for (const c of selected) {
-				const t = effectiveSyncedAt(log[c.key], service?.verifiedSyncAt(c.key));
-				if (t !== undefined) syncedAt[c.key] = t;
-			}
-			const verifiedEqual = service ? await service.verifiedEqualNow(this.compareTargets(selected.map((c) => c.key))) : undefined;
-			const decision = evaluatePreDeploy({
-				selected,
-				orgComps,
-				listedTypes: new Set(outcome.listed),
-				failedTypes: outcome.failed,
-				syncedAt,
-				verifiedEqual,
-			});
-			this.postOrgStatus("ok"); // the rows get the fresher data too
-			return done(decision);
-		} catch (e: unknown) {
-			if (e instanceof ListCancelled) return done(null, "cancelled");
-			return done(null, String((e as Error)?.message ?? e).replace(/\s+/g, " ").trim().slice(0, 240));
-		}
+		const check = await checkOrgBeforeDeploy(
+			{
+				status: this.status,
+				orgKey: this.orgKey,
+				orgArg: this.orgArg,
+				service: this.lease?.service,
+				compareTargets: (k) => this.compareTargets(k),
+				soapCalls: () => this.soapCalls,
+				cancelBackground: () => {
+					if (this.run) this.run.cancelled = true;
+				},
+			},
+			keys
+		);
+		if (check.decision) this.postOrgStatus("ok");
+		return check;
 	}
 
 	/**
