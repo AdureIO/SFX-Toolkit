@@ -1,5 +1,4 @@
 import * as vscode from "vscode";
-import * as path from "path";
 import {
   getTestClassItems,
   buildDeployCommand,
@@ -31,6 +30,7 @@ import { AuthInfo } from "../utils/authInfo";
 import { OperationPanelProvider } from "./OperationPanelProvider";
 import { DeployPanelHost } from "./DeployPanelHost";
 import { preDeployPrompt } from "../utils/deployStatusPure";
+import { SharedMetadataFilter } from "../utils/sharedFilterState";
 import { reportError, reportSuccess } from "../utils/reportError";
 import { upsertTestSuite, deleteTestSuite as deleteTestSuiteEntry, loadTestSuites, type TestSuite } from "../utils/testSuites";
 
@@ -267,6 +267,7 @@ export class DeployMetadataPanelProvider {
         org?: string | null;
         types?: string[];
         key?: string;
+        query?: string;
         legacyState?: { sourcePaths?: string[] } & Partial<DeployPanelState>;
       }) => {
         // A message from a webview load that a project switch has since replaced: its root / paths are stale.
@@ -311,9 +312,16 @@ export class DeployMetadataPanelProvider {
             orgs,
             defaultOrg,
             savedState,
-            testSuites
+            testSuites,
+            sharedFilter: SharedMetadataFilter.get(workspaceRoot)
           });
           void hostNow.refreshModified(false);
+          return;
+        }
+        if (msg.command === "sharedFilter") {
+          // Search text and type selection are shared with the Org Browser (per project).
+          const m = msg as { query?: unknown; types?: unknown };
+          SharedMetadataFilter.set(workspaceRoot, { query: m.query, types: m.types }, "deploy");
           return;
         }
         if (msg.command === "orgChanged") {
@@ -686,6 +694,8 @@ export class DeployMetadataPanelProvider {
       } catch { /* keep the current list */ }
     });
 
+    const sharedFilterSub = SharedMetadataFilter.subscribe("deploy", () => liveRoot, (f) => void panel.webview.postMessage({ command: "sharedFilter", query: f.query, types: f.types }));
+
     // Project selector: the header dropdown (or the active project, while not pinned) switched the
     // panel's project. Reload everything project-bound as if the panel were newly opened.
     const selectorSub = binding.attach(panel.webview);
@@ -718,6 +728,7 @@ export class DeployMetadataPanelProvider {
       host.dispose(); // watchers, debounce timers, running org listing
       listenerDisposable.dispose();
       defaultOrgSub.dispose();
+      sharedFilterSub.dispose();
       projectSub.dispose();
       selectorSub.dispose();
       binding.dispose();

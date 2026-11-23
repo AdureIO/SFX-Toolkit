@@ -22,6 +22,7 @@ import {
 } from "../utils/orgBrowser/filter";
 import { splitByVisibility } from "../utils/orgBrowser/selection";
 import { $, REFRESH_ICON, createFilterBar, esc, toggleIn, FilterBar } from "./shared/filterBar";
+import { createSharedFilterSync } from "./shared/sharedFilter";
 import { Comp, ListFailure, STATUS_CHANGED, STATUS_LOCAL, STATUS_PARTIAL, TypeInfo, compKey } from "../utils/orgBrowser/types";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -105,6 +106,15 @@ let terms: string[] = [];
 let active = -1;
 let anchor = -1;
 let bar: FilterBar;
+/** Search text and type selection shared with the Deploy panel (per project). */
+const sharedSync = createSharedFilterSync({
+	filter: () => ui.filter,
+	applied: () => {
+		bar.syncSearchInput();
+		recompute(true);
+	},
+	send: (s) => post({ command: "sharedFilter", query: s.query, types: s.types }),
+});
 let first = -1;
 let last = -1;
 
@@ -175,6 +185,7 @@ function hiddenSelected(): string[] {
 }
 
 function recompute(resetScroll = false): void {
+	sharedSync.changed();
 	visibleKeysCache = null;
 	ensureStatus();
 	const c = ctx();
@@ -959,6 +970,7 @@ window.addEventListener("message", (ev) => {
 			projectName = m.projectName ?? "";
 			noOrg = orgs.length === 0;
 			mergeUi((m.ui as UiState | null) ?? (api.getState() as UiState | null));
+			sharedSync.init(m.shared);
 			bar.syncSearchInput();
 			applyWidths();
 			renderOrgSelect();
@@ -1062,6 +1074,9 @@ window.addEventListener("message", (ev) => {
 		}
 		case "toast":
 			toast(m.text, m.kind);
+			break;
+		case "sharedFilter":
+			sharedSync.receive({ query: String(m.query ?? ""), types: Array.isArray(m.types) ? m.types.map(String) : [] });
 			break;
 	}
 });

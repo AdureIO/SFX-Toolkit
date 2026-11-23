@@ -12,6 +12,7 @@ import { getOrgByTarget, getOrgListForPicker, onOrgListUpdated } from "../utils/
 import { primaryProjectRoot, isSalesforceProject } from "../utils/projectUtils";
 import { PanelProjectBinding } from "../utils/panelProject";
 import { PROJECT_SELECTOR_CSS, projectSelectorMarkup, projectSelectorScript } from "../utils/panelProjectUi";
+import { SharedMetadataFilter } from "../utils/sharedFilterState";
 import { FILTER_BAR_CSS, FILTER_BAR_VARS, filterGroupsMarkup, filterSearchMarkup } from "../utils/filterBarUi";
 import { confirmOverwrite, revertOpenEditors } from "../utils/retrieveSafety";
 import { retrieveComponents } from "../utils/retrieveEngine";
@@ -228,6 +229,9 @@ export class OrgBrowserPanelProvider {
 			case "uiState":
 				void this.ctx?.workspaceState.update(UI_STATE_KEY, msg.state);
 				break;
+			case "sharedFilter":
+				SharedMetadataFilter.set(this.projectDir(), { query: msg.query, types: msg.types }, "orgBrowser");
+				break;
 		}
 	}
 
@@ -256,6 +260,7 @@ export class OrgBrowserPanelProvider {
 			hasProject: !!root && this.hasSfdxProject(),
 			projectName: root ? path.basename(root) : "",
 			ui: this.ctx?.workspaceState.get(UI_STATE_KEY) ?? null,
+			shared: SharedMetadataFilter.get(root),
 		});
 	}
 

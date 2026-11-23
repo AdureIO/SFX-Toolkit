@@ -35,6 +35,7 @@ import {
 	deployStatusFlags,
 } from "../utils/deployStatusPure";
 import { $, FilterBar, createFilterBar, esc, toggleIn } from "./shared/filterBar";
+import { createSharedFilterSync } from "./shared/sharedFilter";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -147,6 +148,15 @@ let first = -1;
 let last = -1;
 let visibleKeysCache: Set<string> | null = null;
 let bar: FilterBar;
+/** Search text and type selection shared with the Org Browser (per project). */
+const sharedSync = createSharedFilterSync({
+	filter: () => ui.filter,
+	applied: () => {
+		bar.syncSearchInput();
+		recompute(true);
+	},
+	send: (s) => post({ command: "sharedFilter", query: s.query, types: s.types }),
+});
 
 let testClassesData: { label: string; description: string }[] = [];
 let presetsData: Preset[] = [];
@@ -284,6 +294,7 @@ function hiddenSelected(): string[] {
 }
 
 function recompute(resetScroll = false): void {
+	sharedSync.changed();
 	visibleKeysCache = null;
 	ensureStatus();
 	const c = ctx();
@@ -1287,12 +1298,12 @@ function onInit(m: Record<string, any>): void {
 	testSuitesData = Array.isArray(m.testSuites) ? m.testSuites : [];
 	initialPreset = m.initialPreset || null;
 	orgsData = Array.isArray(m.orgs) ? m.orgs : [];
-	defaultOrgVal = m.defaultOrg != null && m.defaultOrg !== "" ? String(m.defaultOrg) : "";
+	defaultOrgVal = m.defaultOrg !== undefined && m.defaultOrg !== null && m.defaultOrg !== "" ? String(m.defaultOrg) : "";
 	try {
 		const saved: PanelState | null =
 			m.savedState && Array.isArray(m.savedState.components) ? m.savedState : ((api.getState() as PanelState | null) ?? null);
 		mergeUi(saved?.ui);
-		applySharedFilter(m.sharedFilter);
+		sharedSync.init(m.sharedFilter);
 		const radio = document.querySelector<HTMLInputElement>('input[name="testLevel"][value="RunRelevantTests"]');
 		if (radio) radio.checked = true;
 		setOrgOptions();
@@ -1312,13 +1323,6 @@ function onInit(m: Record<string, any>): void {
 	} catch (e) {
 		setStatus("Error: " + ((e as Error)?.message ?? String(e)));
 	}
-}
-
-/** Search text and type selection shared with the Org Browser (per project). */
-function applySharedFilter(shared: { query?: string; types?: string[] } | null | undefined): void {
-	if (!shared) return;
-	ui.filter.query = typeof shared.query === "string" ? shared.query : ui.filter.query;
-	ui.filter.types = Array.isArray(shared.types) ? shared.types.map(String) : ui.filter.types;
 }
 
 window.addEventListener("message", (ev) => {
@@ -1344,7 +1348,7 @@ window.addEventListener("message", (ev) => {
 			break;
 		case "defaultOrgChanged":
 			orgsData = Array.isArray(m.orgs) ? m.orgs : orgsData;
-			defaultOrgVal = m.defaultOrg != null && m.defaultOrg !== "" ? String(m.defaultOrg) : "";
+			defaultOrgVal = m.defaultOrg !== undefined && m.defaultOrg !== null && m.defaultOrg !== "" ? String(m.defaultOrg) : "";
 			setOrgOptions();
 			postOrgIfChanged();
 			break;
@@ -1408,6 +1412,9 @@ window.addEventListener("message", (ev) => {
 			break;
 		case "status":
 			setStatus(String(m.text ?? ""));
+			break;
+		case "sharedFilter":
+			sharedSync.receive({ query: String(m.query ?? ""), types: Array.isArray(m.types) ? m.types.map(String) : [] });
 			break;
 	}
 });
