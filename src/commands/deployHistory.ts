@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { Telemetry } from '../utils/telemetry';
 import { escapeHtml, getNonce } from '../utils/htmlUtils';
-import type { DeployPreset, DeployTypeKey } from '../utils/deployPresets';
+import type { DeployPreset, DeployTypeKey } from '../utils/presetsStore';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 

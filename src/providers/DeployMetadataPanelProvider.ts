@@ -11,7 +11,7 @@ import {
   DEPLOY_TYPE_NO_TESTS
 } from "../commands/deployMetadata";
 import { confirmProductionOrgOperation } from "../utils/orgSafety";
-import { loadPresets, addPreset, type DeployPreset, type DeployTypeKey } from "../utils/deployPresets";
+import { listPresets, savePreset, type DeployPreset, type DeployTypeKey } from "../utils/presetsStore";
 import { PanelProjectBinding, orgPickerForProject } from "../utils/panelProject";
 import { PROJECT_SELECTOR_CSS, projectSelectorMarkup, projectSelectorScript } from "../utils/panelProjectUi";
 import { FILTER_BAR_CSS, FILTER_BAR_VARS, filterGroupsMarkup, filterSearchMarkup } from "../utils/filterBarUi";
@@ -104,7 +104,7 @@ export class DeployMetadataPanelProvider {
   private static loadInitData(workspaceRoot: string): Promise<DeployInitData> {
     return Promise.allSettled([
       Promise.resolve().then(() => getTestClassItems(workspaceRoot)),
-      loadPresets(vscode.Uri.file(workspaceRoot)),
+      listPresets(workspaceRoot),
       orgPickerForProject(workspaceRoot),
       Promise.resolve().then(() => loadTestSuites(workspaceRoot))
     ]).then(([testR, presetsR, orgsR, suitesR]) => {
@@ -346,14 +346,13 @@ export class DeployMetadataPanelProvider {
           return;
         }
         if (msg.command === "savePreset") {
-          const workspaceUri = vscode.Uri.file(workspaceRoot);
           const deployType = (msg.deployType || "RunRelevantTests") as DeployTypeKey;
           const components = Array.isArray(msg.components) ? msg.components.filter((k): k is string => typeof k === "string") : [];
           // Next to the authoritative component list, the files they stand for (what older versions of the panel read).
           const sourcePaths = relativeFilesOf(components, hostNow.entries, workspaceRoot);
           const testClassNames = Array.isArray(msg.testClassNames) ? msg.testClassNames : [];
           const targetOrg = msg.targetOrg || undefined;
-          const webPresets = async () => (await loadPresets(workspaceUri)).map((p) => DeployMetadataPanelProvider.toWebPreset(p, hostNow.relComponents()));
+          const webPresets = async () => (await listPresets(workspaceRoot)).map((p) => DeployMetadataPanelProvider.toWebPreset(p, hostNow.relComponents()));
           try {
             const name = (msg.presetName || "").trim();
             if (!name) {
@@ -370,7 +369,7 @@ export class DeployMetadataPanelProvider {
                 });
                 return;
               }
-              await addPreset(workspaceUri, {
+              await savePreset(workspaceRoot, {
                 name: newName.trim(),
                 sourcePaths,
                 components,
@@ -386,7 +385,7 @@ export class DeployMetadataPanelProvider {
               });
               vscode.window.showInformationMessage(`Preset "${newName.trim()}" saved.`);
             } else {
-              await addPreset(workspaceUri, {
+              await savePreset(workspaceRoot, {
                 name,
                 sourcePaths,
                 components,
