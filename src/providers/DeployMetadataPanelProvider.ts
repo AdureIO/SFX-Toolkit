@@ -998,12 +998,15 @@ export class DeployMetadataPanelProvider {
 		.org-info.err { color: var(--asfx-warn); }
 		.org-info.busy::before { content: "⟳ "; }
 		#banner { padding: 6px 12px; font-size: 12px; background: color-mix(in srgb, var(--asfx-warn) 14%, transparent); border-bottom: 1px solid var(--asfx-border); flex-shrink: 0; }
-		#banner[hidden], #noRows[hidden], #side[hidden], #selHidden[hidden] { display: none; }
+		#banner[hidden], #noRows[hidden], #selHidden[hidden] { display: none; }
 		.tree-search-row { flex-wrap: wrap; }
 		.tree-search-row .search { flex: 1 1 150px; min-width: 120px; }
 		#filtersToggle { width: auto; padding: 0 9px; gap: 4px; }
 		#filtersToggle.on { background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); border-color: var(--asfx-border); opacity: 1; }
-		#side { max-height: 46%; overflow-y: auto; flex-shrink: 0; padding: 2px 12px 8px; border-bottom: 1px solid var(--asfx-border); background: var(--vscode-sideBar-background, var(--vscode-editor-background)); }
+		.main { flex: 1; display: flex; min-height: 0; }
+		#side { width: 248px; flex-shrink: 0; overflow-y: auto; border-right: 1px solid var(--ob-border); background: var(--ob-surface); padding: 6px 10px 12px; }
+		.panel-left[data-side="closed"] #side, .panel-left[data-side="auto"][data-narrow] #side { display: none; }
+		.center { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 		#selHidden { padding: 4px 12px; font-size: 11px; color: var(--vscode-descriptionForeground); border-bottom: 1px solid var(--asfx-border); flex-shrink: 0; }
 		#selHidden button { background: transparent; border: 0; padding: 0; color: var(--vscode-textLink-foreground); cursor: pointer; text-decoration: underline; font: inherit; }
 		.gridbar { display: flex; align-items: center; gap: 10px; padding: 4px 12px; border-bottom: 1px solid var(--asfx-border); font-size: 12px; flex-shrink: 0; }
@@ -1052,10 +1055,12 @@ export class DeployMetadataPanelProvider {
 			<div class="tree-search-row">
 				<button type="button" class="btn-select-deselect-all" id="btn-select-deselect-all" title="Select all filtered" aria-label="Select all filtered"><span class="btn-select-deselect-icon" aria-hidden="true">☑</span></button>
 				${filterSearchMarkup("Search…  type:ApexClass  status:conflict  by:smith  Acc*Handler   ( / )")}
-				<button type="button" class="btn-tree-toolbar" id="filtersToggle" title="Show / hide the filters" aria-expanded="false">Filters</button>
+				<button type="button" class="btn-tree-toolbar" id="filtersToggle" title="Show / hide the filter sidebar" aria-expanded="true">Filters</button>
 				<label class="tree-filter-only-selected"><input type="checkbox" id="filter-only-selected" aria-label="Only show selected" /> Selected <span id="sel-count-badge"></span></label>
 			</div>
-			<aside id="side" aria-label="Filters" hidden>${filterGroupsMarkup({ statusTitle: "Status in the org", namespace: true, state: false, modified: false })}</aside>
+			<div class="main">
+			<aside id="side" aria-label="Filters">${filterGroupsMarkup({ statusTitle: "Status in the org", namespace: true, state: false, modified: true, mine: false })}</aside>
+			<div class="center">
 			<div id="selHidden" hidden><span id="selHiddenText"></span> <button type="button" id="selHiddenShow" title="Reset the filters and show only the selected components">show</button> · <button type="button" id="selHiddenClear" title="Deselect the selected components the current filter hides">clear hidden</button></div>
 			<div class="gridbar"><span id="countInfo" class="muted"></span><span class="spacer"></span><button type="button" id="collapseAll" class="linkbtn" title="Collapse / expand all groups">Collapse all</button></div>
 			<div class="gridwrap">
@@ -1063,6 +1068,8 @@ export class DeployMetadataPanelProvider {
 					<div id="spacer" class="vspacer"><div id="rowsEl" class="rowsEl"></div></div>
 				</div>
 				<div id="noRows" hidden></div>
+			</div>
+			</div>
 			</div>
 		</div>
 	</div>

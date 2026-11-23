@@ -70,6 +70,8 @@ export interface FilterGroupsOptions {
 	state?: boolean;
 	/** "Modified by me" + modified-within. */
 	modified?: boolean;
+	/** "Modified by me" checkbox inside the modified group (needs the current user); default true. */
+	mine?: boolean;
 }
 
 /** The facet groups: status, metadata type (searchable, with counts), and the optional namespace / state / modified groups. */
@@ -89,7 +91,7 @@ export function filterGroupsMarkup(o: FilterGroupsOptions): string {
       <div class="fgroup"><h4>Manageable state</h4><div id="fState"></div></div>` : ""}${modified ? `
       <div class="fgroup">
         <h4>Modified</h4>
-        <label class="frow2"><input type="checkbox" id="fMine"> Modified by me</label>
+        ${o.mine !== false ? `<label class="frow2"><input type="checkbox" id="fMine"> Modified by me</label>` : ""}
         <select id="fWithin" aria-label="Modified within">
           <option value="any">Any time</option><option value="24h">Last 24 hours</option><option value="7d">Last 7 days</option>
           <option value="30d">Last 30 days</option><option value="custom">Custom range…</option>

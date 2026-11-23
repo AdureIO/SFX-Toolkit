@@ -146,6 +146,8 @@ export function createFilterBar(cfg: FilterBarConfig): FilterBar {
 			fMine.checked = f.mine;
 			fMine.disabled = me.ids.length === 0 && !me.name;
 			(fMine.parentElement as HTMLElement).title = me.ids.length === 0 && !me.name ? "Current user not resolved yet" : "";
+		}
+		if (document.getElementById("fWithin")) {
 			($("fWithin") as HTMLSelectElement).value = f.within;
 			$("fCustom").hidden = f.within !== "custom";
 			($("fFrom") as HTMLInputElement).value = f.from ? new Date(f.from).toISOString().slice(0, 10) : "";

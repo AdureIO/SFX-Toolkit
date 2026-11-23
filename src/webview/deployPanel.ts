@@ -58,7 +58,8 @@ interface Preset {
 interface UiState {
 	filter: FilterState;
 	collapsed: string[];
-	filtersOpen: boolean;
+	/** Sidebar: true = hidden, false = forced open, undefined = automatic (hidden when the panel is narrow). */
+	filtersCollapsed?: boolean;
 }
 
 interface PanelState {
@@ -125,7 +126,7 @@ function post(payload: Record<string, unknown>): void {
 const ROW_H = 28;
 
 function defaultUi(): UiState {
-	return { filter: { ...DEFAULT_FILTER }, collapsed: [], filtersOpen: false };
+	return { filter: { ...DEFAULT_FILTER }, collapsed: [] };
 }
 
 let ui: UiState = defaultUi();
@@ -213,7 +214,7 @@ function saveState(): void {
 			autoGitSelect: ($("auto-git-select") as HTMLInputElement).checked,
 			validateOnly: ($("validate-only-check") as HTMLInputElement).checked,
 			testSuiteName: ($("suite-select") as HTMLSelectElement).value || null,
-			ui: { filter: { ...ui.filter, onlySelected: false }, collapsed: ui.collapsed, filtersOpen: ui.filtersOpen },
+			ui: { filter: { ...ui.filter, onlySelected: false }, collapsed: ui.collapsed, filtersCollapsed: ui.filtersCollapsed },
 		};
 		api.setState(state);
 		post({ command: "persistPanelState", state });
@@ -713,11 +714,20 @@ function setupGridEvents(): void {
 
 // ── Filter bar + toolbar ───────────────────────────────────────────────────────
 
+const SIDE_MIN_PANEL_W = 560;
+
+function sideVisible(): boolean {
+	return getComputedStyle($("side")).display !== "none";
+}
+
 function applyFiltersOpen(): void {
-	$("side").hidden = !ui.filtersOpen;
+	const left = document.querySelector(".panel-left") as HTMLElement;
+	left.dataset.side = ui.filtersCollapsed === undefined ? "auto" : ui.filtersCollapsed ? "closed" : "open";
+	left.toggleAttribute("data-narrow", left.clientWidth < SIDE_MIN_PANEL_W);
 	const b = $("filtersToggle");
-	b.setAttribute("aria-expanded", String(ui.filtersOpen));
-	b.classList.toggle("on", ui.filtersOpen);
+	const vis = sideVisible();
+	b.setAttribute("aria-expanded", String(vis));
+	b.classList.toggle("on", vis);
 }
 
 function setupToolbar(): void {
@@ -738,8 +748,9 @@ function setupToolbar(): void {
 		preserveOnClear: () => ({ onlySelected: ui.filter.onlySelected && selected.size > 0 }),
 	});
 	$("filtersToggle").addEventListener("click", () => {
-		ui.filtersOpen = !ui.filtersOpen;
+		ui.filtersCollapsed = sideVisible();
 		applyFiltersOpen();
+		renderRows(true);
 		scheduleSaveState();
 	});
 	$("btn-select-deselect-all").addEventListener("click", toggleFiltered);
@@ -773,6 +784,15 @@ function setupToolbar(): void {
 		}
 	});
 	applyFiltersOpen();
+	let lastNarrow = (document.querySelector(".panel-left") as HTMLElement).hasAttribute("data-narrow");
+	new ResizeObserver(() => {
+		const left = document.querySelector(".panel-left") as HTMLElement;
+		const narrow = left.clientWidth < SIDE_MIN_PANEL_W;
+		if (narrow === lastNarrow) return;
+		lastNarrow = narrow;
+		applyFiltersOpen();
+		renderRows(true);
+	}).observe(document.querySelector(".panel-left") as HTMLElement);
 }
 
 // ── Right panel: options, presets, test classes, suites ────────────────────────
@@ -1243,7 +1263,7 @@ function mergeUi(saved: Partial<UiState> | undefined): void {
 	ui = {
 		filter: { ...d.filter, ...(saved?.filter ?? {}), onlySelected: false },
 		collapsed: saved?.collapsed ?? d.collapsed,
-		filtersOpen: saved?.filtersOpen ?? d.filtersOpen,
+		filtersCollapsed: typeof saved?.filtersCollapsed === "boolean" ? saved.filtersCollapsed : undefined,
 	};
 }
 
