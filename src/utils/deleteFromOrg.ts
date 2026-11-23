@@ -16,6 +16,8 @@ import { DEPLOY_TIMEOUT_MS } from "../commands/deployMetadata";
 import { runDestructiveDeploy } from "./destructiveRun";
 import { DeleteOutcome, DestructiveComponent } from "./destructivePure";
 import { Logger } from "./outputChannel";
+import { recordHistory } from "./syncHistory";
+import { historyErrorsFromDeploy } from "./historyPure";
 
 export interface DeleteFromOrgOptions {
 	projectDir: string;
@@ -48,9 +50,11 @@ export function projectApiVersion(projectDir: string): string {
 
 /**
  * Run the destructive deploy. Throws only for invalid input (test level, test names, nothing to delete);
- * a failure of the org or the CLI comes back as `outcome.kind === "failed"`.
+ * a failure of the org or the CLI comes back as `outcome.kind === "failed"`. Recorded in the history (kind
+ * `delete`, source `center`) unless cancelled.
  */
 export async function deleteFromOrg(o: DeleteFromOrgOptions): Promise<DeleteFromOrgResult> {
+	const startedAt = Date.now();
 	const res = await runDestructiveDeploy({
 		projectDir: o.projectDir,
 		org: o.org,
@@ -60,6 +64,21 @@ export async function deleteFromOrg(o: DeleteFromOrgOptions): Promise<DeleteFrom
 		apiVersion: projectApiVersion(o.projectDir),
 		exec: (args, cwd) => runCommandArgs("sf", args, cwd, undefined, false, DEPLOY_TIMEOUT_MS, o.token),
 	});
-	if (res.outcome.kind !== "cancelled") Logger.info(`Delete from org ${o.org}: ${o.components.length} component(s), ${res.outcome.kind} in ${res.durationMs} ms`);
+	const out = res.outcome;
+	if (out.kind !== "cancelled") {
+		Logger.info(`Delete from org ${o.org}: ${o.components.length} component(s), ${out.kind} in ${res.durationMs} ms`);
+		recordHistory(o.projectDir, {
+			kind: "delete",
+			org: o.org,
+			at: startedAt,
+			durationMs: res.durationMs,
+			components: o.components.map((c) => `${c.type}:${c.fullName}`),
+			testLevel: o.testLevel,
+			deployId: out.deployId,
+			ok: out.kind === "success",
+			errors: out.kind === "failed" ? historyErrorsFromDeploy(out.apiResult, out.errorText) : undefined,
+			source: "center",
+		});
+	}
 	return res;
 }

@@ -25,6 +25,8 @@ import { clearDeployDiagnostics, setDeployDiagnosticsFromFailure, setDeployDiagn
 import { deployPathsForComponents, pathsToComponents, presetComponents, relativeFilesOf, type RelComponent } from "../utils/deployComponentsPure";
 import { hiddenSelectionPrompt, splitByVisibility } from "../utils/orgBrowser/selection";
 import { runJsonDeploy } from "../utils/deployEngine";
+import { recordHistory } from "../utils/syncHistory";
+import { historyErrorsFromDeploy } from "../utils/historyPure";
 import { statsFromResult, coverageFromResult, toApiDeployResult, formatStatus, formatElapsed, formatResultSummary, type DeployStats, type CoverageRow } from "../utils/deployStatusMap";
 import { AuthInfo } from "../utils/authInfo";
 import { OperationPanelProvider } from "./OperationPanelProvider";
@@ -521,8 +523,8 @@ export class DeployMetadataPanelProvider {
         // parsed for diagnostics the legacy way.
         type FinalOutcome =
           | { kind: "cancelled" }
-          | { kind: "success"; stats: DeployStats; coverage: CoverageRow[]; apiResult?: import("../utils/deployDiagnostics").ApiDeployResult; completedAt?: number }
-          | { kind: "failed"; stats: DeployStats; coverage: CoverageRow[]; apiResult?: import("../utils/deployDiagnostics").ApiDeployResult; errorText?: string };
+          | { kind: "success"; stats: DeployStats; coverage: CoverageRow[]; apiResult?: import("../utils/deployDiagnostics").ApiDeployResult; completedAt?: number; deployId?: string }
+          | { kind: "failed"; stats: DeployStats; coverage: CoverageRow[]; apiResult?: import("../utils/deployDiagnostics").ApiDeployResult; errorText?: string; deployId?: string };
 
         const deployStartTime = Date.now();
         panel.webview.postMessage({ command: "deployStart", dryRun });
@@ -586,13 +588,13 @@ export class DeployMetadataPanelProvider {
               if (res.kind === "failed") {
                 const dr = res.result;
                 return dr
-                  ? { kind: "failed", stats: statsFromResult(dr), coverage: coverageFromResult(dr), apiResult: toApiDeployResult(dr) }
+                  ? { kind: "failed", stats: statsFromResult(dr), coverage: coverageFromResult(dr), apiResult: toApiDeployResult(dr), deployId: dr.id }
                   : { kind: "failed", stats: { components: 0, componentErrors: 0, testsPassed: 0, testsFailed: 0 }, coverage: [], errorText: res.errorText };
               }
               const dr = res.result;
               // The org's own completion time (server clock), for the retrieve / deploy log when the org reports no newer lastModifiedDate.
               const completed = Date.parse(String((dr as { completedDate?: unknown }).completedDate ?? ""));
-              return { kind: "success", stats: statsFromResult(dr), coverage: coverageFromResult(dr), apiResult: toApiDeployResult(dr), completedAt: Number.isNaN(completed) ? undefined : completed };
+              return { kind: "success", stats: statsFromResult(dr), coverage: coverageFromResult(dr), apiResult: toApiDeployResult(dr), completedAt: Number.isNaN(completed) ? undefined : completed, deployId: dr.id };
             } catch (e: unknown) {
               // Unexpected engine error → fall back to the classic CLI streaming path.
               Logger.info(`Live deploy failed unexpectedly; falling back to CLI streaming: ${(e as { message?: string })?.message ?? String(e)}`);
@@ -621,6 +623,7 @@ export class DeployMetadataPanelProvider {
           // A real deploy: record the components with the org's new lastModifiedDate (our own deploy must not show as "changed in org") and re-list their types.
           if (!dryRun && (apiResult !== undefined || stats.components > 0)) void hostNow.afterDeploy(deployedKeys, outcome.completedAt ?? Date.now());
           addDeployHistoryEntry({ timestamp: deployStartTime, status: "Succeeded", dryRun, ...stats, durationMs, targetOrg: msg.targetOrg ?? "", sourcePaths: sourcePathsForHistory, presetName: msg.presetName ?? null, deployType: msg.deployType, testClassNames: msg.testClassNames });
+          recordHistory(workspaceRoot, { kind: dryRun ? "validate" : "deploy", org: msg.targetOrg ?? "", at: deployStartTime, durationMs, components: deployedKeys, testLevel: testLevel, deployId: outcome.deployId, ok: true, source: "deployPanel" });
           const okSummary = apiResult ? formatResultSummary(apiResult) : "";
           reportSuccess({
             operation: deployOpLabel,
@@ -640,6 +643,7 @@ export class DeployMetadataPanelProvider {
         const { stats, coverage, apiResult, errorText } = outcome;
         panel.webview.postMessage({ command: "deployResult", success: false, cancelled: false, dryRun, ...stats, coverage, durationMs, targetOrg: msg.targetOrg ?? "" });
         addDeployHistoryEntry({ timestamp: deployStartTime, status: "Failed", dryRun, ...stats, durationMs, targetOrg: msg.targetOrg ?? "", sourcePaths: sourcePathsForHistory, presetName: msg.presetName ?? null, deployType: msg.deployType, testClassNames: msg.testClassNames });
+        recordHistory(workspaceRoot, { kind: dryRun ? "validate" : "deploy", org: msg.targetOrg ?? "", at: deployStartTime, durationMs, components: deployedKeys, testLevel: testLevel, deployId: outcome.deployId, ok: false, errors: historyErrorsFromDeploy(apiResult ? withSyntheticTestFailures(apiResult) : undefined, errorText), source: "deployPanel" });
         const failSummary = apiResult ? formatResultSummary(apiResult) : "";
         void vscode.window
           .withProgress(

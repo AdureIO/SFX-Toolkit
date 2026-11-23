@@ -33,6 +33,9 @@ import { retrieveComponents } from "../utils/retrieveEngine";
 import { isSameOrUnder } from "../utils/retrieveSafetyPure";
 import { knownProjectDirs } from "../utils/schemaHealthMonitor";
 import { buildUpdateSummary, resolvePackageDirPaths } from "../utils/updateProjectPure";
+import { recordHistory } from "../utils/syncHistory";
+import { componentKeysFromDeploy, historyErrorsFromDeploy, historyErrorsFromRetrieve } from "../utils/historyPure";
+import type { RawDeployResult } from "../utils/deployStatusMap";
 import { buildDeployStartArgs, planSelection, type SelectionGroup, type SelectionPlan } from "../utils/sourceSelection";
 
 /** Menu arguments: `(clickedUri, allSelectedUris)`; the palette passes nothing. */
@@ -149,7 +152,21 @@ export async function deployToDefaultOrg(uri?: vscode.Uri, uris?: vscode.Uri[]):
 			const submit = ["sf", ...buildDeployStartArgs(group.paths, targetUser).map(escapeShellArg)].join(" ");
 			Logger.info(`Right-click deploy in ${group.projectDir}: ${submit}`);
 			const relPaths = group.paths.map((p) => path.relative(group.projectDir, p) || ".");
-			const record = (status: "Succeeded" | "Failed" | "Cancelled", stats = { components: 0, componentErrors: 0, testsPassed: 0, testsFailed: 0 }) =>
+			const record = (status: "Succeeded" | "Failed" | "Cancelled", stats = { components: 0, componentErrors: 0, testsPassed: 0, testsFailed: 0 }, result?: RawDeployResult, errorText?: string): void => {
+				if (status !== "Cancelled") {
+					recordHistory(group.projectDir, {
+						kind: "deploy",
+						org: targetUser ?? "",
+						at: startTime,
+						durationMs: Date.now() - startTime,
+						components: componentKeysFromDeploy(result),
+						testLevel: "RunRelevantTests",
+						deployId: result?.id,
+						ok: status === "Succeeded",
+						errors: status === "Failed" ? historyErrorsFromDeploy(result ? toApiDeployResult(result) : undefined, errorText) : undefined,
+						source: "command",
+					});
+				}
 				addDeployHistoryEntry({
 					timestamp: startTime,
 					status,
@@ -161,6 +178,7 @@ export async function deployToDefaultOrg(uri?: vscode.Uri, uris?: vscode.Uri[]):
 					presetName: null,
 					deployType: "RunRelevantTests",
 				});
+			};
 			try {
 				const res = await runJsonDeploy({
 					submitCommand: submit,
@@ -186,7 +204,7 @@ export async function deployToDefaultOrg(uri?: vscode.Uri, uris?: vscode.Uri[]):
 					const api = dr ? toApiDeployResult(dr) : undefined;
 					if (api) setDeployDiagnosticsFromApiResult(group.projectDir, withSyntheticTestFailures(api));
 					else await setDeployDiagnosticsFromFailure(group.projectDir, res.errorText, targetUser);
-					record("Failed", dr ? statsFromResult(dr) : undefined);
+					record("Failed", dr ? statsFromResult(dr) : undefined, dr, res.errorText);
 					const failures = api ? componentFailuresOf(withSyntheticTestFailures(api)) : [];
 					reportError({
 						operation: "Deploy",
@@ -202,7 +220,7 @@ export async function deployToDefaultOrg(uri?: vscode.Uri, uris?: vscode.Uri[]):
 				}
 				if (res.kind === "success") {
 					deployed += res.result.numberComponentsDeployed ?? 0;
-					record("Succeeded", statsFromResult(res.result));
+					record("Succeeded", statsFromResult(res.result), res.result);
 				}
 			} catch (e: any) {
 				if (e?.cancelled) {
@@ -211,7 +229,7 @@ export async function deployToDefaultOrg(uri?: vscode.Uri, uris?: vscode.Uri[]):
 					return;
 				}
 				Telemetry.event("deployFile", { status: "failed" });
-				record("Failed");
+				record("Failed", undefined, undefined, String(e?.message ?? e));
 				reportError({ operation: "Deploy", error: e, org: groupOrgLabel, reauthOrg: targetUser ?? undefined, handle: operationHandle });
 				return;
 			}
@@ -224,6 +242,21 @@ export async function deployToDefaultOrg(uri?: vscode.Uri, uris?: vscode.Uri[]):
 			summary: deployed > 0 ? `Deployed ${deployed} components to ${orgLabel}.` : `Nothing to deploy to ${orgLabel} (no changes).`,
 			handle: operationHandle,
 		});
+	});
+}
+
+/** History entry of one project's retrieve (`source: command`). Path retrieves report the components they wrote. */
+function recordRetrieveHistory(projectDir: string, org: string | null, at: number, res: Awaited<ReturnType<typeof retrieveComponents>>): void {
+	const keys = [...new Set([...res.retrieved.map((r) => `${r.type}:${r.fullName}`), ...res.failed.filter((f) => f.type !== "Path").map((f) => `${f.type}:${f.fullName}`)])];
+	recordHistory(projectDir, {
+		kind: "retrieve",
+		org: org ?? "",
+		at,
+		durationMs: Date.now() - at,
+		components: keys,
+		ok: res.failed.length === 0,
+		errors: res.failed.length > 0 ? historyErrorsFromRetrieve(res.failed) : undefined,
+		source: "command",
 	});
 }
 
@@ -246,7 +279,9 @@ export async function retrieveFromDefaultOrg(uri?: vscode.Uri, uris?: vscode.Uri
 			let retrieved = 0;
 			const failed: { fullName: string; error: string }[] = [];
 			for (const { group, org } of assignments) {
+				const at = Date.now();
 				const res = await retrieveComponents({ org: org.username, sourcePaths: group.paths, projectDir: group.projectDir, token });
+				recordRetrieveHistory(group.projectDir, org.username, at, res);
 				retrieved += res.retrieved.length;
 				failed.push(...res.failed);
 			}
@@ -342,6 +377,7 @@ export async function updateProjectFromOrg(): Promise<void> {
 				const failed: { fullName: string; error: string }[] = [];
 				for (const { group, org } of assignments) {
 					let last = 0;
+					const at = Date.now();
 					const res = await retrieveComponents({
 						org: org.username,
 						sourcePaths: group.paths,
@@ -352,6 +388,7 @@ export async function updateProjectFromOrg(): Promise<void> {
 							last = done;
 						},
 					});
+					recordRetrieveHistory(group.projectDir, org.username, at, res);
 					retrieved += res.retrieved.length;
 					failed.push(...res.failed);
 				}

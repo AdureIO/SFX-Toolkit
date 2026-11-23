@@ -16,6 +16,8 @@ import { SharedMetadataFilter } from "../utils/sharedFilterState";
 import { FILTER_BAR_CSS, FILTER_BAR_VARS, filterGroupsMarkup, filterSearchMarkup } from "../utils/filterBarUi";
 import { confirmOverwrite, revertOpenEditors } from "../utils/retrieveSafety";
 import { retrieveComponents } from "../utils/retrieveEngine";
+import { recordHistory } from "../utils/syncHistory";
+import { historyErrorsFromRetrieve } from "../utils/historyPure";
 import { getRetrieveTimes } from "../utils/retrieveLog";
 import { LocalInfoMap, ContentInfoMap } from "../utils/compareStatusPure";
 import { CompareTarget } from "../utils/contentCompare";
@@ -663,6 +665,7 @@ export class OrgBrowserPanelProvider {
 					: getOrgByTarget(this.orgKey)?.alias || this.orgKey;
 		let outcome: Awaited<ReturnType<typeof retrieveComponents>> | undefined;
 		let cancelled = false;
+		const startedAt = Date.now();
 		await vscode.window.withProgress(
 			{ location: vscode.ProgressLocation.Notification, title: `Retrieving ${components.length} component${components.length === 1 ? "" : "s"} from ${label}…`, cancellable: true },
 			async (progress, token) => {
@@ -695,6 +698,16 @@ export class OrgBrowserPanelProvider {
 			if (cancelled) vscode.window.setStatusBarMessage("Retrieve cancelled", 3000);
 			return;
 		}
+		recordHistory(root, {
+			kind: "retrieve",
+			org: this.orgArg ?? getDefaultOrgSync(root)?.username ?? label,
+			at: startedAt,
+			durationMs: Date.now() - startedAt,
+			components: components.map((c) => compKey(c.type, c.fullName)),
+			ok: outcome.failed.length === 0,
+			errors: outcome.failed.length > 0 ? historyErrorsFromRetrieve(outcome.failed) : undefined,
+			source: "orgBrowser",
+		});
 		const results = [
 			...outcome.retrieved.map((r) => ({ key: compKey(r.type, r.fullName), ok: true })),
 			...outcome.failed.map((f) => ({ key: compKey(f.type, f.fullName), ok: false, error: f.error })),

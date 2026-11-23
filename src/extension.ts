@@ -46,6 +46,7 @@ import { SharedMetadataFilter } from "./utils/sharedFilterState";
 import { initRetrieveLog, flushRetrieveLog } from "./utils/retrieveLog";
 import { initContentCompare } from "./utils/contentCompareHost";
 import { initSyncDiff } from "./utils/syncDiff";
+import { initSyncHistory, flushSyncHistory } from "./utils/syncHistory";
 import { registerApexLogDecorator } from "./providers/ApexLogDecorator";
 import { ApexWorkbenchViewProvider } from "./providers/ApexWorkbenchViewProvider";
 import { Logger, outputChannel, registerOutputChannels } from "./utils/outputChannel";
@@ -295,6 +296,7 @@ export function activate(context: vscode.ExtensionContext) {
     initRetrieveLog(context.workspaceState);
     initContentCompare(context);
     initSyncDiff(context);
+    initSyncHistory(context);
     SharedMetadataFilter.init(context);
     OrgBrowserPanelProvider.init(context);
     DeployMetadataPanelProvider.init(context);
@@ -946,6 +948,7 @@ export function deactivate(): Thenable<void> | undefined {
   });
   teardownStep("stop live log polling", () => LiveLogService.disposeAll());
   teardownStep("flush retrieve log", () => flushRetrieveLog());
+  teardownStep("flush sync history", () => flushSyncHistory());
   teardownStep("dispose auth cache", () => AuthInfo.disposeAll());
   teardownStep("dispose SOQL schema cache", () => SoqlSchemaProvider.disposeAll());
   // Flushes pending disk-cache writes synchronously and leaves no timers behind.
