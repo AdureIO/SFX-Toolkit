@@ -15,6 +15,9 @@ import { clearDeployDiagnostics, setDeployDiagnosticsFromFailure } from "../util
 import { getDefaultOrg, getDefaultOrgSync } from "../utils/defaultOrg";
 import { Logger, outputChannel } from "../utils/outputChannel";
 import { Telemetry } from "../utils/telemetry";
+import { recordHistory } from "../utils/syncHistory";
+import { buildTypeTable } from "../utils/orgBrowser/localIndex";
+import { componentKeysFromPaths, historyErrorsFromCliText } from "../utils/commandHistoryPure";
 
 const VALIDATE_TIMEOUT_MS = 5 * 60 * 1000;
 /** Quiet period after a save before the on-save validation starts (coalesces save bursts). */
@@ -71,10 +74,26 @@ export async function validateApexFile(doc?: vscode.TextDocument, silent = false
 		async (_progress, progressToken) => {
 			const cancelSub = progressToken.onCancellationRequested(() => cts.cancel());
 			const token = cts.token;
+			const startedAt = Date.now();
+			// No --json here (the Problems parser reads the plain text), so the entry has no deploy id: ok/failed,
+			// the file's component and the CLI text as the error. Cancelled / superseded runs are not recorded.
+			const record = (ok: boolean, errorText?: string): void => {
+				recordHistory(projectDir, {
+					kind: "validate",
+					org: org.username ?? "",
+					at: startedAt,
+					durationMs: Date.now() - startedAt,
+					components: componentKeysFromPaths(projectDir, [filePath], buildTypeTable()),
+					ok,
+					errors: ok ? undefined : historyErrorsFromCliText(errorText),
+					source: "command",
+				});
+			};
 			const command = `sf project deploy start --dry-run -d ${escapeShellArg(filePath)} --target-org ${escapeShellArg(org.username)}`;
 			try {
 				await runCommand(command, projectDir, undefined, false, token, VALIDATE_TIMEOUT_MS);
 				if (token.isCancellationRequested) return; // superseded
+				record(true);
 				// Success — clear any prior validation diagnostics for a clean slate.
 				clearDeployDiagnostics();
 					Telemetry.event("validateApex", { status: "passed", trigger: silent ? "onSave" : "command" });
@@ -86,6 +105,7 @@ export async function validateApexFile(doc?: vscode.TextDocument, silent = false
 				}
 				Telemetry.event("validateApex", { status: "failed", trigger: silent ? "onSave" : "command" });
 				const raw = e?.message || e?.stderr || "Unknown error";
+				record(false, String(raw));
 				await setDeployDiagnosticsFromFailure(projectDir ?? "", raw, org.username ?? null);
 				if (!silent) {
 					vscode.window

@@ -15,6 +15,9 @@ import { OperationPanelProvider } from "../providers/OperationPanelProvider";
 import { getDefaultOrg, getDefaultOrgSync } from "../utils/defaultOrg";
 import { confirmProductionOrgOperation } from "../utils/orgSafety";
 import { Telemetry } from "../utils/telemetry";
+import { recordHistory } from "../utils/syncHistory";
+import { componentKeysFromDeploy, historyErrorsFromDeploy } from "../utils/historyPure";
+import { componentKeysFromList, historyErrorsFromCliText, parseRetrieveHistory } from "../utils/commandHistoryPure";
 
 // Helper to strip ANSI and progress lines
 export function cleanDeployOutput(output: string): string {
@@ -252,6 +255,7 @@ async function pushSourceHelper(force: boolean) {
         cancellable: true
       },
       async (progress, token) => {
+        let historyDir: string | undefined; // the project the push ran in (undefined: no workspace → not recorded)
         try {
           // 1. Detect sfdx-project.json
           const workspaceFolders = vscode.workspace.workspaceFolders;
@@ -267,6 +271,7 @@ async function pushSourceHelper(force: boolean) {
           }
 
           const rootPath = workspaceFolders[0].uri.fsPath;
+          historyDir = rootPath;
           const projectJsonPath = path.join(rootPath, "sfdx-project.json");
 
           let packageDirs: string[] = [];
@@ -294,7 +299,22 @@ async function pushSourceHelper(force: boolean) {
             failure: { apiResult?: import("../utils/deployDiagnostics").ApiDeployResult; errorText?: string } | null;
             components: DeployedComponent[]; // deployed components, for smart schema refresh
             fallbackUsed: boolean; // a non-live CLI deploy ran → no structured component list
-          } = { totalCount: 0, numTotal: 0, numErrors: 0, cancelled: false, failure: null, components: [], fallbackUsed: false };
+            failedKeys: string[]; // components named by a failed deploy result (History)
+            deployId?: string; // last deploy id seen (History)
+          } = { totalCount: 0, numTotal: 0, numErrors: 0, cancelled: false, failure: null, components: [], fallbackUsed: false, failedKeys: [] };
+          const recordPush = (ok: boolean, errors?: ReturnType<typeof historyErrorsFromDeploy>): void => {
+            recordHistory(rootPath, {
+              kind: "deploy",
+              org: targetUser ?? "",
+              at: pushStartTime,
+              durationMs: Date.now() - pushStartTime,
+              components: [...new Set([...componentKeysFromList(state.components), ...state.failedKeys])],
+              deployId: state.deployId,
+              ok,
+              errors,
+              source: "command",
+            });
+          };
 
           /**
            * Run one deploy invocation; returns false to stop a multi-package loop (cancel/failure).
@@ -330,9 +350,12 @@ async function pushSourceHelper(force: boolean) {
               // Keep the raw errorText even when a (possibly empty) result parsed — CLI-level
               // failures (e.g. ExpectedSourceFilesError) carry the real message only in the text.
               state.failure = { apiResult: outcome.result ? toApiDeployResult(outcome.result) : undefined, errorText: outcome.errorText };
+              state.failedKeys.push(...componentKeysFromDeploy(outcome.result));
+              state.deployId = outcome.result?.id ?? state.deployId;
               return false;
             }
             const dr = outcome.result;
+            state.deployId = dr.id ?? state.deployId;
             if (dr.numberComponentsDeployed !== undefined || dr.details) {
               state.totalCount += dr.numberComponentsDeployed ?? 0;
               state.numTotal += dr.numberComponentsTotal ?? 0;
@@ -395,6 +418,7 @@ async function pushSourceHelper(force: boolean) {
             Telemetry.event("push", { force: String(force), status: "failed" }, { durationMs: Date.now() - pushStartTime });
             const apiResult = state.failure.apiResult;
             const errorText = (state.failure.errorText ?? "").trim();
+            recordPush(false, historyErrorsFromDeploy(apiResult ? withSyntheticTestFailures(apiResult) : undefined, errorText));
             // Fold in code coverage warnings and Apex test failures — the API returns those in
             // separate fields (details.runTestResult), not componentFailures, so a push that
             // fails ONLY on org-wide coverage (clean component/test counts) would otherwise show
@@ -430,6 +454,8 @@ async function pushSourceHelper(force: boolean) {
             });
             return;
           }
+
+          if (state.totalCount > 0 || state.components.length > 0) recordPush(true);
 
           // Smart schema refresh: only invalidate/regenerate stubs when the push
           // actually changed objects/fields — a plain Apex push refreshes nothing.
@@ -487,6 +513,9 @@ async function pushSourceHelper(force: boolean) {
           }
           // e.message contains combined stdout/stderr from commandRunner
           const raw = e.message || e.stderr || "Unknown Error";
+          if (historyDir) {
+            recordHistory(historyDir, { kind: "deploy", org: targetUser ?? "", at: pushStartTime, durationMs: Date.now() - pushStartTime, components: [], ok: false, errors: historyErrorsFromCliText(String(raw)), source: "command" });
+          }
           // Report the UNcleaned text — the CLI's JSON error (message/name/warnings) carries the
           // exact cause; cleanDeployOutput strips it for the human-readable log.
           reportError({
@@ -519,6 +548,7 @@ async function pullSourceHelper(force: boolean) {
   const org = defaultOrg?.displayName;
   const orgFlag = targetOrgFlag(defaultOrg?.username);
   const operationHandle = OperationPanelProvider.beginOperation("Pull", org);
+  const pullDir = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
   await vscode.window.withProgress(
     {
       location: vscode.ProgressLocation.Notification,
@@ -527,6 +557,22 @@ async function pullSourceHelper(force: boolean) {
     },
     async (_progress, token) => {
       const pullStartTime = Date.now();
+      // One History entry per run, at the result point (cancelled runs are not recorded).
+      const recordPull = (ok: boolean, text: string): void => {
+        if (!pullDir) return;
+        const info = parseRetrieveHistory(text);
+        const errors = ok ? (info?.errors ?? []) : info?.errors.length ? info.errors : historyErrorsFromCliText(text);
+        recordHistory(pullDir, {
+          kind: "retrieve",
+          org: defaultOrg?.username ?? "",
+          at: pullStartTime,
+          durationMs: Date.now() - pullStartTime,
+          components: info?.components ?? [],
+          ok: ok && errors.length === 0,
+          errors: errors.length > 0 ? errors : undefined,
+          source: "command",
+        });
+      };
       try {
         const flag = force ? "--ignore-conflicts" : "";
         // --json so we can see exactly which components were retrieved and refresh smartly.
@@ -537,6 +583,7 @@ async function pullSourceHelper(force: boolean) {
 
         // Smart schema refresh: only when the pull brought down object/field changes.
         const components = parseRetrievedComponents(result);
+        recordPull(true, result);
         if (!components) {
           // Couldn't read the retrieve result → refresh fully to be safe.
           OrgMetadataCache.invalidate(defaultOrg?.username ?? null);
@@ -564,6 +611,7 @@ async function pullSourceHelper(force: boolean) {
           return;
         }
         Telemetry.event("pull", { force: String(force), status: "failed" }, { durationMs: Date.now() - pullStartTime });
+        recordPull(false, String(e?.message ?? e?.stderr ?? e ?? ""));
         reportError({ operation: "Pull", error: e, org, reauthOrg: defaultOrg?.username, handle: operationHandle });
       }
     }
