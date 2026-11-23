@@ -10,6 +10,7 @@ import {
 	syncVirtualDocument,
 } from '../languageClient';
 import { clearBufferOrgOverride, setBufferOrgOverride } from '../utils/bufferOrgOverride';
+import { primaryProjectRoot } from '../utils/projectUtils';
 import {
 	LspCompletionItemLike,
 	RequestGate,
@@ -60,23 +61,27 @@ export class ApexBufferBridge {
 	/** Raw items of the last completion list (for completionItem/resolve). */
 	private _lastList: { listId: number; items: LspCompletionItemLike[]; uri: string } | undefined;
 	private _listSeq = 0;
-	private _ephemeralSent = false;
+	/** Buffer URI the server was told is ephemeral (a project switch moves the buffer: tell it again). */
+	private _ephemeralFor: string | undefined;
 
 	/**
 	 * @param bufferRelativePath workspace-relative path of the (historic) buffer file
 	 * @param languageId 'apex' or 'soql' — the language the server treats the buffer as
 	 * @param persist write the text to the buffer file on `persist()` (workbench restores it)
+	 * @param projectDir project the buffer file lives in (re-evaluated on every use, so a panel can
+	 *   switch project); default: the active project, else the first workspace folder
 	 */
 	constructor(
 		private readonly bufferRelativePath: string,
 		private readonly languageId: 'apex' | 'soql' = 'apex',
 		private readonly persistToDisk = false,
+		private readonly projectDir?: () => string | undefined,
 	) {}
 
 	/** The buffer file URI (persistence + org-override key). */
 	getBufferUri(): vscode.Uri | undefined {
-		const root = vscode.workspace.workspaceFolders?.[0]?.uri;
-		return root ? vscode.Uri.joinPath(root, this.bufferRelativePath) : undefined;
+		const dir = this.projectDir?.() ?? primaryProjectRoot();
+		return dir ? vscode.Uri.joinPath(vscode.Uri.file(dir), this.bufferRelativePath) : undefined;
 	}
 
 	/** The virtual document URI the language server sees. */
@@ -101,8 +106,8 @@ export class ApexBufferBridge {
 	setOrg(org: string | null): boolean {
 		const file = this.getBufferUri();
 		if (!file) return false;
-		if (!this._ephemeralSent) {
-			this._ephemeralSent = true;
+		if (this._ephemeralFor !== file.toString()) {
+			this._ephemeralFor = file.toString();
 			setEphemeralBuffers(this.getDocumentUris());
 		}
 		const changed = setBufferOrgOverride(file.fsPath, org);

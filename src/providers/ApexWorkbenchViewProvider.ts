@@ -3,6 +3,8 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { getAnonymousApexOrgList, executeAnonymousForPanel } from '../commands/executeAnonymous';
+import { PanelProjectBinding } from '../utils/panelProject';
+import { PROJECT_SELECTOR_CSS, projectSelectorMarkup, projectSelectorScript } from '../utils/panelProjectUi';
 import { fetchApexLogBody, listActiveTraceFlags, deleteAllApexLogs, createUserTrace, extractCodeUnit } from '../utils/apexLogApi';
 import { LiveLogService } from '../utils/liveLogService';
 import { getHighlightPatterns } from '../utils/apexLogHighlight';
@@ -54,8 +56,13 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 	private _listener?: vscode.Disposable;
 	private _lastLog = '';
 	/** Execute-tab buffer: virtual LS document; text persisted to WORKBENCH_BUFFER on change/blur. */
-	private readonly _bridge = new ApexBufferBridge(WORKBENCH_BUFFER, 'apex', true);
-	private readonly _soqlBridge = new ApexBufferBridge(SOQL_BUFFER, 'soql', true);
+	/** Project selector: storage, both buffers, the org list default and the log folder follow the selected project. */
+	private readonly _binding = new PanelProjectBinding();
+	private readonly _bridge = new ApexBufferBridge(WORKBENCH_BUFFER, 'apex', true, () => this._binding.current());
+	private readonly _soqlBridge = new ApexBufferBridge(SOQL_BUFFER, 'soql', true, () => this._binding.current());
+	/** Project dir the buffers were last opened under (to close their virtual documents on a switch). */
+	private _bufferDir: string | undefined;
+	private _reloadSeq = 0;
 	/** Cache of fetched log bodies (id → { text, unit }) so re-opening is instant. */
 	private readonly _bodyCache = new Map<string, { text: string; unit: string | null }>();
 	/** Live-log subscription for the Logs tab's current org (shared LiveLogService). */
@@ -76,8 +83,41 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 		// When the default org changes, re-send the org list so the selector realigns
 		// (the "(default)" marker follows, and a default-selected user follows along).
 		this._disposables.push(onDidChangeDefaultOrg(async () => {
-			if (this._view) this._post('orgList', { orgs: await getAnonymousApexOrgList(), defaultChanged: true });
+			if (this._view) this._post('orgList', { orgs: await this._orgList(), defaultChanged: true });
 		}));
+		this._disposables.push(this._binding, this._binding.onDidChange(() => void this._onProjectChanged()));
+	}
+
+	/**
+	 * Org list for the selected project (its default org first). While the panel is pinned to a project
+	 * that is not the active one, the default is offered as an explicit org (the webview's "default" entry
+	 * means "no org" = the ACTIVE project's default, which would be the wrong org).
+	 */
+	private async _orgList(): Promise<{ label: string; username: string }[]> {
+		return this._binding.current() ? this._binding.orgList() : getAnonymousApexOrgList();
+	}
+
+	/** The selected project changed: reload the buffers, history and org list from the new project. */
+	private async _onProjectChanged(): Promise<void> {
+		const view = this._view;
+		if (!view) return;
+		// Close the virtual documents of the previous project's buffers (they were keyed by its dir).
+		const old = this._bufferDir;
+		if (old && old !== this._binding.current()) {
+			new ApexBufferBridge(WORKBENCH_BUFFER, 'apex', true, () => old).dispose();
+			new ApexBufferBridge(SOQL_BUFFER, 'soql', true, () => old).dispose();
+		}
+		this._bodyCache.clear();
+		await this._renderView(view);
+	}
+
+	/** Render the webview from the selected project's buffers and history. */
+	private async _renderView(view: vscode.WebviewView): Promise<void> {
+		this._bufferDir = this._binding.current();
+		const initialCode = await this._bridge.readBuffer();
+		const initialSoql = await this._soqlBridge.readBuffer();
+		// A distinct HTML string forces a reload (identical html is ignored).
+		view.webview.html = this._html(view.webview, initialCode, initialSoql) + `<!-- reload ${++this._reloadSeq} -->`;
 	}
 
 	/** Release everything (extension deactivate): subscriptions, live-log feed, cached log bodies. */
@@ -156,7 +196,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 	}
 
 	private _storageDir(): string | null {
-		const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+		const root = this._binding.current();
 		return root ? path.join(root, ASFX_DIR) : null;
 	}
 
@@ -201,9 +241,8 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 				vscode.Uri.joinPath(this._extensionUri, 'node_modules', 'monaco-editor', 'min'),
 			],
 		};
-		const initialCode = await this._bridge.readBuffer();
-		const initialSoql = await this._soqlBridge.readBuffer();
-		view.webview.html = this._html(view.webview, initialCode, initialSoql);
+		this._viewDisposables.push(this._binding.attach(view.webview));
+		await this._renderView(view);
 
 		this._listener?.dispose();
 		this._listener = view.webview.onDidReceiveMessage(async (data: any) => {
@@ -211,7 +250,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 			if (await handleResultsTableMessage(data, (m) => view.webview.postMessage(m))) return;
 			switch (data?.type) {
 				case 'getOrgs':
-					this._post('orgList', { orgs: await getAnonymousApexOrgList() });
+					this._post('orgList', { orgs: await this._orgList() });
 					// The client only starts listening for messages once its script has run —
 					// 'getOrgs' is the first thing it sends, so it's the reliable "ready" signal
 					// for flushing a result that arrived before this webview instance existed.
@@ -437,7 +476,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 
 	/** Remove downloaded `.log` files from the local Salesforce debug-log folder (best effort). */
 	private _deleteLocalLogFiles(): void {
-		const dir = getSalesforceLogDirectory();
+		const dir = getSalesforceLogDirectory(this._binding.current());
 		if (!dir) return;
 		try {
 			for (const f of fs.readdirSync(dir)) {
@@ -448,7 +487,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 
 	private async _openLogFile(name: string, text: string): Promise<void> {
 		try {
-			const dir = getSalesforceLogDirectory() || os.tmpdir();
+			const dir = getSalesforceLogDirectory(this._binding.current()) || os.tmpdir();
 			if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 			const file = path.join(dir, name);
 			fs.writeFileSync(file, text, 'utf8');
@@ -472,6 +511,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 	* { box-sizing:border-box; }
 	body { margin:0; padding:0; height:100vh; display:flex; flex-direction:column; color:var(--vscode-foreground);
 		background:var(--vscode-editor-background); font-family:var(--vscode-font-family); font-size:var(--vscode-font-size,13px); }
+	${PROJECT_SELECTOR_CSS}
 	#bar { display:flex; align-items:center; gap:10px; padding:8px 10px; border-bottom:1px solid var(--vscode-panel-border, rgba(128,128,128,0.25)); flex-shrink:0; }
 	#title { display:inline-flex; align-items:center; gap:6px; font-size:13px; font-weight:500; white-space:nowrap; }
 	.lbl { font-size:11px; opacity:0.7; }
@@ -544,6 +584,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 <div id="bar">
 	<span class="tabs"><span class="tab active" data-t="logs">Logs</span><span class="tab" data-t="exec">Anonymous Apex</span><span class="tab" data-t="soql">SOQL</span></span>
 	<span style="flex:1;"></span>
+	${projectSelectorMarkup()}
 	<span id="busy" title="Loading schema from the org…"><span class="spinner"></span>schema…</span>
 	<select id="org" title="Target org for logs, execution and queries"><option value="">Loading…</option></select>
 	<span id="tracePill" title="Active debug traces">Trace: —</span>
@@ -848,6 +889,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 	});
 	vscode.postMessage({type:'getOrgs'});
 </script>
+<script>${projectSelectorScript('vscode')}</script>
 </body></html>`;
 	}
 }

@@ -16,7 +16,8 @@ import {
 } from "../commands/deployMetadata";
 import { confirmProductionOrgOperation } from "../utils/orgSafety";
 import { loadPresets, addPreset, type DeployPreset, type DeployTypeKey } from "../utils/deployPresets";
-import { getAnonymousApexOrgList } from "../commands/executeAnonymous";
+import { PanelProjectBinding, orgPickerForProject } from "../utils/panelProject";
+import { PROJECT_SELECTOR_CSS, projectSelectorMarkup, projectSelectorScript } from "../utils/panelProjectUi";
 import { onDidChangeDefaultOrg } from "../utils/defaultOrgEvents";
 import { runCommand } from "../utils/commandRunner";
 import { Logger, DeployLog } from "../utils/outputChannel";
@@ -43,6 +44,15 @@ export interface DeployPanelState {
   filterOnlySelected?: boolean;
   autoGitSelect?: boolean;
   validateOnly?: boolean;
+}
+
+interface DeployInitData {
+  tree: DeployTreePackageNode[];
+  testClasses: { label: string; description: string }[];
+  presets: DeployPreset[];
+  orgs: { label: string; username: string }[];
+  defaultOrg: string;
+  testSuites: TestSuite[];
 }
 
 export class DeployMetadataPanelProvider {
@@ -72,17 +82,39 @@ export class DeployMetadataPanelProvider {
   /** Singleton: one Deploy panel (and one retained renderer) at most. */
   private static _panel: vscode.WebviewPanel | undefined;
 
+  /** Everything the panel loads for a project, in parallel (the init message awaits it). */
+  private static loadInitData(workspaceRoot: string): Promise<DeployInitData> {
+    return Promise.allSettled([
+      Promise.resolve().then(() => getMetadataTreeByPackage(workspaceRoot)),
+      Promise.resolve().then(() => getTestClassItems(workspaceRoot)),
+      loadPresets(vscode.Uri.file(workspaceRoot)),
+      orgPickerForProject(workspaceRoot),
+      Promise.resolve().then(() => loadTestSuites(workspaceRoot))
+    ]).then(([treeR, testR, presetsR, orgsR, suitesR]) => {
+      const tree = treeR.status === "fulfilled" ? treeR.value : ([] as DeployTreePackageNode[]);
+      const testClasses = testR.status === "fulfilled" ? testR.value : ([] as { label: string; description: string }[]);
+      const presets = presetsR.status === "fulfilled" ? presetsR.value : ([] as DeployPreset[]);
+      const orgs = orgsR.status === "fulfilled" ? orgsR.value.orgs : ([] as { label: string; username: string }[]);
+      // The project's default org; with none, the first org of the list (as before).
+      const defaultOrg = (orgsR.status === "fulfilled" ? orgsR.value.defaultOrg : "") || (orgs.length > 0 ? orgs[0].username : "");
+      const testSuites = suitesR.status === "fulfilled" ? suitesR.value : ([] as TestSuite[]);
+      return { tree, testClasses, presets, orgs, defaultOrg, testSuites };
+    });
+  }
+
   public static async show(initialPreset?: DeployPreset): Promise<void> {
-    const folder = vscode.workspace.workspaceFolders?.[0];
-    if (!folder) {
+    const binding = new PanelProjectBinding();
+    const workspaceRoot = binding.current() ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!workspaceRoot) {
+      binding.dispose();
       vscode.window.showErrorMessage("No workspace open.");
       return;
     }
-    const workspaceRoot = folder.uri.fsPath;
     const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
 
     const existing = DeployMetadataPanelProvider._panel;
     if (existing) {
+      binding.dispose();
       existing.reveal(column);
       if (initialPreset) void existing.webview.postMessage({ command: "applyPresetFromHost", preset: initialPreset });
       return;
@@ -97,6 +129,7 @@ export class DeployMetadataPanelProvider {
     try {
       panel.webview.html = this.getHtml();
     } catch (e) {
+      binding.dispose();
       vscode.window.showErrorMessage(
         "Deploy Metadata panel failed to load: " + (e instanceof Error ? e.message : String(e))
       );
@@ -105,74 +138,46 @@ export class DeployMetadataPanelProvider {
     }
 
     // Load all data in parallel. The message handler awaits this before sending 'init'.
-    const dataPromise = Promise.allSettled([
-      Promise.resolve().then(() => getMetadataTreeByPackage(workspaceRoot)),
-      Promise.resolve().then(() => getTestClassItems(workspaceRoot)),
-      loadPresets(folder.uri),
-      getAnonymousApexOrgList(),
-      Promise.resolve().then(() => loadTestSuites(workspaceRoot))
-    ]).then(([treeR, testR, presetsR, orgsR, suitesR]) => {
-      const tree = treeR.status === "fulfilled" ? treeR.value : ([] as DeployTreePackageNode[]);
-      const testClasses = testR.status === "fulfilled" ? testR.value : ([] as { label: string; description: string }[]);
-      const presets = presetsR.status === "fulfilled" ? presetsR.value : ([] as DeployPreset[]);
-      const orgs = orgsR.status === "fulfilled" ? orgsR.value : ([] as { label: string; username: string }[]);
-      const defaultOrg = orgs.length > 0 ? orgs[0].username : "";
-      const testSuites = suitesR.status === "fulfilled" ? suitesR.value : ([] as TestSuite[]);
-      return { tree, testClasses, presets, orgs, defaultOrg, testSuites };
-    });
+    const dataPromise = DeployMetadataPanelProvider.loadInitData(workspaceRoot);
 
-    this.attachMessageHandler(panel, initialPreset ?? null, dataPromise, folder, workspaceRoot);
+    this.attachMessageHandler(panel, initialPreset ?? null, dataPromise, binding, workspaceRoot);
   }
 
   /** Call when panel is restored (e.g. after switching back to the tab). Uses cached data so restore is instant. */
   public static async revive(panel: vscode.WebviewPanel): Promise<void> {
-    const folder = vscode.workspace.workspaceFolders?.[0];
-    if (!folder) {
+    const binding = new PanelProjectBinding();
+    const workspaceRoot = binding.current() ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!workspaceRoot) {
+      binding.dispose();
       panel.webview.html = `<html><body><p>No workspace open. Close this tab and run "ASFXT: Deploy Metadata" with a folder open.</p></body></html>`;
       return;
     }
-    const workspaceRoot = folder.uri.fsPath;
 
     // Render HTML immediately — visible at once regardless of cache hit/miss.
     panel.webview.options = { enableScripts: true };
     panel.webview.html = this.getHtml();
 
     const cache = DeployMetadataPanelProvider.initCache;
-    const dataPromise = (cache && cache.workspaceRoot === workspaceRoot)
+    const dataPromise: Promise<DeployInitData> = (cache && cache.workspaceRoot === workspaceRoot)
       ? Promise.resolve({ tree: cache.tree, testClasses: cache.testClasses, presets: cache.presets, orgs: cache.orgs, defaultOrg: cache.defaultOrg, testSuites: cache.testSuites ?? [] })
-      : Promise.allSettled([
-          Promise.resolve().then(() => getMetadataTreeByPackage(workspaceRoot)),
-          Promise.resolve().then(() => getTestClassItems(workspaceRoot)),
-          loadPresets(folder.uri),
-          getAnonymousApexOrgList(),
-          Promise.resolve().then(() => loadTestSuites(workspaceRoot))
-        ]).then(([treeR, testR, presetsR, orgsR, suitesR]) => {
-          const tree = treeR.status === "fulfilled" ? treeR.value : ([] as DeployTreePackageNode[]);
-          const testClasses = testR.status === "fulfilled" ? testR.value : ([] as { label: string; description: string }[]);
-          const presets = presetsR.status === "fulfilled" ? presetsR.value : ([] as DeployPreset[]);
-          const orgs = orgsR.status === "fulfilled" ? orgsR.value : ([] as { label: string; username: string }[]);
-          const defaultOrg = orgs.length > 0 ? orgs[0].username : "";
-          const testSuites = suitesR.status === "fulfilled" ? suitesR.value : ([] as TestSuite[]);
-          return { tree, testClasses, presets, orgs, defaultOrg, testSuites };
-        });
+      : DeployMetadataPanelProvider.loadInitData(workspaceRoot);
 
-    this.attachMessageHandler(panel, null, dataPromise, folder, workspaceRoot);
+    this.attachMessageHandler(panel, null, dataPromise, binding, workspaceRoot);
   }
 
   private static attachMessageHandler(
     panel: vscode.WebviewPanel,
     initialPreset: DeployPreset | null,
-    dataPromise: Promise<{
-      tree: DeployTreePackageNode[];
-      testClasses: { label: string; description: string }[];
-      presets: DeployPreset[];
-      orgs: { label: string; username: string }[];
-      defaultOrg: string;
-      testSuites: TestSuite[];
-    }>,
-    folder: vscode.WorkspaceFolder,
-    workspaceRoot: string
+    initialData: Promise<DeployInitData>,
+    binding: PanelProjectBinding,
+    initialRoot: string
   ): void {
+    // The project the panel shows. Changes when the user picks another project in the selector
+    // (or the active project changes while the panel is not pinned). Handlers snapshot it per message.
+    let liveRoot = initialRoot;
+    let liveData = initialData;
+    let projectSwitched = false;
+    let reloadSeq = 0;
     // Dispose previous listener/watcher when re-attaching (e.g. on revive) to avoid leaking listeners and large closures.
     const previousCleanup = DeployMetadataPanelProvider.cleanupByPanel.get(panel);
     if (previousCleanup) {
@@ -198,19 +203,19 @@ export class DeployMetadataPanelProvider {
       // fires for every save anywhere (build output, .sf tracking internals, unrelated files),
       // each one triggering a git-status call and a selection re-merge that has nothing to do
       // with deployable metadata.
-      const packageDirs = getPackageDirectories(workspaceRoot)
+      const packageDirs = getPackageDirectories(liveRoot)
         .map((d) => d.replace(/\\/g, "/").replace(/\/$/, ""))
         .filter(Boolean);
       const watchPattern = packageDirs.length > 0
-        ? new vscode.RelativePattern(workspaceRoot, packageDirs.length === 1 ? `${packageDirs[0]}/**/*` : `{${packageDirs.join(",")}}/**/*`)
-        : new vscode.RelativePattern(workspaceRoot, "**/*");
+        ? new vscode.RelativePattern(liveRoot, packageDirs.length === 1 ? `${packageDirs[0]}/**/*` : `{${packageDirs.join(",")}}/**/*`)
+        : new vscode.RelativePattern(liveRoot, "**/*");
 
       const watcher = vscode.workspace.createFileSystemWatcher(watchPattern, false, false, false);
       const onChange = () => {
         if (watcherDebounce) clearTimeout(watcherDebounce);
         watcherDebounce = setTimeout(async () => {
           try {
-            const paths = await DeployMetadataPanelProvider.runGitStatusSfdxPaths(workspaceRoot);
+            const paths = await DeployMetadataPanelProvider.runGitStatusSfdxPaths(liveRoot);
             panel.webview.postMessage({ command: "setChangedPaths", paths });
           } catch (e) {
             panel.webview.postMessage({ command: "setChangedPaths", paths: [], error: String(e) });
@@ -237,6 +242,9 @@ export class DeployMetadataPanelProvider {
         state?: DeployPanelState;
         suiteName?: string;
       }) => {
+        // Snapshot: a project switch mid-flight (deploy, git status) must not redirect running work.
+        const workspaceRoot = liveRoot;
+        const dataPromise = liveData;
         if (msg.command === "persistPanelState" && msg.state !== null && msg.state !== undefined) {
           DeployMetadataPanelProvider.panelStateByWorkspace[workspaceRoot] = msg.state;
           updateFileWatcher(msg.state.autoGitSelect ?? false);
@@ -245,14 +253,16 @@ export class DeployMetadataPanelProvider {
         if (msg.command === "panelReady") {
           const { tree, testClasses, presets, orgs, defaultOrg, testSuites } = await dataPromise;
           DeployMetadataPanelProvider.initCache = { workspaceRoot, tree, testClasses, presets, orgs, defaultOrg, testSuites };
-          const savedState = DeployMetadataPanelProvider.panelStateByWorkspace[workspaceRoot] ?? null;
+          // After a project switch the webview must not fall back to its own getState() (the previous
+          // project's selection): an empty state restores "nothing selected".
+          const savedState = DeployMetadataPanelProvider.panelStateByWorkspace[workspaceRoot] ?? (projectSwitched ? ({ sourcePaths: [] } as DeployPanelState) : null);
           AuthInfo.warmAuthForOrg((savedState?.targetOrg ?? defaultOrg) || null);
           updateFileWatcher(savedState?.autoGitSelect ?? false);
           panel.webview.postMessage({ command: "init", tree, testClasses, presets, initialPreset, orgs, defaultOrg, savedState, testSuites });
           return;
         }
         if (msg.command === "savePreset") {
-          const workspaceUri = vscode.workspace.workspaceFolders?.[0]?.uri ?? folder.uri;
+          const workspaceUri = vscode.Uri.file(workspaceRoot);
           const deployType = (msg.deployType || "RunRelevantTests") as DeployTypeKey;
           const sourcePaths = Array.isArray(msg.sourcePaths) ? msg.sourcePaths : [];
           const testClassNames = Array.isArray(msg.testClassNames) ? msg.testClassNames : [];
@@ -549,16 +559,35 @@ export class DeployMetadataPanelProvider {
     const defaultOrgSub = onDidChangeDefaultOrg(async () => {
       DeployMetadataPanelProvider.initCache = null;
       try {
-        const orgs = await getAnonymousApexOrgList();
-        if (DeployMetadataPanelProvider._panel !== panel) return;
-        void panel.webview.postMessage({ command: "defaultOrgChanged", orgs, defaultOrg: orgs[0]?.username ?? "" });
+        const root = liveRoot;
+        const { orgs, defaultOrg } = await orgPickerForProject(root);
+        if (DeployMetadataPanelProvider._panel !== panel || root !== liveRoot) return;
+        void panel.webview.postMessage({ command: "defaultOrgChanged", orgs, defaultOrg: defaultOrg || (orgs[0]?.username ?? "") });
       } catch { /* keep the current list */ }
+    });
+
+    // Project selector: the header dropdown (or the active project, while not pinned) switched the
+    // panel's project. Reload everything project-bound as if the panel were newly opened.
+    const selectorSub = binding.attach(panel.webview);
+    const projectSub = binding.onDidChange(() => {
+      const next = binding.current();
+      if (!next || next === liveRoot) return;
+      liveRoot = next;
+      projectSwitched = true;
+      DeployMetadataPanelProvider.initCache = null;
+      liveData = DeployMetadataPanelProvider.loadInitData(next);
+      updateFileWatcher(false);
+      // A distinct HTML string forces a reload (identical html is ignored); the panelReady handshake re-inits.
+      panel.webview.html = DeployMetadataPanelProvider.getHtml(++reloadSeq);
     });
 
     DeployMetadataPanelProvider.cleanupByPanel.set(panel, () => {
       updateFileWatcher(false); // dispose watcher + debounce timer
       listenerDisposable.dispose();
       defaultOrgSub.dispose();
+      projectSub.dispose();
+      selectorSub.dispose();
+      binding.dispose();
     });
     if (!DeployMetadataPanelProvider.panelsWithDisposeRegistered.has(panel)) {
       DeployMetadataPanelProvider.panelsWithDisposeRegistered.add(panel);
@@ -611,7 +640,7 @@ export class DeployMetadataPanelProvider {
       : unique;
   }
 
-  private static getHtml(): string {
+  private static getHtml(reload = 0): string {
     const testLevels = [
       { value: "NoTestRun", label: DEPLOY_TYPE_NO_TESTS },
       { value: "RunAllTestsInOrg", label: DEPLOY_TYPE_RUN_ALL },
@@ -623,9 +652,11 @@ export class DeployMetadataPanelProvider {
 <html>
 <head>
 	<meta charset="UTF-8">
+	<!-- reload ${reload} -->
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
 	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
 	<style>
+		${PROJECT_SELECTOR_CSS}
 		* { box-sizing: border-box; margin: 0; padding: 0; }
 
 		/* ── Design tokens ───────────────────────────────────────────────────────── */
@@ -815,7 +846,7 @@ export class DeployMetadataPanelProvider {
 	<div id="panelSplit" title="Drag to resize"><span></span></div>
 	<div class="panel-right">
 		<div class="section">
-			<div class="section-title"><span class="st-icon" aria-hidden="true">⚡</span><span>Deployment</span></div>
+			<div class="section-title"><span class="st-icon" aria-hidden="true">⚡</span><span>Deployment</span>${projectSelectorMarkup()}</div>
 			<div class="rp-body">
 				<div class="card">
 					<div class="field-row">
@@ -2096,6 +2127,7 @@ export class DeployMetadataPanelProvider {
 		});
 		postToHost({ command: 'panelReady' });
 	</script>
+	<script>${projectSelectorScript("vsCodeApi")}</script>
 </body>
 </html>`;
   }

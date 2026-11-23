@@ -6,6 +6,7 @@ import { fetchProcessMetadata } from "../utils/processMetadata";
 import { buildProcessGraph, scopeMetadataToObjects, ProcessGraph, ProcessNode } from "../utils/processGraph";
 import { OrgMetadataCache } from "../utils/orgMetadataCache";
 import { runCommandArgs } from "../utils/commandRunner";
+import { primaryProjectRoot } from "../utils/projectUtils";
 import { getNonce } from "../utils/htmlUtils";
 import { onDidChangeDefaultOrg } from "../utils/defaultOrgEvents";
 
@@ -140,7 +141,7 @@ export class ProcessMapPanelProvider {
         const args = ["org", "open", "--path", path];
         if (ProcessMapPanelProvider._org) args.push("--target-org", ProcessMapPanelProvider._org);
         try {
-            await runCommandArgs("sf", args, undefined, undefined, false);
+            await runCommandArgs("sf", args, primaryProjectRoot(), undefined, false);
             vscode.window.setStatusBarMessage(`Opening ${node.label} in the org…`, 2500);
         } catch (e) {
             vscode.window.showErrorMessage(`Couldn't open in org: ${e instanceof Error ? e.message : String(e)}`);
@@ -151,7 +152,8 @@ export class ProcessMapPanelProvider {
         if (!content) return;
         // A bare relative Uri.file() resolves to the filesystem root — default next to the workspace instead.
         const name = path.basename(filename || "process-map");
-        const ws = vscode.workspace.workspaceFolders?.[0]?.uri;
+        const root = primaryProjectRoot();
+        const ws = root ? vscode.Uri.file(root) : undefined;
         const uri = await vscode.window.showSaveDialog({ defaultUri: ws ? vscode.Uri.joinPath(ws, name) : undefined });
         if (!uri) return;
         try {

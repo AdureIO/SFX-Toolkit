@@ -61,6 +61,8 @@ interface LoadState {
 
 const api = acquireVsCodeApi();
 const post = (msg: unknown) => api.postMessage(msg);
+// The shared project selector (panelProjectUi.ts) posts through this handle.
+(window as unknown as { __asfxApi: unknown }).__asfxApi = api;
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const esc = (t: unknown) =>
 	String(t ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");

@@ -58,6 +58,7 @@ const ORG: string[] = [
 	"editSnippetFile",
 	"editSnippet",
 	"refreshSnippets",
+	"filterSnippetsByProject",
 	"lwcNavigate",
 	"lwcGoToJs",
 	"lwcGoToHtml",

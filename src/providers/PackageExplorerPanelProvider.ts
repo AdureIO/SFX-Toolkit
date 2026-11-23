@@ -2,6 +2,9 @@ import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
 import { runCommandArgs } from "../utils/commandRunner";
+import { PanelProjectBinding } from "../utils/panelProject";
+import { PROJECT_SELECTOR_CSS, projectSelectorMarkup, projectSelectorScript } from "../utils/panelProjectUi";
+import { primaryProjectRoot } from "../utils/projectUtils";
 import { Telemetry, categorizeError } from "../utils/telemetry";
 import { getOrgListForPicker, refreshOrgListCache, getOrgByTarget } from "../utils/orgListCache";
 import { getNonce } from "../utils/htmlUtils";
@@ -103,6 +106,24 @@ export class PackageExplorerPanelProvider {
   private static readonly _packageInflight = new Map<string, Promise<PackageEntry[]>>();
   /** Which view the panel shows — repainted from this when the (non-retained) webview reloads. */
   private static _mode: "hub" | "installed" = "hub";
+  /** Project selector: the project whose Dev Hub, sfdx-project.json and cwd the panel uses. */
+  private static _binding: PanelProjectBinding | undefined;
+
+  /** Dir of the project the panel works on. */
+  private static projectDir(): string | undefined {
+    return PackageExplorerPanelProvider._binding?.current() ?? primaryProjectRoot();
+  }
+
+  /** The project changed: drop what was derived from the old one (default hub, package aliases) and reload. */
+  private static async onProjectChanged(): Promise<void> {
+    if (!PackageExplorerPanelProvider._panel) return;
+    PackageExplorerPanelProvider._hubCache = undefined;
+    PackageExplorerPanelProvider._selectedHub = undefined;
+    PackageExplorerPanelProvider._packageCache.clear();
+    PackageExplorerPanelProvider._packageInflight.clear();
+    if (PackageExplorerPanelProvider._mode === "installed" && PackageExplorerPanelProvider._installedOrg) await this.loadInstalled();
+    else await this.load(false);
+  }
 
   /** @param hubUsername when launched from a Dev Hub org node, preselect that hub. */
   public static async show(hubUsername?: string): Promise<void> {
@@ -142,11 +163,19 @@ export class PackageExplorerPanelProvider {
     );
     PackageExplorerPanelProvider._panel = panel;
     panel.webview.html = this.getHtml();
+    const binding = new PanelProjectBinding();
+    PackageExplorerPanelProvider._binding = binding;
+    const selectorSub = binding.attach(panel.webview);
+    const projectSub = binding.onDidChange(() => void this.onProjectChanged());
     const messageListener = panel.webview.onDidReceiveMessage((msg: { command: string; [k: string]: unknown }) =>
       this.handleMessage(msg)
     );
     panel.onDidDispose(() => {
       messageListener.dispose();
+      projectSub.dispose();
+      selectorSub.dispose();
+      binding.dispose();
+      if (PackageExplorerPanelProvider._binding === binding) PackageExplorerPanelProvider._binding = undefined;
       PackageExplorerPanelProvider._panel = undefined;
     });
     return true;
@@ -287,7 +316,7 @@ export class PackageExplorerPanelProvider {
 
   /** Default Dev Hub (username or alias) from project then global SF/SFDX config files — no CLI spawn. */
   private static readDefaultDevHub(): string | undefined {
-    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const root = this.projectDir();
     const home = os.homedir();
     const candidates = [
       root && path.join(root, ".sf", "config.json"),
@@ -329,8 +358,8 @@ export class PackageExplorerPanelProvider {
     if (PackageExplorerPanelProvider._verbose) verArgs.push("--verbose");
     verArgs.push("--json");
     const [pkgRaw, verRaw] = await Promise.all([
-      runCommandArgs("sf", ["package", "list", "--target-dev-hub", hub, "--json"], undefined, undefined, false),
-      runCommandArgs("sf", verArgs, undefined, undefined, false)
+      runCommandArgs("sf", ["package", "list", "--target-dev-hub", hub, "--json"], this.projectDir(), undefined, false),
+      runCommandArgs("sf", verArgs, this.projectDir(), undefined, false)
     ]);
 
     const pkgResult = (JSON.parse(pkgRaw) as { result?: Record<string, unknown>[] }).result ?? [];
@@ -397,7 +426,7 @@ export class PackageExplorerPanelProvider {
     const idToAlias = new Map<string, string>();
     const aliasToId = new Map<string, string>();
     let dirs: SfdxPackageDir[] = [];
-    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const root = this.projectDir();
     if (!root) return { idToAlias, aliasToId, dirs };
     try {
       const json = JSON.parse(fs.readFileSync(path.join(root, "sfdx-project.json"), "utf8")) as {
@@ -461,7 +490,7 @@ export class PackageExplorerPanelProvider {
     const raw = await runCommandArgs(
       "sf",
       ["package", "installed", "list", "--target-org", org, "--json"],
-      undefined,
+      this.projectDir(),
       undefined,
       false
     );
@@ -610,7 +639,7 @@ export class PackageExplorerPanelProvider {
       const raw = await runCommandArgs(
         "sf",
         ["package", "version", "report", "--package", id, "--target-dev-hub", hub, "--json"],
-        undefined,
+        this.projectDir(),
         undefined,
         false
       );
@@ -675,7 +704,7 @@ export class PackageExplorerPanelProvider {
     try {
       await vscode.window.withProgress(
         { location: vscode.ProgressLocation.Notification, title, cancellable: false },
-        () => runCommandArgs("sf", [...args, "--json"], undefined, undefined, false, LONG_TIMEOUT_MS)
+        () => runCommandArgs("sf", [...args, "--json"], this.projectDir(), undefined, false, LONG_TIMEOUT_MS)
       );
       vscode.window.showInformationMessage(`${title} — done.`);
       Telemetry.event("packageExplorer", { status: "action", action: event });
@@ -694,7 +723,8 @@ export class PackageExplorerPanelProvider {
 
   /** Save-dialog default next to the workspace (a bare relative Uri.file resolves to the filesystem root). */
   private static defaultSaveUri(fileName: string): vscode.Uri {
-    const folder = vscode.workspace.workspaceFolders?.[0]?.uri;
+    const dir = this.projectDir();
+    const folder = dir ? vscode.Uri.file(dir) : undefined;
     return folder ? vscode.Uri.joinPath(folder, fileName) : vscode.Uri.file(path.join(os.homedir(), fileName));
   }
 
@@ -785,6 +815,7 @@ export class PackageExplorerPanelProvider {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
     <style>
+        ${PROJECT_SELECTOR_CSS}
         * { box-sizing: border-box; }
         body { font-family: var(--vscode-font-family, system-ui, sans-serif); font-size: 13px; color: var(--vscode-foreground); background: var(--vscode-editor-background); margin: 0; padding: 16px; }
         h2 { margin: 0 0 12px 0; font-weight: 600; }
@@ -849,7 +880,7 @@ export class PackageExplorerPanelProvider {
     </style>
 </head>
 <body>
-    <h2>Package Explorer</h2>
+    <h2 style="display:flex; align-items:center; gap:10px;">Package Explorer ${projectSelectorMarkup()}</h2>
     <div class="tabs">
         <div class="tab active" id="tab-hub">Dev Hub packages</div>
         <div class="tab" id="tab-installed">Installed in org</div>
@@ -1120,6 +1151,7 @@ export class PackageExplorerPanelProvider {
         // Not retained while hidden: ask the host to (re)send the current view on every load.
         vscode.postMessage({ command: 'ready' });
     </script>
+    <script nonce="${nonce}">${projectSelectorScript("vscode")}</script>
 </body>
 </html>`;
   }

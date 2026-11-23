@@ -334,6 +334,11 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "adure-sfx-toolkit.filterSnippetsByProject",
+        "title": "ASFXT: Filter Snippets by Project",
+        "icon": "$(filter)"
+      },
+      {
         "command": "adure-sfx-toolkit.lwcNavigate",
         "title": "ASFXT: LWC Navigate to Sibling",
         "icon": "$(files)"
@@ -558,6 +563,11 @@
           "command": "adure-sfx-toolkit.addDebugTrace",
           "when": "view == adure-sfx-toolkit.traces",
           "group": "navigation"
+        },
+        {
+          "command": "adure-sfx-toolkit.filterSnippetsByProject",
+          "when": "view == adure-sfx-toolkit.snippets && adure-sfx-toolkit:multipleProjects",
+          "group": "navigation@0"
         },
         {
           "command": "adure-sfx-toolkit.refreshSnippets",
@@ -817,6 +827,10 @@
         {
           "command": "adure-sfx-toolkit.selectProject",
           "when": "adure-sfx-toolkit:isUsableProject"
+        },
+        {
+          "command": "adure-sfx-toolkit.filterSnippetsByProject",
+          "when": "adure-sfx-toolkit:multipleProjects"
         },
         {
           "command": "adure-sfx-toolkit.lwcGoToJs",
