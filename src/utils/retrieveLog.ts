@@ -1,6 +1,7 @@
 /**
- * When was each component last retrieved from an org? Backs the Org Browser's
- * "changed in org since last retrieve" status. Stored in the workspace state as one map
+ * When was each component last retrieved from, or deployed to, an org by this toolkit? Backs the Org
+ * Browser's and the Deploy panel's "changed in org since last retrieve / deploy" status (a deploy is
+ * recorded here too, so our own deploy never shows up as a change). Stored in the workspace state as one map
  * `canonicalOrgKey(org) + "|" + type + ":" + fullName` → ISO time. No `vscode` import (the
  * Memento is injected), so it is unit-testable.
  */
@@ -73,6 +74,18 @@ export function recordRetrieved(org: string | null, components: { type: string; 
 	const iso = at.toISOString();
 	const prefix = `${orgKeyOf(org)}|`;
 	for (const c of components) entries[`${prefix}${c.type}:${c.fullName}`] = iso;
+	scheduleFlush();
+}
+
+/**
+ * Record that `components` were just deployed to `org`. `at` should be the org's lastModifiedDate of the
+ * component after the deploy (the status compares against exactly that); with no better value, the
+ * deploy's completion time.
+ */
+export function recordDeployed(org: string | null, components: { type: string; fullName: string; at?: Date }[], fallback: Date = new Date()): void {
+	if (components.length === 0) return;
+	const prefix = `${orgKeyOf(org)}|`;
+	for (const c of components) entries[`${prefix}${c.type}:${c.fullName}`] = (c.at ?? fallback).toISOString();
 	scheduleFlush();
 }
 

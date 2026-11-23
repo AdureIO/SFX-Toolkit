@@ -137,3 +137,28 @@ export function nameOfComponentKey(key: string): string {
 	const c = key.indexOf(":");
 	return c < 0 ? "" : key.slice(c + 1);
 }
+
+/** Types whose components live in folders (`Folder/Name`). */
+export const FOLDER_CONTENT_TYPES: readonly string[] = ["Report", "Dashboard", "Document", "EmailTemplate"];
+
+/**
+ * For a live check of just these components: the folders to list per folder type, so the org is asked
+ * for those folders only instead of every folder it has. A folder type is left out (= list it whole)
+ * when one of its selected components has no folder in its name.
+ */
+export function folderRestriction(keys: Iterable<string>): Record<string, string[]> {
+	const byType = new Map<string, { folders: Set<string>; whole: boolean }>();
+	for (const k of keys) {
+		const type = typeOfComponentKey(k);
+		if (!FOLDER_CONTENT_TYPES.includes(type)) continue;
+		const name = nameOfComponentKey(k);
+		const slash = name.lastIndexOf("/");
+		const e = byType.get(type) ?? { folders: new Set<string>(), whole: false };
+		if (slash <= 0) e.whole = true;
+		else e.folders.add(name.slice(0, slash));
+		byType.set(type, e);
+	}
+	const out: Record<string, string[]> = {};
+	for (const [type, e] of byType) if (!e.whole && e.folders.size > 0) out[type] = [...e.folders].sort();
+	return out;
+}

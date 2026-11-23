@@ -3,6 +3,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { DeployOrgStatus } from "../utils/deployOrgStatus";
+import { evaluatePreDeploy, orgLookupKey } from "../utils/deployStatusPure";
 import { ListOptions, ListResult, saveListingCache } from "../utils/orgBrowser/metadataLister";
 import { Comp, TypeInfo } from "../utils/orgBrowser/types";
 
@@ -153,5 +154,25 @@ describe("DeployOrgStatus", () => {
 		assert.deepStrictEqual(s.get("Report", "Sales/Q1"), { lm: 50, by: "Jane" });
 		assert.deepStrictEqual(s.get("Report", "Ops/B"), { lm: 10, by: "Jane" }); // other folders untouched
 		assert.strictEqual(s.snapshot([{ key: "Report:Ops/B", type: "Report", name: "Ops/B" }]).asOf, before);
+	});
+
+	it("the pre-deploy decision uses a live listing, not the cache: a change made since the cache was written is found", async () => {
+		await saveListingCache(seed, { v: 1, orgKey: "u@x", apiVersion: "67.0", listedAt: 1000, types: [T("ApexClass")], comps: [C("ApexClass", "A", 10, "Jane")], failures: [] });
+		let listed = 0;
+		const s = make(async () => {
+			listed++;
+			return { types: [T("ApexClass")], comps: [C("ApexClass", "A", 30, "Joe")], failures: [] };
+		});
+		await s.load("u@x", "u@x");
+		const syncedAt = { "ApexClass:A": 20 };
+		const selected = [{ key: "ApexClass:A", type: "ApexClass", name: "A" }];
+		// Against the cache alone nothing looks changed (lm 10 < synced 20) ...
+		const cached = evaluatePreDeploy({ selected, orgComps: new Map([[orgLookupKey("ApexClass", "A"), s.get("ApexClass", "A")!]]), listedTypes: new Set(["ApexClass"]), failedTypes: new Map(), syncedAt });
+		assert.strictEqual(cached.needsConfirmation, false);
+		// ... the live listing finds Joe's later change.
+		const out = await s.refresh(["ApexClass"]);
+		assert.strictEqual(listed, 1);
+		const live = evaluatePreDeploy({ selected, orgComps: new Map([[orgLookupKey("ApexClass", "A"), s.get("ApexClass", "A")!]]), listedTypes: new Set(out.listed), failedTypes: out.failed, syncedAt });
+		assert.deepStrictEqual(live.changed.map((c) => [c.key, c.by, c.lm]), [["ApexClass:A", "Joe", 30]]);
 	});
 });

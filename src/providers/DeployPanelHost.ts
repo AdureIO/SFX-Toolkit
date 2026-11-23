@@ -5,14 +5,27 @@ import { getToolingApiVersion } from "../utils/constants";
 import { Logger } from "../utils/outputChannel";
 import { DEFAULT_ORG_KEY, canonicalOrgKey, orgArgForKey } from "../utils/orgKey";
 import { getOrgByTarget } from "../utils/orgListCache";
-import { getRetrieveTimes } from "../utils/retrieveLog";
+import { getRetrieveTimes, recordDeployed } from "../utils/retrieveLog";
 import { metadataDiffForFile } from "../commands/metadataDiff";
 import { DeployOrgStatus } from "../utils/deployOrgStatus";
-import { RelComponent, pathsToComponents } from "../utils/deployComponentsPure";
+import { RelComponent, folderRestriction, nameOfComponentKey, pathsToComponents, typeOfComponentKey } from "../utils/deployComponentsPure";
+import { OrgCompInfo, PreDeployDecision, evaluatePreDeploy, orgLookupKey } from "../utils/deployStatusPure";
 import { ListCancelled } from "../utils/orgBrowser/metadataLister";
 import { LocalEntry, buildTypeTable, readPackageDirectories, scanProject } from "../utils/orgBrowser/localIndex";
 import { makeSoapCall } from "../utils/orgBrowser/soapTransport";
 import { Comp } from "../utils/orgBrowser/types";
+
+/** Result of the live check right before a deploy / validation. */
+export interface PreDeployCheck {
+	/** Null when the org could not be asked (the deploy still goes ahead). */
+	decision: PreDeployDecision | null;
+	/** Why the org could not be asked. */
+	error?: string;
+	/** Metadata types listed live, and the SOAP calls that took (for the log). */
+	types: string[];
+	soapCalls: number;
+	ms: number;
+}
 
 export interface DeployHostDeps {
 	ctx: vscode.ExtensionContext;
@@ -52,6 +65,8 @@ export class DeployPanelHost implements vscode.Disposable {
 	private rescanTimer: ReturnType<typeof setTimeout> | undefined;
 	private gitTimer: ReturnType<typeof setTimeout> | undefined;
 	private disposed = false;
+	/** SOAP calls sent to the org (the pre-deploy check reports its cost). */
+	private soapCalls = 0;
 
 	constructor(private readonly deps: DeployHostDeps) {
 		this.root = deps.root;
@@ -61,7 +76,13 @@ export class DeployPanelHost implements vscode.Disposable {
 			cacheDir: path.join(storage, "deploy-org-status"),
 			seedDir: path.join(storage, "org-browser"),
 			apiVersion,
-			makeCall: (org) => makeSoapCall(org, apiVersion),
+			makeCall: (org) => {
+				const call = makeSoapCall(org, apiVersion);
+				return (op) => {
+					this.soapCalls++;
+					return call(op);
+				};
+			},
 		});
 		this.ready = this.scanLocal().catch((e) => Logger.error("Deploy panel: local scan failed", e));
 		this.setupWatchers();
@@ -219,6 +240,8 @@ export class DeployPanelHost implements vscode.Disposable {
 			this.postOrgStatus("none", "No target org selected.");
 			return;
 		}
+		// Nothing of the previous org may stay on the rows while this one loads.
+		this.postOrgStatus("checking");
 		await this.ready;
 		await this.status.load(key, this.orgArg);
 		if (gen !== this.gen || this.disposed) return;
@@ -273,5 +296,76 @@ export class DeployPanelHost implements vscode.Disposable {
 				return true;
 		}
 		return false;
+	}
+
+	// ── Right before a deploy ────────────────────────────────────────────────────
+
+	/**
+	 * Ask the org NOW (never the cache) whether any selected component changed since this toolkit last
+	 * retrieved or deployed it. Lists live only the metadata types of the selected components (folder
+	 * types: only their folders), then decides with `evaluatePreDeploy`. An org that cannot be asked
+	 * (expired session, offline) does not block: the result has no decision and the deploy goes on.
+	 */
+	async checkBeforeDeploy(keys: string[]): Promise<PreDeployCheck> {
+		const types = [...new Set(keys.map(typeOfComponentKey))];
+		const t0 = Date.now();
+		const calls0 = this.soapCalls;
+		const done = (decision: PreDeployDecision | null, error?: string): PreDeployCheck => ({ decision, error, types, soapCalls: this.soapCalls - calls0, ms: Date.now() - t0 });
+		if (!this.orgKey || this.orgKey === DEFAULT_ORG_KEY) return done(null, "no target org");
+		// A background refresh would race with this one over the same state.
+		if (this.run) this.run.cancelled = true;
+		const selected = keys.map((key) => ({ key, type: typeOfComponentKey(key), name: nameOfComponentKey(key) }));
+		try {
+			const outcome = await vscode.window.withProgress({ location: vscode.ProgressLocation.Window, title: "Checking the org for changes…" }, () =>
+				this.status.refresh(types, { onlyFolders: folderRestriction(keys) })
+			);
+			const orgComps = new Map<string, OrgCompInfo>();
+			for (const c of selected) {
+				const info = this.status.get(c.type, c.name);
+				if (info) orgComps.set(orgLookupKey(c.type, c.name), info);
+			}
+			const decision = evaluatePreDeploy({
+				selected,
+				orgComps,
+				listedTypes: new Set(outcome.listed),
+				failedTypes: outcome.failed,
+				syncedAt: getRetrieveTimes(this.orgArg),
+			});
+			this.postOrgStatus("ok"); // the rows get the fresher data too
+			return done(decision);
+		} catch (e: unknown) {
+			if (e instanceof ListCancelled) return done(null, "cancelled");
+			return done(null, String((e as Error)?.message ?? e).replace(/\s+/g, " ").trim().slice(0, 240));
+		}
+	}
+
+	/**
+	 * After a successful deploy: re-list the deployed types and record each component in the retrieve /
+	 * deploy log with the org's NEW lastModifiedDate (so our own deploy never shows as changed-in-org);
+	 * where the org does not report one, with `completedAt` (the deploy's completion time).
+	 */
+	async afterDeploy(keys: string[], completedAt: number): Promise<void> {
+		if (keys.length === 0) return;
+		const types = [...new Set(keys.map(typeOfComponentKey))];
+		if (this.orgKey && this.orgKey !== DEFAULT_ORG_KEY) {
+			if (this.run) this.run.cancelled = true;
+			try {
+				await this.status.refresh(types, { onlyFolders: folderRestriction(keys) });
+			} catch (e) {
+				Logger.info(`Deploy panel: could not re-list ${types.join(", ")} after the deploy: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+			}
+		}
+		recordDeployed(
+			this.orgArg,
+			keys.map((k) => {
+				const type = typeOfComponentKey(k);
+				const name = nameOfComponentKey(k);
+				const lm = this.status.get(type, name)?.lm;
+				return { type, fullName: name, at: lm ? new Date(lm) : undefined };
+			}),
+			new Date(completedAt)
+		);
+		if (this.disposed) return;
+		this.postOrgStatus("ok");
 	}
 }

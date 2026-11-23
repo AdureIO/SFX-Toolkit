@@ -222,10 +222,15 @@ function setDirty(): void {
 	scheduleSaveState();
 }
 
+/** A panel left open for a while: its org status is refreshed when it is shown again. */
+const STALE_MS = 5 * 60_000;
+
 document.addEventListener("visibilitychange", () => {
 	if (document.hidden) {
 		window.clearTimeout(saveStateTimer);
 		saveState();
+	} else if (org.state === "ok" && Date.now() - org.sentAt > STALE_MS) {
+		post({ command: "refreshOrgStatus" });
 	}
 });
 

@@ -30,6 +30,7 @@ import { statsFromResult, coverageFromResult, toApiDeployResult, formatStatus, f
 import { AuthInfo } from "../utils/authInfo";
 import { OperationPanelProvider } from "./OperationPanelProvider";
 import { DeployPanelHost } from "./DeployPanelHost";
+import { preDeployPrompt } from "../utils/deployStatusPure";
 import { reportError, reportSuccess } from "../utils/reportError";
 import { upsertTestSuite, deleteTestSuite as deleteTestSuiteEntry, loadTestSuites, type TestSuite } from "../utils/testSuites";
 
@@ -469,12 +470,40 @@ export class DeployMetadataPanelProvider {
           return;
         }
 
+        // Right before: ask the org NOW (live, only the selected components' types) whether any selected component
+        // changed there since this toolkit last retrieved or deployed it. Never the cached status.
+        panel.webview.postMessage({ command: "status", text: "Checking the org for changes…" });
+        const check = await hostNow.checkBeforeDeploy(deployedKeys);
+        Logger.info(
+          `Deploy panel pre-deploy check: ${check.types.length} type(s) listed live (${check.types.join(", ")}) in ${check.soapCalls} SOAP call(s), ${check.ms} ms; ` +
+            (check.decision
+              ? `${check.decision.changed.length} changed in the org, ${check.decision.unverified.length} not verifiable`
+              : `org not checked (${check.error ?? "unknown"}) — going on`)
+        );
+        if (check.decision?.needsConfirmation) {
+          const { message, detail } = preDeployPrompt(check.decision.changed, dryRun, (ms) => new Date(ms).toLocaleString());
+          const go = dryRun ? "Validate anyway" : "Deploy anyway";
+          const choice = await vscode.window.showWarningMessage(message, { modal: true, detail }, go, "Compare");
+          if (choice === "Compare") {
+            panel.webview.postMessage({ command: "status", text: "Not deployed: compare the changed components with the org first." });
+            await hostNow.rowAction("compare", check.decision.changed[0].key);
+            return;
+          }
+          if (choice !== go) {
+            panel.webview.postMessage({ command: "status", text: `${dryRun ? "Validation" : "Deploy"} cancelled: ${check.decision.changed.length} component(s) changed in the org.` });
+            return;
+          }
+        } else if (check.decision === null) {
+          Logger.info(`Deploy panel: the org could not be checked for changes before the ${dryRun ? "validation" : "deploy"} (${check.error ?? "unknown"}); going on`);
+        }
+        panel.webview.postMessage({ command: "status", text: "" });
+
         // Normalized result the post-processing consumes, whichever deploy path ran.
         // `apiResult` (REST) feeds Problems directly; `errorText` (CLI fallback) is
         // parsed for diagnostics the legacy way.
         type FinalOutcome =
           | { kind: "cancelled" }
-          | { kind: "success"; stats: DeployStats; coverage: CoverageRow[]; apiResult?: import("../utils/deployDiagnostics").ApiDeployResult }
+          | { kind: "success"; stats: DeployStats; coverage: CoverageRow[]; apiResult?: import("../utils/deployDiagnostics").ApiDeployResult; completedAt?: number }
           | { kind: "failed"; stats: DeployStats; coverage: CoverageRow[]; apiResult?: import("../utils/deployDiagnostics").ApiDeployResult; errorText?: string };
 
         const deployStartTime = Date.now();
@@ -543,7 +572,9 @@ export class DeployMetadataPanelProvider {
                   : { kind: "failed", stats: { components: 0, componentErrors: 0, testsPassed: 0, testsFailed: 0 }, coverage: [], errorText: res.errorText };
               }
               const dr = res.result;
-              return { kind: "success", stats: statsFromResult(dr), coverage: coverageFromResult(dr), apiResult: toApiDeployResult(dr) };
+              // The org's own completion time (server clock), for the retrieve / deploy log when the org reports no newer lastModifiedDate.
+              const completed = Date.parse(String((dr as { completedDate?: unknown }).completedDate ?? ""));
+              return { kind: "success", stats: statsFromResult(dr), coverage: coverageFromResult(dr), apiResult: toApiDeployResult(dr), completedAt: Number.isNaN(completed) ? undefined : completed };
             } catch (e: unknown) {
               // Unexpected engine error → fall back to the classic CLI streaming path.
               Logger.info(`Live deploy failed unexpectedly; falling back to CLI streaming: ${(e as { message?: string })?.message ?? String(e)}`);
@@ -569,6 +600,8 @@ export class DeployMetadataPanelProvider {
             DeployLog.line(formatApiDeployResultForLog(apiResult, `${dryRun ? "Validation" : "Deploy"} succeeded (${formatElapsed(durationMs)}):`));
           }
           panel.webview.postMessage({ command: "deployResult", success: true, cancelled: false, dryRun, ...stats, coverage, durationMs, targetOrg: msg.targetOrg ?? "" });
+          // A real deploy: record the components with the org's new lastModifiedDate (our own deploy must not show as "changed in org") and re-list their types.
+          if (!dryRun && (apiResult !== undefined || stats.components > 0)) void hostNow.afterDeploy(deployedKeys, outcome.completedAt ?? Date.now());
           addDeployHistoryEntry({ timestamp: deployStartTime, status: "Succeeded", dryRun, ...stats, durationMs, targetOrg: msg.targetOrg ?? "", sourcePaths: sourcePathsForHistory, presetName: msg.presetName ?? null, deployType: msg.deployType, testClassNames: msg.testClassNames });
           const okSummary = apiResult ? formatResultSummary(apiResult) : "";
           reportSuccess({

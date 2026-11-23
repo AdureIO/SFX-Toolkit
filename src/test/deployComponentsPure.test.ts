@@ -4,6 +4,7 @@ import * as os from "os";
 import * as path from "path";
 import {
 	RelComponent,
+	folderRestriction,
 	deployPathsForComponents,
 	nameOfComponentKey,
 	pathsToComponents,
@@ -158,5 +159,22 @@ describe("deploy components: preset migration", () => {
 		assert.deepStrictEqual(presetComponents({ sourcePaths: ["force-app/classes"] }, comps).keys, ["ApexClass:A", "ApexClass:B"]);
 		assert.deepStrictEqual(presetComponents({ sourcePaths: [] }, comps), { keys: [], unmatched: [], migrated: true });
 		assert.deepStrictEqual(presetComponents({}, comps).keys, []);
+	});
+});
+
+describe("deploy components: live-check folder restriction", () => {
+	it("lists only the folders of the selected folder components", () => {
+		assert.deepStrictEqual(folderRestriction(["Report:Sales/Q1", "Report:Sales/Q2", "Report:Ops/Sub/B", "ApexClass:A", "Dashboard:Boards/D"]), {
+			Report: ["Ops/Sub", "Sales"],
+			Dashboard: ["Boards"],
+		});
+	});
+
+	it("leaves a folder type out (list it whole) when a selected component has no folder", () => {
+		assert.deepStrictEqual(folderRestriction(["Report:Sales/Q1", "Report:Loose", "Document:Docs/a"]), { Document: ["Docs"] });
+	});
+
+	it("is empty when no folder type is selected", () => {
+		assert.deepStrictEqual(folderRestriction(["ApexClass:A", "Flow:F"]), {});
 	});
 });
