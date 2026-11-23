@@ -127,6 +127,13 @@ describe("compare status: git data", () => {
 		assert.deepStrictEqual(computeLocalInfo(comps, mtime, new Set(["p/A.cls"]), commits), { "ApexClass:A": [900, 1], "ApexClass:B": [200, 0] });
 		assert.deepStrictEqual(computeLocalInfo(comps, mtime, null, null), { "ApexClass:A": [900, 0], "ApexClass:B": [700, 0] });
 	});
+	it("uses the scan boundary for clean files without a commit time, mtime when there is no boundary", () => {
+		const comps = [{ key: "ApexClass:B", files: ["p/B.cls"] }, { key: "ApexClass:C", files: ["p/C.cls"] }];
+		const mtime = () => 700;
+		const commits = new Map([["p/B.cls", 200]]);
+		assert.deepStrictEqual(computeLocalInfo(comps, mtime, new Set(), commits, 50), { "ApexClass:B": [200, 0], "ApexClass:C": [50, 0] });
+		assert.deepStrictEqual(computeLocalInfo(comps, mtime, new Set(), commits, null), { "ApexClass:B": [200, 0], "ApexClass:C": [700, 0] });
+	});
 });
 
 describe("compare status: progress text", () => {

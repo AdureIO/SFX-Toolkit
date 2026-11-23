@@ -228,13 +228,20 @@ export function computeLocalInfo(
 	comps: Iterable<LocalComponentFiles>,
 	mtimeOf: (rel: string) => number,
 	dirty: ReadonlySet<string> | null,
-	commits: ReadonlyMap<string, number> | null
+	commits: ReadonlyMap<string, number> | null,
+	/**
+	 * Time of the oldest commit the bounded git scan read: a path with no commit time in `commits` is unchanged
+	 * since at least then, so it is used as its local time. It is an UPPER bound on the real last-change time,
+	 * which is safe for the status rules (`orgLm > localT + TOL` → changed in org: a larger localT can only
+	 * make that rule stricter, never wrongly report an org change). null = no bound (mtime fallback).
+	 */
+	boundary: number | null = null
 ): LocalInfoMap {
 	const out: LocalInfoMap = {};
 	for (const c of comps) {
 		const files: LocalFileTimes[] = c.files.map((rel) => ({
 			mtime: mtimeOf(rel),
-			commit: commits?.get(rel),
+			commit: commits ? (commits.get(rel) ?? boundary ?? undefined) : undefined,
 			dirty: dirty ? isPathDirty(rel, dirty) : false,
 		}));
 		const r = componentLocalTime(files);
