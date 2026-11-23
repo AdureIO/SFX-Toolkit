@@ -95,10 +95,11 @@ import {
   isWorkspaceUsable,
   updateSalesforceProjectContext,
   NOT_SFDX_PROJECT_MESSAGE,
-  CONVERT_MDAPI_COMMAND
+  CONVERT_MDAPI_COMMAND,
+  findSfdxProjectDir
 } from "./utils/projectUtils";
-import { decideCommandGate } from "./utils/commandScope";
-import { activeProject, initProjectRegistry, onDidChangeActiveProject, onDidChangeProjects, projects } from "./utils/projectRegistry";
+import { decideCommandGate, gateStateOfKind } from "./utils/commandScope";
+import { activeProject, initProjectRegistry, onDidChangeActiveProject, onDidChangeProjects, projectOfFile, projects } from "./utils/projectRegistry";
 import { registerProjectStatusBar, selectProject, SELECT_PROJECT_COMMAND } from "./commands/selectProject";
 import { convertMdapiProject, registerMdapiUi, showConvertHint } from "./commands/convertMdapi";
 import { scheduleStubSync } from "./utils/sobjectStubSync";
@@ -203,11 +204,26 @@ function updateLwcContext(editor: vscode.TextEditor | undefined): void {
   );
 }
 
+/**
+ * Project kind a command acts on: a command invoked on a file (a `vscode.Uri`, or an array of
+ * them, as the explorer / editor context menus pass) acts on that file's project; without such
+ * an argument it acts on the active project.
+ */
+function gateStateForArgs(args: any[]) {
+  const first = args[0];
+  const uri: vscode.Uri | undefined = first instanceof vscode.Uri ? first : Array.isArray(first) && first[0] instanceof vscode.Uri ? first[0] : undefined;
+  if (uri && uri.scheme === "file") {
+    const kind = projectOfFile(uri.fsPath)?.kind ?? (findSfdxProjectDir(uri.fsPath) ? "sfdx" : undefined);
+    if (kind) return gateStateOfKind(kind);
+  }
+  return gateStateOfKind(activeProject()?.kind, isMdapiProject());
+}
+
 // Helper to register commands with logging; blocks execution when not in an SFDX project
 function register(command: string, callback: (...args: any[]) => any, thisArg?: any): vscode.Disposable {
   return vscode.commands.registerCommand(command, async (...args: any[]) => {
     Logger.info(`Command triggered: ${command}`);
-    const gate = decideCommandGate(command, { sfdx: activeProject()?.kind === "sfdx", mdapi: isMdapiProject() });
+    const gate = decideCommandGate(command, gateStateForArgs(args));
     if (gate === "not-sfdx") {
       vscode.window.showInformationMessage(NOT_SFDX_PROJECT_MESSAGE);
       return;
@@ -845,21 +861,32 @@ export function activate(context: vscode.ExtensionContext) {
     // The ACTIVE project changed (editor moved to another project, or the status bar picker).
     // No cache reset, no language server restart: `null` / "the default org" now means the new
     // project's default org, which notifyActiveProjectChanged re-announces (UI repaints, caches warm).
+    // The org-related tail is debounced (400 ms): rapid editor moves between projects settle first.
+    // When the new project's default org is the same, nothing org-related runs (no org list,
+    // no warm-up, no coverage clear, no schema refresh); onDidChangeDefaultOrg covers the rest.
+    let activeSwitchTimer: ReturnType<typeof setTimeout> | undefined;
     context.subscriptions.push(
+      new vscode.Disposable(() => { if (activeSwitchTimer) clearTimeout(activeSwitchTimer); }),
       onDidChangeActiveProject((p) => {
         Logger.info(`Active project → ${p ? `${p.name} (${p.kind})` : "(none)"}`);
         updateSalesforceProjectContext();
         updateSnippetStatusBar();
         refreshMdapiUi();
         devProvider.refresh();
-        void notifyActiveProjectChanged()
-          .catch((e) => Logger.error(`Active project change: ${e instanceof Error ? e.message : String(e)}`))
-          .finally(() => {
-            orgTreeProvider.refresh();
-            traceProvider.refresh();
-            snippetProvider.refresh();
-            if (isWorkspaceUsable()) OrgMetadataCache.warmDefaultOrg();
-          });
+        if (activeSwitchTimer) clearTimeout(activeSwitchTimer);
+        activeSwitchTimer = setTimeout(() => {
+          activeSwitchTimer = undefined;
+          let changed = false;
+          void notifyActiveProjectChanged()
+            .then((c) => { changed = c; })
+            .catch((e) => Logger.error(`Active project change: ${e instanceof Error ? e.message : String(e)}`))
+            .finally(() => {
+              // The onDidChangeDefaultOrg handler already repaints the org tree and traces.
+              if (!changed) traceProvider.refresh();
+              snippetProvider.refresh();
+              if (changed && isWorkspaceUsable()) OrgMetadataCache.warmDefaultOrg();
+            });
+        }, 400);
       }),
       register(SELECT_PROJECT_COMMAND, selectProject)
     );

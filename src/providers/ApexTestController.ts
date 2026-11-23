@@ -99,7 +99,9 @@ export function registerApexTestController(context: vscode.ExtensionContext): vs
     fileToClassId.set(uri.toString(), classId);
   }
 
+  let lastDiscoveredDir: string | undefined;
   async function discoverAll(): Promise<void> {
+    lastDiscoveredDir = activeSfdxDir();
     controller.items.replace([]);
     fileToClassId.clear();
     const projectDir = activeSfdxDir();
@@ -139,9 +141,24 @@ export function registerApexTestController(context: vscode.ExtensionContext): vs
   );
 
   // Rebuild the tree when the active project or the project set changes.
+  // The registry fires both events on a rescan: coalesce them into one discovery (200 ms), and
+  // skip an active-project event that did not change the active SFDX project dir.
+  let discoverTimer: ReturnType<typeof setTimeout> | undefined;
+  let discoverNeeded = false;
+  const scheduleDiscover = (onlyIfDirChanged: boolean) => {
+    if (!onlyIfDirChanged || activeSfdxDir() !== lastDiscoveredDir) discoverNeeded = true;
+    if (!discoverNeeded || discoverTimer) return;
+    discoverTimer = setTimeout(() => {
+      discoverTimer = undefined;
+      if (!discoverNeeded) return;
+      discoverNeeded = false;
+      void discoverAll();
+    }, 200);
+  };
   context.subscriptions.push(
-    onDidChangeActiveProject(() => { void discoverAll(); }),
-    onDidChangeProjects(() => { void discoverAll(); })
+    new vscode.Disposable(() => { if (discoverTimer) clearTimeout(discoverTimer); }),
+    onDidChangeActiveProject(() => scheduleDiscover(true)),
+    onDidChangeProjects(() => scheduleDiscover(false))
   );
 
   // ── Run profile ────────────────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 import * as path from "path";
 import * as vscode from "vscode";
 import { resolveDefaultTargetOrgUsername, resolveDefaultTargetOrgUsernameSync } from "./defaultOrg";
-import { setKnownTargetOrg, invalidateOrgListCache, refreshOrgListCache, getCachedOrgList } from "./orgListCache";
+import { setKnownTargetOrg, invalidateOrgListCache, refreshOrgListCache } from "./orgListCache";
 import { OrgMetadataCache } from "./orgMetadataCache";
 import { outputChannel } from "./outputChannel";
 import { isWorkspaceUsable, primaryProjectRoot } from "./projectUtils";
@@ -59,26 +59,35 @@ export async function notifyDefaultOrgChanged(username?: string | null): Promise
 
 /**
  * The ACTIVE project changed (editor moved to another project, or the status bar picker).
- * "The default org" now means the new project's: drop what was resolved for the previous one
- * (the `null` org key, the org list's default flags) and re-announce the default org, which
- * repaints org-bound UI and warms caches for the new org. Never restarts the language server:
- * the notification only reaches OrgMetadataCache.onChange listeners (a describe-cache refresh).
+ * "The default org" now means the new project's. The org list is global and only its default
+ * flags are per project (derived from each project's config), so a switch never needs
+ * `sf org list`. Resolves the new project's default org; when its key is unchanged nothing
+ * org-related happens. When it changed, `onDidChangeDefaultOrg` fires (org-bound UI repaints,
+ * coverage refreshes once) without a forced stub sync (stubs are per project). Never restarts
+ * the language server. Resolves true when the default org key changed. The caller debounces.
  */
-export async function notifyActiveProjectChanged(): Promise<void> {
+export async function notifyActiveProjectChanged(): Promise<boolean> {
+	// Captured at entry: bail if the active project moved on while we awaited the CLI.
+	const root = primaryProjectRoot();
 	invalidateOrgKeyCache();
-	invalidateOrgListCache();
-	let next: string | null | undefined;
-	try {
-		next = await resolveDefaultTargetOrgUsername();
-	} catch {
-		next = undefined;
+	let next: string | null | undefined = resolveDefaultTargetOrgUsernameSync(root);
+	if (!next) {
+		try {
+			next = await resolveDefaultTargetOrgUsername(root);
+		} catch {
+			next = undefined;
+		}
+		if (!samePath(primaryProjectRoot(), root)) return false;
 	}
-	await notifyDefaultOrgChanged(next ?? null);
-	// The default flags in the org list belong to the previous project: reload them for this one.
-	if (getCachedOrgList() === null) {
-		try { await refreshOrgListCache(); } catch { /* keep going with whatever we have */ }
-		invalidateOrgKeyCache();
-	}
+	const key = next ?? null;
+	if (key === lastKnown) return false;
+	lastKnown = key;
+	if (key) setKnownTargetOrg(key, root);
+	invalidateOrgKeyCache();
+	OrgMetadataCache.notifyDefaultOrgChanged("activeSwitch");
+	outputChannel.appendLine(`defaultOrg: active project default org → ${key ?? "(none)"}`);
+	emitter.fire(key);
+	return true;
 }
 
 /** Live watchers on every project's SF config files, plus their debounce timers. */

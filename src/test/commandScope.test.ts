@@ -1,7 +1,7 @@
 import * as assert from "assert";
 import * as fs from "fs";
 import * as path from "path";
-import { COMMAND_SCOPE, commandScopeOf, decideCommandGate } from "../utils/commandScope";
+import { COMMAND_SCOPE, commandScopeOf, decideCommandGate, gateStateOfKind } from "../utils/commandScope";
 
 const ROOT = path.join(__dirname, "..", "..");
 
@@ -41,6 +41,16 @@ describe("commandScope", () => {
 		}
 		assert.strictEqual(commandScopeOf("adure-sfx-toolkit.convertMdapiToSfdx"), "ungated");
 		assert.strictEqual(commandScopeOf("adure-sfx-toolkit.selectProject"), "ungated");
+	});
+
+	it("derives the gate state from a project kind (file argument vs active project)", () => {
+		assert.deepStrictEqual(gateStateOfKind("sfdx"), { sfdx: true, mdapi: false });
+		assert.deepStrictEqual(gateStateOfKind("mdapi"), { sfdx: false, mdapi: true });
+		assert.deepStrictEqual(gateStateOfKind(undefined), { sfdx: false, mdapi: false });
+		assert.deepStrictEqual(gateStateOfKind(undefined, true), { sfdx: false, mdapi: true });
+		// A command on an SFDX file runs even when the active project is MDAPI, and vice versa.
+		assert.strictEqual(decideCommandGate("adure-sfx-toolkit.pushSource", gateStateOfKind("sfdx")), "run");
+		assert.strictEqual(decideCommandGate("adure-sfx-toolkit.pushSource", gateStateOfKind("mdapi")), "mdapi-hint");
 	});
 
 	it("gates per project kind", () => {

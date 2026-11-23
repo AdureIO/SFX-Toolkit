@@ -60,17 +60,23 @@ export interface SchemaChangeInfo {
 	structural: boolean;
 }
 
+/**
+ * Why a full change was emitted. "activeSwitch": only the active project changed (the new
+ * project's default org differs) — per-project data (stubs) is already right.
+ */
+export type ChangeReason = "activeSwitch";
+
 class OrgMetadataCacheImpl {
 	private cache = new Map<string, OrgCache>();
 	private fetchLocks = new Map<string, Promise<string[]>>();
-	private changeListeners: ((org: string | null, change?: SchemaChangeInfo) => void)[] = [];
+	private changeListeners: ((org: string | null, change?: SchemaChangeInfo, reason?: ChangeReason) => void)[] = [];
 
 	/**
 	 * Subscribe to cache invalidation/refresh events (org switch, pull, refresh
 	 * metadata). Used by the SOQL language server to drop its describe cache.
 	 * `change` is set for targeted (per-object) invalidations. Returns a disposer.
 	 */
-	onChange(listener: (org: string | null, change?: SchemaChangeInfo) => void): () => void {
+	onChange(listener: (org: string | null, change?: SchemaChangeInfo, reason?: ChangeReason) => void): () => void {
 		this.changeListeners.push(listener);
 		return () => {
 			const i = this.changeListeners.indexOf(listener);
@@ -78,10 +84,10 @@ class OrgMetadataCacheImpl {
 		};
 	}
 
-	private emitChange(org: string | null, change?: SchemaChangeInfo): void {
+	private emitChange(org: string | null, change?: SchemaChangeInfo, reason?: ChangeReason): void {
 		for (const l of this.changeListeners) {
 			try {
-				l(org, change);
+				l(org, change, reason);
 			} catch {
 				/* listener errors must not break cache ops */
 			}
@@ -423,8 +429,8 @@ class OrgMetadataCacheImpl {
 	 * by "default"), but every consumer that resolved "the default org" must re-resolve:
 	 * emit a full change without dropping anything.
 	 */
-	notifyDefaultOrgChanged(): void {
-		this.emitChange(null);
+	notifyDefaultOrgChanged(reason?: ChangeReason): void {
+		this.emitChange(null, undefined, reason);
 	}
 
 	/**

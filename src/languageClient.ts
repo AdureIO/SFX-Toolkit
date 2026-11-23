@@ -305,7 +305,7 @@ function startClient(context: vscode.ExtensionContext): void {
 
 	// When the org switches or metadata is refreshed, drop the host-side describe
 	// cache and tell the server to drop its own.
-	const unsubscribe = OrgMetadataCache.onChange((org, change) => {
+	const unsubscribe = OrgMetadataCache.onChange((org, change, reason) => {
 		if (change) {
 			// Targeted: a push/pull touched only these objects' schema (their describes are
 			// already dropped), and `structural` = objects were added/removed, so the server
@@ -329,8 +329,9 @@ function startClient(context: vscode.ExtensionContext): void {
 		schemaHost.clearProjectDirCache();
 		if (lc.isRunning()) void lc.sendNotification(NOTE_REFRESH).catch(() => {});
 		scheduleProjectMap(); // the default org (hence the partition) may have changed
-		// Don't trust any stub.
-		scheduleStubSync({ force: true });
+		// Don't trust any stub — except after a mere active-project switch: stubs are per project
+		// (written under each project's own .sfdx) and are already right.
+		if (reason !== "activeSwitch") scheduleStubSync({ force: true });
 	});
 
 	disposables.push({ dispose: unsubscribe });

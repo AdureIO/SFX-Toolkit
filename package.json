@@ -1153,7 +1153,7 @@
     "test": "node ./out/test/runTest.js",
     "package": "npx --yes @vscode/vsce@3 package",
     "test:unit": "npm run compile && npm run test:unit:run",
-    "test:unit:run": "mocha --reporter spec --exit --timeout 15000 \"out/test/**/*.test.js\" --ignore \"out/test/defaultOrg.test.js\" --ignore \"out/test/orgSafety.test.js\" --ignore \"out/test/shellEscape.test.js\"",
+    "test:unit:run": "mocha --require out/test/setupHome.js --reporter spec --exit --timeout 15000 \"out/test/**/*.test.js\" --ignore \"out/test/defaultOrg.test.js\" --ignore \"out/test/orgSafety.test.js\" --ignore \"out/test/shellEscape.test.js\"",
     "bundle": "node esbuild.js --production",
     "bundle:dev": "node esbuild.js"
   },

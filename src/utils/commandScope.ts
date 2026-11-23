@@ -126,3 +126,11 @@ export function decideCommandGate(command: string, state: { sfdx: boolean; mdapi
 	if (state.mdapi) return scope === "source" ? "mdapi-hint" : "run";
 	return "not-sfdx";
 }
+
+/**
+ * Gate state for a project kind. Without a kind (no project) `mdapiFallback` decides the mdapi
+ * flag (the active project's legacy behaviour).
+ */
+export function gateStateOfKind(kind: "sfdx" | "mdapi" | undefined, mdapiFallback = false): { sfdx: boolean; mdapi: boolean } {
+	return { sfdx: kind === "sfdx", mdapi: kind === "mdapi" || (kind === undefined && mdapiFallback) };
+}

@@ -1,4 +1,5 @@
 import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
 
 /** Parsed shape of `.sf/config.json` (CLI v2) and `.sfdx/sfdx-config.json` (legacy). */
@@ -26,4 +27,12 @@ function readTargetOrg(configPath: string): string | null {
  */
 export function targetOrgFromProjectDir(root: string): string | null {
   return readTargetOrg(path.join(root, ".sf", "config.json")) ?? readTargetOrg(path.join(root, ".sfdx", "sfdx-config.json"));
+}
+
+/**
+ * The CLI's global default target org: `~/.sf/config.json` (`target-org`), else
+ * `~/.sfdx/sfdx-config.json` (`defaultusername` / `target-org`). `home` is injectable for tests.
+ */
+export function globalTargetOrg(home: string = os.homedir()): string | null {
+  return targetOrgFromProjectDir(home);
 }

@@ -6,7 +6,7 @@ import {
   setKnownTargetOrg
 } from "./orgListCache";
 import { primaryProjectRoot } from "./projectUtils";
-import { readTargetOrgFromSfdxConfig } from "./sfdxConfig";
+import { readGlobalTargetOrg, readTargetOrgFromSfdxConfig } from "./sfdxConfig";
 
 export interface DefaultOrgInfo {
   displayName: string;
@@ -27,11 +27,13 @@ function infoFromUsername(username: string): DefaultOrgInfo {
  * Resolve default target-org username (sync) of a project (default: the active project).
  * 1. `.sf/config.json` / `.sfdx/sfdx-config.json`
  * 2. In-memory hint (set-as-default in this session), only if recorded for this project
- * 3. Cached org list default flag (may be stale; no CLI), only if the list was produced in this project
+ * 3. The CLI's global default org (`~/.sf/config.json`, `~/.sfdx/sfdx-config.json`)
+ * 4. Cached org list default flag (may be stale; no CLI), only if the list was produced in this project
+ * The answer for a project never depends on whether it is the active one.
  */
 export function resolveDefaultTargetOrgUsernameSync(workspaceRoot?: string): string | null {
   const root = workspaceRoot ?? primaryProjectRoot();
-  return readTargetOrgFromSfdxConfig(root) ?? getKnownTargetOrgUsername(root) ?? getDefaultUsernameFromOrgCache(root);
+  return readTargetOrgFromSfdxConfig(root) ?? getKnownTargetOrgUsername(root) ?? readGlobalTargetOrg() ?? getDefaultUsernameFromOrgCache(root);
 }
 
 /**

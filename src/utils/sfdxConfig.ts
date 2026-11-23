@@ -1,5 +1,5 @@
 import { primaryProjectRoot } from "./projectUtils";
-import { targetOrgFromProjectDir } from "./sfdxConfigPure";
+import { globalTargetOrg, targetOrgFromProjectDir } from "./sfdxConfigPure";
 
 /**
  * Reads the default target org (username or alias) from the project's `.sf/config.json`
@@ -12,4 +12,9 @@ export function readTargetOrgFromSfdxConfig(workspaceRoot?: string): string | nu
     return null;
   }
   return targetOrgFromProjectDir(root);
+}
+
+/** The CLI's global default target org (`~/.sf/config.json`, `~/.sfdx/sfdx-config.json`). */
+export function readGlobalTargetOrg(): string | null {
+  return globalTargetOrg();
 }

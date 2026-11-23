@@ -1,5 +1,5 @@
 import { runCommandArgs } from "./commandRunner";
-import { readTargetOrgFromSfdxConfig } from "./sfdxConfig";
+import { readGlobalTargetOrg, readTargetOrgFromSfdxConfig } from "./sfdxConfig";
 import { primaryProjectRoot } from "./projectUtils";
 import { samePath } from "./projectDiscoveryPure";
 
@@ -42,10 +42,14 @@ export function setKnownTargetOrg(username: string | null, forDir: string | unde
 }
 
 /**
- * Username marked default in the cached `sf org list` (may be stale — lowest-priority sync
- * fallback). Answers only for the project dir the list was produced in.
+ * Default org of `forDir` as far as it can be told without the CLI (lowest-priority sync
+ * fallback). The cached `sf org list` is global; only its `isDefault` flag is the CLI's view
+ * from one cwd, so for any project the answer is derived from that project's config files,
+ * then the CLI's global config, then (only for the dir the list was produced in) the flag.
  */
 export function getDefaultUsernameFromOrgCache(forDir: string | undefined = primaryProjectRoot()): string | null {
+  const fromConfig = (forDir ? readTargetOrgFromSfdxConfig(forDir) : null) ?? readGlobalTargetOrg();
+  if (fromConfig) return fromConfig;
   if (!samePath(forDir, cachedRecordsDir)) return null;
   return cachedRecords.find((o) => o.isDefault)?.username ?? null;
 }
@@ -58,11 +62,9 @@ function syncKnownTargetFromSfdxConfig(): void {
   }
 }
 
-export function getOrgByTarget(targetOrg?: string | null): OrgRecord | null {
-  const key = targetOrg?.trim();
-  if (!key) {
-    return samePath(primaryProjectRoot(), cachedRecordsDir) ? (cachedRecords.find((o) => o.isDefault) ?? null) : null;
-  }
+export function getOrgByTarget(targetOrg?: string | null, forDir: string | undefined = primaryProjectRoot()): OrgRecord | null {
+  const key = targetOrg?.trim() || getDefaultUsernameFromOrgCache(forDir)?.trim();
+  if (!key) return null;
   const lower = key.toLowerCase();
   return (
     cachedRecords.find((o) => o.username.toLowerCase() === lower || (o.alias && o.alias.toLowerCase() === lower)) ??
