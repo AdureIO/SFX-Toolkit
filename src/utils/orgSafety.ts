@@ -19,41 +19,41 @@ function lookupOrgRecord(targetOrg: string): OrgRecord | null {
 /**
  * Resolve org for production warning (sync).
  * Explicit target: org list cache by username/alias.
- * Default: sfdx-config → session hint → cached isDefault.
+ * Default: sfdx-config → session hint → cached isDefault, of `projectDir` (default: the active project).
  */
-export function resolveOrgForTargetSync(targetOrg?: string | null): OrgRecord | null {
+export function resolveOrgForTargetSync(targetOrg?: string | null, projectDir?: string): OrgRecord | null {
   const key = targetOrg?.trim();
   if (key) {
     return lookupOrgRecord(key);
   }
-  const username = resolveDefaultTargetOrgUsernameSync();
+  const username = resolveDefaultTargetOrgUsernameSync(projectDir);
   return username ? lookupOrgRecord(username) : null;
 }
 
 /**
  * Same as sync, with CLI fallback for default target when config file is missing.
  */
-export async function resolveOrgForTarget(targetOrg?: string | null): Promise<OrgRecord | null> {
-  const sync = resolveOrgForTargetSync(targetOrg);
+export async function resolveOrgForTarget(targetOrg?: string | null, projectDir?: string): Promise<OrgRecord | null> {
+  const sync = resolveOrgForTargetSync(targetOrg, projectDir);
   if (sync || targetOrg?.trim()) {
     return sync;
   }
-  const cli = await getTargetOrgUsernameFromCli();
+  const cli = await getTargetOrgUsernameFromCli(projectDir);
   if (!cli) {
     return null;
   }
-  setKnownTargetOrg(cli);
+  setKnownTargetOrg(cli, projectDir);
   return lookupOrgRecord(cli);
 }
 
 /**
  * Modal confirmation before deploy / execute against a production org.
  */
-export async function confirmProductionOrgOperation(action: string, targetOrg?: string | null): Promise<boolean> {
+export async function confirmProductionOrgOperation(action: string, targetOrg?: string | null, projectDir?: string): Promise<boolean> {
   if (!getWarnOnProductionOrg()) {
     return true;
   }
-  let org = await resolveOrgForTarget(targetOrg);
+  let org = await resolveOrgForTarget(targetOrg, projectDir);
   if (!org) {
     // The org list cache may have been emptied (refresh, default-org change) — reload
     // it once and look again before deciding.
@@ -62,11 +62,11 @@ export async function confirmProductionOrgOperation(action: string, targetOrg?: 
     } catch {
       /* fall through to the fail-closed prompt below */
     }
-    org = await resolveOrgForTarget(targetOrg);
+    org = await resolveOrgForTarget(targetOrg, projectDir);
   }
   if (!org) {
     // Fail closed: we cannot prove this is not a production org, so ask.
-    const name = targetOrg?.trim() || resolveDefaultTargetOrgUsernameSync();
+    const name = targetOrg?.trim() || resolveDefaultTargetOrgUsernameSync(projectDir);
     const label = name ? `"${name}"` : "the default org";
     const unknownChoice = await vscode.window.showWarningMessage(
       `Could not verify whether ${label} is a production org. You are about to ${action} it.`,

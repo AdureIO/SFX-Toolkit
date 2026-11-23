@@ -5,7 +5,7 @@ import { typingsForClass, findApexTypeShapes, interfacesForShapes, ApexTypeShape
 import { reportError } from "../utils/reportError";
 import { Logger } from "../utils/outputChannel";
 import { isSalesforceProject } from "../utils/projectUtils";
-import { onDidChangeProjects } from "../utils/projectRegistry";
+import { onDidChangeProjects, projectOfFile, projects } from "../utils/projectRegistry";
 
 /**
  * Keep `@salesforce/apex/<Class>.<method>` typings in sync with the Apex source.
@@ -40,11 +40,17 @@ function isUserApexClass(fsPath: string): boolean {
 }
 
 /** Cache of custom Apex type shapes, so a single-file save doesn't rescan the whole workspace. */
-let knownShapes: ApexTypeShape[] = [];
-let knownTypeNames = new Set<string>();
+const knownTypes = new Map<string, { shapes: ApexTypeShape[]; names: Set<string> }>();
 
-function workspaceRoot(): string | undefined {
-    return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+/** Every SFDX project dir: typings are generated per project, each within its own `.sfdx`. */
+function sfdxProjectDirs(): string[] {
+    return projects().filter((p) => p.kind === "sfdx").map((p) => p.dir);
+}
+
+/** The SFDX project dir owning an Apex file. */
+function sfdxRootOf(file: string): string | undefined {
+    const p = projectOfFile(file);
+    return p && p.kind === "sfdx" ? p.dir : undefined;
 }
 
 function autoGenerateEnabled(): boolean {
@@ -74,7 +80,7 @@ async function writeTypingsFor(root: string, classFile: string, source?: string)
             return false; // deleted between the event and the read
         }
     }
-    const body = typingsForClass(className, source, knownTypeNames);
+    const body = typingsForClass(className, source, knownTypes.get(root)?.names ?? new Set<string>());
     if (!body) {
         // No @AuraEnabled methods — drop a stale file we previously generated.
         await removeGeneratedTypings(target);
@@ -91,11 +97,27 @@ async function writeTypingsFor(root: string, classFile: string, source?: string)
     return true;
 }
 
-/** Regenerate typings for every Apex class in the workspace. */
+/** Regenerate typings for every Apex class of every SFDX project (each within its own project). */
 export async function syncAllLwcApexTypings(silent = false): Promise<{ classes: number }> {
-    const root = workspaceRoot();
-    if (!root) return { classes: 0 };
-    const files = (await vscode.workspace.findFiles("**/*.cls", EXCLUDE_GLOB)).filter((f) => isUserApexClass(f.fsPath));
+    let total = 0;
+    let types = 0;
+    const roots = sfdxProjectDirs();
+    for (const root of roots) {
+        const r = await syncProjectTypings(root);
+        total += r.classes;
+        types += r.types;
+    }
+    Logger.info(`LWC Apex typings: synced ${total} class(es), ${types} custom type(s) in ${roots.length} project(s)`);
+    if (!silent) {
+        vscode.window.showInformationMessage(
+            total ? `Generated LWC typings for ${total} Apex class(es).` : "No @AuraEnabled methods found."
+        );
+    }
+    return { classes: total };
+}
+
+async function syncProjectTypings(root: string): Promise<{ classes: number; types: number }> {
+    const files = (await vscode.workspace.findFiles(new vscode.RelativePattern(root, "**/*.cls"), EXCLUDE_GLOB)).filter((f) => isUserApexClass(f.fsPath));
 
     // Pass 1 — collect every custom Apex type (incl. inner classes) so parameters and return
     // values reference a real interface instead of `any`. Only classes with @AuraEnabled
@@ -115,11 +137,11 @@ export async function syncAllLwcApexTypings(silent = false): Promise<{ classes: 
             /* unreadable file — skip */
         }
     }
-    knownShapes = [...byName.values()];
-    knownTypeNames = new Set(byName.keys());
+    const shapes = [...byName.values()];
+    knownTypes.set(root, { shapes, names: new Set(byName.keys()) });
 
     await fs.promises.mkdir(path.join(root, TYPINGS_DIR), { recursive: true });
-    await fs.promises.writeFile(path.join(root, TYPINGS_DIR, TYPES_FILE), interfacesForShapes(knownShapes), "utf8");
+    await fs.promises.writeFile(path.join(root, TYPINGS_DIR, TYPES_FILE), interfacesForShapes(shapes), "utf8");
 
     // Pass 2 — module declarations, now able to name those types.
     let classes = 0;
@@ -138,13 +160,7 @@ export async function syncAllLwcApexTypings(silent = false): Promise<{ classes: 
         const name = `${path.basename(file, ".cls")}.d.ts`;
         if (existing.has(name)) await removeGeneratedTypings(path.join(root, TYPINGS_DIR, name));
     }
-    Logger.info(`LWC Apex typings: synced ${classes} class(es), ${knownShapes.length} custom type(s) → ${TYPINGS_DIR}`);
-    if (!silent) {
-        vscode.window.showInformationMessage(
-            classes ? `Generated LWC typings for ${classes} Apex class(es).` : "No @AuraEnabled methods found."
-        );
-    }
-    return { classes };
+    return { classes, types: shapes.length };
 }
 
 /** The `ASFXT: Generate LWC Apex Typings` command — a manual full resync. */
@@ -183,8 +199,7 @@ export function registerLwcApexTypingsSync(context: vscode.ExtensionContext): vo
 
     const flush = async (): Promise<void> => {
         timer = undefined;
-        const root = workspaceRoot();
-        if (!root || !autoGenerateEnabled()) {
+        if (!autoGenerateEnabled()) {
             changed.clear();
             deleted.clear();
             return;
@@ -194,6 +209,8 @@ export function registerLwcApexTypingsSync(context: vscode.ExtensionContext): vo
         changed.clear();
         deleted.clear();
         for (const file of toWrite) {
+            const root = sfdxRootOf(file);
+            if (!root) continue;
             try {
                 await writeTypingsFor(root, file);
             } catch (e) {
@@ -201,6 +218,8 @@ export function registerLwcApexTypingsSync(context: vscode.ExtensionContext): vo
             }
         }
         for (const file of toDelete) {
+            const root = sfdxRootOf(file);
+            if (!root) continue;
             await removeGeneratedTypings(path.join(root, TYPINGS_DIR, `${path.basename(file, ".cls")}.d.ts`));
         }
     };
@@ -248,6 +267,19 @@ export function registerLwcApexTypingsSync(context: vscode.ExtensionContext): vo
             void syncAllLwcApexTypings(true).catch((e) => Logger.warn(`LWC Apex typings: initial sync failed: ${e}`));
         }, 3000);
     }
+    // Projects added / removed: regenerate for the new set.
+    let projectsTimer: NodeJS.Timeout | undefined;
+    context.subscriptions.push(
+        onDidChangeProjects(() => {
+            if (!autoGenerateEnabled()) return;
+            if (projectsTimer) clearTimeout(projectsTimer);
+            projectsTimer = setTimeout(() => {
+                projectsTimer = undefined;
+                void syncAllLwcApexTypings(true).catch((e) => Logger.warn(`LWC Apex typings: resync failed: ${e}`));
+            }, 3000);
+        }),
+        { dispose: () => { if (projectsTimer) clearTimeout(projectsTimer); } },
+    );
     context.subscriptions.push({
         dispose: () => {
             if (timer) clearTimeout(timer);

@@ -1,7 +1,8 @@
 /**
  * Right-click "Deploy to / Retrieve from Default Org" for files, folders and multi-selections
  * (Explorer, editor and editor-tab context menus, plus the palette for the active editor).
- * Always targets the default org; each project in the selection is ONE CLI call.
+ * Each project in the selection is ONE CLI call, against that project's OWN default org
+ * (a selection spanning projects with different default orgs deploys each group to its own org).
  */
 import * as vscode from "vscode";
 import * as fs from "fs";
@@ -23,6 +24,7 @@ import {
 import { reportError, reportSuccess } from "../utils/reportError";
 import { OperationPanelProvider } from "../providers/OperationPanelProvider";
 import { getDefaultOrg, getDefaultOrgSync } from "../utils/defaultOrg";
+import { assignOrgs, orgLabelOf, spansMultipleOrgs, summarizeOrgs, type OrgAssignment } from "../utils/perProjectOrg";
 import { confirmProductionOrgOperation } from "../utils/orgSafety";
 import { Telemetry } from "../utils/telemetry";
 import { findSfdxProjectDir } from "../utils/projectUtils";
@@ -31,7 +33,7 @@ import { retrieveComponents } from "../utils/retrieveEngine";
 import { isSameOrUnder } from "../utils/retrieveSafetyPure";
 import { knownProjectDirs } from "../utils/schemaHealthMonitor";
 import { buildUpdateSummary, resolvePackageDirPaths } from "../utils/updateProjectPure";
-import { buildDeployStartArgs, planSelection, type SelectionPlan } from "../utils/sourceSelection";
+import { buildDeployStartArgs, planSelection, type SelectionGroup, type SelectionPlan } from "../utils/sourceSelection";
 
 /** Menu arguments: `(clickedUri, allSelectedUris)`; the palette passes nothing. */
 function selectionFromArgs(uri?: vscode.Uri, uris?: vscode.Uri[]): vscode.Uri[] {
@@ -88,6 +90,27 @@ function invalidateSchema(org: string | null, paths: string[]): void {
 	if (structural) OrgMetadataCache.warmOrg(org);
 }
 
+/** Every group paired with ITS project's default org (CLI fallback when config / cache are empty). */
+async function resolveGroupOrgs(plan: SelectionPlan): Promise<OrgAssignment<SelectionGroup>[]> {
+	const resolved = new Map<string, { username: string; displayName: string } | null>();
+	for (const g of plan.groups) {
+		resolved.set(g.projectDir, getDefaultOrgSync(g.projectDir) ?? (await getDefaultOrg(g.projectDir)));
+	}
+	return assignOrgs(plan.groups, (dir) => resolved.get(dir) ?? null);
+}
+
+/** One modal listing which project goes to which org, when the selection spans several orgs. */
+async function confirmMultiOrg(assignments: OrgAssignment<SelectionGroup>[], verb: string): Promise<boolean> {
+	if (!spansMultipleOrgs(assignments)) return true;
+	const lines = assignments.map((a) => `${path.basename(a.group.projectDir)}: ${orgLabelOf(a.org)}`);
+	const choice = await vscode.window.showWarningMessage(
+		`The selection spans projects with different default orgs.`,
+		{ modal: true, detail: `Each project is ${verb} its own default org:\n${lines.join("\n")}` },
+		"Continue"
+	);
+	return choice === "Continue";
+}
+
 function showProblems(): void {
 	void vscode.commands.executeCommand("workbench.actions.view.problems");
 }
@@ -101,19 +124,28 @@ export async function deployToDefaultOrg(uri?: vscode.Uri, uris?: vscode.Uri[]):
 	const dirty = vscode.workspace.textDocuments.filter((d) => d.isDirty && !d.isUntitled && paths.some((p) => isSameOrUnder(p, d.uri.fsPath)));
 	for (const d of dirty) await d.save();
 
-	const defaultOrg = getDefaultOrgSync() ?? (await getDefaultOrg());
-	const targetUser = defaultOrg?.username ?? null;
-	const orgLabel = defaultOrg?.displayName ?? targetUser ?? "default org";
-	if (!(await confirmProductionOrgOperation("deploy metadata to", targetUser))) return;
+	const assignments = await resolveGroupOrgs(plan);
+	const orgLabel = summarizeOrgs(assignments);
+	// Production warning once per distinct org, checked against the project that deploys to it.
+	const checked = new Set<string | null>();
+	for (const a of assignments) {
+		if (checked.has(a.org.username)) continue;
+		checked.add(a.org.username);
+		if (!(await confirmProductionOrgOperation("deploy metadata to", a.org.username, a.group.projectDir))) return;
+	}
+	if (!(await confirmMultiOrg(assignments, "deployed to"))) return;
 
-	const operationHandle = OperationPanelProvider.beginOperation("Deploy", defaultOrg?.displayName);
+	const operationHandle = OperationPanelProvider.beginOperation("Deploy", orgLabel);
 	const startTime = Date.now();
 	const title = `Deploying ${paths.length} item(s) to ${orgLabel}…`;
 
 	await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title, cancellable: true }, async (progress, token) => {
 		clearDeployDiagnostics();
 		let deployed = 0;
-		for (const group of plan.groups) {
+		for (const { group, org } of assignments) {
+			const targetUser = org.username;
+			const groupOrgLabel = orgLabelOf(org);
+			progress.report({ message: `${path.basename(group.projectDir)} → ${groupOrgLabel}` });
 			const submit = ["sf", ...buildDeployStartArgs(group.paths, targetUser).map(escapeShellArg)].join(" ");
 			Logger.info(`Right-click deploy in ${group.projectDir}: ${submit}`);
 			const relPaths = group.paths.map((p) => path.relative(group.projectDir, p) || ".");
@@ -159,7 +191,7 @@ export async function deployToDefaultOrg(uri?: vscode.Uri, uris?: vscode.Uri[]):
 					reportError({
 						operation: "Deploy",
 						error: res.errorText || (api ? JSON.stringify(api, null, 2) : "Deploy failed."),
-						org: defaultOrg?.displayName,
+						org: groupOrgLabel,
 						reauthOrg: targetUser ?? undefined,
 						failures,
 						topError: api?.errorMessage ?? api?.stateDetail,
@@ -180,15 +212,15 @@ export async function deployToDefaultOrg(uri?: vscode.Uri, uris?: vscode.Uri[]):
 				}
 				Telemetry.event("deployFile", { status: "failed" });
 				record("Failed");
-				reportError({ operation: "Deploy", error: e, org: defaultOrg?.displayName, reauthOrg: targetUser ?? undefined, handle: operationHandle });
+				reportError({ operation: "Deploy", error: e, org: groupOrgLabel, reauthOrg: targetUser ?? undefined, handle: operationHandle });
 				return;
 			}
 		}
-		invalidateSchema(targetUser, paths);
+		for (const { group, org } of assignments) invalidateSchema(org.username, group.paths);
 		Telemetry.event("deployFile", { status: "succeeded" });
 		reportSuccess({
 			operation: "Deploy",
-			org: defaultOrg?.displayName,
+			org: orgLabel,
 			summary: deployed > 0 ? `Deployed ${deployed} components to ${orgLabel}.` : `Nothing to deploy to ${orgLabel} (no changes).`,
 			handle: operationHandle,
 		});
@@ -200,28 +232,28 @@ export async function retrieveFromDefaultOrg(uri?: vscode.Uri, uris?: vscode.Uri
 	if (!plan) return;
 	const paths = allPaths(plan);
 
-	const defaultOrg = getDefaultOrgSync() ?? (await getDefaultOrg());
-	const targetUser = defaultOrg?.username ?? null;
-	const orgLabel = defaultOrg?.displayName ?? targetUser ?? "default org";
+	const assignments = await resolveGroupOrgs(plan);
+	const orgLabel = summarizeOrgs(assignments);
 
+	if (!(await confirmMultiOrg(assignments, "retrieved from"))) return;
 	if (!(await confirmOverwrite(paths, "Retrieve"))) return;
 
-	const operationHandle = OperationPanelProvider.beginOperation("Retrieve", defaultOrg?.displayName);
+	const operationHandle = OperationPanelProvider.beginOperation("Retrieve", orgLabel);
 	const title = `Retrieving ${paths.length} item(s) from ${orgLabel}…`;
 
 	await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title, cancellable: true }, async (_progress, token) => {
 		try {
 			let retrieved = 0;
 			const failed: { fullName: string; error: string }[] = [];
-			for (const group of plan.groups) {
-				const res = await retrieveComponents({ org: targetUser, sourcePaths: group.paths, projectDir: group.projectDir, token });
+			for (const { group, org } of assignments) {
+				const res = await retrieveComponents({ org: org.username, sourcePaths: group.paths, projectDir: group.projectDir, token });
 				retrieved += res.retrieved.length;
 				failed.push(...res.failed);
 			}
 			await revertOpenEditors(paths);
 			Telemetry.event("retrieveFile", { status: failed.length ? "partial" : "succeeded" });
 			if (failed.length === 0) {
-				reportSuccess({ operation: "Retrieve", org: defaultOrg?.displayName, summary: `Retrieved ${retrieved} components from ${orgLabel}.`, handle: operationHandle });
+				reportSuccess({ operation: "Retrieve", org: orgLabel, summary: `Retrieved ${retrieved} components from ${orgLabel}.`, handle: operationHandle });
 				return;
 			}
 			operationHandle.dispose();
@@ -242,20 +274,12 @@ export async function retrieveFromDefaultOrg(uri?: vscode.Uri, uris?: vscode.Uri
 				return;
 			}
 			Telemetry.event("retrieveFile", { status: "failed" });
-			reportError({ operation: "Retrieve", error: e, org: defaultOrg?.displayName, reauthOrg: targetUser ?? undefined, handle: operationHandle });
+			reportError({ operation: "Retrieve", error: e, org: orgLabel, handle: operationHandle });
 		}
 	});
 }
 
 export async function updateProjectFromOrg(): Promise<void> {
-	const defaultOrg = getDefaultOrgSync() ?? (await getDefaultOrg());
-	if (!defaultOrg?.username) {
-		vscode.window.showErrorMessage("No default org set. Set a default org (ASFXT: Set as Default Org) and try again.");
-		return;
-	}
-	const targetUser = defaultOrg.username;
-	const orgLabel = defaultOrg.displayName ?? targetUser;
-
 	let projects = knownProjectDirs();
 	if (projects.length === 0) {
 		vscode.window.showErrorMessage("No SFDX project found in the workspace.");
@@ -269,41 +293,57 @@ export async function updateProjectFromOrg(): Promise<void> {
 		if (!picked || picked.length === 0) return;
 		projects = picked.map((p) => p.dir);
 	}
-	const groups = projects
+	const candidates = projects
 		.map((projectDir) => ({
 			projectDir,
 			paths: resolvePackageDirPaths(projectDir, getPackageDirectories(projectDir), (p) => fs.existsSync(p)),
 		}))
 		.filter((g) => g.paths.length > 0);
-	if (groups.length === 0) {
+	if (candidates.length === 0) {
 		vscode.window.showErrorMessage("No package directories found to update.");
 		return;
 	}
+	// Each project updates from its OWN default org; projects without one are skipped.
+	const all = await resolveGroupOrgs({ groups: candidates, skipped: [] });
+	const noOrg = all.filter((a) => !a.org.username);
+	const assignments = all.filter((a) => a.org.username);
+	if (assignments.length === 0) {
+		vscode.window.showErrorMessage("No default org set. Set a default org (ASFXT: Set as Default Org) and try again.");
+		return;
+	}
+	if (noOrg.length > 0) {
+		vscode.window.showWarningMessage(`Skipped (no default org): ${noOrg.map((a) => path.basename(a.group.projectDir)).join(", ")}`);
+	}
+	const groups = assignments.map((a) => a.group);
+	const orgLabel = summarizeOrgs(assignments);
 	const paths = groups.flatMap((g) => g.paths);
 	const dirList = paths.map((p) => path.basename(p)).join(", ");
 
 	const confirm = await vscode.window.showWarningMessage(
-		`Update project from ${orgLabel}?`,
+		spansMultipleOrgs(assignments) ? `Update projects from their own default orgs (${orgLabel})?` : `Update project from ${orgLabel}?`,
 		{
 			modal: true,
-			detail: `Every component in ${dirList} is retrieved and overwrites the local version. Components that only exist in the org are not added.`,
+			detail:
+				(spansMultipleOrgs(assignments)
+					? assignments.map((a) => `${path.basename(a.group.projectDir)}: ${orgLabelOf(a.org)}`).join("\n") + "\n\n"
+					: "") + `Every component in ${dirList} is retrieved and overwrites the local version. Components that only exist in the org are not added.`,
 		},
 		"Update"
 	);
 	if (confirm !== "Update") return;
 	if (!(await confirmOverwrite(paths, "Update from org"))) return;
 
-	const operationHandle = OperationPanelProvider.beginOperation("Retrieve", defaultOrg.displayName);
+	const operationHandle = OperationPanelProvider.beginOperation("Retrieve", orgLabel);
 	await vscode.window.withProgress(
 		{ location: vscode.ProgressLocation.Notification, title: `Updating project from ${orgLabel}…`, cancellable: true },
 		async (progress, token) => {
 			try {
 				let retrieved = 0;
 				const failed: { fullName: string; error: string }[] = [];
-				for (const group of groups) {
+				for (const { group, org } of assignments) {
 					let last = 0;
 					const res = await retrieveComponents({
-						org: targetUser,
+						org: org.username,
 						sourcePaths: group.paths,
 						projectDir: group.projectDir,
 						token,
@@ -319,7 +359,7 @@ export async function updateProjectFromOrg(): Promise<void> {
 				Telemetry.event("updateProjectFromOrg", { status: failed.length ? "partial" : "succeeded" });
 				const summary = buildUpdateSummary(orgLabel, retrieved, failed);
 				if (failed.length === 0) {
-					reportSuccess({ operation: "Retrieve", org: defaultOrg.displayName, summary: summary.text, handle: operationHandle });
+					reportSuccess({ operation: "Retrieve", org: orgLabel, summary: summary.text, handle: operationHandle });
 					return;
 				}
 				operationHandle.dispose();
@@ -335,7 +375,7 @@ export async function updateProjectFromOrg(): Promise<void> {
 					return;
 				}
 				Telemetry.event("updateProjectFromOrg", { status: "failed" });
-				reportError({ operation: "Retrieve", error: e, org: defaultOrg.displayName, reauthOrg: targetUser, handle: operationHandle });
+				reportError({ operation: "Retrieve", error: e, org: orgLabel, handle: operationHandle });
 			}
 		}
 	);

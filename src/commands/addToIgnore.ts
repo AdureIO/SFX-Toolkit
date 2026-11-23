@@ -3,6 +3,8 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { Logger } from '../utils/outputChannel';
+import { projectDirOfFile } from '../utils/projectUtils';
+import { forceignoreRoot, gitignoreRoot, ignoreEntry, type IgnoreEnv } from '../utils/ignoreTargetPure';
 
 async function appendToFile(filePath: string, entry: string): Promise<boolean> {
     try {
@@ -25,50 +27,40 @@ async function appendToFile(filePath: string, entry: string): Promise<boolean> {
     }
 }
 
-function getRelativePath(uri: vscode.Uri): string | null {
-    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    if (!root) return null;
-    let rel = path.relative(root, uri.fsPath).replace(/\\/g, '/');
-    try {
-        if (fs.statSync(uri.fsPath).isDirectory()) {
-            if (!rel.endsWith('/')) rel += '/';
-        }
-    } catch { /* ignore */ }
-    return rel;
+const ignoreEnv: IgnoreEnv = {
+    exists: (p) => fs.existsSync(p),
+    isDirectory: (p) => {
+        try { return fs.statSync(p).isDirectory(); } catch { return false; }
+    },
+};
+
+function workspaceFolderOf(uri: vscode.Uri): string | undefined {
+    return vscode.workspace.getWorkspaceFolder(uri)?.uri.fsPath ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+}
+
+async function addTo(uri: vscode.Uri | undefined, fileName: '.gitignore' | '.forceignore'): Promise<void> {
+    if (!uri) {
+        uri = vscode.window.activeTextEditor?.document.uri;
+        if (!uri) return;
+    }
+    const ws = workspaceFolderOf(uri);
+    const root = fileName === '.gitignore'
+        ? gitignoreRoot(uri.fsPath, ws, ignoreEnv)
+        : forceignoreRoot(uri.fsPath, projectDirOfFile(uri.fsPath), ws);
+    if (!root) return;
+
+    const rel = ignoreEntry(uri.fsPath, root, ignoreEnv);
+    if (await appendToFile(path.join(root, fileName), rel)) {
+        vscode.window.showInformationMessage(`Added "${rel}" to ${fileName}`);
+    }
 }
 
 export async function addToGitignore(uri?: vscode.Uri): Promise<void> {
-    if (!uri) {
-        uri = vscode.window.activeTextEditor?.document.uri;
-        if (!uri) return;
-    }
-    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    if (!root) return;
-
-    const rel = getRelativePath(uri);
-    if (!rel) return;
-
-    const gitignorePath = path.join(root, '.gitignore');
-    if (await appendToFile(gitignorePath, rel)) {
-        vscode.window.showInformationMessage(`Added "${rel}" to .gitignore`);
-    }
+    await addTo(uri, '.gitignore');
 }
 
 export async function addToForceignore(uri?: vscode.Uri): Promise<void> {
-    if (!uri) {
-        uri = vscode.window.activeTextEditor?.document.uri;
-        if (!uri) return;
-    }
-    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    if (!root) return;
-
-    const rel = getRelativePath(uri);
-    if (!rel) return;
-
-    const forceignorePath = path.join(root, '.forceignore');
-    if (await appendToFile(forceignorePath, rel)) {
-        vscode.window.showInformationMessage(`Added "${rel}" to .forceignore`);
-    }
+    await addTo(uri, '.forceignore');
 }
 
 export async function addToIgnore(uri?: vscode.Uri): Promise<void> {

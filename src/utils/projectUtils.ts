@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 import { hasSfdxProjectUpward, isMdapiFolder } from './mdapiFolder';
-import { activeProject, projects } from './projectRegistry';
+import { activeProject, projectOfFile, projects } from './projectRegistry';
 
 /** Message shown when workspace is not an SFDX project. */
 export const NOT_SFDX_PROJECT_MESSAGE = 'Open an SFDX project (folder containing sfdx-project.json) to use Salesforce features.';
@@ -34,6 +34,11 @@ export function findSfdxProjectDir(filePath: string): string | null {
         dir = parent;
     }
     return null;
+}
+
+/** The project dir a file belongs to: nearest sfdx-project.json upward, else the discovered project containing it. */
+export function projectDirOfFile(filePath: string): string | undefined {
+    return findSfdxProjectDir(filePath) ?? projectOfFile(filePath)?.dir;
 }
 
 /** Shown when a source-based feature is used in an MDAPI-format project. */

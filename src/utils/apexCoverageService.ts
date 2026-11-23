@@ -165,13 +165,13 @@ function scheduleWatcherRefresh(): void {
 }
 
 export function registerCoverageWatchers(context: vscode.ExtensionContext): void {
-  // One watcher per workspace folder, kept in sync when folders are added/removed.
+  // One watcher per workspace folder (`**/` also covers projects nested in it), kept in sync when folders are added/removed.
   const watchers = new Map<string, vscode.Disposable>();
   const watch = (folder: vscode.WorkspaceFolder) => {
     const key = folder.uri.toString();
     if (watchers.has(key)) return;
     const watcher = vscode.workspace.createFileSystemWatcher(
-      new vscode.RelativePattern(folder, ".sfdx/tools/testresults/**")
+      new vscode.RelativePattern(folder, "**/.sfdx/tools/testresults/**")
     );
     watchers.set(
       key,

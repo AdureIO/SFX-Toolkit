@@ -5,6 +5,8 @@ import * as fs from "fs";
 import * as os from "os";
 import { escapeShellArg, runCommand } from "../utils/commandRunner";
 import { Logger } from "../utils/outputChannel";
+import { projectDirOfFile } from "../utils/projectUtils";
+import { resolveDefaultTargetOrgUsernameSync } from "../utils/defaultOrg";
 
 /** Org-side copies for the diff editor live here; swept so they never accumulate. */
 const DIFF_TMP_DIR = path.join(os.tmpdir(), "asfx-metadata-diff");
@@ -49,19 +51,21 @@ export async function metadataDiff() {
 
 /**
  * Compare a local metadata file with its org version (the diff opens beside the local file).
- * `org` pins the org (alias or username); omitted = the CLI's default org.
+ * `org` pins the org (alias or username); omitted = the default org of the file's own project.
+ * The CLI runs in the file's project dir and the path is relative to it.
  */
 export async function metadataDiffForFile(filePath: string, org?: string | null) {
-  const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  const workspaceRoot = projectDirOfFile(filePath) ?? vscode.workspace.getWorkspaceFolder(vscode.Uri.file(filePath))?.uri.fsPath;
   if (!workspaceRoot) {
-    vscode.window.showErrorMessage("No workspace folder open.");
+    vscode.window.showErrorMessage("The file is not inside a Salesforce project or workspace folder.");
     return;
   }
+  const orgTarget = org ?? resolveDefaultTargetOrgUsernameSync(workspaceRoot);
 
   const relativePath = path.relative(workspaceRoot, filePath);
   const fileName = path.basename(filePath);
   const localUri = vscode.Uri.file(filePath);
-  const orgFlag = org ? ` --target-org ${escapeShellArg(org)}` : "";
+  const orgFlag = orgTarget ? ` --target-org ${escapeShellArg(orgTarget)}` : "";
 
   await vscode.window.withProgress(
     {
