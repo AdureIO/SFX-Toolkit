@@ -17,6 +17,13 @@ import { FILTER_BAR_CSS, FILTER_BAR_VARS, filterGroupsMarkup, filterSearchMarkup
 import { confirmOverwrite, revertOpenEditors } from "../utils/retrieveSafety";
 import { retrieveComponents } from "../utils/retrieveEngine";
 import { getRetrieveTimes } from "../utils/retrieveLog";
+import { LocalInfoMap, ContentInfoMap } from "../utils/compareStatusPure";
+import { CompareTarget } from "../utils/contentCompare";
+import { innerFilesOfEntry } from "../utils/contentComparePure";
+import { CompareLease, acquireCompare, compareMode } from "../utils/contentCompareHost";
+import { readLocalInfo } from "../utils/localChangeInfo";
+import { orgLookupKey } from "../utils/deployStatusPure";
+import { DeployMetadataPanelProvider } from "./DeployMetadataPanelProvider";
 import { classifyHealth } from "../utils/schemaHealth";
 import { reauthenticateOrg } from "../commands/orgCommands";
 import { metadataDiffForFile } from "../commands/metadataDiff";
@@ -31,7 +38,7 @@ import {
 	saveListingCache,
 } from "../utils/orgBrowser/metadataLister";
 import { hiddenSelectionPrompt, splitByVisibility } from "../utils/orgBrowser/selection";
-import { LocalIndex, buildTypeTable, overwriteTargets, partialObjectKeys, readPackageDirectories, scanProject } from "../utils/orgBrowser/localIndex";
+import { LocalEntry, LocalIndex, buildTypeTable, overwriteTargets, partialObjectKeys, readPackageDirectories, scanProject } from "../utils/orgBrowser/localIndex";
 import { makeSoapCall } from "../utils/orgBrowser/soapTransport";
 import { setupTarget } from "../utils/orgBrowser/setupUrl";
 import { Comp, ListFailure, TypeInfo, compKey } from "../utils/orgBrowser/types";
@@ -72,6 +79,13 @@ export class OrgBrowserPanelProvider {
 	private static listedAt = 0;
 	private static typeListedAt: Record<string, number> = {};
 	private static local: LocalIndex | undefined;
+	/** Local entries by the key the org listing uses (`Type:Name`, name percent-decoded). */
+	private static byOrgKey = new Map<string, LocalEntry>();
+	/** The shared content-compare service of (project, org). */
+	private static lease: CompareLease | undefined;
+	private static leaseSubs: { dispose(): void }[] = [];
+	private static compareTimer: ReturnType<typeof setTimeout> | undefined;
+	private static infoTimer: ReturnType<typeof setTimeout> | undefined;
 	/** The project the panel shows (project selector); follows the active project until the user picks another. */
 	private static binding: PanelProjectBinding | undefined;
 
@@ -152,7 +166,11 @@ export class OrgBrowserPanelProvider {
 		this.disposables = [];
 		this.watchers = [];
 		if (this.watchTimer) clearTimeout(this.watchTimer);
+		if (this.compareTimer) clearTimeout(this.compareTimer);
+		if (this.infoTimer) clearTimeout(this.infoTimer);
 		this.panel = undefined;
+		this.releaseLease();
+		this.byOrgKey = new Map();
 		this.binding = undefined;
 		// Release the (potentially 50k-row) listing.
 		this.comps = [];
@@ -194,8 +212,12 @@ export class OrgBrowserPanelProvider {
 			case "setup":
 				await this.openSetup(pair().t, pair().n);
 				break;
+			case "compareContents":
+				// The "Compare contents" button: what needs it, or (force) the components the filter shows, again.
+				void this.requestCompare(msg.force === true, Array.isArray(msg.keys) ? msg.keys.map(String) : undefined);
+				break;
 			case "compare": {
-				const e = this.local?.entries.get(compKey(pair().t, pair().n));
+				const e = this.entryFor(pair().t, pair().n);
 				if (!e) {
 					this.post({ type: "toast", text: "This component is not in the project.", kind: "warn" });
 					break;
@@ -204,12 +226,12 @@ export class OrgBrowserPanelProvider {
 				break;
 			}
 			case "reveal": {
-				const e = this.local?.entries.get(compKey(pair().t, pair().n));
+				const e = this.entryFor(pair().t, pair().n);
 				if (e) await vscode.commands.executeCommand("revealInExplorer", vscode.Uri.file(e.root ?? e.primary));
 				break;
 			}
 			case "openFile": {
-				const e = this.local?.entries.get(compKey(pair().t, pair().n));
+				const e = this.entryFor(pair().t, pair().n);
 				if (e) await vscode.window.showTextDocument(vscode.Uri.file(e.primary));
 				break;
 			}
@@ -299,6 +321,8 @@ export class OrgBrowserPanelProvider {
 		this.listedAt = 0;
 		this.typeListedAt = {};
 		this.local = undefined;
+		this.byOrgKey = new Map();
+		this.releaseLease();
 		this.post({ type: "reset", org: key === DEFAULT_ORG_KEY ? null : key });
 
 		if ((await this.orgOptions()).length === 0) {
@@ -310,6 +334,7 @@ export class OrgBrowserPanelProvider {
 			void this.refreshLocal();
 			return;
 		}
+		void this.acquireLease(key, gen);
 		void this.refreshLocal();
 		void this.resolveMe(gen);
 
@@ -457,10 +482,117 @@ export class OrgBrowserPanelProvider {
 			const index = await scanProject(root, dirs.length > 0 ? dirs : ["force-app"], buildTypeTable(this.types));
 			if (gen !== this.gen || !this.panel) return;
 			this.local = index;
-			this.post({ type: "local", keys: [...index.entries.keys()], partial: partialObjectKeys(index.entries), retrieved: getRetrieveTimes(this.orgKey === DEFAULT_ORG_KEY ? null : this.orgKey), hasProject: true });
+			this.byOrgKey = new Map([...index.entries.values()].map((e) => [orgLookupKey(e.type, e.name), e]));
+			this.post({ type: "local", keys: [...this.byOrgKey.keys()], partial: partialObjectKeys(index.entries), retrieved: getRetrieveTimes(this.orgKey === DEFAULT_ORG_KEY ? null : this.orgKey), hasProject: true });
+			await this.refreshLocalInfo();
 		} catch (e: any) {
 			Logger.error("Org Browser: local scan failed", e?.message ?? e);
 		}
+	}
+
+	// ── Content compare ──────────────────────────────────────────────────────────
+
+	private static entryFor(type: string, name: string): LocalEntry | undefined {
+		return this.byOrgKey.get(compKey(type, name)) ?? this.local?.entries.get(compKey(type, name));
+	}
+
+	private static releaseLease(): void {
+		for (const d of this.leaseSubs) d.dispose();
+		this.leaseSubs = [];
+		if (this.lease) {
+			this.lease.release();
+			this.lease = undefined;
+			this.post({ type: "compareContent", full: true, content: {} });
+			this.post({ type: "compareProgress", progress: { state: "idle", done: 0, total: 0, failed: 0 } });
+		}
+	}
+
+	private static async acquireLease(orgKey: string, gen: number): Promise<void> {
+		const root = this.projectDir();
+		if (!root || !this.hasSfdxProject() || orgKey === DEFAULT_ORG_KEY) return;
+		const lease = acquireCompare(root, orgKey, orgArgForKey(orgKey));
+		this.lease = lease;
+		const service = lease.service;
+		this.leaseSubs.push(
+			service.onDidUpdate((localKeys) => this.post({ type: "compareContent", full: false, content: this.toOrgKeys(service.contentInfo(localKeys)) })),
+			service.onDidProgress((progress) => this.post({ type: "compareProgress", progress }))
+		);
+		await service.load();
+		if (gen !== this.gen || this.lease !== lease) return;
+		this.post({ type: "compareProgress", progress: service.progress() });
+		await this.pushContent();
+	}
+
+	/** Content results are keyed by the local index's key; this panel's rows use the org listing's key. */
+	private static toOrgKeys<T>(m: Record<string, T>): Record<string, T> {
+		const out: Record<string, T> = {};
+		for (const [k, v] of Object.entries(m)) {
+			const e = this.local?.entries.get(k);
+			out[e ? orgLookupKey(e.type, e.name) : k] = v;
+		}
+		return out;
+	}
+
+	/** Local components that are in the listing, ready for the compare service (`orgKeys`: only these). */
+	private static compareTargets(orgKeys?: Iterable<string>): CompareTarget[] {
+		const root = this.projectDir();
+		if (!root) return [];
+		const dirs = readPackageDirectories(root);
+		const pkgAbs = (dirs.length > 0 ? dirs : ["force-app"]).map((d) => path.resolve(root, d));
+		const table = buildTypeTable(this.types);
+		const list = orgKeys ? [...orgKeys].map((k) => this.byOrgKey.get(k)).filter((e): e is LocalEntry => !!e) : [...this.byOrgKey.values()];
+		const out: CompareTarget[] = [];
+		for (const e of list) {
+			const c = this.compMap.get(orgLookupKey(e.type, e.name));
+			if (!c) continue;
+			out.push({ key: e.key, type: e.type, name: e.name, orgLm: c.lm, files: innerFilesOfEntry(e, pkgAbs, table) });
+		}
+		return out;
+	}
+
+	private static async pushContent(): Promise<void> {
+		const lease = this.lease;
+		if (!lease) return;
+		lease.setTypes(this.types);
+		const content: ContentInfoMap = this.toOrgKeys(await lease.service.validContentInfo(this.compareTargets()));
+		if (this.lease !== lease) return;
+		this.post({ type: "compareContent", full: true, content });
+	}
+
+	/** Local change times + git dirty per component, then the compare results that are still valid. */
+	private static async refreshLocalInfo(): Promise<void> {
+		const root = this.projectDir();
+		const gen = this.gen;
+		if (!root || !this.local || !this.panel || !this.hasSfdxProject()) return;
+		let dirty: string[] | null = null;
+		try {
+			dirty = await DeployMetadataPanelProvider.runGitStatusSfdxPaths(root);
+		} catch {
+			dirty = null; // not a git repository: file times only
+		}
+		const dirs = readPackageDirectories(root);
+		const local: LocalInfoMap = await readLocalInfo(root, this.local.entries.values(), dirs.length > 0 ? dirs : ["force-app"], dirty);
+		if (gen !== this.gen || !this.panel) return;
+		this.post({ type: "compareLocal", local: this.toOrgKeys(local) });
+		await this.pushContent();
+		this.scheduleCompare(0);
+	}
+
+	private static scheduleCompare(ms: number): void {
+		if (this.compareTimer) clearTimeout(this.compareTimer);
+		this.compareTimer = setTimeout(() => {
+			this.compareTimer = undefined;
+			if (compareMode() === "auto") void this.requestCompare(false);
+		}, ms);
+	}
+
+	private static async requestCompare(force: boolean, orgKeys?: string[]): Promise<void> {
+		const lease = this.lease;
+		if (!lease || !this.local || this.comps.length === 0) return;
+		await lease.service.load();
+		if (this.lease !== lease) return;
+		lease.setTypes(this.types);
+		lease.service.request(this.compareTargets(orgKeys), force);
 	}
 
 	private static setupWatchers(): void {
@@ -471,9 +603,15 @@ export class OrgBrowserPanelProvider {
 			this.watchTimer = setTimeout(() => void this.refreshLocal(), 700);
 		};
 		for (const pkg of readPackageDirectories(root)) {
-			const w = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(path.resolve(root, pkg), "**/*"), false, true, false);
+			const w = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(path.resolve(root, pkg), "**/*"), false, false, false);
 			w.onDidCreate(rescan);
 			w.onDidDelete(rescan);
+			// A saved file: its local change time / git status and compare result are out of date.
+			w.onDidChange(() => {
+				if (this.infoTimer) clearTimeout(this.infoTimer);
+				this.infoTimer = setTimeout(() => void this.refreshLocalInfo(), 800);
+				this.scheduleCompare(4000);
+			});
 			this.watchers.push(w);
 		}
 	}
@@ -512,7 +650,7 @@ export class OrgBrowserPanelProvider {
 			}
 		}
 		const targets = [...new Set(components.flatMap((c) => {
-			const e = this.local?.entries.get(compKey(c.type, c.fullName));
+			const e = this.entryFor(c.type, c.fullName);
 			return e ? overwriteTargets(e) : [];
 		}))];
 		if (!(await confirmOverwrite(targets, "Retrieve"))) {
@@ -628,6 +766,8 @@ ${PROJECT_SELECTOR_CSS}
     ${filterSearchMarkup("Search name or type…   type:ApexClass  ns:abc  by:smith  status:changed  Acc*Handler  ApexClass:Foo   ( / )")}
     <span id="listedInfo" class="muted"></span>
     <button id="refreshBtn" class="ghost" title="Re-list every type from the org">↻ Refresh</button>
+    <span id="cmpInfo" class="muted"></span>
+    <button id="cmpBtn" class="ghost" title="Compare the contents of the components that are in the project with the org (the ones that need it; with a filter active: the shown ones again)">≈ Compare contents</button>
     <span class="spacer"></span>
     <span id="selHidden" class="selhidden" hidden><span id="selHiddenText"></span> <button id="selHiddenShow" class="link" title="Reset the filters and show only the selected components">show</button> · <button id="selHiddenClear" class="link" title="Deselect the selected components the current filter hides">clear hidden</button></span>
     <span id="selChip" class="selchip" hidden><button id="selChipText" title="Show only the selected components"></button><button id="selChipClear" title="Clear selection" aria-label="Clear selection">×</button></span>
@@ -636,7 +776,7 @@ ${PROJECT_SELECTOR_CSS}
   <div id="progress" class="progress" hidden><div id="progressBar"></div></div>
   <div id="banner"></div>
   <div class="main">
-    <aside id="side" aria-label="Filters">${filterGroupsMarkup({ statusTitle: "Local status" })}
+    <aside id="side" aria-label="Filters">${filterGroupsMarkup({ statusTitle: "Local vs org" })}
     </aside>
     <section class="center">
       <div class="gridbar">
@@ -656,7 +796,7 @@ ${PROJECT_SELECTOR_CSS}
               <span class="hcell" data-sort="ns">Namespace<i class="grip" data-col="ns"></i></span>
               <span class="hcell" data-sort="by">Last modified by<i class="grip" data-col="by"></i></span>
               <span class="hcell" data-sort="modified">Last modified<i class="grip" data-col="mod"></i></span>
-              <span class="hcell" data-sort="status">Local status<i class="grip" data-col="status"></i></span>
+              <span class="hcell" data-sort="status">Local vs org<i class="grip" data-col="status"></i></span>
               <span class="hcell"></span>
             </div>
             <div id="spacer" class="vspacer"><div id="rowsEl" class="rowsEl"></div></div>
@@ -745,9 +885,13 @@ button.ghost:hover:not(:disabled) { background: var(--ob-hover); }
 mark { background: color-mix(in srgb, var(--ob-warn) 45%, transparent); color: inherit; border-radius: 2px; padding: 0 1px; }
 .badge { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px; border: 1px solid var(--ob-border); }
 .badge.none { color: var(--vscode-descriptionForeground); }
-.badge.local { color: var(--ob-ok); border-color: color-mix(in srgb, var(--ob-ok) 50%, transparent); }
+.badge.equal { color: var(--ob-ok); border-color: color-mix(in srgb, var(--ob-ok) 50%, transparent); }
 .badge.partial { color: var(--ob-accent); border-color: color-mix(in srgb, var(--ob-accent) 50%, transparent); }
-.badge.changed { color: var(--ob-warn); border-color: color-mix(in srgb, var(--ob-warn) 55%, transparent); background: color-mix(in srgb, var(--ob-warn) 12%, transparent); }
+.badge.changed-org { color: var(--ob-warn); border-color: color-mix(in srgb, var(--ob-warn) 55%, transparent); background: color-mix(in srgb, var(--ob-warn) 12%, transparent); }
+.badge.changed-local { color: var(--vscode-charts-blue, #3794ff); border-color: color-mix(in srgb, var(--vscode-charts-blue, #3794ff) 55%, transparent); }
+.badge.conflict { color: var(--ob-bad); border-color: color-mix(in srgb, var(--ob-bad) 60%, transparent); background: color-mix(in srgb, var(--ob-bad) 12%, transparent); }
+.badge.unknown { color: var(--vscode-descriptionForeground); border-style: dashed; }
+.badge.prov { border-style: dashed; opacity: .75; }
 .res { font-weight: 700; cursor: help; }
 .res.ok { color: var(--ob-ok); }
 .res.bad { color: var(--ob-bad); }

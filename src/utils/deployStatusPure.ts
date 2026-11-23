@@ -2,54 +2,60 @@
  * Deploy Metadata panel: status of a local component against the target org. Pure (no `vscode`, no DOM):
  * runs in the webview, the extension host and the tests.
  *
- * A row carries a bitmask of these statuses (several can hold at once):
+ * One status per row (a code, index into `DEPLOY_STATUS_NAMES`):
  *   new               exists locally, not in the org listing
- *   in-org            exists in the org
- *   changed-in-org    the org's lastModifiedDate is newer than the last retrieve / deploy of it from this toolkit
- *   modified-locally  git reports its files as changed
- *   unknown           the org listing of its type is missing (not listed yet, or the listing failed)
- * `changed-in-org` + `modified-locally` is a conflict (`status:conflict`).
+ *   equal             same as the org
+ *   changed-locally   changed here since the last sync
+ *   changed-in-org    changed in the org since the last sync (its latest change is shown next to the badge)
+ *   conflict          both
+ *   unknown           the org listing of its type is missing (not listed yet, or the listing failed), or the local
+ *                     change info is not read yet
+ * The compare itself (dates, then contents) is `compareStatus` in compareStatusPure.
  */
 import { StatusVocab } from "./orgBrowser/filter";
+import {
+	CODE_CHANGED_IN_ORG,
+	CODE_CHANGED_LOCALLY,
+	CODE_CONFLICT,
+	CODE_EQUAL,
+	COMPARE_CODES,
+	ContentResult,
+	anyComparedShorthand,
+	compareStatus,
+	sharedStatusAliases,
+} from "./compareStatusPure";
 
-export const DS_NEW = 1;
-export const DS_IN_ORG = 2;
-export const DS_CHANGED_IN_ORG = 4;
-export const DS_MODIFIED_LOCALLY = 8;
-export const DS_UNKNOWN = 16;
-export const DS_CONFLICT = DS_CHANGED_IN_ORG | DS_MODIFIED_LOCALLY;
+export const DS_NEW = 0;
+export const DS_EQUAL = CODE_EQUAL;
+export const DS_CHANGED_LOCALLY = CODE_CHANGED_LOCALLY;
+export const DS_CHANGED_IN_ORG = CODE_CHANGED_IN_ORG;
+export const DS_CONFLICT = CODE_CONFLICT;
+export const DS_UNKNOWN = 5;
 
-/** Facet names; bit i of the row value = names[i]. */
-export const DEPLOY_STATUS_NAMES = ["new", "in-org", "changed-in-org", "modified-locally", "unknown"] as const;
+/** Facet names; the row value is the index. */
+export const DEPLOY_STATUS_NAMES = ["new", "equal", "changed-locally", "changed-in-org", "conflict", "unknown"] as const;
 
 export const DEPLOY_STATUS_LABELS: Record<(typeof DEPLOY_STATUS_NAMES)[number], string> = {
 	new: "New (not in org)",
-	"in-org": "In org",
-	"changed-in-org": "Changed in org",
-	"modified-locally": "Modified locally",
-	unknown: "Unknown",
+	equal: "Equal",
+	"changed-locally": "Changed locally",
+	"changed-in-org": "Changed in org (latest)",
+	conflict: "Conflict",
+	unknown: "Not compared / unknown",
 };
 
 export const DEPLOY_VOCAB: StatusVocab = {
 	names: DEPLOY_STATUS_NAMES,
-	flags: true,
+	flags: false,
 	aliases: {
+		...sharedStatusAliases(),
 		new: "new",
 		"not-in-org": "new",
 		notinorg: "new",
-		"in-org": "in-org",
-		inorg: "in-org",
-		"changed-in-org": "changed-in-org",
-		changed: "changed-in-org",
-		"org-changed": "changed-in-org",
-		"modified-locally": "modified-locally",
-		modified: "modified-locally",
-		local: "modified-locally",
-		dirty: "modified-locally",
-		unknown: "unknown",
 	},
 	shorthands: {
-		conflict: (v) => (v & DS_CONFLICT) === DS_CONFLICT,
+		inorg: anyComparedShorthand,
+		"in-org": anyComparedShorthand,
 	},
 };
 
@@ -61,24 +67,28 @@ export interface DeployStatusInput {
 	inOrg: boolean;
 	/** lastModifiedDate in the org (epoch ms; 0 = unknown). */
 	orgLm: number;
-	/** Last retrieve / deploy of it from this toolkit for this org (epoch ms); undefined = never. */
+	/** Last sync: toolkit retrieve / deploy log or content-verified equal (epoch ms); undefined = never. */
 	syncedAt?: number;
-	/** Git reports one of its files as changed. */
-	modifiedLocally: boolean;
+	/** Local change time + git dirty; undefined = not read yet. */
+	local?: { localT: number; dirty: boolean };
+	/** Content diff result. */
+	content?: ContentResult;
 }
 
-/** The status bitmask of a component. */
-export function deployStatusFlags(i: DeployStatusInput): number {
-	let v = 0;
-	if (!i.orgKnown) v |= DS_UNKNOWN;
-	else if (!i.inOrg) v |= DS_NEW;
-	else {
-		v |= DS_IN_ORG;
-		// Without a retrieve / deploy record there is nothing to compare with: not "changed" (as in the Org Browser).
-		if (i.syncedAt !== undefined && i.orgLm > i.syncedAt) v |= DS_CHANGED_IN_ORG;
-	}
-	if (i.modifiedLocally) v |= DS_MODIFIED_LOCALLY;
-	return v;
+export interface DeployStatus {
+	code: number;
+	provisional: boolean;
+	/** For `unknown`: why. */
+	why?: "org" | "local";
+}
+
+/** The status of a component. */
+export function deployStatus(i: DeployStatusInput): DeployStatus {
+	if (!i.orgKnown) return { code: DS_UNKNOWN, provisional: true, why: "org" };
+	if (!i.inOrg) return { code: DS_NEW, provisional: false };
+	if (!i.local && i.content !== "same") return { code: DS_UNKNOWN, provisional: true, why: "local" };
+	const r = compareStatus({ orgLm: i.orgLm, syncedAt: i.syncedAt, localT: i.local?.localT ?? 0, dirty: i.local?.dirty ?? false, content: i.content });
+	return { code: COMPARE_CODES[r.status], provisional: r.provisional };
 }
 
 /**
@@ -128,8 +138,10 @@ export interface PreDeployInput {
 	listedTypes: ReadonlySet<string>;
 	/** Types that could not be listed: type → reason. */
 	failedTypes: ReadonlyMap<string, string>;
-	/** Last retrieve / deploy of each component from this toolkit: `Type:Name` → epoch ms. */
+	/** Last sync of each component (toolkit retrieve / deploy, or a content-verified "same"): `Type:Name` → epoch ms. */
 	syncedAt: Readonly<Record<string, number>>;
+	/** Components whose contents were compared against this very org version and found equal: they never warn. */
+	verifiedEqual?: ReadonlySet<string>;
 }
 
 export interface PreDeployDecision {
@@ -141,7 +153,7 @@ export interface PreDeployDecision {
 	needsConfirmation: boolean;
 }
 
-/** Which of the selected components changed in the org since this toolkit last retrieved or deployed them. */
+/** Which of the selected components changed in the org since the last sync (retrieve, deploy or verified-equal compare); verified-equal ones never warn. */
 export function evaluatePreDeploy(i: PreDeployInput): PreDeployDecision {
 	const changed: ChangedComponent[] = [];
 	const unverified: { key: string; reason: string }[] = [];
@@ -154,6 +166,7 @@ export function evaluatePreDeploy(i: PreDeployInput): PreDeployDecision {
 			unverified.push({ key: c.key, reason: "type not listed" });
 			continue;
 		}
+		if (i.verifiedEqual?.has(c.key)) continue;
 		const org = i.orgComps.get(orgLookupKey(c.type, c.name));
 		const synced = i.syncedAt[c.key];
 		if (org && synced !== undefined && org.lm > synced) {

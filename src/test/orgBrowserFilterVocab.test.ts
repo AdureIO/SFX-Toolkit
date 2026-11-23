@@ -43,14 +43,14 @@ describe("filter: status vocabulary", () => {
 	it("keeps the Org Browser vocabulary as the default", () => {
 		const q = parseQuery("status:changed status:bogus");
 		assert.strictEqual(q.status.length, 1);
-		assert.strictEqual(q.status[0].value(2), true);
-		assert.strictEqual(q.status[0].value(1), false);
-		assert.deepStrictEqual(ORG_BROWSER_VOCAB.names, ["not-local", "local", "changed", "partial"]);
+		assert.strictEqual(q.status[0].value(3), true); // changed → changed-in-org
+		assert.strictEqual(q.status[0].value(2), false);
+		assert.deepStrictEqual(ORG_BROWSER_VOCAB.names, ["not-in-project", "equal", "changed-locally", "changed-in-org", "conflict", "partial", "unknown"]);
 	});
 
 	it("statusTest: a code vocabulary compares the code, a flags vocabulary tests the bit", () => {
-		assert.strictEqual(statusTest(ORG_BROWSER_VOCAB, "local")(1), true);
-		assert.strictEqual(statusTest(ORG_BROWSER_VOCAB, "local")(3), false);
+		assert.strictEqual(statusTest(ORG_BROWSER_VOCAB, "equal")(1), true);
+		assert.strictEqual(statusTest(ORG_BROWSER_VOCAB, "equal")(3), false);
 		assert.strictEqual(statusTest(FLAGS, "gamma")(A | C), true);
 		assert.strictEqual(statusTest(FLAGS, "gamma")(A), false);
 		assert.strictEqual(statusTest(FLAGS, "nope")(7), false);
@@ -82,7 +82,7 @@ describe("filter: status vocabulary", () => {
 		assert.deepStrictEqual(none.status, [0, 0, 0]);
 		// Org Browser default vocabulary: one code per row.
 		const org = computeFacets(idx, { ...DEFAULT_FILTER }, { now: NOW, status: Uint8Array.from([0, 1, 1, 2, 3]) });
-		assert.deepStrictEqual(org.status, [1, 2, 1, 1]);
+		assert.deepStrictEqual(org.status, [1, 2, 1, 1, 0, 0, 0]);
 	});
 
 	it("the status facet ignores its own filter only", () => {

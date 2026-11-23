@@ -267,6 +267,8 @@ export class DeployMetadataPanelProvider {
         org?: string | null;
         types?: string[];
         key?: string;
+        keys?: string[];
+        force?: boolean;
         query?: string;
         legacyState?: { sourcePaths?: string[] } & Partial<DeployPanelState>;
       }) => {
@@ -330,6 +332,11 @@ export class DeployMetadataPanelProvider {
         }
         if (msg.command === "refreshOrgStatus") {
           void hostNow.refreshOrg(Array.isArray(msg.types) && msg.types.length > 0 ? msg.types.map(String) : undefined);
+          return;
+        }
+        if (msg.command === "compareContents") {
+          // The "Compare contents" button: the components that need it, or (force) the ones the filter shows, again.
+          void hostNow.requestCompare(msg.force === true, Array.isArray(msg.keys) ? msg.keys.map(String) : undefined);
           return;
         }
         if (msg.command === "compare" || msg.command === "openFile" || msg.command === "reveal") {
@@ -431,6 +438,9 @@ export class DeployMetadataPanelProvider {
           return;
         }
         if (msg.command !== "deploy" || !Array.isArray(msg.components) || !msg.testLevel) return;
+        // No background content compare while a deploy / validation runs; it continues afterwards.
+        hostNow.pauseCompare();
+        try {
         const dryRun = msg.dryRun === true;
         await hostNow.ready;
         // The selection is a set of components: each deploys exactly its own files (never a folder).
@@ -679,6 +689,9 @@ export class DeployMetadataPanelProvider {
               }
             });
           });
+        } finally {
+          hostNow.resumeCompare();
+        }
       },
       null,
       []
@@ -1039,10 +1052,12 @@ export class DeployMetadataPanelProvider {
 		mark { background: color-mix(in srgb, var(--ob-warn) 45%, transparent); color: inherit; border-radius: 2px; padding: 0 1px; }
 		.badge { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px; border: 1px solid var(--ob-border); white-space: nowrap; }
 		.badge.new { color: var(--ob-accent); border-color: color-mix(in srgb, var(--ob-accent) 50%, transparent); }
-		.badge.inorg { color: var(--ob-ok); border-color: color-mix(in srgb, var(--ob-ok) 50%, transparent); }
-		.badge.changed { color: var(--ob-warn); border-color: color-mix(in srgb, var(--ob-warn) 55%, transparent); background: color-mix(in srgb, var(--ob-warn) 12%, transparent); }
-		.badge.modified { color: var(--vscode-charts-blue, #3794ff); border-color: color-mix(in srgb, var(--vscode-charts-blue, #3794ff) 55%, transparent); }
+		.badge.equal { color: var(--ob-ok); border-color: color-mix(in srgb, var(--ob-ok) 50%, transparent); }
+		.badge.changed-org { color: var(--ob-warn); border-color: color-mix(in srgb, var(--ob-warn) 55%, transparent); background: color-mix(in srgb, var(--ob-warn) 12%, transparent); }
+		.badge.changed-local { color: var(--vscode-charts-blue, #3794ff); border-color: color-mix(in srgb, var(--vscode-charts-blue, #3794ff) 55%, transparent); }
+		.badge.conflict { color: var(--ob-bad); border-color: color-mix(in srgb, var(--ob-bad) 60%, transparent); background: color-mix(in srgb, var(--ob-bad) 12%, transparent); }
 		.badge.unknown { color: var(--vscode-descriptionForeground); border-style: dashed; }
+		.badge.prov { border-style: dashed; opacity: .75; }
 		@media (forced-colors: active) { .badge { border-color: CanvasText; } }
 
 	</style>
@@ -1050,7 +1065,7 @@ export class DeployMetadataPanelProvider {
 <body>
 	<div class="panel-left">
 		<div class="section">
-			<div class="section-title"><span class="st-icon" aria-hidden="true">📦</span><span>Metadata to deploy</span><span class="st-spacer"></span><span id="orgInfo" class="org-info" role="status"></span><button type="button" class="btn-tree-toolbar" id="orgRefresh" title="Re-list this project's metadata types in the target org" aria-label="Refresh org status">↻</button></div>
+			<div class="section-title"><span class="st-icon" aria-hidden="true">📦</span><span>Metadata to deploy</span><span class="st-spacer"></span><span id="orgInfo" class="org-info" role="status"></span><span id="cmpInfo" class="org-info" role="status"></span><button type="button" class="btn-tree-toolbar" id="cmpBtn" title="Compare the contents of the local components with the org (the ones that need it; with a filter active: the shown ones again)" aria-label="Compare contents">&#8776;</button><button type="button" class="btn-tree-toolbar" id="orgRefresh" title="Re-list this project's metadata types in the target org" aria-label="Refresh org status">↻</button></div>
 			<div id="banner" hidden></div>
 			<div class="tree-search-row">
 				<button type="button" class="btn-select-deselect-all" id="btn-select-deselect-all" title="Select all filtered" aria-label="Select all filtered"><span class="btn-select-deselect-icon" aria-hidden="true">☑</span></button>

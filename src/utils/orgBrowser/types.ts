@@ -49,14 +49,20 @@ export interface ListFailure {
 	error: string;
 }
 
-/** Local status codes (index into `STATUS_NAMES`). */
-export const STATUS_NOT_LOCAL = 0;
-export const STATUS_LOCAL = 1;
-export const STATUS_CHANGED = 2;
+/**
+ * Org Browser row status codes (index into `STATUS_NAMES`). 0..4 are shared with the Deploy panel
+ * (see compareStatusPure): absent on the other side, equal, changed locally, changed in org, conflict.
+ */
+export const STATUS_NOT_IN_PROJECT = 0;
+export const STATUS_EQUAL = 1;
+export const STATUS_CHANGED_LOCALLY = 2;
+export const STATUS_CHANGED_IN_ORG = 3;
+export const STATUS_CONFLICT = 4;
 /** CustomObject whose object file is missing locally but some of its children (fields …) exist. */
-export const STATUS_PARTIAL = 3;
-export type StatusCode = 0 | 1 | 2 | 3;
-export const STATUS_NAMES = ["not-local", "local", "changed", "partial"] as const;
+export const STATUS_PARTIAL = 5;
+/** The local project was not read yet (or its change info is not available yet). */
+export const STATUS_UNKNOWN = 6;
+export const STATUS_NAMES = ["not-in-project", "equal", "changed-locally", "changed-in-org", "conflict", "partial", "unknown"] as const;
 export type StatusName = (typeof STATUS_NAMES)[number];
 
 /** `Type:Name` row key used across host, webview, local index and retrieve log. */

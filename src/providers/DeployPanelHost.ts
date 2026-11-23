@@ -10,6 +10,11 @@ import { metadataDiffForFile } from "../commands/metadataDiff";
 import { DeployOrgStatus } from "../utils/deployOrgStatus";
 import { RelComponent, folderRestriction, nameOfComponentKey, pathsToComponents, typeOfComponentKey } from "../utils/deployComponentsPure";
 import { OrgCompInfo, PreDeployDecision, evaluatePreDeploy, orgLookupKey } from "../utils/deployStatusPure";
+import { effectiveSyncedAt } from "../utils/compareStatusPure";
+import { CompareTarget } from "../utils/contentCompare";
+import { innerFilesOfEntry, requestNameOf } from "../utils/contentComparePure";
+import { CompareLease, acquireCompare, compareMode } from "../utils/contentCompareHost";
+import { readLocalInfo } from "../utils/localChangeInfo";
 import { ListCancelled } from "../utils/orgBrowser/metadataLister";
 import { LocalEntry, buildTypeTable, readPackageDirectories, scanProject } from "../utils/orgBrowser/localIndex";
 import { makeSoapCall } from "../utils/orgBrowser/soapTransport";
@@ -67,6 +72,10 @@ export class DeployPanelHost implements vscode.Disposable {
 	private disposed = false;
 	/** SOAP calls sent to the org (the pre-deploy check reports its cost). */
 	private soapCalls = 0;
+	/** The shared content-compare service of (project, target org). */
+	private lease: CompareLease | undefined;
+	private leaseSubs: { dispose(): void }[] = [];
+	private compareTimer: ReturnType<typeof setTimeout> | undefined;
 
 	constructor(private readonly deps: DeployHostDeps) {
 		this.root = deps.root;
@@ -100,6 +109,8 @@ export class DeployPanelHost implements vscode.Disposable {
 		this.watchers = [];
 		if (this.rescanTimer) clearTimeout(this.rescanTimer);
 		if (this.gitTimer) clearTimeout(this.gitTimer);
+		if (this.compareTimer) clearTimeout(this.compareTimer);
+		this.releaseLease();
 	}
 
 	// ── Local index ──────────────────────────────────────────────────────────────
@@ -156,6 +167,7 @@ export class DeployPanelHost implements vscode.Disposable {
 		const unseen = this.localTypes().filter((t) => !this.status.isListed(t) && !this.status.hasFailed(t));
 		if (unseen.length > 0 && this.orgKey && this.orgKey !== DEFAULT_ORG_KEY) void this.refreshOrg(unseen);
 		void this.refreshModified(false);
+		this.scheduleCompare(1500);
 	}
 
 	private setupWatchers(): void {
@@ -168,6 +180,8 @@ export class DeployPanelHost implements vscode.Disposable {
 			} else {
 				if (this.gitTimer) clearTimeout(this.gitTimer);
 				this.gitTimer = setTimeout(() => void this.refreshModified(this.autoGit), 600);
+				// A saved file changes its local contents: compare again once the burst of saves is over.
+				this.scheduleCompare(4000);
 			}
 		};
 		for (const pkg of dirs.length > 0 ? dirs : ["force-app"]) {
@@ -191,13 +205,28 @@ export class DeployPanelHost implements vscode.Disposable {
 	 */
 	async refreshModified(select: boolean): Promise<void> {
 		if (this.disposed) return;
+		let paths: string[] | null = null;
 		try {
 			await this.ready;
-			const paths = await this.deps.gitStatusPaths(this.root);
+			paths = await this.deps.gitStatusPaths(this.root);
 			const { keys, unmatched } = pathsToComponents(paths, this.relComponents());
 			this.post({ command: "modifiedKeys", keys, select, total: paths.length, unmatched: unmatched.length });
 		} catch (e) {
+			paths = null;
 			this.post({ command: "modifiedKeys", keys: [], select, total: 0, unmatched: 0, error: String((e as Error)?.message ?? e) });
+		}
+		await this.postLocalInfo(paths);
+	}
+
+	/** Local change times + git dirty per component (the status compare's local side). Without git: file times only. */
+	private async postLocalInfo(dirtyPaths: string[] | null): Promise<void> {
+		try {
+			const dirs = readPackageDirectories(this.root);
+			const local = await readLocalInfo(this.root, this.entries.values(), dirs.length > 0 ? dirs : ["force-app"], dirtyPaths);
+			this.post({ command: "compareLocal", local });
+			await this.pushContent();
+		} catch (e) {
+			Logger.info(`Deploy panel: could not read the local change times: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
 		}
 	}
 
@@ -219,6 +248,10 @@ export class DeployPanelHost implements vscode.Disposable {
 		const synced: Record<string, number> = {};
 		for (const l of local) if (all[l.key] !== undefined) synced[l.key] = all[l.key];
 		this.post({ command: "orgStatus", state, error: error || undefined, orgLabel: this.orgLabel(), snapshot, synced, sentAt: Date.now() });
+		if (state === "ok") {
+			void this.pushContent();
+			this.scheduleCompare(0);
+		}
 	}
 
 	/** The target org changed (or was chosen first): show what is cached at once, then refresh the local types. */
@@ -227,6 +260,7 @@ export class DeployPanelHost implements vscode.Disposable {
 		if (this.run) this.run.cancelled = true;
 		this.targetOrg = org || null;
 		this.status.reset();
+		this.releaseLease();
 		if (!org) {
 			this.orgKey = "";
 			this.orgArg = null;
@@ -242,6 +276,7 @@ export class DeployPanelHost implements vscode.Disposable {
 		}
 		// Nothing of the previous org may stay on the rows while this one loads.
 		this.postOrgStatus("checking");
+		await this.acquireLease(key, this.orgArg, gen);
 		await this.ready;
 		await this.status.load(key, this.orgArg);
 		if (gen !== this.gen || this.disposed) return;
@@ -274,6 +309,92 @@ export class DeployPanelHost implements vscode.Disposable {
 		} finally {
 			if (this.run === run) this.run = undefined;
 		}
+	}
+
+	// ── Content compare ──────────────────────────────────────────────────────────
+
+	private releaseLease(): void {
+		for (const d of this.leaseSubs) d.dispose();
+		this.leaseSubs = [];
+		if (this.lease) {
+			this.lease.release();
+			this.lease = undefined;
+			if (!this.disposed) {
+				this.post({ command: "compareContent", full: true, content: {} });
+				this.post({ command: "compareProgress", progress: { state: "idle", done: 0, total: 0, failed: 0 } });
+			}
+		}
+	}
+
+	/** Join the shared compare service of this project and org; the rows get its results as they come. */
+	private async acquireLease(orgKey: string, orgArg: string | null, gen: number): Promise<void> {
+		const lease = acquireCompare(this.root, orgKey, orgArg);
+		this.lease = lease;
+		const service = lease.service;
+		this.leaseSubs.push(
+			service.onDidUpdate((keys) => this.post({ command: "compareContent", full: false, content: service.contentInfo(keys) })),
+			service.onDidProgress((progress) => this.post({ command: "compareProgress", progress }))
+		);
+		await service.load();
+		if (gen !== this.gen || this.disposed || this.lease !== lease) return;
+		this.post({ command: "compareProgress", progress: service.progress() });
+		await this.pushContent();
+	}
+
+	/** Send every still-valid compare result (full replace of the webview's map). */
+	private async pushContent(): Promise<void> {
+		const lease = this.lease;
+		if (!lease || this.disposed) return;
+		await this.ready;
+		const content = await lease.service.validContentInfo(this.compareTargets());
+		if (this.lease !== lease || this.disposed) return;
+		this.post({ command: "compareContent", full: true, content });
+	}
+
+	/** The local components that exist in the org, ready for the compare service (`keys`: only these). */
+	private compareTargets(keys?: Iterable<string>): CompareTarget[] {
+		const dirs = readPackageDirectories(this.root);
+		const pkgAbs = (dirs.length > 0 ? dirs : ["force-app"]).map((d) => path.resolve(this.root, d));
+		const table = buildTypeTable(this.status.knownTypes());
+		const list = keys ? [...keys].map((k) => this.entries.get(k)).filter((e): e is LocalEntry => !!e) : [...this.entries.values()];
+		const out: CompareTarget[] = [];
+		for (const e of list) {
+			const org = this.status.get(e.type, e.name);
+			if (!org) continue;
+			out.push({ key: e.key, type: e.type, name: e.name, orgLm: org.lm, files: innerFilesOfEntry(e, pkgAbs, table) });
+		}
+		return out;
+	}
+
+	/** Queue the content compare (setting `auto`) after `ms`. */
+	private scheduleCompare(ms: number): void {
+		if (this.compareTimer) clearTimeout(this.compareTimer);
+		this.compareTimer = setTimeout(() => {
+			this.compareTimer = undefined;
+			if (compareMode() === "auto") void this.requestCompare(false);
+		}, ms);
+	}
+
+	/**
+	 * Compare contents now: the components that need it (never compared, or the org time / local contents changed
+	 * since), or with `force` the given `keys` (default all) again.
+	 */
+	async requestCompare(force: boolean, keys?: string[]): Promise<void> {
+		const lease = this.lease;
+		if (!lease || this.disposed || this.lastState === "none") return;
+		await lease.service.load();
+		await this.ready;
+		if (this.lease !== lease || this.disposed) return;
+		lease.service.request(this.compareTargets(keys), force);
+	}
+
+	/** Stop the running compare (a deploy starts); `resumeCompare` continues it. */
+	pauseCompare(): void {
+		this.lease?.service.pause();
+	}
+
+	resumeCompare(): void {
+		this.lease?.service.resume();
 	}
 
 	// ── Row actions ──────────────────────────────────────────────────────────────
@@ -324,12 +445,22 @@ export class DeployPanelHost implements vscode.Disposable {
 				const info = this.status.get(c.type, c.name);
 				if (info) orgComps.set(orgLookupKey(c.type, c.name), info);
 			}
+			// Last sync = retrieve / deploy log or the last content-verified "same"; verified-equal components never warn.
+			const log = getRetrieveTimes(this.orgArg);
+			const service = this.lease?.service;
+			const syncedAt: Record<string, number> = {};
+			for (const c of selected) {
+				const t = effectiveSyncedAt(log[c.key], service?.verifiedSyncAt(c.key));
+				if (t !== undefined) syncedAt[c.key] = t;
+			}
+			const verifiedEqual = service ? await service.verifiedEqualNow(this.compareTargets(selected.map((c) => c.key))) : undefined;
 			const decision = evaluatePreDeploy({
 				selected,
 				orgComps,
 				listedTypes: new Set(outcome.listed),
 				failedTypes: outcome.failed,
-				syncedAt: getRetrieveTimes(this.orgArg),
+				syncedAt,
+				verifiedEqual,
 			});
 			this.postOrgStatus("ok"); // the rows get the fresher data too
 			return done(decision);

@@ -27,13 +27,22 @@ import {
 	DEPLOY_STATUS_NAMES,
 	DEPLOY_VOCAB,
 	DS_CHANGED_IN_ORG,
+	DS_CHANGED_LOCALLY,
 	DS_CONFLICT,
-	DS_IN_ORG,
-	DS_MODIFIED_LOCALLY,
+	DS_EQUAL,
 	DS_NEW,
 	DS_UNKNOWN,
-	deployStatusFlags,
+	deployStatus,
 } from "../utils/deployStatusPure";
+import {
+	CompareProgress,
+	ContentInfoMap,
+	LocalInfoMap,
+	contentFromCode,
+	effectiveSyncedAt,
+	isComparedCode,
+	progressText,
+} from "../utils/compareStatusPure";
 import { $, FilterBar, createFilterBar, esc, toggleIn } from "./shared/filterBar";
 import { createSharedFilterSync } from "./shared/sharedFilter";
 
@@ -138,7 +147,14 @@ let synced: Record<string, number> = {};
 let modified = new Set<string>();
 let org: OrgStatusMsg = { state: "none", orgLabel: "", snapshot: { listed: {}, failed: {}, comps: {}, asOf: 0 }, synced: {}, sentAt: 0 };
 let statusArr: Uint8Array = new Uint8Array(0);
+/** 1 = decided by dates only (contents not compared). */
+let provArr: Uint8Array = new Uint8Array(0);
 let statusDirty = true;
+/** Local change times + git dirty per component (host: compareLocal); undefined = not read yet. */
+let localInfo: LocalInfoMap | undefined;
+/** Content compare results per component (host: compareContent). */
+let contentInfo: ContentInfoMap = {};
+let cmpProgress: CompareProgress | null = null;
 let rows: number[] = [];
 let items: Item[] = [];
 let facets: Facets | null = null;
@@ -251,19 +267,26 @@ function ensureStatus(): void {
 	if (!statusDirty && statusArr.length === idx.comps.length) return;
 	const n = idx.comps.length;
 	const arr = new Uint8Array(n);
+	const prov = new Uint8Array(n);
 	for (let i = 0; i < n; i++) {
 		const c = idx.comps[i];
 		const key = c.t + ":" + c.n;
 		const o = org.snapshot.comps[key];
-		arr[i] = deployStatusFlags({
+		const li = localInfo?.[key];
+		const ci = contentInfo[key];
+		const r = deployStatus({
 			orgKnown: org.snapshot.listed[c.t] !== undefined,
 			inOrg: !!o,
 			orgLm: o ? o[0] : 0,
-			syncedAt: synced[key],
-			modifiedLocally: modified.has(key),
+			syncedAt: effectiveSyncedAt(synced[key], ci && ci[2] ? ci[2] : undefined),
+			local: li ? { localT: li[0], dirty: li[1] === 1 } : undefined,
+			content: contentFromCode(ci?.[0]),
 		});
+		arr[i] = r.code;
+		prov[i] = r.provisional ? 1 : 0;
 	}
 	statusArr = arr;
+	provArr = prov;
 	statusDirty = false;
 }
 
@@ -371,18 +394,33 @@ const ICON = {
 	chevron: '<svg viewBox="0 0 16 16" width="12" height="12"><path fill="currentColor" d="M6 4l4.500 4L6 12z"/></svg>',
 };
 
-function statusBadges(v: number, key: string): string {
-	let s = "";
-	if (v & DS_UNKNOWN) {
-		const type = key.slice(0, key.indexOf(":"));
-		const why = org.snapshot.failed[type] ?? (org.state === "none" ? "No target org" : org.state === "checking" ? "Still checking the org…" : "This type has not been listed in the org");
-		s += `<span class="badge unknown" title="${esc("Status in the org unknown: " + why)}">Unknown</span>`;
+const PROV_TIP = "Based on dates — contents not compared yet";
+
+function statusBadge(v: number, prov: boolean, key: string): string {
+	const cmp = contentInfo[key];
+	const tip = (what: string) => esc(prov ? `${what} (${PROV_TIP})` : `${what} (Contents compared ${cmp && cmp[1] ? new Date(cmp[1]).toLocaleString() : "just now"})`);
+	const cls = prov ? " prov" : "";
+	switch (v) {
+		case DS_UNKNOWN: {
+			const type = key.slice(0, key.indexOf(":"));
+			const orgReason = org.snapshot.listed[type] === undefined;
+			const why = orgReason
+				? (org.snapshot.failed[type] ?? (org.state === "none" ? "No target org" : org.state === "checking" ? "Still checking the org…" : "This type has not been listed in the org"))
+				: "Local changes not read yet";
+			return `<span class="badge unknown" title="${esc("Not compared: " + why)}">Unknown</span>`;
+		}
+		case DS_NEW:
+			return '<span class="badge new" title="Not in the org yet">New</span>';
+		case DS_EQUAL:
+			return `<span class="badge equal${cls}" title="${tip("Same as the org")}">Equal</span>`;
+		case DS_CHANGED_LOCALLY:
+			return `<span class="badge changed-local${cls}" title="${tip("Changed here since the last sync with the org")}">Changed locally</span>`;
+		case DS_CHANGED_IN_ORG:
+			return `<span class="badge changed-org${cls}" title="${tip("Changed in the org since the last sync (latest change shown on the right)")}">Changed in org</span>`;
+		case DS_CONFLICT:
+			return `<span class="badge conflict${cls}" title="${tip("Changed here and in the org since the last sync")}">Conflict</span>`;
 	}
-	if (v & DS_NEW) s += '<span class="badge new" title="Not in the org yet">New</span>';
-	if (v & DS_CHANGED_IN_ORG) s += '<span class="badge changed" title="Modified in the org after your last retrieve or deploy">Changed in org</span>';
-	else if (v & DS_IN_ORG) s += '<span class="badge inorg" title="In the org, unchanged since your last retrieve or deploy">In org</span>';
-	if (v & DS_MODIFIED_LOCALLY) s += '<span class="badge modified" title="Git reports local changes">Modified locally</span>';
-	return s;
+	return "";
 }
 
 function rowHtml(pos: number, it: RowItem): string {
@@ -394,13 +432,13 @@ function rowHtml(pos: number, it: RowItem): string {
 	const by = c.by ? `${esc(c.by)} · ` : "";
 	const label = (it.lvl > 1 ? c.n.slice(c.n.lastIndexOf("/") + 1) : c.n) || c.n;
 	return (
-		`<div class="drow${sel ? " sel" : ""}${pos === active ? " active" : ""}${(v & DS_CONFLICT) === DS_CONFLICT ? " conflict" : ""}" data-pos="${pos}" role="row" aria-selected="${sel}" style="padding-left:${6 + it.lvl * 16}px">` +
+		`<div class="drow${sel ? " sel" : ""}${pos === active ? " active" : ""}${v === DS_CONFLICT ? " conflict" : ""}" data-pos="${pos}" role="row" aria-selected="${sel}" style="padding-left:${6 + it.lvl * 16}px">` +
 		`<span class="c cb"><input type="checkbox" class="rowcb" tabindex="-1" ${sel ? "checked" : ""} aria-label="Select ${esc(c.n)}"></span>` +
 		`<span class="c nm" title="${esc(key)}">${hl(label)}</span>` +
-		`<span class="c st">${statusBadges(v, key)}</span>` +
+		`<span class="c st">${statusBadge(v, provArr[it.i] === 1, key)}</span>` +
 		`<span class="c md" title="${esc(exact)}">${c.lm ? by + esc(relativeTime(c.lm, Date.now())) : ""}</span>` +
 		`<span class="c acts">` +
-		((v & DS_IN_ORG) ? `<button data-act="compare" title="Compare with the org" aria-label="Compare with the org">${ICON.diff}</button>` : "") +
+		(isComparedCode(v) ? `<button data-act="compare" title="Compare with the org" aria-label="Compare with the org">${ICON.diff}</button>` : "") +
 		`<button data-act="openFile" title="Open the file" aria-label="Open the file">${ICON.file}</button>` +
 		`<button data-act="reveal" title="Reveal in Explorer" aria-label="Reveal in Explorer">${ICON.folder}</button>` +
 		`</span></div>`
@@ -537,6 +575,7 @@ function renderOrgInfo(): void {
 	}
 	el.textContent = text;
 	el.title = title;
+	renderCompareInfo();
 	el.classList.toggle("err", org.state === "error");
 	el.classList.toggle("busy", org.state === "checking");
 	btn.disabled = org.state === "checking" || org.state === "none";
@@ -546,6 +585,16 @@ function renderOrgInfo(): void {
 	const nof = $("noRows");
 	nof.hidden = idx.comps.length > 0;
 	nof.textContent = hasProject ? "No metadata components found in the package directories (sfdx-project.json)." : "No SFDX project in this folder — open one with sfdx-project.json to deploy.";
+}
+
+function renderCompareInfo(): void {
+	const el = $("cmpInfo");
+	const t = progressText(cmpProgress);
+	const failed = cmpProgress?.failed ?? 0;
+	el.textContent = t ? ` · ${t}` : "";
+	el.title = failed > 0 ? `${failed} component${failed === 1 ? "" : "s"} could not be compared (they keep the date-based status)` : "";
+	el.classList.toggle("busy", cmpProgress?.state === "running");
+	($("cmpBtn") as HTMLButtonElement).disabled = org.state === "none";
 }
 
 function renderAll(): void {
@@ -776,6 +825,12 @@ function setupToolbar(): void {
 		scheduleSaveState();
 	});
 	$("orgRefresh").addEventListener("click", () => post({ command: "refreshOrgStatus" }));
+	// Compare contents: what needs it; with a filter active, the shown components again (forced).
+	$("cmpBtn").addEventListener("click", () => {
+		const filtered = rows.length < idx.comps.length;
+		post(filtered ? { command: "compareContents", force: true, keys: rows.map(keyAt) } : { command: "compareContents", force: false });
+		setStatus(filtered ? `Comparing the contents of ${rows.length.toLocaleString()} shown component${rows.length === 1 ? "" : "s"}…` : "Comparing contents…");
+	});
 	document.addEventListener("keydown", (e) => {
 		const tag = (e.target as HTMLElement).tagName;
 		if (e.key === "/" && tag !== "INPUT" && tag !== "SELECT" && tag !== "TEXTAREA") {
@@ -1394,6 +1449,20 @@ window.addEventListener("message", (ev) => {
 			recompute();
 			break;
 		}
+		case "compareLocal":
+			localInfo = (m.local ?? {}) as LocalInfoMap;
+			statusDirty = true;
+			recompute();
+			break;
+		case "compareContent":
+			contentInfo = m.full ? ((m.content ?? {}) as ContentInfoMap) : { ...contentInfo, ...((m.content ?? {}) as ContentInfoMap) };
+			statusDirty = true;
+			recompute();
+			break;
+		case "compareProgress":
+			cmpProgress = (m.progress ?? null) as CompareProgress | null;
+			renderCompareInfo();
+			break;
 		case "modifiedKeys": {
 			if (m.error) {
 				// Only an explicit "select changed" is worth a message; the background status stays quiet outside a repository.

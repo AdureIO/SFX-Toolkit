@@ -8,10 +8,11 @@
  *   type:ApexClass       type equals (wildcards allowed); several type: tokens are ORed
  *   ns:abc  ns:none      namespace prefix equals; `ns:none` / `ns:` = unmanaged; ORed
  *   by:smith  by:"Jo Do" last-modified-by name contains; ORed
- *   status:not-local|local|changed|partial   status of the panel's vocabulary (see StatusVocab); ORed
+ *   status:equal|changed-locally|changed-in-org|conflict|…   status of the panel's vocabulary (see StatusVocab); ORed
  *   ApexClass:Foo        `Type:Name` (type equals, name contains / wildcard)
  */
 import { Comp, STATUS_NAMES, compKey } from "./types";
+import { anyComparedShorthand, sharedStatusAliases } from "../compareStatusPure";
 
 // ── Status vocabulary ──────────────────────────────────────────────────────────
 
@@ -31,20 +32,25 @@ export interface StatusVocab {
 	shorthands?: Record<string, (v: number) => boolean>;
 }
 
-/** The Org Browser's local status (not-local / local / changed / partial). */
+/** The Org Browser's local-vs-org status (not-in-project / equal / changed-locally / changed-in-org / conflict / partial / unknown). */
 export const ORG_BROWSER_VOCAB: StatusVocab = {
 	names: STATUS_NAMES,
 	flags: false,
 	aliases: {
-		"not-local": "not-local",
-		notlocal: "not-local",
-		missing: "not-local",
-		local: "local",
-		"in-project": "local",
-		inproject: "local",
-		changed: "changed",
+		...sharedStatusAliases(),
+		"not-in-project": "not-in-project",
+		notinproject: "not-in-project",
+		"not-local": "not-in-project",
+		notlocal: "not-in-project",
+		missing: "not-in-project",
 		partial: "partial",
 		"partly-in-project": "partial",
+	},
+	shorthands: {
+		inorg: anyComparedShorthand,
+		"in-org": anyComparedShorthand,
+		"in-project": (v) => anyComparedShorthand(v) || v === 5,
+		inproject: (v) => anyComparedShorthand(v) || v === 5,
 	},
 };
 

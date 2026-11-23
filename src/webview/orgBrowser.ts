@@ -23,7 +23,30 @@ import {
 import { splitByVisibility } from "../utils/orgBrowser/selection";
 import { $, REFRESH_ICON, createFilterBar, esc, toggleIn, FilterBar } from "./shared/filterBar";
 import { createSharedFilterSync } from "./shared/sharedFilter";
-import { Comp, ListFailure, STATUS_CHANGED, STATUS_LOCAL, STATUS_PARTIAL, TypeInfo, compKey } from "../utils/orgBrowser/types";
+import {
+	Comp,
+	ListFailure,
+	STATUS_CHANGED_IN_ORG,
+	STATUS_CHANGED_LOCALLY,
+	STATUS_CONFLICT,
+	STATUS_EQUAL,
+	STATUS_NOT_IN_PROJECT,
+	STATUS_PARTIAL,
+	STATUS_UNKNOWN,
+	TypeInfo,
+	compKey,
+} from "../utils/orgBrowser/types";
+import {
+	COMPARE_CODES,
+	CompareProgress,
+	ContentInfoMap,
+	LocalInfoMap,
+	compareStatus,
+	contentFromCode,
+	effectiveSyncedAt,
+	isComparedCode,
+	progressText,
+} from "../utils/compareStatusPure";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -95,7 +118,14 @@ let noOrg = false;
 let local = { keys: new Set<string>(), partial: new Set<string>(), retrieved: {} as Record<string, number>, known: false };
 let me = { ids: [] as string[], name: "" };
 let statusArr: Uint8Array = new Uint8Array(0);
+/** 1 = decided by dates only (contents not compared). */
+let provArr: Uint8Array = new Uint8Array(0);
 let statusDirty = true;
+/** Local change times + git dirty per component (host: compareLocal); undefined = not read yet. */
+let localInfo: LocalInfoMap | undefined;
+/** Content compare results per component (host: compareContent). */
+let contentInfo: ContentInfoMap = {};
+let cmpProgress: CompareProgress | null = null;
 let selected = new Set<string>();
 let results = new Map<string, { ok: boolean; error?: string }>();
 let retrieving = false;
@@ -147,19 +177,38 @@ function ensureStatus(): void {
 	if (!statusDirty && statusArr.length === idx.comps.length) return;
 	const n = idx.comps.length;
 	const arr = new Uint8Array(n);
-	if (local.known) {
-		for (let i = 0; i < n; i++) {
-			const c = idx.comps[i];
-			const key = c.t + ":" + c.n;
-			if (!local.keys.has(key)) {
-				if (local.partial.has(key)) arr[i] = STATUS_PARTIAL;
-				continue;
-			}
-			const rt = local.retrieved[key];
-			arr[i] = rt !== undefined && c.lm > rt ? STATUS_CHANGED : STATUS_LOCAL;
+	const prov = new Uint8Array(n);
+	for (let i = 0; i < n; i++) {
+		const c = idx.comps[i];
+		const key = c.t + ":" + c.n;
+		if (!local.known) {
+			arr[i] = STATUS_UNKNOWN;
+			continue;
 		}
+		if (!local.keys.has(key)) {
+			arr[i] = local.partial.has(key) ? STATUS_PARTIAL : STATUS_NOT_IN_PROJECT;
+			continue;
+		}
+		const li = localInfo?.[key];
+		const ci = contentInfo[key];
+		const content = contentFromCode(ci?.[0]);
+		if (!li && content !== "same") {
+			arr[i] = STATUS_UNKNOWN;
+			prov[i] = 1;
+			continue;
+		}
+		const r = compareStatus({
+			orgLm: c.lm,
+			syncedAt: effectiveSyncedAt(local.retrieved[key], ci && ci[2] ? ci[2] : undefined),
+			localT: li ? li[0] : 0,
+			dirty: li ? li[1] === 1 : false,
+			content,
+		});
+		arr[i] = COMPARE_CODES[r.status];
+		prov[i] = r.provisional ? 1 : 0;
 	}
 	statusArr = arr;
+	provArr = prov;
 	statusDirty = false;
 }
 
@@ -244,13 +293,36 @@ const ICON = {
 	chevron: '<svg viewBox="0 0 16 16" width="12" height="12"><path fill="currentColor" d="M6 4l4.500 4L6 12z"/></svg>',
 };
 
-function statusBadge(code: number, key: string): string {
+const PROV_TIP = "Based on dates — contents not compared yet";
+
+function statusBadge(code: number, prov: boolean, key: string): string {
 	const res = results.get(key);
+	const cmp = contentInfo[key];
+	const tip = (what: string) => esc(prov ? `${what} (${PROV_TIP})` : `${what} (Contents compared ${cmp && cmp[1] ? new Date(cmp[1]).toLocaleString() : "just now"})`);
+	const cls = prov ? " prov" : "";
 	let s = "";
-	if (code === STATUS_CHANGED) s = '<span class="badge changed" title="Modified in the org after your last retrieve">Changed in org</span>';
-	else if (code === STATUS_PARTIAL) s = '<span class="badge partial" title="Some parts (fields, record types …) are in the project, the object file itself is not. Retrieving adds it.">Partly in project</span>';
-	else if (code === STATUS_LOCAL) s = '<span class="badge local">In project</span>';
-	else s = '<span class="badge none">Not in project</span>';
+	switch (code) {
+		case STATUS_EQUAL:
+			s = `<span class="badge equal${cls}" title="${tip("Same as the local file")}">Equal</span>`;
+			break;
+		case STATUS_CHANGED_LOCALLY:
+			s = `<span class="badge changed-local${cls}" title="${tip("Changed in the project since the last sync with the org")}">Changed locally</span>`;
+			break;
+		case STATUS_CHANGED_IN_ORG:
+			s = `<span class="badge changed-org${cls}" title="${tip("Changed in the org since the last sync")}">Changed in org</span>`;
+			break;
+		case STATUS_CONFLICT:
+			s = `<span class="badge conflict${cls}" title="${tip("Changed in the project and in the org since the last sync")}">Conflict</span>`;
+			break;
+		case STATUS_PARTIAL:
+			s = '<span class="badge partial" title="Some parts (fields, record types …) are in the project, the object file itself is not. Retrieving adds it.">Partly in project</span>';
+			break;
+		case STATUS_UNKNOWN:
+			s = `<span class="badge unknown" title="${local.known ? "Local changes not read yet" : "The project was not read yet"}">Unknown</span>`;
+			break;
+		default:
+			s = '<span class="badge none">Not in project</span>';
+	}
 	if (res) {
 		s += res.ok
 			? ' <span class="res ok" title="Retrieved">✓</span>'
@@ -264,7 +336,7 @@ function rowHtml(pos: number, i: number): string {
 	const key = c.t + ":" + c.n;
 	const sel = selected.has(key);
 	const st = statusArr[i] ?? 0;
-	const isLocal = st === STATUS_LOCAL || st === STATUS_CHANGED;
+	const isLocal = isComparedCode(st) || (st === STATUS_UNKNOWN && local.keys.has(key));
 	const exact = c.lm ? new Date(c.lm).toLocaleString() : "";
 	const failed = results.get(key);
 	return (
@@ -275,7 +347,7 @@ function rowHtml(pos: number, i: number): string {
 		`<span class="c ns">${esc(c.ns)}</span>` +
 		`<span class="c by" title="${esc(c.by)}">${esc(c.by)}</span>` +
 		`<span class="c md" title="${esc(exact)}">${esc(relativeTime(c.lm, Date.now()))}</span>` +
-		`<span class="c st">${statusBadge(st, key)}</span>` +
+		`<span class="c st">${statusBadge(st, provArr[i] === 1, key)}</span>` +
 		`<span class="c acts">` +
 		`<button data-act="retrieve" title="Retrieve" aria-label="Retrieve">${ICON.download}</button>` +
 		`<button data-act="setup" title="Open in Setup" aria-label="Open in Setup">${ICON.globe}</button>` +
@@ -386,6 +458,16 @@ function renderListed(): void {
 		el.title = listedAt ? new Date(listedAt).toLocaleString() : "";
 		$("refreshBtn").toggleAttribute("disabled", noOrg);
 	}
+	renderCompareInfo();
+}
+
+function renderCompareInfo(): void {
+	const t = progressText(cmpProgress);
+	const el = $("cmpInfo");
+	el.textContent = t;
+	const failed = cmpProgress?.failed ?? 0;
+	el.title = failed > 0 ? `${failed} component${failed === 1 ? "" : "s"} could not be compared (they keep the date-based status)` : "";
+	$("cmpBtn").toggleAttribute("disabled", noOrg || !hasProject);
 }
 
 function renderOverlay(): void {
@@ -573,7 +655,7 @@ let menuRow = -1;
 function showMenu(i: number, x: number, y: number): void {
 	menuRow = i;
 	const key = keyAt(i);
-	const isLocal = [STATUS_LOCAL, STATUS_CHANGED].includes(statusArr[i] ?? 0);
+	const isLocal = local.keys.has(key);
 	const multi = selected.has(key) && selected.size > 1;
 	const entries: [string, string, boolean][] = [
 		[multi ? "retrieveSel" : "retrieve", multi ? `Retrieve selected (${selected.size})` : "Retrieve", hasProject],
@@ -610,10 +692,13 @@ function setupEvents(): void {
 		facets: () => facets,
 		rowCount: () => idx.comps.length,
 		statusOptions: [
-			{ value: "not-local", label: "Not in project" },
-			{ value: "local", label: "In project" },
-			{ value: "changed", label: "Changed in org" },
+			{ value: "not-in-project", label: "Not in project" },
+			{ value: "equal", label: "Equal" },
+			{ value: "changed-locally", label: "Changed locally" },
+			{ value: "changed-in-org", label: "Changed in org (latest)" },
+			{ value: "conflict", label: "Conflict" },
 			{ value: "partial", label: "Partly in project" },
+			{ value: "unknown", label: "Not compared / unknown" },
 		],
 		me: () => me,
 		onChange: () => {
@@ -653,6 +738,12 @@ function setupEvents(): void {
 		post({ command: "selectOrg", org: v });
 	});
 	$("refreshBtn").addEventListener("click", () => post({ command: "refresh" }));
+	// Compare contents: what needs it; with a filter active, the shown components again (forced).
+	$("cmpBtn").addEventListener("click", () => {
+		const filtered = rows.length < idx.comps.length;
+		post(filtered ? { command: "compareContents", force: true, keys: rows.map(keyAt) } : { command: "compareContents", force: false });
+		toast(filtered ? `Comparing the contents of ${rows.length.toLocaleString()} shown component${rows.length === 1 ? "" : "s"}…` : "Comparing contents…");
+	});
 	$("retrieveBtn").addEventListener("click", retrieveSelection);
 	$("selChipText").addEventListener("click", () => {
 		ui.filter.onlySelected = !ui.filter.onlySelected;
@@ -769,7 +860,7 @@ function setupEvents(): void {
 		const rowEl = (e.target as HTMLElement).closest<HTMLElement>(".row");
 		if (!rowEl) return;
 		const it = items[Number(rowEl.dataset.pos)];
-		if (typeof it === "number" && [STATUS_LOCAL, STATUS_CHANGED].includes(statusArr[it] ?? 0)) rowAction("open", it);
+		if (typeof it === "number" && local.keys.has(keyAt(it))) rowAction("open", it);
 	});
 	rowsEl.addEventListener("contextmenu", (e) => {
 		const rowEl = (e.target as HTMLElement).closest<HTMLElement>(".row");
@@ -938,6 +1029,9 @@ function resetData(): void {
 	pending = null;
 	errorView = null;
 	local = { keys: new Set(), partial: new Set(), retrieved: {}, known: false };
+	localInfo = undefined;
+	contentInfo = {};
+	cmpProgress = null;
 	me = { ids: [], name: "" };
 	statusDirty = true;
 	results = new Map();
@@ -1056,6 +1150,20 @@ window.addEventListener("message", (ev) => {
 			hasProject = m.hasProject;
 			statusDirty = true;
 			recompute();
+			break;
+		case "compareLocal":
+			localInfo = (m.local ?? {}) as LocalInfoMap;
+			statusDirty = true;
+			recompute();
+			break;
+		case "compareContent":
+			contentInfo = m.full ? ((m.content ?? {}) as ContentInfoMap) : { ...contentInfo, ...((m.content ?? {}) as ContentInfoMap) };
+			statusDirty = true;
+			recompute();
+			break;
+		case "compareProgress":
+			cmpProgress = (m.progress ?? null) as CompareProgress | null;
+			renderCompareInfo();
 			break;
 		case "me":
 			me = { ids: m.ids ?? [], name: m.name ?? "" };

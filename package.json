@@ -1034,6 +1034,16 @@
           "default": true,
           "markdownDescription": "In the **Deploy Metadata** panel, show live status by polling the Metadata REST API for structured progress (stage, components X/Y, tests X/Y) and routing failures to the Problems view. Turn **off** to stream the classic `sf project deploy start` CLI output instead. (Push/Pull always run a synchronous deploy so source tracking stays correct — this setting does not affect them.)"
         },
+        "adure-sfx-toolkit.compare.verifyContents": {
+          "type": "string",
+          "enum": ["auto", "manual"],
+          "enumDescriptions": [
+            "Compare contents in the background as soon as the org listing is available.",
+            "Only compare contents when you press Compare contents in the Deploy Metadata panel or the Org Browser."
+          ],
+          "default": "auto",
+          "markdownDescription": "How the **Deploy Metadata** panel and the **Org Browser** confirm \"Equal\" and correct \"Changed locally / in org\": the status first comes from dates (shown dashed), then a background content diff retrieves the org's copy of each component into a private cache (never into your project) and compares it with your local files. `auto` starts it when the org listing is available; `manual` waits for the **Compare contents** button."
+        },
         "adure-sfx-toolkit.apex.validateOnSave": {
           "type": "boolean",
           "default": false,
