@@ -252,6 +252,11 @@
         "icon": "$(library)"
       },
       {
+        "command": "adure-sfx-toolkit.openSyncCenter",
+        "title": "ASFXT: Deploy & Retrieve Center",
+        "icon": "$(git-compare)"
+      },
+      {
         "command": "adure-sfx-toolkit.processMap",
         "title": "ASFXT: Process Visualizer",
         "icon": "$(circuit-board)"

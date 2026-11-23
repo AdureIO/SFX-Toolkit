@@ -8,7 +8,7 @@ import * as vscode from "vscode";
 import { SharedFilter, sameSharedFilter, sanitizeSharedFilter, sharedFilterKey } from "./sharedFilterPure";
 import { samePath } from "./projectDiscoveryPure";
 
-export type SharedFilterSource = "orgBrowser" | "deploy";
+export type SharedFilterSource = "orgBrowser" | "deploy" | "syncCenter";
 
 export interface SharedFilterChange {
 	dir: string;

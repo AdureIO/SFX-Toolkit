@@ -42,6 +42,7 @@ import { SOQLEditorProvider } from "./providers/SOQLEditorProvider";
 import { ObjectVisualizerPanelProvider } from "./providers/ObjectVisualizerPanelProvider";
 import { ProcessMapPanelProvider } from "./providers/ProcessMapPanelProvider";
 import { OrgBrowserPanelProvider } from "./providers/OrgBrowserPanelProvider";
+import { SyncCenterOpenOptions, SyncCenterPanelProvider } from "./providers/SyncCenterPanelProvider";
 import { SharedMetadataFilter } from "./utils/sharedFilterState";
 import { initRetrieveLog, flushRetrieveLog } from "./utils/retrieveLog";
 import { initContentCompare } from "./utils/contentCompareHost";
@@ -299,6 +300,7 @@ export function activate(context: vscode.ExtensionContext) {
     initSyncHistory(context);
     SharedMetadataFilter.init(context);
     OrgBrowserPanelProvider.init(context);
+    SyncCenterPanelProvider.init(context);
     DeployMetadataPanelProvider.init(context);
 
     // Org-aware SOQL language server (JVM-free). Safe no-op outside SFDX projects.
@@ -565,6 +567,17 @@ export function activate(context: vscode.ExtensionContext) {
     const orgBrowserCmd = register("adure-sfx-toolkit.openOrgBrowser", (item?: { orgData?: { username?: string } }) =>
       OrgBrowserPanelProvider.show(item?.orgData?.username ?? undefined)
     );
+    // Deploy & Retrieve Center: palette (default org), or from the Org Browser / Deploy panel buttons (project, org and selection carried over).
+    const syncCenterCmd = register("adure-sfx-toolkit.openSyncCenter", (opts?: SyncCenterOpenOptions) =>
+      SyncCenterPanelProvider.show(opts && typeof opts === "object" && !("orgData" in opts) ? opts : {})
+    );
+    context.subscriptions.push(
+      vscode.window.registerWebviewPanelSerializer(SyncCenterPanelProvider.viewType, {
+        async deserializeWebviewPanel(panel: vscode.WebviewPanel): Promise<void> {
+          SyncCenterPanelProvider.revive(panel);
+        }
+      })
+    );
     // Re-authenticate: org-node context menu (that org), a string org from an error toast, or the palette picker.
     const reauthCmd = register("adure-sfx-toolkit.reauthenticateOrg", (arg?: string | { orgData?: { username?: string } }) => {
       const org = typeof arg === "string" ? arg : arg?.orgData?.username;
@@ -770,6 +783,7 @@ export function activate(context: vscode.ExtensionContext) {
       objectVisualizerCmd,
       processMapCmd,
       orgBrowserCmd,
+      syncCenterCmd,
       reauthCmd,
       showOutputCmd,
       revealOperationPanelCmd,

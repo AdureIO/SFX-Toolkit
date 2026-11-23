@@ -1072,6 +1072,7 @@ function setupDeploy(): void {
 			presetName: loadedPresetName || undefined,
 		});
 	};
+	$("openCenterBtn").onclick = () => post({ command: "openCenter", components: [...selected], targetOrg: currentOrg() || undefined });
 	$("btn-git-select").onclick = () => {
 		post({ command: "getChangedFiles" });
 		setStatus("Reading Git status…");

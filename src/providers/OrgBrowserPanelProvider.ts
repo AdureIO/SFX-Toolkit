@@ -19,7 +19,7 @@ import { runRetrieveFlow } from "../utils/retrieveFlow";
 import { getRetrieveTimes } from "../utils/retrieveLog";
 import { LocalInfoMap, ContentInfoMap } from "../utils/compareStatusPure";
 import { CompareTarget } from "../utils/contentCompare";
-import { innerFilesOfEntry } from "../utils/contentComparePure";
+import { compareTargetsFor } from "../utils/compareTargetsHost";
 import { CompareLease, acquireCompare, compareMode } from "../utils/contentCompareHost";
 import { readLocalInfo } from "../utils/localChangeInfo";
 import { orgLookupKey } from "../utils/deployStatusPure";
@@ -202,6 +202,14 @@ export class OrgBrowserPanelProvider {
 				break;
 			case "setup":
 				await this.openSetup(pair().t, pair().n);
+				break;
+			case "openCenter":
+				// Same project and org; the selection (Type:Name) comes along.
+				await vscode.commands.executeCommand("adure-sfx-toolkit.openSyncCenter", {
+					projectDir: this.projectDir(),
+					org: this.orgKey === DEFAULT_ORG_KEY ? null : this.orgKey,
+					selection: Array.isArray(msg.keys) ? msg.keys.map(String) : [],
+				});
 				break;
 			case "compareContents":
 				// The "Compare contents" button: what needs it, or (force) the components the filter shows, again.
@@ -480,17 +488,8 @@ export class OrgBrowserPanelProvider {
 	private static compareTargets(orgKeys?: Iterable<string>): CompareTarget[] {
 		const root = this.projectDir();
 		if (!root) return [];
-		const dirs = readPackageDirectories(root);
-		const pkgAbs = (dirs.length > 0 ? dirs : ["force-app"]).map((d) => path.resolve(root, d));
-		const table = buildTypeTable(this.types);
 		const list = orgKeys ? [...orgKeys].map((k) => this.byOrgKey.get(k)).filter((e): e is LocalEntry => !!e) : [...this.byOrgKey.values()];
-		const out: CompareTarget[] = [];
-		for (const e of list) {
-			const c = this.compMap.get(orgLookupKey(e.type, e.name));
-			if (!c) continue;
-			out.push({ key: e.key, type: e.type, name: e.name, orgLm: c.lm, files: innerFilesOfEntry(e, pkgAbs, table) });
-		}
-		return out;
+		return compareTargetsFor(root, this.types, list, this.compMap);
 	}
 
 	private static async pushContent(): Promise<void> {
@@ -677,6 +676,7 @@ ${PROJECT_SELECTOR_CSS}
     <button id="refreshBtn" class="ghost" title="Re-list every type from the org">↻ Refresh</button>
     <span id="cmpInfo" class="muted"></span>
     <button id="cmpBtn" class="ghost" title="Compare the contents of the components that are in the project with the org (the ones that need it; with a filter active: the shown ones again)">≈ Compare contents</button>
+    <button id="centerBtn" class="ghost" title="Open this org and the selection in the Deploy &amp; Retrieve Center">⇄ Open in Deploy &amp; Retrieve Center</button>
     <span class="spacer"></span>
     <span id="selHidden" class="selhidden" hidden><span id="selHiddenText"></span> <button id="selHiddenShow" class="link" title="Reset the filters and show only the selected components">show</button> · <button id="selHiddenClear" class="link" title="Deselect the selected components the current filter hides">clear hidden</button></span>
     <span id="selChip" class="selchip" hidden><button id="selChipText" title="Show only the selected components"></button><button id="selChipClear" title="Clear selection" aria-label="Clear selection">×</button></span>

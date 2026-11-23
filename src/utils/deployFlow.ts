@@ -151,15 +151,17 @@ export interface DeployReportInput {
 	dryRun: boolean;
 	root: string;
 	targetOrg: string | null;
+	/** What the operation is called in the toasts ("Delete"); default Deploy / Validation. */
+	label?: string;
 }
 
 /** The toast, the Operation panel and (failure) the Problems diagnostics of a finished deploy. */
 export function reportDeployOutcome(i: DeployReportInput): void {
 	const { run, dryRun, root, targetOrg } = i;
 	const { outcome, durationMs, handle } = run;
-	const label = deployLabel(dryRun);
+	const label = i.label ?? deployLabel(dryRun);
 	if (outcome.kind === "cancelled") {
-		void vscode.window.showInformationMessage(dryRun ? "Validation cancelled." : "Deploy cancelled.");
+		void vscode.window.showInformationMessage(`${label} cancelled.`);
 		handle.dispose();
 		return;
 	}

@@ -83,6 +83,7 @@ const ORG: string[] = [
 
 const SOURCE: string[] = [
 	"deployMetadata",
+	"openSyncCenter",
 	"openPermissionSetUI",
 	"pushSource",
 	"pushSourceForce",

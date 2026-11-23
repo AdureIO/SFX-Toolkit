@@ -745,6 +745,7 @@ function setupEvents(): void {
 		toast(filtered ? `Comparing the contents of ${rows.length.toLocaleString()} shown component${rows.length === 1 ? "" : "s"}…` : "Comparing contents…");
 	});
 	$("retrieveBtn").addEventListener("click", retrieveSelection);
+	$("centerBtn").addEventListener("click", () => post({ command: "openCenter", keys: [...selected] }));
 	$("selChipText").addEventListener("click", () => {
 		ui.filter.onlySelected = !ui.filter.onlySelected;
 		recompute(true);

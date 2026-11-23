@@ -302,6 +302,15 @@ export class DeployMetadataPanelProvider {
           SharedMetadataFilter.set(workspaceRoot, { query: m.query, types: m.types }, "deploy");
           return;
         }
+        if (msg.command === "openCenter") {
+          // Same project and org; the selection (local component keys) comes along.
+          void vscode.commands.executeCommand("adure-sfx-toolkit.openSyncCenter", {
+            projectDir: workspaceRoot,
+            org: typeof msg.targetOrg === "string" && msg.targetOrg ? msg.targetOrg : null,
+            selection: Array.isArray(msg.components) ? msg.components.filter((k): k is string => typeof k === "string") : []
+          });
+          return;
+        }
         if (msg.command === "orgChanged") {
           void hostNow.setTargetOrg(typeof msg.org === "string" && msg.org ? msg.org : null);
           return;
@@ -509,7 +518,7 @@ export class DeployMetadataPanelProvider {
           // A real deploy: record the components with the org's new lastModifiedDate (our own deploy must not show as "changed in org") and re-list their types.
           if (!dryRun && (apiResult !== undefined || stats.components > 0)) void hostNow.afterDeploy(deployedKeys, outcome.completedAt ?? Date.now());
           addDeployHistoryEntry({ timestamp: deployStartTime, status: "Succeeded", dryRun, ...stats, durationMs, targetOrg: msg.targetOrg ?? "", sourcePaths: sourcePathsForHistory, presetName: msg.presetName ?? null, deployType: msg.deployType, testClassNames: msg.testClassNames });
-          recordHistory(workspaceRoot, { kind: dryRun ? "validate" : "deploy", org: msg.targetOrg ?? "", at: deployStartTime, durationMs, components: deployedKeys, testLevel: testLevel, deployId: outcome.deployId, ok: true, source: "deployPanel" });
+          recordHistory(workspaceRoot, { kind: dryRun ? "validate" : "deploy", org: msg.targetOrg ?? "", at: deployStartTime, durationMs, components: deployedKeys, testLevel: testLevel, tests: testFlags, deployId: outcome.deployId, ok: true, source: "deployPanel" });
           report();
           return;
         }
@@ -518,7 +527,7 @@ export class DeployMetadataPanelProvider {
         const { stats, coverage, apiResult, errorText } = outcome;
         panel.webview.postMessage({ command: "deployResult", success: false, cancelled: false, dryRun, ...stats, coverage, durationMs, targetOrg: msg.targetOrg ?? "" });
         addDeployHistoryEntry({ timestamp: deployStartTime, status: "Failed", dryRun, ...stats, durationMs, targetOrg: msg.targetOrg ?? "", sourcePaths: sourcePathsForHistory, presetName: msg.presetName ?? null, deployType: msg.deployType, testClassNames: msg.testClassNames });
-        recordHistory(workspaceRoot, { kind: dryRun ? "validate" : "deploy", org: msg.targetOrg ?? "", at: deployStartTime, durationMs, components: deployedKeys, testLevel: testLevel, deployId: outcome.deployId, ok: false, errors: historyErrorsFromDeploy(apiResult ? withSyntheticTestFailures(apiResult) : undefined, errorText), source: "deployPanel" });
+        recordHistory(workspaceRoot, { kind: dryRun ? "validate" : "deploy", org: msg.targetOrg ?? "", at: deployStartTime, durationMs, components: deployedKeys, testLevel: testLevel, tests: testFlags, deployId: outcome.deployId, ok: false, errors: historyErrorsFromDeploy(apiResult ? withSyntheticTestFailures(apiResult) : undefined, errorText), source: "deployPanel" });
         report();
         } finally {
           hostNow.resumeCompare();
@@ -932,7 +941,7 @@ export class DeployMetadataPanelProvider {
 	<div id="panelSplit" title="Drag to resize"><span></span></div>
 	<div class="panel-right">
 		<div class="section">
-			<div class="section-title"><span class="st-icon" aria-hidden="true">⚡</span><span>Deployment</span>${projectSelectorMarkup()}</div>
+			<div class="section-title"><span class="st-icon" aria-hidden="true">⚡</span><span>Deployment</span><button type="button" class="btn-tree-toolbar" id="openCenterBtn" style="width:auto;padding:0 8px;margin-left:auto;text-transform:none;letter-spacing:normal;font-weight:400;opacity:1;border-color:var(--asfx-border);" title="Open in Deploy &amp; Retrieve Center" aria-label="Open in Deploy &amp; Retrieve Center">Open in Center ⇄</button>${projectSelectorMarkup()}</div>
 			<div id="switch-note" style="display:none;margin:4px 0;font-size:11px;opacity:.8" role="status">Project switch applies after this deploy.</div>
 			<div class="rp-body">
 				<div class="card">
