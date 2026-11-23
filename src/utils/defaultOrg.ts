@@ -5,6 +5,7 @@ import {
   getTargetOrgUsernameFromCli,
   setKnownTargetOrg
 } from "./orgListCache";
+import { primaryProjectRoot } from "./projectUtils";
 import { readTargetOrgFromSfdxConfig } from "./sfdxConfig";
 
 export interface DefaultOrgInfo {
@@ -23,26 +24,28 @@ function infoFromUsername(username: string): DefaultOrgInfo {
 }
 
 /**
- * Resolve default target-org username (sync).
- * 1. `.sfdx/sfdx-config.json`
- * 2. In-memory hint (set-as-default in this session)
- * 3. Cached org list default flag (may be stale; no CLI)
+ * Resolve default target-org username (sync) of a project (default: the active project).
+ * 1. `.sf/config.json` / `.sfdx/sfdx-config.json`
+ * 2. In-memory hint (set-as-default in this session), only if recorded for this project
+ * 3. Cached org list default flag (may be stale; no CLI), only if the list was produced in this project
  */
 export function resolveDefaultTargetOrgUsernameSync(workspaceRoot?: string): string | null {
-  return readTargetOrgFromSfdxConfig(workspaceRoot) ?? getKnownTargetOrgUsername() ?? getDefaultUsernameFromOrgCache();
+  const root = workspaceRoot ?? primaryProjectRoot();
+  return readTargetOrgFromSfdxConfig(root) ?? getKnownTargetOrgUsername(root) ?? getDefaultUsernameFromOrgCache(root);
 }
 
 /**
  * Resolve default target-org username with CLI fallback when sync sources are empty.
  */
 export async function resolveDefaultTargetOrgUsername(workspaceRoot?: string): Promise<string | null> {
-  const sync = resolveDefaultTargetOrgUsernameSync(workspaceRoot);
+  const root = workspaceRoot ?? primaryProjectRoot();
+  const sync = resolveDefaultTargetOrgUsernameSync(root);
   if (sync) {
     return sync;
   }
-  const cli = await getTargetOrgUsernameFromCli();
+  const cli = await getTargetOrgUsernameFromCli(root);
   if (cli) {
-    setKnownTargetOrg(cli);
+    setKnownTargetOrg(cli, root);
   }
   return cli;
 }

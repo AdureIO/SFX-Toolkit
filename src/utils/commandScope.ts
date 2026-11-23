@@ -6,7 +6,10 @@
  * - "source":   needs SFDX-format source (sfdx-project.json): push/pull, local deploy and
  *               retrieve, source tracking, stubs. In an MDAPI project these show a
  *               "Convert to SFDX format" hint instead of running.
- * - "ungated":  runs everywhere it is invoked (the conversion command itself).
+ * - "ungated":  runs everywhere it is invoked (the conversion command itself, the project picker).
+ *
+ * With several projects the gate looks at the ACTIVE project: `sfdx` = it is an SFDX project,
+ * `mdapi` = it is an MDAPI project (an SFDX project elsewhere is reachable via "Switch project").
  *
  * Every registered or contributed command MUST appear here (enforced by a unit test).
  */
@@ -97,7 +100,7 @@ const SOURCE: string[] = [
 	"apex.createFieldStub",
 ];
 
-const UNGATED: string[] = ["convertMdapiToSfdx"];
+const UNGATED: string[] = ["convertMdapiToSfdx", "selectProject"];
 
 export const COMMAND_SCOPE: Readonly<Record<string, CommandScope>> = Object.freeze({
 	...Object.fromEntries(ORG.map((c) => [P + c, "org" as const])),

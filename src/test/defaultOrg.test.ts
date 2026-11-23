@@ -42,7 +42,7 @@ describe("defaultOrg.resolveDefaultTargetOrgUsernameSync", () => {
 
   it("uses session hint when config file is missing", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sfdx-test-"));
-    setKnownTargetOrg("hint-user");
+    setKnownTargetOrg("hint-user", dir);
     assert.strictEqual(resolveDefaultTargetOrgUsernameSync(dir), "hint-user");
   });
 });

@@ -40,6 +40,7 @@ describe("commandScope", () => {
 			assert.strictEqual(commandScopeOf(`adure-sfx-toolkit.${c}`), "source", c);
 		}
 		assert.strictEqual(commandScopeOf("adure-sfx-toolkit.convertMdapiToSfdx"), "ungated");
+		assert.strictEqual(commandScopeOf("adure-sfx-toolkit.selectProject"), "ungated");
 	});
 
 	it("gates per project kind", () => {
@@ -53,6 +54,8 @@ describe("commandScope", () => {
 		assert.strictEqual(decideCommandGate("adure-sfx-toolkit.executeSOQL", mdapi), "run");
 		assert.strictEqual(decideCommandGate("adure-sfx-toolkit.executeSOQL", none), "not-sfdx");
 		assert.strictEqual(decideCommandGate("adure-sfx-toolkit.convertMdapiToSfdx", mdapi), "run");
+		// The project picker works everywhere, even before any project is found.
+		assert.strictEqual(decideCommandGate("adure-sfx-toolkit.selectProject", none), "run");
 		// Unclassified commands fall back to the org rule.
 		assert.strictEqual(decideCommandGate("adure-sfx-toolkit.unknown", mdapi), "run");
 	});

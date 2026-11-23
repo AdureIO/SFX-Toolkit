@@ -11,6 +11,7 @@ import { resolveDefaultTargetOrgUsernameSync } from "./defaultOrg";
 import { canonicalOrgKey } from "./orgKey";
 import { getOrgByTarget } from "./orgListCache";
 import { findSfdxProjectDir, primaryProjectRoot } from "./projectUtils";
+import { projects } from "./projectRegistry";
 import { applyNoDefaultOrgResult, findProjectsWithoutDefaultOrg, reportSchemaFailure } from "./schemaHealth";
 
 /** Nested projects seen so far (opened files, config events, discovery at activation). */
@@ -31,9 +32,10 @@ export function forgetProjectsForTests(): void {
 	extraProjects.clear();
 }
 
-/** Every sfdx project we know of: workspace folders with an sfdx-project.json plus nested ones seen. */
+/** Every sfdx project we know of: the discovered ones plus deeper nested ones seen. */
 export function knownProjectDirs(): string[] {
 	const dirs = new Set<string>();
+	for (const p of projects()) if (p.kind === "sfdx") dirs.add(p.dir);
 	for (const f of vscode.workspace.workspaceFolders ?? []) {
 		if (fs.existsSync(path.join(f.uri.fsPath, "sfdx-project.json"))) dirs.add(f.uri.fsPath);
 	}

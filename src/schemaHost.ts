@@ -13,6 +13,7 @@ import * as vscode from "vscode";
 const { ResponseError } = require("vscode-jsonrpc") as { ResponseError: typeof import("vscode-languageclient/node").ResponseError };
 import { SoqlSchemaProvider } from "./utils/soqlSchemaProvider";
 import { findSfdxProjectDir } from "./utils/projectUtils";
+import { onDidChangeProjects, projectOfFile } from "./utils/projectRegistry";
 import { canonicalOrgKey, orgArgForKey } from "./utils/orgKey";
 import { SchemaUnavailableError } from "./utils/describeStore";
 import { getBufferOrgOverride } from "./utils/bufferOrgOverride";
@@ -33,6 +34,7 @@ export interface RequestRegistrar {
 export interface SchemaHost {
 	orgForUri(uri?: string): string | null;
 	clearProjectDirCache(): void;
+	dispose(): void;
 }
 
 export function registerSchemaHostHandlers(lc: RequestRegistrar): SchemaHost {
@@ -52,7 +54,9 @@ export function registerSchemaHostHandlers(lc: RequestRegistrar): SchemaHost {
 			const dir = path.dirname(fsPath);
 			let projectDir = projectDirCache.get(dir);
 			if (projectDir === undefined) {
-				projectDir = findSfdxProjectDir(fsPath);
+				// Nearest sfdx-project.json first (a project nested deeper than discovery looks), else the
+				// discovered project containing the file (MDAPI files: their own project's default org).
+				projectDir = findSfdxProjectDir(fsPath) ?? projectOfFile(fsPath)?.dir ?? null;
 				if (projectDirCache.size > 2000) projectDirCache.clear();
 				projectDirCache.set(dir, projectDir);
 			}
@@ -158,5 +162,6 @@ export function registerSchemaHostHandlers(lc: RequestRegistrar): SchemaHost {
 		}
 	});
 
-	return { orgForUri, clearProjectDirCache: () => projectDirCache.clear() };
+	const projectsSub = onDidChangeProjects(() => projectDirCache.clear());
+	return { orgForUri, clearProjectDirCache: () => projectDirCache.clear(), dispose: () => projectsSub.dispose() };
 }

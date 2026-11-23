@@ -91,7 +91,6 @@ import * as path from "path";
 import * as fs from "fs";
 import { startLanguageServer, stopLanguageServer, restartLanguageServerForWorkspaceChange } from "./languageClient";
 import {
-  isSalesforceProject,
   isMdapiProject,
   isWorkspaceUsable,
   updateSalesforceProjectContext,
@@ -99,6 +98,8 @@ import {
   CONVERT_MDAPI_COMMAND
 } from "./utils/projectUtils";
 import { decideCommandGate } from "./utils/commandScope";
+import { activeProject, initProjectRegistry, onDidChangeActiveProject, onDidChangeProjects, projects } from "./utils/projectRegistry";
+import { registerProjectStatusBar, selectProject, SELECT_PROJECT_COMMAND } from "./commands/selectProject";
 import { convertMdapiProject, registerMdapiUi, showConvertHint } from "./commands/convertMdapi";
 import { scheduleStubSync } from "./utils/sobjectStubSync";
 import { OrgMetadataCache } from "./utils/orgMetadataCache";
@@ -106,7 +107,7 @@ import { AuthInfo } from "./utils/authInfo";
 import { getDeployDiagnosticCollection, registerDeployDiagnosticAutoClear, deployErrorsContentProvider } from "./utils/deployDiagnostics";
 import { OperationPanelProvider, REVEAL_OPERATION_PANEL_COMMAND } from "./providers/OperationPanelProvider";
 import { warmOrgListCache, invalidateOrgListCache, refreshOrgListCache } from "./utils/orgListCache";
-import { initDefaultOrgWatcher, onDidChangeDefaultOrg, resetDefaultOrgWatcher } from "./utils/defaultOrgEvents";
+import { initDefaultOrgWatcher, notifyActiveProjectChanged, onDidChangeDefaultOrg, resetDefaultOrgWatcher } from "./utils/defaultOrgEvents";
 import { killAllChildProcesses } from "./utils/commandRunner";
 import { LiveLogService } from "./utils/liveLogService";
 import { SoqlSchemaProvider } from "./utils/soqlSchemaProvider";
@@ -153,10 +154,13 @@ function warmProjectCaches(): vscode.Disposable {
   });
 }
 
-/** Identity of the open project: changes when the user switches project in the same window. */
+/**
+ * Identity of the open project set: changes when a project appears, disappears or changes
+ * kind (a folder switch, a conversion). Deliberately independent of the ACTIVE project:
+ * switching between discovered projects must not reset caches or restart the language server.
+ */
 function currentProjectKey(): string {
-  const folder = vscode.workspace.workspaceFolders?.[0];
-  return `${folder?.uri.toString() ?? ""}|${isSalesforceProject() ? "sfdx" : isMdapiProject() ? "mdapi" : "-"}`;
+  return projects().map((p) => `${p.kind}:${p.dir}`).join("|") || "-";
 }
 
 function updateLwcContext(editor: vscode.TextEditor | undefined): void {
@@ -203,7 +207,7 @@ function updateLwcContext(editor: vscode.TextEditor | undefined): void {
 function register(command: string, callback: (...args: any[]) => any, thisArg?: any): vscode.Disposable {
   return vscode.commands.registerCommand(command, async (...args: any[]) => {
     Logger.info(`Command triggered: ${command}`);
-    const gate = decideCommandGate(command, { sfdx: isSalesforceProject(), mdapi: isMdapiProject() });
+    const gate = decideCommandGate(command, { sfdx: activeProject()?.kind === "sfdx", mdapi: isMdapiProject() });
     if (gate === "not-sfdx") {
       vscode.window.showInformationMessage(NOT_SFDX_PROJECT_MESSAGE);
       return;
@@ -229,6 +233,10 @@ function register(command: string, callback: (...args: any[]) => any, thisArg?: 
 export function activate(context: vscode.ExtensionContext) {
   registerOutputChannels(context);
   Logger.info('Extension "adure-sfx-toolkit" is starting activation...');
+
+  // Discover the Salesforce projects (workspace roots and up to 2 levels below) and pick the
+  // active one, before anything below asks projectUtils for the project root.
+  initProjectRegistry(context);
 
   // Persistent trimmed describe cache (per org id + API version) — lets completion use
   // the last session's schema right after a reload while it is revalidated in background.
@@ -824,7 +832,35 @@ export function activate(context: vscode.ExtensionContext) {
 
         warmup = warmProjectCaches();
     };
-    context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(onProjectChanged));
+    // The registry rescans on workspace-folder changes and on sfdx-project.json / package.xml
+    // events; a changed project set takes the same path as a workspace-folder change.
+    context.subscriptions.push(
+      vscode.workspace.onDidChangeWorkspaceFolders(onProjectChanged),
+      onDidChangeProjects(onProjectChanged)
+    );
+
+    // The ACTIVE project changed (editor moved to another project, or the status bar picker).
+    // No cache reset, no language server restart: `null` / "the default org" now means the new
+    // project's default org, which notifyActiveProjectChanged re-announces (UI repaints, caches warm).
+    context.subscriptions.push(
+      onDidChangeActiveProject((p) => {
+        Logger.info(`Active project → ${p ? `${p.name} (${p.kind})` : "(none)"}`);
+        updateSalesforceProjectContext();
+        updateSnippetStatusBar();
+        refreshMdapiUi();
+        devProvider.refresh();
+        void notifyActiveProjectChanged()
+          .catch((e) => Logger.error(`Active project change: ${e instanceof Error ? e.message : String(e)}`))
+          .finally(() => {
+            orgTreeProvider.refresh();
+            traceProvider.refresh();
+            snippetProvider.refresh();
+            if (isWorkspaceUsable()) OrgMetadataCache.warmDefaultOrg();
+          });
+      }),
+      register(SELECT_PROJECT_COMMAND, selectProject)
+    );
+    registerProjectStatusBar(context);
 
     // MDAPI (legacy format) support: status bar hint, one-time notice, and the conversion command.
     const refreshMdapiUi = registerMdapiUi(context);

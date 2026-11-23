@@ -65,13 +65,29 @@ describe("MDAPI project detection", () => {
 		assert.deepStrictEqual(mdapiFolders(), [a]);
 	});
 
-	it("workspace: a mixed multi-root workspace stays SFDX", () => {
+	it("workspace: a mixed multi-root workspace has an SFDX project; the active one is the first (MDAPI here)", () => {
 		const a = mkProject("a");
 		const b = mkProject("b", { pkg: null, sfdx: true });
 		setWorkspaceFolders([a, b]);
 		assert.strictEqual(isSalesforceProject(), true);
-		assert.strictEqual(isMdapiProject(), false);
+		// isMdapiProject() means "the active project is MDAPI": no editor, so the first project.
+		assert.strictEqual(isMdapiProject(), true);
 		assert.strictEqual(isWorkspaceUsable(), true);
+		setWorkspaceFolders([b, a]);
+		assert.strictEqual(isMdapiProject(), false);
+	});
+
+	it("workspace: projects in subfolders (depth 1 and 2) are discovered", () => {
+		const root = path.join(tmp, "ws");
+		fs.mkdirSync(path.join(root, "one", "two", "src"), { recursive: true });
+		fs.mkdirSync(path.join(root, "legacy", "src"), { recursive: true });
+		fs.writeFileSync(path.join(root, "one", "sfdx-project.json"), "{}");
+		fs.writeFileSync(path.join(root, "legacy", "src", "package.xml"), GOOD_PACKAGE);
+		fs.writeFileSync(path.join(root, "one", "two", "src", "package.xml"), GOOD_PACKAGE); // inside a project: ignored
+		setWorkspaceFolders([root]);
+		assert.strictEqual(isSalesforceProject(), true);
+		assert.strictEqual(isWorkspaceUsable(), true);
+		assert.deepStrictEqual(mdapiFolders(), [path.join(root, "legacy")]);
 	});
 
 	it("workspace: neither kind is not usable", () => {

@@ -5,6 +5,7 @@ import { typingsForClass, findApexTypeShapes, interfacesForShapes, ApexTypeShape
 import { reportError } from "../utils/reportError";
 import { Logger } from "../utils/outputChannel";
 import { isSalesforceProject } from "../utils/projectUtils";
+import { onDidChangeProjects } from "../utils/projectRegistry";
 
 /**
  * Keep `@salesforce/apex/<Class>.<method>` typings in sync with the Apex source.
@@ -163,7 +164,16 @@ export async function generateLwcApexTypings(): Promise<void> {
  * whenever an Apex file is saved, created or deleted.
  */
 export function registerLwcApexTypingsSync(context: vscode.ExtensionContext): void {
-    if (!isSalesforceProject()) return;
+    if (!isSalesforceProject()) {
+        // No SFDX project yet: register once one appears (a project folder created or opened later).
+        const sub = onDidChangeProjects(() => {
+            if (!isSalesforceProject()) return;
+            sub.dispose();
+            registerLwcApexTypingsSync(context);
+        });
+        context.subscriptions.push(sub);
+        return;
+    }
 
     // Changed/created and deleted classes are queued and processed in one debounced pass.
     const changed = new Set<string>();

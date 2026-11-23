@@ -1,7 +1,7 @@
 import * as path from "path";
 import * as vscode from "vscode";
-import { resolveDefaultTargetOrgUsernameSync } from "./defaultOrg";
-import { setKnownTargetOrg, invalidateOrgListCache, refreshOrgListCache } from "./orgListCache";
+import { resolveDefaultTargetOrgUsername, resolveDefaultTargetOrgUsernameSync } from "./defaultOrg";
+import { setKnownTargetOrg, invalidateOrgListCache, refreshOrgListCache, getCachedOrgList } from "./orgListCache";
 import { OrgMetadataCache } from "./orgMetadataCache";
 import { outputChannel } from "./outputChannel";
 import { isWorkspaceUsable, primaryProjectRoot } from "./projectUtils";
@@ -55,6 +55,30 @@ export async function notifyDefaultOrgChanged(username?: string | null): Promise
 	invalidateOrgKeyCache();
 	outputChannel.appendLine(`defaultOrg: default org changed → ${next ?? "(none)"}`);
 	emitter.fire(next);
+}
+
+/**
+ * The ACTIVE project changed (editor moved to another project, or the status bar picker).
+ * "The default org" now means the new project's: drop what was resolved for the previous one
+ * (the `null` org key, the org list's default flags) and re-announce the default org, which
+ * repaints org-bound UI and warms caches for the new org. Never restarts the language server:
+ * the notification only reaches OrgMetadataCache.onChange listeners (a describe-cache refresh).
+ */
+export async function notifyActiveProjectChanged(): Promise<void> {
+	invalidateOrgKeyCache();
+	invalidateOrgListCache();
+	let next: string | null | undefined;
+	try {
+		next = await resolveDefaultTargetOrgUsername();
+	} catch {
+		next = undefined;
+	}
+	await notifyDefaultOrgChanged(next ?? null);
+	// The default flags in the org list belong to the previous project: reload them for this one.
+	if (getCachedOrgList() === null) {
+		try { await refreshOrgListCache(); } catch { /* keep going with whatever we have */ }
+		invalidateOrgKeyCache();
+	}
 }
 
 /** Live watchers on every project's SF config files, plus their debounce timers. */

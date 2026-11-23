@@ -3,6 +3,7 @@ import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 import { Logger } from "./outputChannel";
+import { activeProject } from "./projectRegistry";
 
 const DEFAULT_TIMEOUT_MS = 300000; // 5 minutes
 
@@ -432,6 +433,11 @@ function supervise(child: cp.ChildProcess, opts: RunOptions): Promise<string> {
   });
 }
 
+/** Default working directory: the active Salesforce project, else the first workspace folder. */
+function defaultCwd(): string | undefined {
+  return activeProject()?.dir ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+}
+
 /**
  * Run a command with an argv array — arguments are never re-parsed by a shell on Unix
  * and are cmd-escaped on Windows, so user input (SOQL, aliases, paths) is safe here.
@@ -447,7 +453,7 @@ export async function runCommandArgs(
   cancellationToken?: vscode.CancellationToken
 ): Promise<string> {
   Logger.info(`Executing Command: ${command} ${args.join(" ")}`);
-  const cwdPath = cwd ? cwd : vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  const cwdPath = cwd ? cwd : defaultCwd();
   let child: cp.ChildProcess;
   if (IS_WINDOWS) {
     child = spawnWindowsArgv(command, args, cwdPath);
@@ -491,7 +497,7 @@ export async function runCommand(
 ): Promise<string> {
   const log = shouldLogCommand(command);
   if (log) Logger.info(`Executing Command: ${command}`);
-  const cwdPath = cwd ? cwd : vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  const cwdPath = cwd ? cwd : defaultCwd();
   const firstWord = command.trim().split(/\s+/)[0] || "sh";
   let child: cp.ChildProcess;
   if (IS_WINDOWS) {

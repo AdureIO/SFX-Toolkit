@@ -255,6 +255,7 @@ function startClient(context: vscode.ExtensionContext): void {
 	clientDisposables = disposables;
 
 	const schemaHost = registerSchemaHostHandlers(lc);
+	disposables.push(schemaHost);
 
 	// When the org switches or metadata is refreshed, drop the host-side describe
 	// cache and tell the server to drop its own.
