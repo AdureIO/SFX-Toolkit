@@ -6,8 +6,8 @@
  */
 import * as fs from "fs";
 import * as path from "path";
-import * as zlib from "zlib";
 import { XMLParser } from "fast-xml-parser";
+import { readGzipJson, safeFileStem, writeGzipJson } from "../diskCache";
 import { Comp, ListFailure, TypeInfo } from "./types";
 
 // ── SOAP bodies ────────────────────────────────────────────────────────────────
@@ -392,29 +392,18 @@ export interface ListingCache {
 }
 
 export function cacheFilePath(dir: string, orgKey: string): string {
-	return path.join(dir, `${orgKey.replace(/[^A-Za-z0-9._@-]/g, "_")}.json.gz`);
+	return path.join(dir, `${safeFileStem(orgKey)}.json.gz`);
 }
 
 export async function saveListingCache(dir: string, cache: ListingCache): Promise<void> {
-	await fs.promises.mkdir(dir, { recursive: true });
-	const file = cacheFilePath(dir, cache.orgKey);
-	const tmp = `${file}.${process.pid}.tmp`;
-	const gz = await new Promise<Buffer>((resolve, reject) => zlib.gzip(Buffer.from(JSON.stringify(cache), "utf8"), (e, b) => (e ? reject(e) : resolve(b))));
-	await fs.promises.writeFile(tmp, gz);
-	await fs.promises.rename(tmp, file);
+	await writeGzipJson(cacheFilePath(dir, cache.orgKey), cache);
 }
 
 /** The cached listing for an org, or null when missing / unreadable / from another format version. */
 export async function loadListingCache(dir: string, orgKey: string): Promise<ListingCache | null> {
-	try {
-		const gz = await fs.promises.readFile(cacheFilePath(dir, orgKey));
-		const json = await new Promise<Buffer>((resolve, reject) => zlib.gunzip(gz, (e, b) => (e ? reject(e) : resolve(b))));
-		const parsed = JSON.parse(json.toString("utf8")) as ListingCache;
-		if (parsed?.v !== 1 || !Array.isArray(parsed.comps) || !Array.isArray(parsed.types)) return null;
-		return parsed;
-	} catch {
-		return null;
-	}
+	const parsed = await readGzipJson<ListingCache>(cacheFilePath(dir, orgKey));
+	if (parsed?.v !== 1 || !Array.isArray(parsed.comps) || !Array.isArray(parsed.types)) return null;
+	return parsed;
 }
 
 export async function deleteListingCache(dir: string, orgKey: string): Promise<void> {

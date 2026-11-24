@@ -6,9 +6,11 @@ import {
 	HistoryEntry,
 	MAX_COMPONENTS,
 	MAX_ENTRIES,
+	MAX_LABEL,
 	MAX_ERRORS,
 	NewHistoryEntry,
 	addEntry,
+	cleanLabel,
 	componentKeysFromDeploy,
 	historyErrorsFromDeploy,
 	historyErrorsFromRetrieve,
@@ -29,6 +31,30 @@ const base = (over: Partial<NewHistoryEntry> = {}): NewHistoryEntry => ({
 	ok: true,
 	source: "center",
 	...over,
+});
+
+describe("history label (Deploy name)", () => {
+	it("is stored trimmed and capped, and left out when empty", () => {
+		assert.strictEqual(normalizeEntry(base({ label: "  Sprint   42\n hotfix " }), newId).label, "Sprint 42 hotfix");
+		assert.strictEqual(normalizeEntry(base({ label: "x".repeat(500) }), newId).label?.length, MAX_LABEL);
+		assert.ok(!("label" in normalizeEntry(base({ label: "   " }), newId)));
+		assert.ok(!("label" in normalizeEntry(base(), newId)));
+		assert.strictEqual(cleanLabel(42), undefined);
+	});
+
+	it("survives serialisation; a damaged stored label is dropped", () => {
+		const e = normalizeEntry(base({ label: "Release 7" }), newId);
+		assert.strictEqual(parseHistory(serializeHistory([e]))[0].label, "Release 7");
+		const bad = JSON.stringify({ v: 1, entries: [{ ...e, label: { a: 1 } }] });
+		const back = parseHistory(bad);
+		assert.strictEqual(back.length, 1);
+		assert.ok(!("label" in back[0]));
+	});
+
+	it("an old entry without a label reads back unchanged", () => {
+		const e = normalizeEntry(base(), newId);
+		assert.deepStrictEqual(parseHistory(serializeHistory([e])), [e]);
+	});
 });
 
 describe("history entries", () => {

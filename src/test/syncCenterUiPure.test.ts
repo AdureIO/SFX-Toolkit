@@ -1,15 +1,36 @@
 import * as assert from "assert";
-import { ConflictChoice, SyncInputs, SyncRow, buildSyncRows, deployCandidates, deleteCandidates, retrieveCandidates } from "../utils/syncCenterPure";
+import {
+	ConflictChoice,
+	SC_CONFLICT,
+	SC_EQUAL,
+	SC_ONLY_LOCAL,
+	SC_ONLY_ORG,
+	SC_PARTIAL,
+	SC_UNKNOWN,
+	SYNC_CENTER_VOCAB,
+	SYNC_IN_PROJECT,
+	SYNC_IN_PROJECT_FACET_INDEX,
+	SYNC_STATUS_NAMES,
+	SyncInputs,
+	SyncRow,
+	buildSyncRows,
+	deployCandidates,
+	deleteCandidates,
+	retrieveCandidates,
+} from "../utils/syncCenterPure";
+import { DEFAULT_FILTER, FilterContext, buildIndex, computeFacets, filterIndices, parseQuery } from "../utils/orgBrowser/filter";
 import {
 	buttonState,
 	choicesFromJson,
 	choicesStoreKey,
 	choicesToJson,
 	deployLocalKeys,
+	defaultStatusFilter,
 	deploymentSetupPath,
 	historyDeployLocalKeys,
 	historyRowKeys,
 	historyViews,
+	initialStatusFilter,
 	objectOfChild,
 	onlyOrgRefs,
 	overwriteLocalKeys,
@@ -315,5 +336,61 @@ describe("sync center ui rules", () => {
 		it("matches type and name, not the name alone", () => {
 			assert.strictEqual(onlyOrgRefs([{ type: "ApexTrigger", fullName: "A" }], keys).keep.length, 1);
 		});
+	});
+});
+
+describe("status filter: In project", () => {
+	const names = ["only-local", "equal", "changed-locally", "changed-in-org", "conflict", "partial", "unknown", "only-org"];
+	const codes = Uint8Array.from([SC_ONLY_LOCAL, SC_EQUAL, 2, 3, SC_CONFLICT, SC_PARTIAL, SC_UNKNOWN, SC_ONLY_ORG]);
+	const comps = names.map((n) => comp("ApexClass", n));
+	const idx = buildIndex(comps);
+	const ctx: FilterContext = { now: T0, status: codes, vocab: SYNC_CENTER_VOCAB };
+	const run = (over: Partial<typeof DEFAULT_FILTER>) => filterIndices(idx, { ...DEFAULT_FILTER, ...over }, ctx).map((i) => names[i]);
+
+	it("is every row that exists locally: everything except only-org", () => {
+		assert.deepStrictEqual(run({ status: [SYNC_IN_PROJECT] }), names.filter((n) => n !== "only-org"));
+	});
+
+	it("combines with the other status options like the group does (OR)", () => {
+		assert.deepStrictEqual(run({ status: [SYNC_IN_PROJECT, "only-org"] }), names);
+		assert.deepStrictEqual(run({ status: [SYNC_IN_PROJECT, "conflict"] }), names.filter((n) => n !== "only-org"));
+		assert.deepStrictEqual(run({ status: ["only-org"] }), ["only-org"]);
+	});
+
+	it("query aliases status:project, status:in-project and status:inproject", () => {
+		for (const q of ["status:project", "status:in-project", "status:inproject", "status:IN-PROJECT"]) {
+			assert.deepStrictEqual(run({ query: q }), names.filter((n) => n !== "only-org"), q);
+		}
+		// a negated alias is the rows that are not local
+		assert.deepStrictEqual(run({ query: "-status:project" }), ["only-org"]);
+		// the old "compared or partial" meaning is gone: only-local counts now
+		assert.ok(parseQuery("status:project", SYNC_CENTER_VOCAB).status[0].value(SC_ONLY_LOCAL));
+	});
+
+	it("is counted as a facet after the names; the other facets are unchanged", () => {
+		const f = computeFacets(idx, DEFAULT_FILTER, ctx);
+		assert.strictEqual(f.status.length, SYNC_STATUS_NAMES.length + 1);
+		assert.strictEqual(f.status[SYNC_IN_PROJECT_FACET_INDEX], names.length - 1);
+		assert.strictEqual(f.status[SC_ONLY_ORG], 1);
+		assert.strictEqual(f.status[SC_EQUAL], 1);
+	});
+
+	it("is the default; a store from before the default gets it once, a cleared filter stays cleared", () => {
+		assert.deepStrictEqual(defaultStatusFilter(), [SYNC_IN_PROJECT]);
+		assert.deepStrictEqual(initialStatusFilter(undefined, false), [SYNC_IN_PROJECT]);
+		assert.deepStrictEqual(initialStatusFilter([], false), [SYNC_IN_PROJECT]);
+		assert.deepStrictEqual(initialStatusFilter([], true), []);
+		assert.deepStrictEqual(initialStatusFilter(["conflict", "bogus", "conflict", 3], true), ["conflict"]);
+		assert.deepStrictEqual(initialStatusFilter(["only-org", SYNC_IN_PROJECT], false), ["only-org", SYNC_IN_PROJECT]);
+	});
+});
+
+describe("history views: label", () => {
+	it("carries the Deploy name", () => {
+		const e: HistoryEntry = { id: "1", kind: "deploy", org: "o", at: T0, durationMs: 1, components: ["ApexClass:A"], componentCount: 1, ok: true, source: "center", label: "Sprint 42" };
+		const [v] = historyViews([e], T0 + HOUR);
+		assert.strictEqual(v.label, "Sprint 42");
+		const [w] = historyViews([{ ...e, label: undefined }], T0 + HOUR);
+		assert.ok(!("label" in w));
 	});
 });

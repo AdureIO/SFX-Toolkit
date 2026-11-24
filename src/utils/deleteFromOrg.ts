@@ -13,6 +13,8 @@ import type * as vscode from "vscode";
 import { runCommandArgs } from "./commandRunner";
 import { getToolingApiVersion } from "./constants";
 import { DEPLOY_TIMEOUT_MS } from "../commands/deployMetadata";
+import { startLiveDiscovery } from "./deployEngine";
+import { DeployLiveStatus } from "./deployStatusMap";
 import { runDestructiveDeploy } from "./destructiveRun";
 import { DeleteOutcome, DestructiveComponent } from "./destructivePure";
 import { Logger } from "./outputChannel";
@@ -28,6 +30,8 @@ export interface DeleteFromOrgOptions {
 	testLevel: string;
 	specifiedTests?: readonly string[];
 	token?: vscode.CancellationToken;
+	/** Live numbers of the running delete (components, errors), polled over REST like a deploy's; absent = no polling. */
+	onStatus?: (s: DeployLiveStatus) => void;
 }
 
 export interface DeleteFromOrgResult {
@@ -62,7 +66,14 @@ export async function deleteFromOrg(o: DeleteFromOrgOptions): Promise<DeleteFrom
 		testLevel: o.testLevel,
 		specifiedTests: o.specifiedTests,
 		apiVersion: projectApiVersion(o.projectDir),
-		exec: (args, cwd) => runCommandArgs("sf", args, cwd, undefined, false, DEPLOY_TIMEOUT_MS, o.token),
+		exec: async (args, cwd) => {
+			const live = o.onStatus && o.token ? startLiveDiscovery({ cwd, org: o.org, token: o.token, onStatus: o.onStatus, timeoutMs: DEPLOY_TIMEOUT_MS }) : undefined;
+			try {
+				return await runCommandArgs("sf", args, cwd, live?.onOutput, false, DEPLOY_TIMEOUT_MS, o.token);
+			} finally {
+				await live?.finish();
+			}
+		},
 	});
 	const out = res.outcome;
 	if (out.kind !== "cancelled") {

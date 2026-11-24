@@ -45,17 +45,33 @@ export interface RunJsonDeployOptions {
 const DISCOVERY_BACKOFF_MS = [1000, 2000, 3000, 5000, 8000];
 const DEPLOY_ID_RE = /\b(0Af[0-9A-Za-z]{12}(?:[0-9A-Za-z]{3})?)\b/;
 
+/** What `startLiveDiscovery` needs: the settings of the synchronous `sf` run it follows. */
+export interface LiveDiscoveryOptions {
+	cwd: string;
+	/** Org for the live REST poll + auth (null = default). */
+	org: string | null;
+	token: vscode.CancellationToken;
+	onStatus: (s: DeployLiveStatus) => void;
+	timeoutMs: number;
+}
+
+export interface LiveDiscovery {
+	/** Feed the streamed output of the `sf` run: a deploy id in it starts the live poll at once. */
+	onOutput(chunk: string): void;
+	/** The `sf` run ended (either way): stop discovering / polling and wait until that has happened. */
+	finish(): Promise<void>;
+}
+
 /**
- * Run a SYNCHRONOUS `--json` deploy (waits for the org → advances source tracking) while
- * showing live status: discover the running deploy's id and REST-poll it. The id is taken
- * from the CLI's streamed output when it shows up there; in `--json` mode the CLI normally
- * prints nothing until it finishes, so we fall back to at most a handful of
- * `deploy report --use-most-recent --json` lookups with increasing backoff. Discovery and
- * polling stop the moment the deploy settles — nothing outlives this call. Returns a
- * structured outcome (component list, counts) for the caller.
+ * Follow a SYNCHRONOUS `sf` deploy (`start --json`, which waits for the org and so advances source tracking)
+ * while it runs: discover the running deploy's id and REST-poll it, reporting through `onStatus`. The id is
+ * taken from the CLI's streamed output when it shows up there; in `--json` mode the CLI normally prints nothing
+ * until it finishes, so we fall back to at most a handful of `deploy report --use-most-recent --json` lookups with
+ * increasing backoff. Discovery and polling stop the moment `finish()` is called: nothing outlives the run.
+ * Used by `runJsonDeploy` and by the destructive (delete) deploy.
  */
-export async function runJsonDeploy(opts: RunJsonDeployOptions): Promise<JsonDeployOutcome> {
-	const { submitCommand, cwd, org, token, onStatus, timeoutMs } = opts;
+export function startLiveDiscovery(opts: LiveDiscoveryOptions): LiveDiscovery {
+	const { cwd, org, token, onStatus, timeoutMs } = opts;
 	const startTime = Date.now();
 	let settled = false;
 	let markSettled!: () => void;
@@ -111,17 +127,31 @@ export async function runJsonDeploy(opts: RunJsonDeployOptions): Promise<JsonDep
 		}
 	})().catch(() => undefined);
 
+	return {
+		onOutput,
+		finish: async () => {
+			settled = true;
+			markSettled();
+			await liveStatus;
+		},
+	};
+}
+
+/**
+ * Run a SYNCHRONOUS `--json` deploy (waits for the org → advances source tracking) while
+ * showing live status (see `startLiveDiscovery`). Returns a structured outcome (component
+ * list, counts) for the caller.
+ */
+export async function runJsonDeploy(opts: RunJsonDeployOptions): Promise<JsonDeployOutcome> {
+	const { submitCommand, cwd, org, token, onStatus, timeoutMs } = opts;
+	const live = startLiveDiscovery({ cwd, org, token, onStatus, timeoutMs });
 	try {
-		const out = await runCommand(`${submitCommand} --json`.replace(/\s+/g, " ").trim(), cwd, onOutput, false, token, timeoutMs);
-		settled = true;
-		markSettled();
-		await liveStatus;
+		const out = await runCommand(`${submitCommand} --json`.replace(/\s+/g, " ").trim(), cwd, live.onOutput, false, token, timeoutMs);
+		await live.finish();
 		const dr = parseCliDeployJson(out);
 		return dr ? { kind: "success", result: dr } : { kind: "success", result: {} };
 	} catch (e: any) {
-		settled = true;
-		markSettled();
-		await liveStatus;
+		await live.finish();
 		if (e?.cancelled) return { kind: "cancelled" };
 		const msg = e?.message ?? String(e);
 		if (/NothingToDeploy|No (?:local )?changes to deploy/i.test(msg)) return { kind: "nothing" };
@@ -210,7 +240,8 @@ function metadataUrl(instanceUrl: string, deployId: string, includeDetails: bool
 	return includeDetails ? `${base}?includeDetails=true` : base;
 }
 
-async function getDeployStatus(org: string | null, deployId: string, includeDetails: boolean): Promise<RawDeployResult> {
+/** One `deployRequest` read over REST (`includeDetails`: the component / test result lists too). */
+export async function getDeployStatus(org: string | null, deployId: string, includeDetails: boolean): Promise<RawDeployResult> {
 	const { body } = await AuthInfo.get(org, (a) => metadataUrl(a.instanceUrl, deployId, includeDetails));
 	const dr = extractDeployResult(JSON.parse(body));
 	if (!dr) throw new Error("Unexpected deployRequest response shape");

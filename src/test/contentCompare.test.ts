@@ -2,6 +2,7 @@ import * as assert from "assert";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import * as zlib from "zlib";
 import { CancelToken, CompareTarget, ContentCompareService, RetrieveReply, RetrieveRequest } from "../utils/contentCompare";
 import { innerFilesOfEntry } from "../utils/contentComparePure";
 import { buildTypeTable } from "../utils/orgBrowser/localIndex";
@@ -188,6 +189,49 @@ describe("content compare service", () => {
 		assert.strictEqual(s2.contentInfo()["ApexClass:A"][0], 1);
 		assert.strictEqual(s2.verifiedSyncAt("ApexClass:A"), 5000);
 		t = 0;
+	});
+
+	it("stores the index as gzip JSON (like the other caches) and still reads the plain index.json of older versions", async () => {
+		const org = new FakeOrg();
+		const a = writeClass(f, "A", "same");
+		org.copies.set("A", { cls: "same" });
+		const s1 = service(f, org, 150, () => 5000);
+		s1.request([a]);
+		await s1.whenIdle();
+		await s1.flush();
+		assert.ok(fs.existsSync(path.join(f.cache, "index.json.gz")));
+		assert.ok(!fs.existsSync(path.join(f.cache, "index.json")));
+		// An index.json left by an older version is read when there is no gzip file.
+		const legacy = JSON.parse(zlib.gunzipSync(fs.readFileSync(path.join(f.cache, "index.json.gz"))).toString("utf8"));
+		fs.rmSync(path.join(f.cache, "index.json.gz"));
+		fs.writeFileSync(path.join(f.cache, "index.json"), JSON.stringify({ v: 1, entries: legacy.entries }));
+		const s2 = service(f, new FakeOrg());
+		await s2.load();
+		assert.strictEqual(s2.contentInfo()["ApexClass:A"][0], 1);
+	});
+
+	it("persists the digests of the local files: a file with the same mtime and size is not read again after a restart", async () => {
+		const org = new FakeOrg();
+		const a = writeClass(f, "A", "same1");
+		org.copies.set("A", { cls: "same1" });
+		const file = a.files.find((x) => x.inner.endsWith(".cls"))!.abs;
+		const t0 = new Date(1_700_000_000_000); // a whole-millisecond mtime survives being set again exactly
+		fs.utimesSync(file, t0, t0);
+		const s1 = service(f, org);
+		s1.request([a]);
+		await s1.whenIdle();
+		await s1.flush();
+		// Different content, same size and mtime: only a stored digest can still say "same".
+		fs.writeFileSync(file, "same2");
+		fs.utimesSync(file, t0, t0);
+		const s2 = service(f, new FakeOrg());
+		const valid = await s2.validContentInfo([a]);
+		assert.strictEqual(valid["ApexClass:A"]?.[0], 1, "the stored digest was used");
+		// A changed mtime reads the file again: now it is stale.
+		fs.utimesSync(file, t0, new Date(t0.getTime() + 5000));
+		const s3 = service(f, new FakeOrg());
+		const stale = await s3.validContentInfo([a]);
+		assert.strictEqual(stale["ApexClass:A"]?.[0], 0);
 	});
 
 	it("keeps the last verified-equal time as baseline when a later compare says different", async () => {

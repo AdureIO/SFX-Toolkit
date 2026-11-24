@@ -29,6 +29,8 @@ export interface HistoryEntry {
 	testLevel?: string;
 	/** Apex tests of a RunSpecifiedTests run (capped at `MAX_TESTS`): a re-run needs them. */
 	tests?: string[];
+	/** Optional "Deploy name" typed by the user (local only: Salesforce has no deploy label). */
+	label?: string;
 	/** Deploy id (`0Af…`) of a deploy, validate or delete. */
 	deployId?: string;
 	ok: boolean;
@@ -46,6 +48,14 @@ export const MAX_ERRORS = 50;
 export const MAX_COMPONENTS = 1000;
 export const MAX_TESTS = 200;
 const MAX_MESSAGE = 600;
+export const MAX_LABEL = 120;
+
+/** A user-typed deploy name: whitespace collapsed, capped; undefined when empty. */
+export function cleanLabel(v: unknown): string | undefined {
+	if (typeof v !== "string") return undefined;
+	const t = v.replace(/\s+/g, " ").trim().slice(0, MAX_LABEL);
+	return t || undefined;
+}
 
 const KINDS: readonly string[] = ["deploy", "validate", "retrieve", "delete"];
 const SOURCES: readonly string[] = ["center", "deployPanel", "orgBrowser", "command"];
@@ -66,6 +76,7 @@ export function normalizeEntry(e: NewHistoryEntry, newId: () => string): History
 		componentCount: Math.max(e.componentCount ?? 0, e.components.length),
 		...(e.testLevel ? { testLevel: e.testLevel } : {}),
 		...(e.tests && e.tests.length > 0 ? { tests: e.tests.slice(0, MAX_TESTS) } : {}),
+		...(cleanLabel(e.label) ? { label: cleanLabel(e.label) } : {}),
 		...(e.deployId ? { deployId: e.deployId } : {}),
 		ok: e.ok,
 		...(errors.length > 0 ? { errors } : {}),
@@ -110,7 +121,14 @@ export function parseHistory(text: string | undefined): HistoryEntry[] {
 	try {
 		const raw = JSON.parse(text) as Partial<HistoryFile>;
 		if (!raw || raw.v !== 1 || !Array.isArray(raw.entries)) return [];
-		return raw.entries.filter(validEntry).map((e) => ({ ...e, componentCount: typeof e.componentCount === "number" ? e.componentCount : e.components.length })).slice(0, MAX_ENTRIES);
+		return raw.entries
+			.filter(validEntry)
+			.map((e) => {
+				const { label, ...rest } = e;
+				const l = cleanLabel(label);
+				return { ...rest, ...(l ? { label: l } : {}), componentCount: typeof e.componentCount === "number" ? e.componentCount : e.components.length };
+			})
+			.slice(0, MAX_ENTRIES);
 	} catch {
 		return [];
 	}

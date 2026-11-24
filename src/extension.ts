@@ -48,6 +48,7 @@ import { initRetrieveLog, flushRetrieveLog } from "./utils/retrieveLog";
 import { initContentCompare } from "./utils/contentCompareHost";
 import { initSyncDiff } from "./utils/syncDiff";
 import { initSyncHistory, flushSyncHistory } from "./utils/syncHistory";
+import { initProjectScanCache, flushProjectScanCache } from "./utils/projectScanCache";
 import { registerApexLogDecorator } from "./providers/ApexLogDecorator";
 import { ApexWorkbenchViewProvider } from "./providers/ApexWorkbenchViewProvider";
 import { Logger, outputChannel, registerOutputChannels } from "./utils/outputChannel";
@@ -298,6 +299,7 @@ export function activate(context: vscode.ExtensionContext) {
     initContentCompare(context);
     initSyncDiff(context);
     initSyncHistory(context);
+    initProjectScanCache(path.join(context.globalStorageUri.fsPath, "org-browser"));
     SharedMetadataFilter.init(context);
     OrgBrowserPanelProvider.init(context);
     SyncCenterPanelProvider.init(context);
@@ -963,6 +965,10 @@ export function deactivate(): Thenable<void> | undefined {
   teardownStep("stop live log polling", () => LiveLogService.disposeAll());
   teardownStep("flush retrieve log", () => flushRetrieveLog());
   teardownStep("flush sync history", () => flushSyncHistory());
+  let scanFlush: Promise<void> | undefined;
+  teardownStep("flush project scan cache", () => {
+    scanFlush = flushProjectScanCache();
+  });
   teardownStep("dispose auth cache", () => AuthInfo.disposeAll());
   teardownStep("dispose SOQL schema cache", () => SoqlSchemaProvider.disposeAll());
   // Flushes pending disk-cache writes synchronously and leaves no timers behind.
@@ -973,8 +979,11 @@ export function deactivate(): Thenable<void> | undefined {
   // Last, after the LS stop has been kicked off: no CLI process may outlive the window.
   teardownStep("kill child processes", () => killAllChildProcesses());
 
-  if (!lsStop) return undefined;
-  return Promise.resolve(lsStop).catch((e) => {
-    Logger.error("deactivate: language server stop failed", e);
-  });
+  if (!lsStop && !scanFlush) return undefined;
+  return Promise.all([Promise.resolve(lsStop), scanFlush]).then(
+    () => undefined,
+    (e) => {
+      Logger.error("deactivate: language server stop / cache flush failed", e);
+    }
+  );
 }

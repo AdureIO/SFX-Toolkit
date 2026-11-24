@@ -27,6 +27,10 @@ export interface RetrieveFlowOptions {
 	source: HistorySource;
 	/** Runs after the open editors were refreshed, also when the retrieve failed or was cancelled (rescan the project). */
 	afterWrite?: () => Promise<void>;
+	/** Components retrieved so far (the same numbers the progress notification shows); the notification is unchanged. */
+	onProgress?: (done: number, total: number) => void;
+	/** The retrieve is about to run (the overwrite confirmation, when asked, was accepted). */
+	onStart?: () => void;
 }
 
 export interface RetrieveFlowResult {
@@ -38,6 +42,7 @@ export interface RetrieveFlowResult {
 export async function runRetrieveFlow(o: RetrieveFlowOptions): Promise<RetrieveFlowResult> {
 	const { components } = o;
 	if (o.confirm !== false && !(await confirmOverwrite(o.targets, "Retrieve"))) return { cancelled: true };
+	o.onStart?.();
 	let outcome: RetrieveResult | undefined;
 	let cancelled = false;
 	const startedAt = Date.now();
@@ -55,6 +60,7 @@ export async function runRetrieveFlow(o: RetrieveFlowOptions): Promise<RetrieveF
 						onProgress: (done, total) => {
 							progress.report({ message: `${done}/${total}`, increment: ((done - reported) / total) * 100 });
 							reported = done;
+							o.onProgress?.(done, total);
 						},
 					});
 				} catch (e: any) {

@@ -1,6 +1,6 @@
 /**
  * Deploy & Retrieve Center webview: the union of the local project and the org's metadata in a virtualized grid
- * with the filter sidebar, one selection, quick actions, per-row conflict choices, and the Deploy / Retrieve /
+ * with the filter sidebar, one selection, per-row Deploy / Retrieve / Diff and conflict choices, and the Deploy / Retrieve /
  * Delete sections plus the history. Bundled by esbuild to resources/webview/syncCenter.js; talks to
  * SyncCenterPanelProvider via postMessage.
  *
@@ -29,6 +29,8 @@ import { CompareProgress, ContentInfoMap, LocalInfoMap, progressText } from "../
 import {
 	ConflictChoice,
 	SYNC_CENTER_VOCAB,
+	SYNC_IN_PROJECT,
+	SYNC_IN_PROJECT_FACET_INDEX,
 	SYNC_STATUS_LABELS,
 	SYNC_STATUS_NAMES,
 	SyncRow,
@@ -36,9 +38,6 @@ import {
 	deleteCandidates,
 	deployCandidates,
 	isDiffable,
-	quickActionCounts,
-	quickActionKeys,
-	QuickAction,
 	retrieveCandidates,
 } from "../utils/syncCenterPure";
 import {
@@ -48,12 +47,46 @@ import {
 	choicesToJson,
 	historyRowKeys,
 	historyViews,
+	initialStatusFilter,
 	pruneConflictChoices,
 	rowDeployLocalKeys,
 	rowKeyOf,
 	rowRetrieveRef,
 } from "../utils/syncCenterUiPure";
+import {
+	ColumnId,
+	ColumnLayout,
+	columnLabel,
+	defaultLayout,
+	gridTemplate,
+	isFixedColumn,
+	moveColumn,
+	normalizeLayout,
+	setColumnVisible,
+	setColumnWidth,
+	visibleColumns,
+} from "../utils/syncCenterColumnsPure";
+import { deleteTestHint } from "../utils/deployTestArgsPure";
 import { HistoryEntry } from "../utils/historyPure";
+import type { DeployDetails, DeployListItem } from "../utils/deployListPure";
+import type { OpMessage } from "../utils/syncCenterOpPure";
+import {
+	OP_KIND_GLYPH,
+	canCancelOp,
+	componentErrorWhere,
+	countsText,
+	deployRowView,
+	detailsAreEmpty,
+	errorPercent,
+	isActivePhase,
+	opActions,
+	opElapsedText,
+	opJustFinished,
+	opTitle,
+	phaseLabel,
+	progressPercent,
+	testErrorName,
+} from "../utils/syncCenterActivityUiPure";
 import { WebPreset } from "../utils/presetsWebPure";
 import { $, REFRESH_ICON, createFilterBar, esc, toggleIn, FilterBar } from "./shared/filterBar";
 import { createSharedFilterSync } from "./shared/sharedFilter";
@@ -75,6 +108,8 @@ interface Options {
 	validateOnly: boolean;
 	autoGit: boolean;
 	testLevel: string;
+	/** Test level of the Delete section (its own, not the Deploy section's). */
+	delTestLevel: string;
 }
 
 interface UiState {
@@ -82,7 +117,8 @@ interface UiState {
 	sort: { key: SortKey; dir: 1 | -1 };
 	group: boolean;
 	collapsed: string[];
-	widths: { type: number; ns: number; by: number; mod: number; status: number };
+	/** The "In project" status default was applied once (a store from before it gets it on the next load). */
+	statusDefault?: boolean;
 	filtersCollapsed?: boolean;
 	rightWidth?: number;
 	opts: Options;
@@ -111,6 +147,8 @@ interface LocalEntryMsg {
 	type: string;
 	name: string;
 	key: string;
+	/** Project-relative path of the component's main file. */
+	path?: string;
 }
 
 // ── State ──────────────────────────────────────────────────────────────────────
@@ -126,16 +164,16 @@ const SIDE_MIN_W = 560;
 const PROV_TIP = "Based on dates — contents not compared yet";
 
 function defaultOpts(): Options {
-	return { skipEqualDeploy: true, skipEqualRetrieve: true, confirmOverwrite: true, wholeObject: false, validateOnly: false, autoGit: false, testLevel: "RunRelevantTests" };
+	return { skipEqualDeploy: true, skipEqualRetrieve: true, confirmOverwrite: true, wholeObject: false, validateOnly: false, autoGit: false, testLevel: "RunRelevantTests", delTestLevel: "RunLocalTests" };
 }
 
 function defaultUi(): UiState {
 	return {
-		filter: { ...DEFAULT_FILTER },
+		filter: { ...DEFAULT_FILTER, status: initialStatusFilter(undefined, false) },
 		sort: { key: "name", dir: 1 },
 		group: false,
 		collapsed: [],
-		widths: { type: 120, ns: 70, by: 120, mod: 90, status: 130 },
+		statusDefault: true,
 		opts: defaultOpts(),
 		choices: {},
 	};
@@ -158,6 +196,12 @@ let errorView: { state: string; message: string } | null = null;
 let noOrg = false;
 let local = { entries: [] as LocalEntryMsg[], partial: [] as string[], retrieved: {} as Record<string, number>, known: false };
 let me = { ids: [] as string[], name: "" };
+/** Column layout (order, visibility, widths); stored per computer by the host. */
+let layout: ColumnLayout = defaultLayout();
+/** The host is busy loading / scanning / listing (`{type:"busy", on, label}`). */
+let hostBusy: { label: string } | null = null;
+/** Project-relative file path by local index key (the "Local path" column). */
+let localPaths = new Map<string, string>();
 let localInfo: LocalInfoMap | undefined;
 let contentInfo: ContentInfoMap = {};
 let cmpProgress: CompareProgress | null = null;
@@ -186,8 +230,24 @@ let opPending = false;
 let history: HistoryEntry[] = [];
 let historyOpen = false;
 const historyExpanded = new Set<string>();
+/** Activity tab: which segment is shown. */
+let activitySeg: "deploys" | "history" = "deploys";
+/** The last operation started from the Center (`{type:"op"}`), shown in the card until dismissed. */
+let curOp: OpMessage | null = null;
+/** The org's recent deploys (`{type:"deploys"}`); `null` = not loaded for this org yet. */
+let deploys: DeployListItem[] | null = null;
+let deploysError = "";
+let deploysLoading = false;
+/** The list is out of date (an op finished or the org changed while the tab was closed): reload on the next open. */
+let deploysStale = true;
+let deployFailedOnly = false;
+const deployExpanded = new Set<string>();
+/** Details fetched per deploy id (kept until the org changes). */
+const deployDetailsCache = new Map<string, { details: DeployDetails; error?: string }>();
+const deployDetailsAsked = new Set<string>();
 let presets: WebPreset[] = [];
-const suites = mountTestSuites({ post, checked: checkedTests, onApplied: () => renderRight(), setStatus });
+const suites = mountTestSuites({ post, checked: checkedTests, onApplied: () => renderRight(), setStatus, scope: () => $("test-list") });
+const delSuites = mountTestSuites({ post, checked: checkedDeleteTests, onApplied: () => renderRight(), setStatus, idPrefix: "del-", scope: () => $("del-test-list") });
 let testClasses: { label: string; description: string }[] = [];
 let statusText = "";
 /** The first listing of this org finished (a selection carried in by "open in the Center" survives the `reset` before it). */
@@ -219,8 +279,8 @@ function mergeUi(saved: Partial<UiState> | null | undefined): void {
 	ui = {
 		...d,
 		...saved,
-		filter: { ...d.filter, ...(saved.filter ?? {}), onlySelected: false },
-		widths: { ...d.widths, ...(saved.widths ?? {}) },
+		filter: { ...d.filter, ...(saved.filter ?? {}), status: initialStatusFilter(saved.filter?.status, !!saved.statusDefault), onlySelected: false },
+		statusDefault: true,
 		sort: saved.sort ?? d.sort,
 		opts: { ...d.opts, ...(saved.opts ?? {}) },
 		choices: saved.choices && typeof saved.choices === "object" ? saved.choices : {},
@@ -261,6 +321,7 @@ function settled(): boolean {
 function ensureRows(): void {
 	if (!rowsDirty) return;
 	rowsDirty = false;
+	localPaths = new Map(local.entries.filter((e) => e.path).map((e) => [e.key, e.path as string]));
 	syncRows = buildSyncRows({
 		localKnown: local.known,
 		local: local.entries,
@@ -370,8 +431,14 @@ function hl(text: string): string {
 const ICON = {
 	diff: '<svg viewBox="0 0 16 16" width="14" height="14"><path fill="currentColor" d="M2 4h9.600l-2-2 .7-.7 3.200 3.200-3.200 3.200-.7-.7 2-2H2zm12 8H4.400l2 2-.7.700L2.500 11.500l3.200-3.200.7.700-2 2H14z"/></svg>',
 	chevron: '<svg viewBox="0 0 16 16" width="12" height="12"><path fill="currentColor" d="M6 4l4.500 4L6 12z"/></svg>',
-	refresh: REFRESH_ICON,
+	// Same 14 px size as the other row icons.
+	refresh: REFRESH_ICON.replace('width="13" height="13"', 'width="14" height="14"'),
+	deploy: '<svg viewBox="0 0 16 16" width="14" height="14"><path fill="currentColor" d="M8 1.500l5 5-.7.700-3.800-3.800V14h-1V3.400L3.700 7.200 3 6.500z"/></svg>',
+	retrieve: '<svg viewBox="0 0 16 16" width="14" height="14"><path fill="currentColor" d="M8 14.500l-5-5 .7-.7 3.800 3.800V2h1v10.600l3.800-3.800.7.700z"/></svg>',
 };
+
+/** Sort key of the columns that can be sorted. */
+const SORT_OF: Partial<Record<ColumnId, SortKey>> = { name: "name", type: "type", ns: "ns", by: "by", mod: "modified", status: "status" };
 
 const BADGE_TEXT: Record<string, string> = {
 	"only-local": "Only local",
@@ -432,25 +499,67 @@ function choiceHtml(r: SyncRow): string {
 	);
 }
 
+function actsHtml(r: SyncRow): string {
+	const conflict = r.status === "conflict";
+	const canDeploy = r.local || r.status === "partial";
+	const ph = '<span class="ibtn ph" aria-hidden="true"></span>';
+	return (
+		`<span class="c acts">` +
+		(conflict ? choiceHtml(r) : "") +
+		(canDeploy
+			? `<button class="ibtn deploy" data-act="deployRow" title="${conflict ? "Deploy this component and overwrite the org’s version (asks first)" : "Deploy this component to the org"}" aria-label="Deploy ${esc(r.name)}">${ICON.deploy}</button>`
+			: ph) +
+		(r.inOrg
+			? `<button class="ibtn retrieve" data-act="retrieveRow" title="${conflict ? "Retrieve this component and overwrite the local version (asks first)" : "Retrieve this component from the org"}" aria-label="Retrieve ${esc(r.name)}">${ICON.retrieve}</button>`
+			: ph) +
+		(isDiffable(r) ? `<button class="ibtn" data-act="diff" title="Compare with the org" aria-label="Compare with the org">${ICON.diff}</button>` : ph) +
+		`</span>`
+	);
+}
+
+function cellHtml(id: ColumnId, r: SyncRow, c: Comp): string {
+	switch (id) {
+		case "name":
+			return `<span class="c nm${ui.group ? " ind" : ""}" title="${esc(r.key)}">${hl(r.name)}</span>`;
+		case "type":
+			return `<span class="c ty">${hl(r.type)}</span>`;
+		case "ns":
+			return `<span class="c ns">${esc(c.ns)}</span>`;
+		case "by":
+			return `<span class="c by" title="${esc(c.by)}">${esc(c.by)}</span>`;
+		case "mod":
+			return `<span class="c md" title="${esc(c.lm ? new Date(c.lm).toLocaleString() : "")}">${esc(relativeTime(c.lm, Date.now()))}</span>`;
+		case "status":
+			return `<span class="c st">${statusBadge(r)}</span>`;
+		case "created":
+			return `<span class="c md" title="${esc(c.cd ? new Date(c.cd).toLocaleString() : "")}">${c.cd ? esc(new Date(c.cd).toLocaleDateString()) : ""}</span>`;
+		case "id":
+			return `<span class="c mono ty" title="${esc(c.id)}">${esc(c.id)}</span>`;
+		case "file":
+			return `<span class="c ty" title="${esc(c.f)}">${esc(c.f)}</span>`;
+		case "path": {
+			const p = r.localKey ? (localPaths.get(r.localKey) ?? "") : "";
+			return `<span class="c ty" title="${esc(p)}">${esc(p)}</span>`;
+		}
+		case "state":
+			return `<span class="c ty">${esc(c.ms)}</span>`;
+		case "actions":
+			return actsHtml(r);
+	}
+}
+
 function rowHtml(pos: number, i: number): string {
 	const r = syncRows[i];
 	const c = idx.comps[i];
 	const sel = selected.has(r.key);
-	const exact = c.lm ? new Date(c.lm).toLocaleString() : "";
 	const failed = results.get(r.key);
+	let cells = "";
+	for (const col of visibleColumns(layout)) cells += cellHtml(col.id, r, c);
 	return (
 		`<div class="row${sel ? " sel" : ""}${pos === active ? " active" : ""}${failed && !failed.ok ? " failed" : ""}" data-pos="${pos}" role="row" aria-selected="${sel}">` +
 		`<span class="c cb"><input type="checkbox" class="rowcb" tabindex="-1" ${sel ? "checked" : ""} aria-label="Select ${esc(r.name)}"></span>` +
-		`<span class="c nm" title="${esc(r.key)}">${hl(r.name)}</span>` +
-		`<span class="c ty">${hl(r.type)}</span>` +
-		`<span class="c ns">${esc(c.ns)}</span>` +
-		`<span class="c by" title="${esc(c.by)}">${esc(c.by)}</span>` +
-		`<span class="c md" title="${esc(exact)}">${esc(relativeTime(c.lm, Date.now()))}</span>` +
-		`<span class="c st">${statusBadge(r)}</span>` +
-		`<span class="c acts">` +
-		(r.status === "conflict" ? choiceHtml(r) : "") +
-		(isDiffable(r) ? `<button class="ibtn" data-act="diff" title="Compare with the org" aria-label="Compare with the org">${ICON.diff}</button>` : "") +
-		`</span></div>`
+		cells +
+		`</div>`
 	);
 }
 
@@ -462,7 +571,7 @@ function groupHtml(pos: number, g: Group): string {
 		`<div class="row grp${pos === active ? " active" : ""}" data-pos="${pos}" data-type="${esc(g.type)}" role="row">` +
 		`<span class="c cb"><input type="checkbox" class="grpcb" tabindex="-1" ${all ? "checked" : ""} data-partial="${n > 0 && !all}" aria-label="Select all ${esc(g.type)}"></span>` +
 		`<span class="c gname"><span class="chev${g.collapsed ? "" : " open"}">${ICON.chevron}</span><b>${hl(g.type)}</b><span class="gcount">${g.rows.length.toLocaleString()}</span>` +
-		`<button class="gref" data-act="refreshType" title="Re-list ${esc(g.type)} only">${ICON.refresh}</button></span></div>`
+		`<button class="gref" data-act="refreshType" title="Re-list ${esc(g.type)} only" aria-label="Re-list ${esc(g.type)} only">${ICON.refresh}</button></span></div>`
 	);
 }
 
@@ -492,6 +601,21 @@ function invalidateRows(): void {
 	renderRows();
 }
 
+/** The column headers of the visible columns, in layout order (the checkbox cell is static). */
+function renderHeader(): void {
+	$("hcols").innerHTML = visibleColumns(layout)
+		.map((c) => {
+			const sort = SORT_OF[c.id];
+			const fixed = isFixedColumn(c.id);
+			const sorted = sort && sort === ui.sort.key;
+			return (
+				`<span class="hcell${sorted ? " sorted" : ""}" data-col="${c.id}"${sort ? ` data-sort="${sort}"` : ""}${sorted ? ` data-dir="${ui.sort.dir === 1 ? "asc" : "desc"}"` : ""}${fixed ? "" : ' draggable="true"'} title="${fixed ? "" : "Drag to reorder · "}right-click for columns">` +
+				`${esc(columnLabel(c.id))}${fixed ? "" : `<i class="grip" data-col="${c.id}"></i>`}</span>`
+			);
+		})
+		.join("");
+}
+
 function renderGridChrome(): void {
 	$("spacer").style.height = items.length * ROW_H + "px";
 	const total = idx.comps.length;
@@ -519,17 +643,24 @@ function renderGridChrome(): void {
 function renderListed(): void {
 	const el = $("listedInfo");
 	const prog = $("progress");
+	const bar = $("progressBar");
+	const cmpRunning = cmpProgress?.state === "running";
+	const busyNow = !!loading || !!hostBusy || cmpRunning;
 	if (loading) {
 		el.textContent = loading.total ? `Loaded ${loading.done.toLocaleString()}/${loading.total.toLocaleString()} types…` : "Listing metadata…";
-		prog.hidden = false;
-		($("progressBar").style as CSSStyleDeclaration).width = loading.total ? Math.round((loading.done / loading.total) * 100) + "%" : "8%";
-		$("refreshBtn").setAttribute("disabled", "");
+	} else if (hostBusy) {
+		el.textContent = hostBusy.label || "Loading…";
 	} else {
-		prog.hidden = true;
 		el.textContent = listedAt ? `Listed ${relativeTime(listedAt, Date.now())}` : "";
 		el.title = listedAt ? new Date(listedAt).toLocaleString() : "";
-		$("refreshBtn").toggleAttribute("disabled", noOrg);
 	}
+	// A thin bar under the top bar: filled while the listing reports progress, otherwise indeterminate.
+	const determinate = !!loading && loading.total > 0;
+	prog.hidden = !busyNow;
+	prog.classList.toggle("indet", busyNow && !determinate);
+	bar.style.width = determinate ? Math.round((loading!.done / loading!.total) * 100) + "%" : "";
+	prog.setAttribute("aria-busy", String(busyNow));
+	$("refreshBtn").toggleAttribute("disabled", noOrg || !!loading || !!hostBusy);
 	renderCompareInfo();
 }
 
@@ -557,6 +688,8 @@ function renderOverlay(): void {
 		overlayHtml = `<div class="card err"><h3>${errorView.state === "authInvalid" ? "Org connection is not valid" : "Couldn’t list metadata"}</h3><p>${esc(errorView.message)}</p><div class="btns">${btns}</div></div>`;
 	} else if (loading && idx.comps.length === 0) {
 		overlayHtml = `<div class="card"><h3>Listing metadata…</h3><p>${loading.total ? `Loaded ${loading.done.toLocaleString()}/${loading.total.toLocaleString()} types…` : "Reading the org’s metadata types…"}</p></div>`;
+	} else if (idx.comps.length === 0 && !errorView && !loadedOnce && !listedAt) {
+		overlayHtml = `<div class="card"><h3>Loading…</h3><p>${esc(hostBusy?.label || "Reading the project and the org’s metadata…")}</p><div class="skel" aria-hidden="true"><i style="width:92%"></i><i style="width:78%"></i><i style="width:85%"></i></div></div>`;
 	} else if (idx.comps.length === 0 && !loading && listedAt && local.known) {
 		overlayHtml = '<div class="card"><h3>Nothing to show</h3><p>Neither the org nor the project has components.</p></div>';
 	}
@@ -586,12 +719,10 @@ function renderOverlay(): void {
 }
 
 function renderOrgSelect(): void {
-	for (const id of ["org", "org2"]) {
-		const sel = $(id) as HTMLSelectElement;
-		sel.innerHTML = orgs.map((o) => `<option value="${esc(o.username)}"${o.username === currentOrg ? " selected" : ""}>${esc(o.label)}</option>`).join("");
-		if (currentOrg && !orgs.some((o) => o.username === currentOrg)) sel.insertAdjacentHTML("afterbegin", `<option value="${esc(currentOrg)}" selected>${esc(currentOrg)}</option>`);
-		sel.disabled = orgs.length === 0;
-	}
+	const sel = $("org") as HTMLSelectElement;
+	sel.innerHTML = orgs.map((o) => `<option value="${esc(o.username)}"${o.username === currentOrg ? " selected" : ""}>${esc(o.label)}</option>`).join("");
+	if (currentOrg && !orgs.some((o) => o.username === currentOrg)) sel.insertAdjacentHTML("afterbegin", `<option value="${esc(currentOrg)}" selected>${esc(currentOrg)}</option>`);
+	sel.disabled = orgs.length === 0;
 }
 
 // ── Rendering: right panel ─────────────────────────────────────────────────────
@@ -609,7 +740,15 @@ function currentTestLevel(): string {
 }
 
 function checkedTests(): string[] {
-	return [...document.querySelectorAll<HTMLInputElement>(".test-class")].filter((c) => c.checked).map((c) => c.value);
+	return [...$("test-list").querySelectorAll<HTMLInputElement>(".test-class")].filter((c) => c.checked).map((c) => c.value);
+}
+
+function checkedDeleteTests(): string[] {
+	return [...$("del-test-list").querySelectorAll<HTMLInputElement>(".test-class")].filter((c) => c.checked).map((c) => c.value);
+}
+
+function currentDeleteLevel(): string {
+	return document.querySelector<HTMLInputElement>('input[name="delTestLevel"]:checked')?.value || ui.opts.delTestLevel;
 }
 
 function renderRight(): void {
@@ -643,20 +782,12 @@ function renderRight(): void {
 		}
 	}
 
-	const vis = visibleKeys();
-	const counts = quickActionCounts(syncRows, vis);
-	for (const b of document.querySelectorAll<HTMLButtonElement>("#quick button[data-q]")) {
-		const q = b.dataset.q as QuickAction | "clear";
-		const cnt = b.querySelector("b")!;
-		if (q === "clear") {
-			cnt.textContent = sel > 0 ? `${sel.toLocaleString()} selected` : "";
-			b.disabled = sel === 0;
-		} else {
-			cnt.textContent = counts[q].toLocaleString();
-			b.disabled = counts[q] === 0;
-		}
-	}
 	$("specified-tests-wrap").classList.toggle("visible", currentTestLevel() === "RunSpecifiedTests");
+	const delLevel = currentDeleteLevel();
+	$("del-specified-tests-wrap").classList.toggle("visible", delLevel === "RunSpecifiedTests");
+	const delHint = deleteTestHint(delLevel, xc.keys.map((k) => syncRows[rowIndex.get(k) ?? -1]?.type ?? ""));
+	$("delHint").hidden = delHint === "";
+	$("delHint").textContent = delHint;
 	$("statusLine").textContent = statusText;
 	$("statusLine").title = statusText;
 	renderPresetOptions();
@@ -694,9 +825,18 @@ function orgLabelOf(org: string): string {
 
 function renderHistory(): void {
 	$("historyTab").setAttribute("aria-expanded", String(historyOpen));
-	$("historyTab").textContent = history.length > 0 ? `History (${history.length})` : "History";
 	$("historyPane").hidden = !historyOpen;
 	if (!historyOpen) return;
+	for (const [id, seg] of [["segDeploys", "deploys"], ["segHistory", "history"]] as const) {
+		$(id).classList.toggle("on", activitySeg === seg);
+		$(id).setAttribute("aria-pressed", String(activitySeg === seg));
+	}
+	$("depView").hidden = activitySeg !== "deploys";
+	$("histView").hidden = activitySeg !== "history";
+	if (activitySeg === "deploys") {
+		renderDeploys();
+		return;
+	}
 	const views = historyViews(history, Date.now(), orgLabelOf);
 	$("histCount").textContent = views.length ? `${views.length} entr${views.length === 1 ? "y" : "ies"}` : "";
 	$("histList").innerHTML =
@@ -706,6 +846,7 @@ function renderHistory(): void {
 				const detail = open
 					? `<div class="hist-detail">` +
 						`<div class="muted">${esc(v.whenExact)}${v.testLevel ? ` · ${esc(v.testLevel)}` : ""} · ${esc(v.source)}</div>` +
+							(v.label ? `<div><b>${esc(v.label)}</b></div>` : "") +
 						`<ul>${v.components.slice(0, 200).map((c) => `<li>${esc(c)}</li>`).join("")}${v.components.length > 200 ? `<li>+${v.components.length - 200} more</li>` : ""}</ul>` +
 						(v.errors.length > 0 ? `<ul class="err">${v.errors.map((e) => `<li>${e.component ? `<b>${esc(e.component)}</b>: ` : ""}${esc(e.message)}</li>`).join("")}</ul>` : "") +
 						`<div class="hist-actions" data-id="${esc(v.id)}"><button type="button" data-h="select">Select these components</button><button type="button" data-h="rerun">Re-run</button>` +
@@ -714,7 +855,7 @@ function renderHistory(): void {
 					: "";
 				return (
 					`<div class="hist-item" data-id="${esc(v.id)}"><div class="hist-line" data-h="toggle" title="${esc(v.whenExact)}">` +
-					`<span class="hist-kind" title="${esc(v.kindLabel)}">${KIND_GLYPH[v.kind] ?? ""}</span><span class="hist-org">${esc(v.kindLabel)} · ${esc(v.org)}</span>` +
+					`<span class="hist-kind" title="${esc(v.kindLabel)}">${KIND_GLYPH[v.kind] ?? ""}</span><span class="hist-org" title="${esc(v.label ?? "")}">${esc(v.kindLabel)} · ${esc(v.org)}${v.label ? ` · <b>${esc(v.label)}</b>` : ""}</span>` +
 					`<span class="hist-meta">${esc(v.when)} · ${esc(v.countText)}</span><span class="${v.ok ? "hist-ok" : "hist-bad"}">${esc(v.statusText)}</span></div>${detail}</div>`
 				);
 			})
@@ -733,15 +874,9 @@ function onHistoryClick(e: Event): void {
 			else historyExpanded.add(id);
 			renderHistory();
 			break;
-		case "select": {
-			if (!entry) break;
-			ensureRows();
-			const r = historyRowKeys(entry, syncRows);
-			selected = new Set(r.keys);
-			setStatus(`Selected ${r.keys.length} component${r.keys.length === 1 ? "" : "s"} of this entry${r.missing > 0 ? ` (${r.missing} not in the list any more)` : ""}.`);
-			afterSelectionChange();
+		case "select":
+			if (entry) selectComponentsOf(entry.components);
 			break;
-		}
 		case "rerun":
 			post({ command: "historyRerun", id, testClassNames: checkedTests() });
 			break;
@@ -749,6 +884,213 @@ function onHistoryClick(e: Event): void {
 			post({ command: "historyOpenSetup", id });
 			break;
 	}
+}
+
+/** "Select these components" of a history entry / deploy row: replaces the selection with those that are still rows. */
+function selectComponentsOf(components: readonly string[]): void {
+	ensureRows();
+	const r = historyRowKeys({ components: [...components] }, syncRows);
+	selected = new Set(r.keys);
+	setStatus(`Selected ${r.keys.length} component${r.keys.length === 1 ? "" : "s"} of this entry${r.missing > 0 ? ` (${r.missing} not in the list any more)` : ""}.`);
+	afterSelectionChange();
+}
+
+// ── Operation card ─────────────────────────────────────────────────────────────
+
+function barHtml(label: string, c: { done: number; total: number; errors: number } | undefined, errWord: string): string {
+	if (!c || (c.total <= 0 && c.errors <= 0)) return "";
+	const txt = countsText({ ...c }, errWord);
+	const [counts, errs] = txt.split(" · ");
+	return (
+		`<div><div class="op-bar-label"><span>${esc(label)}</span><span>${esc(counts)}${errs ? ` · <span class="bad">${esc(errs)}</span>` : ""}</span></div>` +
+		`<div class="op-track" role="progressbar" aria-label="${esc(label)}" aria-valuemin="0" aria-valuemax="${c.total}" aria-valuenow="${c.done}"><span class="op-fill" style="width:${progressPercent(c)}%"></span><span class="op-fill err" style="width:${errorPercent(c)}%"></span></div></div>`
+	);
+}
+
+function renderOpCard(): void {
+	const el = $("opCard");
+	const op = curOp;
+	el.hidden = !op;
+	if (!op) {
+		el.innerHTML = "";
+		return;
+	}
+	const active = isActivePhase(op.phase);
+	const acts = opActions(op);
+	el.className = `opcard ${op.phase}`;
+	el.innerHTML =
+		`<div class="op-head"><span class="op-kind" aria-hidden="true">${OP_KIND_GLYPH[op.kind] ?? ""}</span><b class="op-title" title="${esc(opTitle(op))}">${esc(opTitle(op))}</b>` +
+		`<span class="op-badge ${op.phase}">${op.phase === "running" ? '<span class="op-spin" aria-hidden="true"></span>' : ""}${esc(phaseLabel(op.phase))}</span>` +
+		`<span class="op-time" id="opElapsed" title="Elapsed time">${esc(opElapsedText(op, Date.now()))}</span>` +
+		(active ? "" : '<button type="button" class="op-x" data-op="dismiss" title="Dismiss" aria-label="Dismiss">×</button>') +
+		`</div>` +
+		barHtml("Components", op.components, "error") +
+		barHtml("Tests", op.tests, "failure") +
+		(op.message ? `<div class="op-msg">${esc(op.message)}</div>` : "") +
+		(canCancelOp(op) || acts.details || acts.setup
+			? `<div class="op-actions">${canCancelOp(op) ? '<button type="button" data-op="cancel">Cancel</button>' : ""}${acts.details ? '<button type="button" data-op="details">Details</button>' : ""}${acts.setup ? '<button type="button" data-op="setup">Open in Setup</button>' : ""}</div>`
+			: "");
+}
+
+function onOpCardClick(e: Event): void {
+	const el = (e.target as HTMLElement).closest<HTMLElement>("[data-op]");
+	const op = curOp;
+	if (!el || !op) return;
+	switch (el.dataset.op) {
+		case "dismiss":
+			curOp = null;
+			renderOpCard();
+			break;
+		case "cancel":
+			post({ command: "cancelOp", id: op.id });
+			break;
+		case "setup":
+			if (op.deployId) post({ command: "openDeployInSetup", deployId: op.deployId });
+			break;
+		case "details":
+			if (op.deployId) showDeployDetails(op.deployId);
+			break;
+	}
+}
+
+function onOpMessage(m: OpMessage): void {
+	const prev = curOp?.id === m.id ? curOp : undefined;
+	curOp = m;
+	renderOpCard();
+	if (opJustFinished(prev, m)) {
+		deploysStale = true;
+		if (historyOpen && activitySeg === "deploys") loadDeploys();
+	}
+}
+
+// ── Activity: recent deploys ───────────────────────────────────────────────────
+
+function loadDeploys(): void {
+	deploysStale = false;
+	deploysLoading = true;
+	post({ command: "listDeploys", failedOnly: deployFailedOnly });
+	renderDeploys();
+}
+
+/** Open the Activity tab on the Deploys segment, expand the deploy and fetch its details. */
+function showDeployDetails(deployId: string): void {
+	historyOpen = true;
+	activitySeg = "deploys";
+	deployExpanded.add(deployId);
+	requestDeployDetails(deployId);
+	if (deploysStale || deploys === null) loadDeploys();
+	else renderHistory();
+}
+
+function requestDeployDetails(deployId: string): void {
+	if (deployDetailsCache.has(deployId) || deployDetailsAsked.has(deployId)) return;
+	deployDetailsAsked.add(deployId);
+	post({ command: "deployDetails", id: deployId });
+}
+
+function detailsHtml(v: ReturnType<typeof deployRowView>): string {
+	if (!v.hasDetails) return '<div class="muted">No deploy id in the org for this entry: no details to fetch.</div>';
+	const c = deployDetailsCache.get(v.deployId ?? "");
+	if (!c) return '<div class="muted">Loading details…</div>';
+	const d = c.details;
+	let h = c.error ? `<div class="hint warn">${esc(c.error)}</div>` : "";
+	if (d.componentErrors.length > 0) {
+		h +=
+			`<div class="sub">Component errors (${d.componentErrors.length})</div><ul class="err">` +
+			d.componentErrors
+				.map((e) => {
+					const w = componentErrorWhere(e);
+					return `<li>${w.who ? `<b>${esc(w.who)}</b>` : ""}${w.loc ? ` <span class="muted">${esc(w.loc)}</span>` : ""}${w.who || w.loc ? ": " : ""}${esc(e.message)}</li>`;
+				})
+				.join("") +
+			"</ul>";
+	}
+	if (d.testErrors.length > 0) {
+		h +=
+			`<div class="sub">Test failures (${d.testErrors.length})</div><ul class="err">` +
+			d.testErrors.map((t) => `<li><b>${esc(testErrorName(t))}</b>: ${esc(t.message)}${t.stackTrace ? `<details><summary>Stack trace</summary><pre>${esc(t.stackTrace)}</pre></details>` : ""}</li>`).join("") +
+			"</ul>";
+	}
+	if (d.codeCoverageWarnings && d.codeCoverageWarnings.length > 0) {
+		h += `<div class="sub">Coverage warnings (${d.codeCoverageWarnings.length})</div><ul>${d.codeCoverageWarnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul>`;
+	}
+	if (!c.error && detailsAreEmpty(d)) h += '<div class="muted">No errors reported.</div>';
+	return h;
+}
+
+function renderDeploys(): void {
+	$("depFailed").classList.toggle("on", deployFailedOnly);
+	$("depFailed").setAttribute("aria-pressed", String(deployFailedOnly));
+	($("depRefresh") as HTMLButtonElement).disabled = deploysLoading;
+	const notice = $("depNotice");
+	notice.hidden = !deploysError;
+	notice.textContent = deploysError;
+	const list = $("depList");
+	$("histCount").textContent = deploys && !deploysLoading ? `${deploys.length} deploy${deploys.length === 1 ? "" : "s"}` : "";
+	$("depCount").textContent = deploysLoading ? "Loading…" : "";
+	if (deploys === null) {
+		list.innerHTML = `<div class="muted" style="padding:10px">${deploysLoading ? "Loading recent deploys…" : "Not loaded yet."}</div>`;
+		return;
+	}
+	const now = Date.now();
+	list.innerHTML =
+		deploys
+			.map((i) => {
+				const v = deployRowView(i, now);
+				const open = deployExpanded.has(i.id);
+				const meta: { t: string; bad?: boolean }[] = [{ t: v.kindLabel }, { t: v.createdBy }, { t: v.duration }, { t: v.componentsText && `${v.componentsText} components`, bad: (i.components?.errors ?? 0) > 0 }, { t: v.testsText && `${v.testsText} tests`, bad: (i.tests?.errors ?? 0) > 0 }];
+				const l2 = meta.filter((x) => x.t).map((x) => `<span${x.bad ? ' class="dep-bad"' : ""}>${esc(x.t)}</span>`).join("");
+				const detail = open
+					? `<div class="hist-detail dep-detail">` +
+						`<div class="muted">${esc(v.whenExact)} · ${esc(v.statusText)}${i.deployId ? ` · ${esc(i.deployId)}` : ""}</div>` +
+						detailsHtml(v) +
+						`<div class="hist-actions" data-id="${esc(i.id)}">${v.canSelect ? '<button type="button" data-d="select">Select components</button>' : ""}${v.canSetup ? '<button type="button" data-d="setup">Open in Setup</button>' : ""}</div></div>`
+					: "";
+				return (
+					`<div class="hist-item" data-id="${esc(i.id)}"><div class="dep-row" data-d="toggle" title="${esc(v.whenExact)}">` +
+					`<div class="dep-l1"><span class="dep-ic ${v.state}" title="${esc(v.statusText)}">${v.icon}</span><span class="t" title="${esc(v.title)}">${esc(v.title)}</span>` +
+					`<span class="muted">${esc(v.when)}</span><span class="dep-chip" title="Where this entry comes from">${esc(v.sourceLabel)}</span></div>` +
+					`<div class="dep-l2">${l2}</div></div>${detail}</div>`
+				);
+			})
+			.join("") ||
+		`<div class="muted" style="padding:10px">${deployFailedOnly ? "No failed deploys." : "No deploys yet."} Deploys and validations of this org show up here.</div>`;
+}
+
+function onDeployListClick(e: Event): void {
+	const el = (e.target as HTMLElement).closest<HTMLElement>("[data-d]");
+	if (!el) return;
+	const id = el.closest<HTMLElement>("[data-id]")?.dataset.id ?? "";
+	const item = deploys?.find((d) => d.id === id);
+	if (!item) return;
+	switch (el.dataset.d) {
+		case "toggle":
+			if (deployExpanded.has(id)) deployExpanded.delete(id);
+			else {
+				deployExpanded.add(id);
+				if (item.deployId) requestDeployDetails(item.deployId);
+			}
+			renderDeploys();
+			break;
+		case "select":
+			if (item.componentKeys) selectComponentsOf(item.componentKeys);
+			break;
+		case "setup":
+			if (item.deployId) post({ command: "openDeployInSetup", deployId: item.deployId });
+			break;
+	}
+}
+
+/** The org changed: what was listed for the other one is dropped. */
+function resetActivity(): void {
+	deploys = null;
+	deploysError = "";
+	deploysLoading = false;
+	deploysStale = true;
+	deployExpanded.clear();
+	deployDetailsCache.clear();
+	deployDetailsAsked.clear();
+	if (historyOpen && activitySeg === "deploys") loadDeploys();
 }
 
 // ── Selection ──────────────────────────────────────────────────────────────────
@@ -791,21 +1133,6 @@ function toggleGroup(g: Group): void {
 	afterSelectionChange();
 }
 
-function quickSelect(q: QuickAction | "clear"): void {
-	if (q === "clear") {
-		selected = new Set();
-		ui.filter.onlySelected = false;
-		recompute();
-		saveUi();
-		return;
-	}
-	// The shown (filtered) rows only; added to what is selected.
-	const keys = quickActionKeys(syncRows, q, visibleKeys());
-	for (const k of keys) selected.add(k);
-	setStatus(keys.length === 0 ? "Nothing to select." : `Selected ${keys.length.toLocaleString()} component${keys.length === 1 ? "" : "s"}.`);
-	afterSelectionChange();
-}
-
 function setChoice(key: string, c: ConflictChoice): void {
 	if (choices.get(key) === c) choices.delete(key);
 	else choices.set(key, c);
@@ -836,10 +1163,12 @@ function resultBar(id: string, cls: string, text: string): void {
 	b.style.display = text ? "block" : "none";
 }
 
-function doDeploy(): void {
-	if (opPending || busyOp) return;
-	const c = deployCandidates(syncRows, selected, choices, ui.opts.skipEqualDeploy);
-	if (c.keys.length === 0 || c.unresolvedConflicts > 0) return;
+/** Deploy `keys` (row keys) with the Deploy section's options. `conflict`: a single conflict row; the host asks first. `withVisible`: the hidden-selection check of the main button. */
+function startDeploy(keys: string[], conflict: boolean, withVisible: boolean): void {
+	if (opPending || busyOp) {
+		toast("An operation is running.", "warn");
+		return;
+	}
 	const level = currentTestLevel();
 	const tests = level === "RunSpecifiedTests" ? checkedTests() : [];
 	if (level === "RunSpecifiedTests" && tests.length === 0) {
@@ -848,7 +1177,7 @@ function doDeploy(): void {
 	}
 	const locals = local.entries;
 	const itemsOut: { key: string; local: string[] }[] = [];
-	for (const k of c.keys) {
+	for (const k of keys) {
 		const r = syncRows[rowIndex.get(k)!];
 		const lk = rowDeployLocalKeys(r, locals, childTypes);
 		if (lk.length > 0) itemsOut.push({ key: k, local: lk });
@@ -860,29 +1189,53 @@ function doDeploy(): void {
 	opPending = true;
 	setStatus("");
 	renderRight();
-	post({ command: "deploy", items: itemsOut, visible: visibleOf(itemsOut.map((i) => i.key)), testLevel: level, testClassNames: tests.length ? tests : undefined, dryRun: ui.opts.validateOnly });
+	const label = ($("deployLabel") as HTMLInputElement).value.trim();
+	post({
+		command: "deploy",
+		items: itemsOut,
+		...(withVisible ? { visible: visibleOf(itemsOut.map((i) => i.key)) } : {}),
+		testLevel: level,
+		testClassNames: tests.length ? tests : undefined,
+		dryRun: ui.opts.validateOnly,
+		label: label || undefined,
+		conflict: conflict || undefined,
+	});
 }
 
-function doRetrieve(): void {
-	if (opPending || busyOp) return;
-	const c = retrieveCandidates(syncRows, selected, choices, ui.opts.skipEqualRetrieve);
-	if (c.keys.length === 0 || c.unresolvedConflicts > 0) return;
-	const itemsOut = c.keys.map((k) => ({ key: k, refs: [rowRetrieveRef(syncRows[rowIndex.get(k)!], ui.opts.wholeObject, childTypes)] }));
+/** Retrieve `keys` (row keys) with the Retrieve section's options (see `startDeploy` for the flags). */
+function startRetrieve(keys: string[], conflict: boolean, withVisible: boolean): void {
+	if (opPending || busyOp) {
+		toast("An operation is running.", "warn");
+		return;
+	}
+	const itemsOut = keys.map((k) => ({ key: k, refs: [rowRetrieveRef(syncRows[rowIndex.get(k)!], ui.opts.wholeObject, childTypes)] }));
 	opPending = true;
 	results = new Map();
 	resultBar("retrieveResult", "running", "Retrieving…");
 	renderRight();
-	post({ command: "retrieve", items: itemsOut, visible: visibleOf(c.keys), confirm: ui.opts.confirmOverwrite });
+	post({ command: "retrieve", items: itemsOut, ...(withVisible ? { visible: visibleOf(keys) } : {}), confirm: ui.opts.confirmOverwrite, conflict: conflict || undefined });
+}
+
+function doDeploy(): void {
+	const c = deployCandidates(syncRows, selected, choices, ui.opts.skipEqualDeploy);
+	if (c.keys.length === 0 || c.unresolvedConflicts > 0) return;
+	startDeploy(c.keys, false, true);
+}
+
+function doRetrieve(): void {
+	const c = retrieveCandidates(syncRows, selected, choices, ui.opts.skipEqualRetrieve);
+	if (c.keys.length === 0 || c.unresolvedConflicts > 0) return;
+	startRetrieve(c.keys, false, true);
 }
 
 function doDelete(): void {
 	if (opPending || busyOp) return;
 	const c = deleteCandidates(syncRows, selected);
 	if (c.keys.length === 0) return;
-	const level = currentTestLevel();
-	const tests = level === "RunSpecifiedTests" ? checkedTests() : [];
+	const level = currentDeleteLevel();
+	const tests = level === "RunSpecifiedTests" ? checkedDeleteTests() : [];
 	if (level === "RunSpecifiedTests" && tests.length === 0) {
-		setStatus("Select at least one test class for Run Specified Tests (Deploy section).");
+		setStatus("Select at least one test class for Run Specified Tests (Delete section).");
 		return;
 	}
 	const refs = c.keys.map((k) => {
@@ -899,6 +1252,12 @@ function rowAction(act: string, i: number): void {
 	switch (act) {
 		case "diff":
 			post({ command: "diff", key: r.key, status: r.status });
+			break;
+		case "deployRow":
+			startDeploy([r.key], r.status === "conflict", false);
+			break;
+		case "retrieveRow":
+			startRetrieve([r.key], r.status === "conflict", false);
 			break;
 		case "open":
 			post({ command: "openFile", key: r.key });
@@ -947,6 +1306,47 @@ function showMenu(i: number, x: number, y: number): void {
 	(m.querySelector("button") as HTMLElement | null)?.focus();
 }
 
+// ── Column menu ────────────────────────────────────────────────────────────────
+
+let colSaveTimer: number | undefined;
+/** Post the layout to the host (stored per computer), debounced. */
+function saveColumns(): void {
+	if (colSaveTimer) window.clearTimeout(colSaveTimer);
+	colSaveTimer = window.setTimeout(() => post({ command: "columns", layout }), 300);
+}
+
+/** The layout changed (visibility, order, reset): redraw headers and rows, store. */
+function layoutChanged(): void {
+	renderHeader();
+	applyWidths();
+	invalidateRows();
+	saveColumns();
+}
+
+function renderColMenu(): void {
+	$("colMenu").innerHTML =
+		layout.cols
+			.map((c) => {
+				const fixed = isFixedColumn(c.id);
+				return `<label class="${fixed ? "fixed" : ""}"${fixed ? ' title="Always shown"' : ""}><input type="checkbox" data-col="${c.id}" ${c.visible ? "checked" : ""} ${fixed ? "disabled" : ""}> ${esc(columnLabel(c.id))}</label>`;
+			})
+			.join("") + '<hr><button role="menuitem" data-colreset="1">Reset columns</button>';
+}
+
+function showColMenu(x: number, y: number): void {
+	hideMenu();
+	renderColMenu();
+	const m = $("colMenu");
+	m.hidden = false;
+	const rect = m.getBoundingClientRect();
+	m.style.left = Math.max(4, Math.min(x, window.innerWidth - rect.width - 4)) + "px";
+	m.style.top = Math.max(4, Math.min(y, window.innerHeight - rect.height - 4)) + "px";
+}
+
+function hideColMenu(): void {
+	$("colMenu").hidden = true;
+}
+
 function hideMenu(): void {
 	$("menu").hidden = true;
 	menuRow = -1;
@@ -974,7 +1374,10 @@ function setupEvents(): void {
 		filter: () => ui.filter,
 		facets: () => facets,
 		rowCount: () => idx.comps.length,
-		statusOptions: SYNC_STATUS_NAMES.map((n) => ({ value: n, label: SYNC_STATUS_LABELS[n] })),
+		statusOptions: [
+			{ value: SYNC_IN_PROJECT, label: "In project", facetIndex: SYNC_IN_PROJECT_FACET_INDEX },
+			...SYNC_STATUS_NAMES.map((n) => ({ value: n, label: SYNC_STATUS_LABELS[n] })),
+		],
 		me: () => me,
 		onChange: () => {
 			recompute(true);
@@ -992,12 +1395,12 @@ function setupEvents(): void {
 		const v = (e.target as HTMLSelectElement).value;
 		currentOrg = v;
 		resetData();
+		resetActivity();
 		loadChoices();
 		renderOrgSelect();
 		post({ command: "selectOrg", org: v });
 	};
 	$("org").addEventListener("change", onOrgChange);
-	$("org2").addEventListener("change", onOrgChange);
 	$("refreshBtn").addEventListener("click", () => post({ command: "refresh" }));
 	// Compare contents: what needs it; with a filter active, the shown components again (forced).
 	$("cmpBtn").addEventListener("click", () => {
@@ -1037,36 +1440,104 @@ function setupEvents(): void {
 		saveUi();
 	});
 
-	// Sort + resize
-	for (const th of document.querySelectorAll<HTMLElement>(".hcell[data-sort]")) {
-		th.addEventListener("click", (e) => {
-			if ((e.target as HTMLElement).classList.contains("grip")) return;
-			const k = th.dataset.sort as SortKey;
-			ui.sort = ui.sort.key === k ? { key: k, dir: (ui.sort.dir * -1) as 1 | -1 } : { key: k, dir: k === "modified" ? -1 : 1 };
-			recompute();
-			saveUi();
-		});
-	}
-	for (const grip of document.querySelectorAll<HTMLElement>(".grip")) {
-		grip.addEventListener("mousedown", (e) => {
-			e.preventDefault();
-			e.stopPropagation();
-			const col = grip.dataset.col as keyof UiState["widths"];
-			const startX = e.clientX;
-			const startW = ui.widths[col];
-			const move = (ev: MouseEvent) => {
-				ui.widths[col] = Math.max(60, Math.min(500, startW + ev.clientX - startX));
-				applyWidths();
-			};
-			const up = () => {
-				window.removeEventListener("mousemove", move);
-				window.removeEventListener("mouseup", up);
-				saveUi();
-			};
-			window.addEventListener("mousemove", move);
-			window.addEventListener("mouseup", up);
-		});
-	}
+	// Column headers (delegated): sort, resize, reorder by drag and drop, column menu.
+	const ghead = $("ghead");
+	let dragCol: ColumnId | null = null;
+	const clearDrop = () => {
+		for (const el of ghead.querySelectorAll(".drop-before, .drop-after, .dragging")) el.classList.remove("drop-before", "drop-after", "dragging");
+	};
+	ghead.addEventListener("click", (e) => {
+		const t = e.target as HTMLElement;
+		if (t.classList.contains("grip")) return;
+		const th = t.closest<HTMLElement>(".hcell[data-sort]");
+		if (!th) return;
+		const k = th.dataset.sort as SortKey;
+		ui.sort = ui.sort.key === k ? { key: k, dir: (ui.sort.dir * -1) as 1 | -1 } : { key: k, dir: k === "modified" ? -1 : 1 };
+		renderHeader();
+		recompute();
+		saveUi();
+	});
+	ghead.addEventListener("mousedown", (e) => {
+		const grip = (e.target as HTMLElement).closest<HTMLElement>(".grip");
+		if (!grip) return;
+		e.preventDefault();
+		e.stopPropagation();
+		const id = grip.dataset.col as ColumnId;
+		const startX = e.clientX;
+		const startW = layout.cols.find((c) => c.id === id)?.width ?? 100;
+		const move = (ev: MouseEvent) => {
+			layout = setColumnWidth(layout, id, startW + ev.clientX - startX);
+			applyWidths();
+		};
+		const up = () => {
+			window.removeEventListener("mousemove", move);
+			window.removeEventListener("mouseup", up);
+			saveColumns();
+		};
+		window.addEventListener("mousemove", move);
+		window.addEventListener("mouseup", up);
+	});
+	ghead.addEventListener("dragstart", (e) => {
+		const th = (e.target as HTMLElement).closest<HTMLElement>(".hcell[data-col]");
+		if (!th || !e.dataTransfer) return;
+		dragCol = th.dataset.col as ColumnId;
+		e.dataTransfer.effectAllowed = "move";
+		e.dataTransfer.setData("text/plain", dragCol);
+		th.classList.add("dragging");
+	});
+	ghead.addEventListener("dragover", (e) => {
+		const th = (e.target as HTMLElement).closest<HTMLElement>(".hcell[data-col]");
+		if (!dragCol || !th || th.dataset.col === dragCol) return;
+		e.preventDefault();
+		const r = th.getBoundingClientRect();
+		const after = e.clientX > r.left + r.width / 2 || isFixedColumn(th.dataset.col as ColumnId);
+		for (const el of ghead.querySelectorAll(".drop-before, .drop-after")) el.classList.remove("drop-before", "drop-after");
+		th.classList.add(after ? "drop-after" : "drop-before");
+	});
+	ghead.addEventListener("drop", (e) => {
+		const th = (e.target as HTMLElement).closest<HTMLElement>(".hcell[data-col]");
+		const id = dragCol;
+		dragCol = null;
+		if (!th || !id || th.dataset.col === id) {
+			clearDrop();
+			return;
+		}
+		e.preventDefault();
+		const r = th.getBoundingClientRect();
+		layout = moveColumn(layout, id, th.dataset.col as ColumnId, e.clientX > r.left + r.width / 2);
+		clearDrop();
+		layoutChanged();
+	});
+	ghead.addEventListener("dragend", () => {
+		dragCol = null;
+		clearDrop();
+	});
+	ghead.addEventListener("contextmenu", (e) => {
+		e.preventDefault();
+		showColMenu(e.clientX, e.clientY);
+	});
+	$("colsBtn").addEventListener("click", (e) => {
+		e.stopPropagation();
+		if (!$("colMenu").hidden) {
+			hideColMenu();
+			return;
+		}
+		const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+		showColMenu(r.left, r.bottom + 2);
+	});
+	$("colMenu").addEventListener("change", (e) => {
+		const cb = e.target as HTMLInputElement;
+		const id = cb.dataset.col as ColumnId | undefined;
+		if (!id) return;
+		layout = setColumnVisible(layout, id, cb.checked);
+		layoutChanged();
+	});
+	$("colMenu").addEventListener("click", (e) => {
+		if (!(e.target as HTMLElement).closest("[data-colreset]")) return;
+		layout = defaultLayout();
+		layoutChanged();
+		renderColMenu();
+	});
 	$("panelSplit").addEventListener("mousedown", (e) => {
 		const right = $("right");
 		const sx = e.clientX;
@@ -1171,6 +1642,7 @@ function setupEvents(): void {
 	});
 	document.addEventListener("mousedown", (e) => {
 		if (!$("menu").hidden && !(e.target as HTMLElement).closest("#menu")) hideMenu();
+		if (!$("colMenu").hidden && !(e.target as HTMLElement).closest("#colMenu, #colsBtn")) hideColMenu();
 	});
 
 	$("overlay").addEventListener("click", overlayClick);
@@ -1201,6 +1673,8 @@ function setupEvents(): void {
 			search.select();
 		} else if (e.key === "Escape" && !$("menu").hidden) {
 			hideMenu();
+		} else if (e.key === "Escape" && !$("colMenu").hidden) {
+			hideColMenu();
 		}
 	});
 
@@ -1218,11 +1692,6 @@ function setupEvents(): void {
 }
 
 function setupRightPanel(): void {
-	// Quick actions
-	$("quick").addEventListener("click", (e) => {
-		const b = (e.target as HTMLElement).closest<HTMLButtonElement>("button[data-q]");
-		if (b && !b.disabled) quickSelect(b.dataset.q as QuickAction | "clear");
-	});
 	// "Show conflicts": filter to the conflicts of the selection.
 	$("right").addEventListener("click", (e) => {
 		if (!(e.target as HTMLElement).closest("[data-showconflicts]")) return;
@@ -1233,7 +1702,7 @@ function setupRightPanel(): void {
 	});
 
 	// Options
-	const bind = (id: string, key: Exclude<keyof Options, "testLevel">, after?: () => void) => {
+	const bind = (id: string, key: Exclude<keyof Options, "testLevel" | "delTestLevel">, after?: () => void) => {
 		const el = $(id) as HTMLInputElement;
 		el.addEventListener("change", () => {
 			ui.opts[key] = el.checked;
@@ -1256,6 +1725,14 @@ function setupRightPanel(): void {
 		});
 	}
 	($("test-search") as HTMLInputElement).addEventListener("input", () => filterTestList($("test-list"), ($("test-search") as HTMLInputElement).value));
+	for (const r of document.querySelectorAll<HTMLInputElement>('input[name="delTestLevel"]')) {
+		r.addEventListener("change", () => {
+			ui.opts.delTestLevel = r.value;
+			renderRight();
+			saveUi();
+		});
+	}
+	($("del-test-search") as HTMLInputElement).addEventListener("input", () => filterTestList($("del-test-list"), ($("del-test-search") as HTMLInputElement).value));
 	$("gitSelect").addEventListener("click", () => {
 		setStatus("Reading Git status…");
 		post({ command: "gitSelect" });
@@ -1289,8 +1766,25 @@ function setupRightPanel(): void {
 	// History
 	$("historyTab").addEventListener("click", () => {
 		historyOpen = !historyOpen;
+		if (historyOpen && activitySeg === "deploys" && (deploysStale || deploys === null)) loadDeploys();
+		else renderHistory();
+	});
+	$("segDeploys").addEventListener("click", () => {
+		activitySeg = "deploys";
+		if (deploysStale || deploys === null) loadDeploys();
+		else renderHistory();
+	});
+	$("segHistory").addEventListener("click", () => {
+		activitySeg = "history";
 		renderHistory();
 	});
+	$("depRefresh").addEventListener("click", loadDeploys);
+	$("depFailed").addEventListener("click", () => {
+		deployFailedOnly = !deployFailedOnly;
+		loadDeploys();
+	});
+	$("depList").addEventListener("click", onDeployListClick);
+	$("opCard").addEventListener("click", onOpCardClick);
 	$("histClose").addEventListener("click", () => {
 		historyOpen = false;
 		renderHistory();
@@ -1310,7 +1804,7 @@ function applyPreset(p: WebPreset): void {
 	const radio = document.querySelector<HTMLInputElement>(`input[name="testLevel"][value="${ui.opts.testLevel}"]`);
 	if (radio) radio.checked = true;
 	const names = new Set(p.testClassNames);
-	for (const cb of document.querySelectorAll<HTMLInputElement>(".test-class")) cb.checked = names.has(cb.value);
+	for (const cb of $("test-list").querySelectorAll<HTMLInputElement>(".test-class")) cb.checked = names.has(cb.value);
 	setStatus(`Preset “${p.name}”: ${found.length} of ${keys.length} component${keys.length === 1 ? "" : "s"} selected${keys.length > found.length ? ` (${keys.length - found.length} not in the list)` : ""}.`);
 	afterSelectionChange();
 	saveUi();
@@ -1404,10 +1898,9 @@ function onGridKey(e: KeyboardEvent): void {
 }
 
 function applyWidths(): void {
-	const w = ui.widths;
-	const cols = `34px minmax(140px,1fr) ${w.type}px ${w.ns}px ${w.by}px ${w.mod}px ${w.status}px 176px`;
-	document.documentElement.style.setProperty("--cols", cols);
-	document.documentElement.style.setProperty("--minw", 34 + 140 + w.type + w.ns + w.by + w.mod + w.status + 176 + "px");
+	const g = gridTemplate(layout);
+	document.documentElement.style.setProperty("--cols", g.cols);
+	document.documentElement.style.setProperty("--minw", g.minWidth + "px");
 	if (ui.rightWidth) $("right").style.width = ui.rightWidth + "px";
 }
 
@@ -1422,6 +1915,8 @@ function applyOptionsToControls(): void {
 	($("autoGit") as HTMLInputElement).checked = o.autoGit;
 	const radio = document.querySelector<HTMLInputElement>(`input[name="testLevel"][value="${o.testLevel}"]`) ?? document.querySelector<HTMLInputElement>('input[name="testLevel"][value="RunRelevantTests"]');
 	if (radio) radio.checked = true;
+	const delRadio = document.querySelector<HTMLInputElement>(`input[name="delTestLevel"][value="${o.delTestLevel}"]`) ?? document.querySelector<HTMLInputElement>('input[name="delTestLevel"][value="RunLocalTests"]');
+	if (delRadio) delRadio.checked = true;
 }
 
 function resetData(): void {
@@ -1536,6 +2031,8 @@ window.addEventListener("message", (ev) => {
 			noOrg = orgs.length === 0;
 			testClasses = m.testClasses ?? [];
 			mergeUi((m.ui as UiState | null) ?? (api.getState() as UiState | null));
+			layout = normalizeLayout(m.columns);
+			renderHeader();
 			loadChoices();
 			sharedSync.init(m.shared);
 			bar.syncSearchInput();
@@ -1543,6 +2040,7 @@ window.addEventListener("message", (ev) => {
 			applyOptionsToControls();
 			applyFiltersOpen();
 			mountTestTree($("test-list"), testClasses, () => renderRight());
+			mountTestTree($("del-test-list"), testClasses, () => renderRight());
 			renderOrgSelect();
 			if (Array.isArray(m.selection) && m.selection.length > 0) selected = new Set<string>((m.selection as string[]).map(rowKeyOf));
 			recompute();
@@ -1560,6 +2058,7 @@ window.addEventListener("message", (ev) => {
 			currentOrg = m.org;
 			renderOrgSelect();
 			resetData();
+			resetActivity();
 			loadChoices();
 			// A selection carried in by "open in the Center" survives the first org load.
 			if (keep.size > 0 && !loadedOnce) selected = keep;
@@ -1637,7 +2136,7 @@ window.addEventListener("message", (ev) => {
 			break;
 		case "compareProgress":
 			cmpProgress = (m.progress ?? null) as CompareProgress | null;
-			renderCompareInfo();
+			renderListed();
 			break;
 		case "me":
 			me = { ids: m.ids ?? [], name: m.name ?? "" };
@@ -1645,6 +2144,13 @@ window.addEventListener("message", (ev) => {
 			if (ui.filter.mine) recompute();
 			break;
 		case "busy":
+			// `{on, label?}`: the host is loading / scanning / listing (the progress bar). `{op}`: a deploy / retrieve / delete runs.
+			if (typeof m.on === "boolean") {
+				hostBusy = m.on ? { label: String(m.label ?? "") } : null;
+				renderListed();
+				renderOverlay();
+				break;
+			}
 			busyOp = m.op ?? null;
 			if (!busyOp) opPending = false;
 			renderRight();
@@ -1690,8 +2196,23 @@ window.addEventListener("message", (ev) => {
 			history = Array.isArray(m.entries) ? m.entries : [];
 			renderHistory();
 			break;
+		case "op":
+			onOpMessage(m as unknown as OpMessage);
+			break;
+		case "deploys":
+			deploys = Array.isArray(m.items) ? (m.items as DeployListItem[]) : [];
+			deploysError = typeof m.error === "string" ? m.error : "";
+			deploysLoading = false;
+			if (historyOpen) renderHistory();
+			break;
+		case "deployDetails":
+			deployDetailsAsked.delete(String(m.id));
+			deployDetailsCache.set(String(m.id), { details: (m.details ?? { componentErrors: [], testErrors: [] }) as DeployDetails, ...(m.error ? { error: String(m.error) } : {}) });
+			if (historyOpen && activitySeg === "deploys") renderHistory();
+			break;
 		case "testSuites":
 			suites.setSuites(Array.isArray(m.suites) ? m.suites : []);
+			delSuites.setSuites(Array.isArray(m.suites) ? m.suites : []);
 			break;
 		case "presets":
 			presets = Array.isArray(m.presets) ? m.presets : [];
@@ -1744,7 +2265,14 @@ window.setInterval(() => {
 	invalidateRows();
 	if (historyOpen) renderHistory();
 }, 60_000);
+// The operation card's elapsed time ticks once a second while the op runs.
+window.setInterval(() => {
+	if (!curOp || !isActivePhase(curOp.phase)) return;
+	const t = document.getElementById("opElapsed");
+	if (t) t.textContent = opElapsedText(curOp, Date.now());
+}, 1000);
 
 setupEvents();
+renderHeader();
 applyWidths();
 post({ command: "ready" });

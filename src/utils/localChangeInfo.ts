@@ -11,6 +11,8 @@ import { LocalInfoMap, computeLocalInfo, isPathDirty } from "./compareStatusPure
 import { GitLogScanResult, GitLogScan, LineSplitter, MAX_SCAN_COMMITS } from "./gitLogScanPure";
 import { LocalEntry } from "./orgBrowser/localIndex";
 import { Logger } from "./outputChannel";
+import { loadCommitSnapshot, saveCommitSnapshot, saveLocalInfo } from "./projectScanCache";
+import { commitMapsOf, commitSnapshotOf } from "./projectScanCachePure";
 
 const posix = (p: string) => p.split(path.sep).join("/");
 
@@ -32,6 +34,8 @@ export interface CommitTimes {
 	 * ("unchanged since at least then"). Null = nothing to bound with (empty log): use the file mtime.
 	 */
 	boundary: number | null;
+	/** The git HEAD the times are valid for. */
+	head: string;
 }
 
 /** One `git log` scan, streamed line by line; git is killed as soon as the accumulator is done. */
@@ -80,6 +84,15 @@ export async function gitCommitTimes(projectDir: string, packageDirs: string[], 
 	const dirsKey = packageDirs.join("|");
 	try {
 		let cache = commitCache.get(projectDir);
+		if (!cache) {
+			// A cache stored by an earlier session (or another panel's window): HEAD moved since → caught up below.
+			const stored = commitMapsOf(await loadCommitSnapshot(projectDir), dirsKey);
+			if (stored) {
+				cache = { head: stored.head, dirsKey, times: stored.times, bounds: stored.bounds };
+				commitCache.set(projectDir, cache);
+			}
+		}
+		let changed = false;
 		if (cache && cache.dirsKey !== dirsKey) cache = undefined;
 		if (cache && cache.head !== head) {
 			let ok = false;
@@ -99,6 +112,7 @@ export async function gitCommitTimes(projectDir: string, packageDirs: string[], 
 						cache.bounds.delete(p);
 					}
 					cache.head = head;
+					changed = true;
 				}
 			}
 			if (!ok) cache = undefined;
@@ -106,6 +120,7 @@ export async function gitCommitTimes(projectDir: string, packageDirs: string[], 
 		if (!cache) {
 			cache = { head, dirsKey, times: new Map(), bounds: new Map() };
 			commitCache.set(projectDir, cache);
+			changed = true;
 		}
 		const unresolved = [...needed].filter((p) => !cache!.times.has(p) && !cache!.bounds.has(p));
 		if (unresolved.length > 0) {
@@ -113,14 +128,16 @@ export async function gitCommitTimes(projectDir: string, packageDirs: string[], 
 			for (const [p, t] of r.times) cache.times.set(p, t);
 			// Not found: unchanged since at least the oldest commit read (none read = empty log: stays unresolved, mtime).
 			if (r.boundary !== null) for (const p of unresolved) if (!r.times.has(p)) cache.bounds.set(p, r.boundary);
+			changed = true;
 		}
+		if (changed) void saveCommitSnapshot(projectDir, commitSnapshotOf(cache.head, cache.dirsKey, cache.times, cache.bounds));
 		let boundary: number | null = null;
 		for (const p of needed) {
 			if (cache.times.has(p)) continue;
 			const b = cache.bounds.get(p);
 			if (b !== undefined && (boundary === null || b > boundary)) boundary = b; // max: a valid upper bound for every path
 		}
-		return { times: cache.times, boundary };
+		return { times: cache.times, boundary, head };
 	} catch (e) {
 		Logger.info(`Compare: could not read the git history of ${projectDir}: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
 		return null;
@@ -150,5 +167,7 @@ export async function readLocalInfo(projectDir: string, entries: Iterable<LocalE
 	// Only the files of clean components need a commit time; dirty files use their mtime.
 	const needed = dirty ? new Set(all.filter((rel) => !isPathDirty(rel, dirty))) : new Set<string>();
 	const commits = dirty === null ? null : await gitCommitTimes(projectDir, packageDirs, needed);
-	return computeLocalInfo(comps, (rel) => mtimes.get(rel) ?? 0, dirty, commits?.times ?? null, commits?.boundary ?? null);
+	const info = computeLocalInfo(comps, (rel) => mtimes.get(rel) ?? 0, dirty, commits?.times ?? null, commits?.boundary ?? null);
+	void saveLocalInfo(projectDir, commits?.head ?? null, info);
+	return info;
 }

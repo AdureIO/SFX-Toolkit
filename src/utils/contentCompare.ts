@@ -13,6 +13,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { ContentInfoMap, CompareProgress } from "./compareStatusPure";
+import { readGzipJson, writeGzipJson } from "./diskCache";
 import {
 	CompareIndexFile,
 	IndexEntry,
@@ -94,7 +95,9 @@ interface Queued {
 export type UpdateListener = (keys: string[]) => void;
 export type ProgressListener = (p: CompareProgress) => void;
 
-const INDEX_FILE = "index.json";
+/** The compare index: gzip JSON like the other caches (`diskCache`). `index.json` is the plain file older versions wrote. */
+const INDEX_FILE = "index.json.gz";
+const LEGACY_INDEX_FILE = "index.json";
 
 class SimpleToken implements CancelToken {
 	isCancellationRequested = false;
@@ -145,6 +148,7 @@ export class ContentCompareService {
 	private readonly progressListeners = new Set<ProgressListener>();
 	private readonly digestCache = new Map<string, { mtimeMs: number; size: number; digest: string }>();
 	private flushTimer: ReturnType<typeof setTimeout> | undefined;
+	private flushTail: Promise<void> = Promise.resolve();
 	private idleWaiters: (() => void)[] = [];
 	/** Tail of the chain that serializes the `sf` retrieves into the stub project (compare chunks, on-demand copies). */
 	private lockTail: Promise<void> = Promise.resolve();
@@ -157,15 +161,24 @@ export class ContentCompareService {
 
 	// ── Index ────────────────────────────────────────────────────────────────────
 
-	/** Read the persisted index (once). Safe to call repeatedly. */
+	/** Read the persisted index and digest cache (once). Safe to call repeatedly. */
 	load(): Promise<void> {
 		if (!this.loaded) {
 			this.loaded = (async () => {
-				try {
-					const raw = JSON.parse(await fs.promises.readFile(path.join(this.deps.cacheRoot, INDEX_FILE), "utf8")) as CompareIndexFile;
-					if (raw && raw.v === 1 && raw.entries && typeof raw.entries === "object") this.index = raw;
-				} catch {
-					/* no index yet */
+				let raw = await readGzipJson<CompareIndexFile>(path.join(this.deps.cacheRoot, INDEX_FILE));
+				if (!raw) {
+					try {
+						raw = JSON.parse(await fs.promises.readFile(path.join(this.deps.cacheRoot, LEGACY_INDEX_FILE), "utf8")) as CompareIndexFile;
+					} catch {
+						/* no index yet */
+					}
+				}
+				if (raw && raw.v === 1 && raw.entries && typeof raw.entries === "object") {
+					this.index = { v: 1, entries: raw.entries };
+					// The digests of the local files read last time: a file whose mtime and size are unchanged is not read again.
+					for (const [abs, d] of Object.entries(raw.digests ?? {})) {
+						if (Array.isArray(d) && typeof d[0] === "number" && typeof d[1] === "number" && typeof d[2] === "string") this.digestCache.set(abs, { mtimeMs: d[0], size: d[1], digest: d[2] });
+					}
 				}
 				await this.sweepRunDirs();
 			})();
@@ -183,21 +196,25 @@ export class ContentCompareService {
 		(this.flushTimer as { unref?: () => void }).unref?.();
 	}
 
-	/** Write the index now (temp file + rename). */
-	async flush(): Promise<void> {
+	/** Write the index (and the local digests) now: gzip JSON, temp file + rename; writes never overlap. */
+	flush(): Promise<void> {
 		if (this.flushTimer) {
 			clearTimeout(this.flushTimer);
 			this.flushTimer = undefined;
 		}
-		try {
-			await fs.promises.mkdir(this.deps.cacheRoot, { recursive: true });
-			const file = path.join(this.deps.cacheRoot, INDEX_FILE);
-			const tmp = `${file}.${process.pid}.tmp`;
-			await fs.promises.writeFile(tmp, JSON.stringify(this.index), "utf8");
-			await fs.promises.rename(tmp, file);
-		} catch {
-			/* the index is a cache */
-		}
+		const run = this.flushTail.then(async () => {
+			try {
+				const digests: Record<string, [number, number, string]> = {};
+				for (const [abs, d] of this.digestCache) digests[abs] = [d.mtimeMs, d.size, d.digest];
+				const file: CompareIndexFile = { v: 1, entries: this.index.entries, digests };
+				await writeGzipJson(path.join(this.deps.cacheRoot, INDEX_FILE), file);
+				await fs.promises.rm(path.join(this.deps.cacheRoot, LEGACY_INDEX_FILE), { force: true });
+			} catch {
+				/* the index is a cache */
+			}
+		});
+		this.flushTail = run;
+		return run;
 	}
 
 	/** The wire form of the compare results of `keys` (default: all) for the webviews. Keys are the panels' row keys. */
@@ -454,6 +471,7 @@ export class ContentCompareService {
 				}
 				const digest = digestContent(await fs.promises.readFile(f.abs));
 				this.digestCache.set(f.abs, { mtimeMs: st.mtimeMs, size: st.size, digest });
+				this.scheduleFlush();
 				out.set(f.inner, digest);
 			} catch {
 				/* a file removed since the scan: the component's local set shrinks (→ different) */

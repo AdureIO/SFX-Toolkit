@@ -22,11 +22,13 @@ import { orgLookupKey, preDeployPrompt } from "../utils/deployStatusPure";
 import { confirmationMatches, deleteListing } from "../utils/destructivePure";
 import { getToolingApiVersion } from "../utils/constants";
 import { getNonce } from "../utils/htmlUtils";
-import { HistoryEntry, historyErrorsFromDeploy } from "../utils/historyPure";
+import { HistoryEntry, cleanLabel, historyErrorsFromDeploy } from "../utils/historyPure";
+import { COLUMNS_STORE_KEY, normalizeLayout } from "../utils/syncCenterColumnsPure";
+import { checkDeleteTestOptions } from "../utils/deployTestArgsPure";
 import { readLocalInfo } from "../utils/localChangeInfo";
 import { openOrgPath } from "../utils/openOrgPath";
 import { resolveCurrentUser } from "../utils/orgBrowser/currentUser";
-import { LocalEntry, LocalIndex, OBJECT_CHILD_TYPES, buildTypeTable, overwriteTargets, partialObjectKeys, readPackageDirectories, scanProject } from "../utils/orgBrowser/localIndex";
+import { LocalEntry, LocalIndex, OBJECT_CHILD_TYPES, overwriteTargets, partialObjectKeys, readPackageDirectories } from "../utils/orgBrowser/localIndex";
 import { listFailureView, runListing } from "../utils/orgBrowser/listingRunner";
 import { ListCancelled, expandOnlyTypes, loadListingCache, saveListingCache } from "../utils/orgBrowser/metadataLister";
 import { hiddenSelectionPrompt, splitByVisibility } from "../utils/orgBrowser/selection";
@@ -56,6 +58,8 @@ import { reauthenticateOrg } from "../commands/orgCommands";
 import { DeployMetadataPanelProvider } from "./DeployMetadataPanelProvider";
 import { OperationPanelProvider } from "./OperationPanelProvider";
 import { syncCenterHtml } from "./syncCenterHtml";
+import { OpHandle, OpenTimings, SyncCenterActivity, mergeTokens } from "./syncCenterActivityHost";
+import { peekLocalIndex, peekLocalInfo, scanProjectCached } from "../utils/projectScanCache";
 
 const UI_STATE_KEY = "adure-sfx-toolkit.syncCenter.ui";
 const CHUNK = 4000;
@@ -108,12 +112,26 @@ export class SyncCenterPanelProvider {
 	private static infoTimer: ReturnType<typeof setTimeout> | undefined;
 	private static binding: PanelProjectBinding | undefined;
 	private static busy: Busy | null = null;
+	/** Nested loads / scans / listings in progress: the webview's progress bar (`{type:"busy", on, label}`). */
+	private static loadDepth = 0;
 	private static autoGit = false;
 	/** Options of a `show` that switched the project: applied once the panel has rebuilt for it. */
 	private static pendingOpen: SyncCenterOpenOptions | undefined;
 	/** The selection to hand the webview with the next init. */
 	private static initialSelection: string[] = [];
 	private static soapCalls = 0;
+	private static compareStartedAt = 0;
+	/** Live operations, recent deploys, cancel (see syncCenterActivityHost). */
+	private static activity: SyncCenterActivity | undefined;
+	/** Phases of opening the panel, logged once. */
+	private static timings: OpenTimings | undefined;
+	/** `refreshLocal` runs one at a time; a call during a run makes it run once more afterwards (open used to start three scans at once). */
+	private static localRun: Promise<void> | undefined;
+	private static localAgain = false;
+	private static localForce = false;
+	/** The Apex test classes, read while the webview loads. */
+	private static testClassesFor: { root: string; p: Promise<{ label: string; description: string }[]> } | undefined;
+	private static endCompareBusy: (() => void) | undefined;
 
 	private static projectDir(): string | undefined {
 		return this.binding?.current() ?? primaryProjectRoot();
@@ -164,6 +182,25 @@ export class SyncCenterPanelProvider {
 		this.userPicked = !!opts.org;
 		this.initialSelection = opts.selection ?? [];
 		this.panel = panel;
+		this.timings = new OpenTimings();
+		this.activity = new SyncCenterActivity({
+			post: (m) => this.post(m),
+			projectDir: () => this.projectDir(),
+			orgArg: () => (this.orgKey === DEFAULT_ORG_KEY ? null : this.orgArg),
+			orgLabel: () => this.orgLabel(),
+			sameOrg: (o) => this.sameOrg(o),
+			generation: () => this.gen,
+			busy: (label) => {
+				this.beginLoad(label);
+				let ended = false;
+				return () => {
+					if (!ended) {
+						ended = true;
+						this.endLoad();
+					}
+				};
+			},
+		});
 		panel.iconPath = vscode.Uri.joinPath(ctx.extensionUri, "resources", "icon.png");
 		panel.webview.html = this.getHtml(panel.webview, ctx.extensionUri);
 
@@ -171,6 +208,7 @@ export class SyncCenterPanelProvider {
 		const binding = new PanelProjectBinding();
 		this.binding = binding;
 		if (opts.projectDir) binding.pick(opts.projectDir);
+		this.prefetchTestClasses();
 		this.disposables.push(
 			binding,
 			binding.attach(panel.webview),
@@ -221,7 +259,13 @@ export class SyncCenterPanelProvider {
 		if (this.compareTimer) clearTimeout(this.compareTimer);
 		if (this.infoTimer) clearTimeout(this.infoTimer);
 		this.panel = undefined;
+		this.loadDepth = 0;
 		this.releaseLease();
+		this.endCompareBusy = undefined;
+		this.activity = undefined;
+		this.timings = undefined;
+		this.testClassesFor = undefined;
+		this.localRun = undefined;
 		this.byOrgKey = new Map();
 		this.binding = undefined;
 		this.busy = null;
@@ -238,6 +282,17 @@ export class SyncCenterPanelProvider {
 		this.post({ type: "status", text });
 	}
 
+	/** Mark a load / scan / listing as running; the webview shows its progress bar while any is. Pair with `endLoad` (try/finally). */
+	private static beginLoad(label: string): void {
+		this.loadDepth++;
+		this.post({ type: "busy", on: true, label });
+	}
+
+	private static endLoad(): void {
+		this.loadDepth = Math.max(0, this.loadDepth - 1);
+		if (this.loadDepth === 0) this.post({ type: "busy", on: false });
+	}
+
 	/** The project of the panel changed: rebuild everything bound to it, as if the panel were newly opened. */
 	private static async onProjectChanged(): Promise<void> {
 		if (!this.panel) return;
@@ -249,6 +304,7 @@ export class SyncCenterPanelProvider {
 		this.pendingOpen = undefined;
 		if (open?.org) this.userPicked = true;
 		if (open?.selection) this.initialSelection = open.selection;
+		this.prefetchTestClasses();
 		await this.sendInit();
 		await this.loadOrg(open?.org ?? null);
 	}
@@ -257,6 +313,7 @@ export class SyncCenterPanelProvider {
 
 	private static async onMessage(msg: { command: string; [k: string]: any }, initialOrg: () => string | null): Promise<void> {
 		const key = () => String(msg.key ?? "");
+		if (this.activity?.handle(msg)) return;
 		switch (msg.command) {
 			case "ready":
 				await this.sendInit();
@@ -267,6 +324,7 @@ export class SyncCenterPanelProvider {
 				await this.loadOrg(String(msg.org));
 				break;
 			case "refresh":
+				this.localForce = true; // Refresh does not trust the stored project index
 				if (this.orgKey === DEFAULT_ORG_KEY) await this.loadOrg(null);
 				else await this.list();
 				break;
@@ -333,6 +391,10 @@ export class SyncCenterPanelProvider {
 			case "uiState":
 				void this.ctx?.workspaceState.update(UI_STATE_KEY, msg.state);
 				break;
+			case "columns":
+				// Per computer (not per workspace): order, visibility and widths of the grid columns.
+				void this.ctx?.globalState.update(COLUMNS_STORE_KEY, normalizeLayout(msg.layout));
+				break;
 			case "saveTestSuite":
 			case "deleteTestSuite": {
 				const dir = this.projectDir();
@@ -347,11 +409,25 @@ export class SyncCenterPanelProvider {
 
 	// ── Init / org list ──────────────────────────────────────────────────────────
 
+	/** Read the test classes now (they are a file scan): by the time the webview says `ready` they are usually done. */
+	private static prefetchTestClasses(): void {
+		const root = this.projectDir();
+		if (!root) return;
+		this.testClassesFor = { root, p: Promise.resolve().then(() => getTestClassItems(root)).catch(() => []) };
+	}
+
+	private static takeTestClasses(root: string): Promise<{ label: string; description: string }[]> {
+		const pre = this.testClassesFor;
+		this.testClassesFor = undefined;
+		if (pre && pre.root === root) return pre.p;
+		return Promise.resolve().then(() => getTestClassItems(root)).catch(() => []);
+	}
+
 	private static async sendInit(): Promise<void> {
 		const root = this.projectDir();
 		const picker = root ? await orgPickerForProject(root).catch(() => ({ orgs: [], defaultOrg: "" })) : { orgs: [], defaultOrg: "" };
 		const key = canonicalOrgKey(null, root);
-		const testClasses = root ? await Promise.resolve().then(() => getTestClassItems(root)).catch(() => []) : [];
+		const testClasses = root ? await this.takeTestClasses(root) : [];
 		const selection = this.initialSelection;
 		this.initialSelection = [];
 		this.post({
@@ -362,6 +438,7 @@ export class SyncCenterPanelProvider {
 			projectDir: root ?? "",
 			projectName: root ? path.basename(root) : "",
 			ui: this.ctx?.workspaceState.get(UI_STATE_KEY) ?? null,
+			columns: normalizeLayout(this.ctx?.globalState.get(COLUMNS_STORE_KEY)),
 			shared: SharedMetadataFilter.get(root),
 			testClasses,
 			childTypes: [...OBJECT_CHILD_TYPES],
@@ -426,8 +503,18 @@ export class SyncCenterPanelProvider {
 	}
 
 	private static async loadOrg(org: string | null): Promise<void> {
+		this.beginLoad("Loading…");
+		try {
+			await this.loadOrgInner(org);
+		} finally {
+			this.endLoad();
+		}
+	}
+
+	private static async loadOrgInner(org: string | null): Promise<void> {
 		if (!this.panel) return;
 		const gen = ++this.gen;
+		this.timings = new OpenTimings();
 		if (this.run) this.run.cancelled = true;
 		const key = canonicalOrgKey(org, this.projectDir());
 		this.orgKey = key;
@@ -443,7 +530,19 @@ export class SyncCenterPanelProvider {
 		this.post({ type: "reset", org: key === DEFAULT_ORG_KEY ? null : key });
 
 		const root = this.projectDir();
+		// What does not depend on the org list starts at once and runs beside it: the local scan and the stored listing.
+		const t0 = Date.now();
+		void this.refreshLocal();
+		// The Org Browser's listing cache is shared: opening the Center for an org the Org Browser listed is instant.
+		const cacheP =
+			key === DEFAULT_ORG_KEY
+				? Promise.resolve(null)
+				: loadListingCache(this.cacheDir(), key).then((c) => {
+					this.timings?.mark(`stored listing${c ? ` (${c.comps.length} components)` : " (none)"}`, Date.now() - t0);
+					return c;
+				});
 		const picker = root ? await orgPickerForProject(root).catch(() => ({ orgs: [], defaultOrg: "" })) : { orgs: [], defaultOrg: "" };
+		this.timings?.mark("org list", Date.now() - t0);
 		if (gen !== this.gen) return;
 		if (picker.orgs.length === 0) {
 			this.post({ type: "orgs", orgs: [], org: null });
@@ -451,15 +550,12 @@ export class SyncCenterPanelProvider {
 		}
 		if (key === DEFAULT_ORG_KEY) {
 			this.post({ type: "loadError", state: "noDefaultOrg", message: "No default org is set. Choose an org to compare the project with." });
-			void this.refreshLocal();
 			return;
 		}
 		void this.acquireLease(key, gen);
-		void this.refreshLocal();
 		void this.resolveMe(gen);
 
-		// The Org Browser's listing cache is shared: opening the Center for an org the Org Browser listed is instant.
-		const cache = await loadListingCache(this.cacheDir(), key);
+		const cache = await cacheP;
 		if (gen !== this.gen) return;
 		if (cache) {
 			this.types = cache.types;
@@ -500,6 +596,7 @@ export class SyncCenterPanelProvider {
 		const isCancelled = () => run.cancelled || gen !== this.gen;
 		const expanded = only ? expandOnlyTypes(only) : undefined;
 		this.post({ type: "loadStart", mode: only ? "types" : this.comps.length > 0 ? "refresh" : "live", only: expanded });
+		this.beginLoad(only ? "Listing metadata…" : "Listing the org’s metadata…");
 		try {
 			const out = await runListing({
 				orgKey: this.orgKey,
@@ -531,12 +628,59 @@ export class SyncCenterPanelProvider {
 			this.post({ type: "loadError", state: view.state, message: view.message });
 		} finally {
 			if (this.run === run) this.run = undefined;
+			this.endLoad();
 		}
 	}
 
 	// ── Local index ──────────────────────────────────────────────────────────────
 
-	private static async refreshLocal(): Promise<void> {
+	/**
+	 * Scan the project (and read its change times). One run at a time: a call during a run (open used to start three
+	 * scans at once: before the org list, after it, after the listing) makes it run once more afterwards.
+	 * `force`: do not trust the stored index (the Refresh button).
+	 */
+	private static refreshLocal(force = false): Promise<void> {
+		if (force) this.localForce = true;
+		if (this.localRun) {
+			this.localAgain = true;
+			return this.localRun;
+		}
+		const run = (async () => {
+			try {
+				do {
+					this.localAgain = false;
+					const f = this.localForce;
+					this.localForce = false;
+					this.beginLoad("Reading the project…");
+					try {
+						await this.refreshLocalInner(f);
+					} finally {
+						this.endLoad();
+					}
+				} while (this.localAgain && this.panel);
+			} finally {
+				this.localRun = undefined;
+			}
+		})();
+		this.localRun = run;
+		return run;
+	}
+
+	/** Send the local index to the webview (`local` message) and remember it for the compare and the actions. */
+	private static applyLocal(index: LocalIndex, root: string): void {
+		this.local = index;
+		this.byOrgKey = new Map([...index.entries.values()].map((e) => [orgLookupKey(e.type, e.name), e]));
+		this.post({
+			type: "local",
+			entries: [...index.entries.values()].map((e) => ({ type: e.type, name: e.name, key: e.key, path: path.relative(root, e.primary).split(path.sep).join("/") })),
+			partial: partialObjectKeys(index.entries),
+			retrieved: getRetrieveTimes(this.orgKey === DEFAULT_ORG_KEY ? null : this.orgKey),
+			hasProject: true,
+		});
+		void this.postPresets();
+	}
+
+	private static async refreshLocalInner(force: boolean): Promise<void> {
 		if (!this.panel) return;
 		const gen = this.gen;
 		const root = this.projectDir();
@@ -546,18 +690,25 @@ export class SyncCenterPanelProvider {
 		}
 		try {
 			const dirs = readPackageDirectories(root);
-			const index = await scanProject(root, dirs.length > 0 ? dirs : ["force-app"], buildTypeTable(this.types));
+			const pkg = dirs.length > 0 ? dirs : ["force-app"];
+			// 1. Paint at once from the stored index (and the stored change times); 2. check it against the disk in the background.
+			if (!this.local && !force) {
+				const t = Date.now();
+				const stored = await peekLocalIndex(root, pkg, this.types);
+				if (gen !== this.gen || !this.panel) return;
+				if (stored) {
+					this.applyLocal(stored, root);
+					const info = await peekLocalInfo(root, stored.entries.keys());
+					if (gen !== this.gen || !this.panel) return;
+					if (info) this.post({ type: "compareLocal", local: info });
+					this.timings?.mark(`stored project index (${stored.entries.size} components)`, Date.now() - t);
+				}
+			}
+			const t1 = Date.now();
+			const r = await scanProjectCached(root, pkg, this.types, { force });
 			if (gen !== this.gen || !this.panel) return;
-			this.local = index;
-			this.byOrgKey = new Map([...index.entries.values()].map((e) => [orgLookupKey(e.type, e.name), e]));
-			this.post({
-				type: "local",
-				entries: [...index.entries.values()].map((e) => ({ type: e.type, name: e.name, key: e.key })),
-				partial: partialObjectKeys(index.entries),
-				retrieved: getRetrieveTimes(this.orgKey === DEFAULT_ORG_KEY ? null : this.orgKey),
-				hasProject: true,
-			});
-			void this.postPresets();
+			if (!r.reused || !this.local) this.applyLocal(r.index, root);
+			this.timings?.mark(r.reused ? "index check (unchanged)" : `project scan (${r.index.entries.size} components)`, Date.now() - t1);
 			await this.refreshLocalInfo();
 		} catch (e: any) {
 			Logger.error("Deploy & Retrieve Center: local scan failed", e?.message ?? e);
@@ -569,6 +720,8 @@ export class SyncCenterPanelProvider {
 	private static releaseLease(): void {
 		for (const d of this.leaseSubs) d.dispose();
 		this.leaseSubs = [];
+		this.endCompareBusy?.();
+		this.endCompareBusy = undefined;
 		if (this.lease) {
 			this.lease.release();
 			this.lease = undefined;
@@ -586,12 +739,27 @@ export class SyncCenterPanelProvider {
 		this.leaseSubs.push(
 			// Results are keyed by the local index key, which is what the rows look them up by.
 			service.onDidUpdate((localKeys) => this.post({ type: "compareContent", full: false, content: service.contentInfo(localKeys) })),
-			service.onDidProgress((progress) => this.post({ type: "compareProgress", progress }))
+			service.onDidProgress((progress) => {
+				this.post({ type: "compareProgress", progress });
+				this.trackCompareBusy(progress.state === "running", progress);
+			})
 		);
 		await service.load();
 		if (gen !== this.gen || this.lease !== lease) return;
 		this.post({ type: "compareProgress", progress: service.progress() });
 		await this.pushContent();
+	}
+
+	/** The compare's phase as the webview's busy bar: on while contents are being retrieved and compared. */
+	private static trackCompareBusy(running: boolean, p: { done: number; total: number }): void {
+		if (running && !this.endCompareBusy) {
+			this.endCompareBusy = this.activity?.busyBegin("Comparing contents…");
+			this.compareStartedAt = Date.now();
+		} else if (!running && this.endCompareBusy) {
+			this.endCompareBusy();
+			this.endCompareBusy = undefined;
+			Logger.info(`Deploy & Retrieve Center: content compare finished: ${p.done} component(s) in ${Date.now() - this.compareStartedAt} ms`);
+		}
 	}
 
 	/** Local components that are in the listing, ready for the compare service (`orgKeys`: only these). */
@@ -623,19 +791,32 @@ export class SyncCenterPanelProvider {
 		const root = this.projectDir();
 		const gen = this.gen;
 		if (!root || !this.local || !this.panel || !this.hasSfdxProject()) return;
-		let dirty: string[] | null = null;
+		this.beginLoad("Reading change times…");
 		try {
-			dirty = await DeployMetadataPanelProvider.runGitStatusSfdxPaths(root);
-		} catch {
-			dirty = null; // not a git repository: file times only
+			const t0 = Date.now();
+			let dirty: string[] | null = null;
+			try {
+				dirty = await DeployMetadataPanelProvider.runGitStatusSfdxPaths(root);
+			} catch {
+				dirty = null; // not a git repository: file times only
+			}
+			const t1 = Date.now();
+			const dirs = readPackageDirectories(root);
+			const local: LocalInfoMap = await readLocalInfo(root, this.local.entries.values(), dirs.length > 0 ? dirs : ["force-app"], dirty);
+			if (gen !== this.gen || !this.panel) return;
+			this.timings?.mark("git status", t1 - t0);
+			this.timings?.mark("change times", Date.now() - t1);
+			this.post({ type: "compareLocal", local });
+			if (this.autoGit && dirty) this.postModified(dirty, true);
+			const t2 = Date.now();
+			await this.pushContent();
+			this.timings?.mark("stored compare results", Date.now() - t2);
+			this.timings?.at("ready");
+			this.timings?.log("Deploy & Retrieve Center open");
+			this.scheduleCompare(0);
+		} finally {
+			this.endLoad();
 		}
-		const dirs = readPackageDirectories(root);
-		const local: LocalInfoMap = await readLocalInfo(root, this.local.entries.values(), dirs.length > 0 ? dirs : ["force-app"], dirty);
-		if (gen !== this.gen || !this.panel) return;
-		this.post({ type: "compareLocal", local });
-		if (this.autoGit && dirty) this.postModified(dirty, true);
-		await this.pushContent();
-		this.scheduleCompare(0);
 	}
 
 	private static scheduleCompare(ms: number): void {
@@ -728,16 +909,27 @@ export class SyncCenterPanelProvider {
 			this.post({ type: "deployResult", cancelled: true, dryRun });
 			return;
 		}
+		// A conflict row's own Deploy icon acts directly: say what it overwrites first. A validation overwrites nothing.
+		if (msg.conflict === true && !dryRun) {
+			const name = items[0]?.key ?? "this component";
+			const go = "Overwrite org";
+			const choice = await vscode.window.showWarningMessage(`Conflict: overwrite the org’s version with your local version?`, { modal: true, detail: `${name} changed in the project and in the org. Deploying replaces the org’s version with the local one.` }, go);
+			if (choice !== go) {
+				this.post({ type: "deployResult", cancelled: true, dryRun });
+				return;
+			}
+		}
 		const localKeys = [...new Set(items.flatMap((i) => i.local))];
 		await this.doDeploy({
 			localKeys,
 			testLevel: String(msg.testLevel ?? ""),
 			testNames: Array.isArray(msg.testClassNames) ? msg.testClassNames.map(String) : [],
 			dryRun,
+			label: cleanLabel(msg.label),
 		});
 	}
 
-	private static async doDeploy(p: { localKeys: string[]; testLevel: string; testNames: string[]; dryRun: boolean }): Promise<void> {
+	private static async doDeploy(p: { localKeys: string[]; testLevel: string; testNames: string[]; dryRun: boolean; label?: string }): Promise<void> {
 		const { dryRun, testLevel } = p;
 		const root = this.projectDir();
 		const fail = (error: string, toast = true) => {
@@ -764,6 +956,9 @@ export class SyncCenterPanelProvider {
 			return fail(e instanceof Error ? e.message : String(e));
 		}
 		this.setBusy("deploy");
+		const opN = deployedKeys.length;
+		const op = this.activity?.beginOp(dryRun ? "validate" : "deploy", p.label || `${dryRun ? "Validate" : "Deploy"} ${opN} component${opN === 1 ? "" : "s"}`);
+		let opError: unknown;
 		const service = this.lease?.service;
 		// No background content compare while a deploy / validation runs; it continues afterwards.
 		service?.pause();
@@ -799,14 +994,16 @@ export class SyncCenterPanelProvider {
 			}
 			this.status("");
 			this.post({ type: "deployStart", dryRun });
-			const run = await runDeploy({ absPaths, testLevel, testFlags, dryRun, root, targetOrg });
+			op?.running();
+			const run = await runDeploy({ absPaths, testLevel, testFlags, dryRun, root, targetOrg, onProgress: (s) => op?.live(s), cancelToken: op?.token });
 			const { outcome, startedAt, durationMs } = run;
+			op?.settle(outcome);
 			if (outcome.kind === "cancelled") {
 				this.post({ type: "deployResult", success: false, cancelled: true, dryRun, durationMs });
 			} else if (outcome.kind === "success") {
 				const { stats, coverage, apiResult } = outcome;
 				this.post({ type: "deployResult", success: true, cancelled: false, dryRun, ...stats, coverage, durationMs });
-				recordHistory(root, { kind: dryRun ? "validate" : "deploy", org: targetOrg, at: startedAt, durationMs, components: deployedKeys, testLevel, tests: testFlags, deployId: outcome.deployId, ok: true, source: "center" });
+				recordHistory(root, { kind: dryRun ? "validate" : "deploy", org: targetOrg, at: startedAt, durationMs, components: deployedKeys, testLevel, tests: testFlags, deployId: outcome.deployId, ok: true, source: "center", ...(p.label ? { label: p.label } : {}) });
 				// A real deploy: record the components with the org's new lastModifiedDate (our own deploy must not show as "changed in org").
 				if (!dryRun && (apiResult !== undefined || stats.components > 0)) await this.afterDeploy(deployedKeys, outcome.completedAt ?? Date.now());
 			} else {
@@ -824,10 +1021,16 @@ export class SyncCenterPanelProvider {
 					ok: false,
 					errors: historyErrorsFromDeploy(apiResult ? withSyntheticTestFailures(apiResult) : undefined, errorText),
 					source: "center",
+					...(p.label ? { label: p.label } : {}),
 				});
 			}
 			reportDeployOutcome({ run, dryRun, root, targetOrg });
+		} catch (e) {
+			opError = e;
+			throw e;
 		} finally {
+			// Declined at a confirmation = cancelled; an error thrown on the way = failed.
+			if (op && !op.finished) op.end(opError ? "failed" : "cancelled", opError ? String((opError as Error)?.message ?? opError) : undefined);
 			service?.resume();
 			this.setBusy(null);
 		}
@@ -891,6 +1094,16 @@ export class SyncCenterPanelProvider {
 			this.post({ type: "retrieveResult", results: [], cancelled: true });
 			return;
 		}
+		// A conflict row's own Retrieve icon acts directly: say what it overwrites first.
+		if (msg.conflict === true) {
+			const name = items[0]?.key ?? "this component";
+			const go = "Overwrite local";
+			const choice = await vscode.window.showWarningMessage(`Conflict: overwrite your local version with the org’s version?`, { modal: true, detail: `${name} changed in the project and in the org. Retrieving replaces the local files with the org’s version.` }, go);
+			if (choice !== go) {
+				this.post({ type: "retrieveResult", results: [], cancelled: true });
+				return;
+			}
+		}
 		const seen = new Set<string>();
 		const refs = items.flatMap((i) => i.refs).filter((r) => {
 			const k = compKey(r.type, r.fullName);
@@ -916,6 +1129,7 @@ export class SyncCenterPanelProvider {
 			return cancel();
 		}
 		this.setBusy("retrieve");
+		let op: OpHandle | undefined;
 		try {
 			const locals = [...this.local.entries.values()];
 			const targets = [
@@ -936,9 +1150,18 @@ export class SyncCenterPanelProvider {
 				confirm: p.confirm,
 				source: "center",
 				afterWrite: () => this.refreshLocal(),
+				// A retrieve has no queued phase: it starts once the overwrite confirmation (if any) is accepted.
+				onStart: () => {
+					op = this.activity?.beginOp("retrieve", `Retrieve ${p.refs.length} component${p.refs.length === 1 ? "" : "s"}`, "running");
+				},
+				onProgress: (done, total) => op?.retrieveProgress(done, total),
 			});
-			if (flow.cancelled || !flow.outcome) return cancel();
+			if (flow.cancelled || !flow.outcome) {
+				op?.end("failed", "Cancelled");
+				return cancel();
+			}
 			const out = flow.outcome;
+			op?.end(out.failed.length > 0 ? "failed" : "done", out.failed.length > 0 ? `Retrieved ${out.retrieved.length}, ${out.failed.length} failed` : `Retrieved ${out.retrieved.length}`);
 			this.post({
 				type: "retrieveResult",
 				results: [
@@ -949,6 +1172,7 @@ export class SyncCenterPanelProvider {
 			// The retrieved copies are the org's now: compare them again so the rows settle on Equal.
 			void this.requestCompare(true, out.retrieved.map((r) => compKey(r.type, r.fullName)));
 		} finally {
+			op?.end("failed", "Interrupted");
 			this.setBusy(null);
 		}
 	}
@@ -996,9 +1220,16 @@ export class SyncCenterPanelProvider {
 		const skippedLine = dropped.length > 0 ? [`Skipped ${dropped.length} component(s) that exist locally: ${dropped.slice(0, 5).map((r) => `${r.type}:${r.fullName}`).join(", ")}${dropped.length > 5 ? ", …" : ""}`, ""] : [];
 		const org = this.orgArg;
 		const check = await checkOrgForDestructive(org, root);
+		// The Delete section's own test options. An org that could not be verified counts as production.
+		const testCheck = checkDeleteTestOptions(p.testLevel, p.testNames, p.refs.map((r) => r.type), check.production || !check.known);
+		if (testCheck.error) {
+			this.post({ type: "deleteResult", success: false, cancelled: false, error: testCheck.error });
+			void vscode.window.showErrorMessage(`Delete from org not started: ${testCheck.error}`);
+			return;
+		}
 		const n = p.refs.length;
 		const who = check.username && check.username !== check.display ? `${check.display} (${check.username})` : check.display;
-		const detail = [`Org: ${who}`, "", ...skippedLine, ...deleteListing(p.refs, 20), "", "This deletes the components from the org. It cannot be undone."].join("\n");
+		const detail = [`Org: ${who}`, `Tests: ${p.testLevel}`, ...(testCheck.hint ? [testCheck.hint] : []), "", ...skippedLine, ...deleteListing(p.refs, 20), "", "This deletes the components from the org. It cannot be undone."].join("\n");
 		const go = "Delete from org";
 		const choice = await vscode.window.showWarningMessage(`Delete ${n} component${n === 1 ? "" : "s"} from ${check.display}?`, { modal: true, detail }, go);
 		if (choice !== go) return cancelled();
@@ -1014,21 +1245,28 @@ export class SyncCenterPanelProvider {
 		this.setBusy("delete");
 		this.post({ type: "deleteStart" });
 		const handle = OperationPanelProvider.beginOperation("Delete", org);
+		const op = this.activity?.beginOp("delete", `Delete ${n} component${n === 1 ? "" : "s"} from ${check.display}`);
 		try {
 			const startedAt = Date.now();
+			op?.running();
 			const res = await vscode.window.withProgress(
 				{ location: vscode.ProgressLocation.Notification, title: `Deleting ${n} component${n === 1 ? "" : "s"} from ${check.display}…`, cancellable: true },
-				(_progress, token) =>
-					deleteFromOrg({
+				(_progress, token) => {
+					// The notification's Cancel and the right panel's Cancel stop the same run.
+					const merged = mergeTokens(token, op?.token);
+					return deleteFromOrg({
 						projectDir: root,
 						org,
 						components: p.refs,
 						testLevel: p.testLevel,
 						specifiedTests: p.testLevel === "RunSpecifiedTests" ? p.testNames : [],
-						token,
-					})
+						token: merged.token,
+						onStatus: (s) => op?.live(s),
+					}).finally(() => merged.dispose());
+				}
 			);
 			const out = res.outcome;
+			op?.settle(out);
 			if (out.kind === "cancelled") this.post({ type: "deleteResult", cancelled: true, success: false });
 			else this.post({ type: "deleteResult", success: out.kind === "success", cancelled: false, components: out.stats.components, componentErrors: out.stats.componentErrors, durationMs: res.durationMs });
 			reportDeployOutcome({ run: { outcome: out, startedAt, durationMs: res.durationMs, handle }, dryRun: false, root, targetOrg: org, label: "Delete" });
@@ -1039,6 +1277,7 @@ export class SyncCenterPanelProvider {
 		} catch (e) {
 			handle.dispose();
 			const error = e instanceof Error ? e.message : String(e);
+			op?.end("failed", error);
 			this.post({ type: "deleteResult", success: false, cancelled: false, error });
 			void vscode.window.showErrorMessage(`Delete from org not started: ${error}`);
 		} finally {
@@ -1197,7 +1436,7 @@ export class SyncCenterPanelProvider {
 			void vscode.window.showWarningMessage("This entry ran specified tests that were not recorded. Check the test classes in the Deploy section (or pick a suite) and re-run.");
 			return;
 		}
-		await this.doDeploy({ localKeys: r.keys, testLevel: e.testLevel || "RunLocalTests", testNames: tests, dryRun: e.kind === "validate" });
+		await this.doDeploy({ localKeys: r.keys, testLevel: e.testLevel || "RunLocalTests", testNames: tests, dryRun: e.kind === "validate", label: e.label });
 	}
 
 	// ── HTML ─────────────────────────────────────────────────────────────────────

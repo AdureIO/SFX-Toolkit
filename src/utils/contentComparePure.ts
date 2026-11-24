@@ -121,6 +121,8 @@ export interface IndexEntry {
 export interface CompareIndexFile {
 	v: 1;
 	entries: Record<string, IndexEntry>;
+	/** Digest of every local file read so far: absolute path → `[mtimeMs, size, digest]` (a file is read again only when mtime or size changed). */
+	digests?: Record<string, [number, number, string]>;
 }
 
 /** A component needs a (re)compare when it never was, or its org time or local hash changed since. */

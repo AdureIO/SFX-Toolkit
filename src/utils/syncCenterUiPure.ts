@@ -3,7 +3,7 @@
  * partial-object expansion for a deploy, whole-object retrieves, conflict choices that follow their rows, the
  * button states and the history list. Pure (no `vscode`, no DOM): runs in the host, the webview and the tests.
  */
-import { Candidates, ConflictChoice, SyncRow, componentRefs } from "./syncCenterPure";
+import { Candidates, ConflictChoice, SYNC_IN_PROJECT, SYNC_STATUS_NAMES, SyncRow, componentRefs } from "./syncCenterPure";
 import { orgLookupKey } from "./deployStatusPure";
 import { HistoryEntry, HistoryKind } from "./historyPure";
 import { relativeTime } from "./orgBrowser/filter";
@@ -26,6 +26,23 @@ export function refOfKey(key: string): { type: string; fullName: string } {
 export function rowKeyOf(key: string): string {
 	const r = refOfKey(key);
 	return orgLookupKey(r.type, r.fullName);
+}
+
+// ── Status filter default ──────────────────────────────────────────────────────
+
+/** The default of the status filter group: "In project" (everything that exists locally). */
+export function defaultStatusFilter(): string[] {
+	return [SYNC_IN_PROJECT];
+}
+
+/**
+ * The status filter to start from. A stored value is sanitised to the known facets; a store from before the
+ * default existed (`defaultApplied` false) with nothing selected gets the default once.
+ */
+export function initialStatusFilter(stored: unknown, defaultApplied: boolean): string[] {
+	const known = new Set<string>([...SYNC_STATUS_NAMES, SYNC_IN_PROJECT]);
+	const list = Array.isArray(stored) ? stored.filter((x): x is string => typeof x === "string" && known.has(x)) : [];
+	return list.length === 0 && !defaultApplied ? defaultStatusFilter() : [...new Set(list)];
 }
 
 // ── Objects and their children ─────────────────────────────────────────────────
@@ -207,6 +224,8 @@ export interface HistoryItemView {
 	/** A deploy id exists: "Open in Setup" is offered. */
 	deployId?: string;
 	testLevel?: string;
+	/** The optional "Deploy name" the user gave (local only). */
+	label?: string;
 	components: string[];
 	errors: { component?: string; message: string }[];
 	source: string;
@@ -230,6 +249,7 @@ export function historyViews(entries: readonly HistoryEntry[], now: number, orgL
 			statusText: e.ok ? "ok" : "failed",
 			deployId: e.deployId,
 			testLevel: e.testLevel,
+			...(e.label ? { label: e.label } : {}),
 			components: e.components,
 			errors: e.errors ?? [],
 			source: e.source,

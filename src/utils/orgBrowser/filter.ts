@@ -30,6 +30,11 @@ export interface StatusVocab {
 	aliases: Record<string, string>;
 	/** Query-only shorthands over the raw row value (e.g. `conflict` = two flags set). */
 	shorthands?: Record<string, (v: number) => boolean>;
+	/**
+	 * Facets that are no row value of their own but a test over the row value (e.g. "in-project": every row that
+	 * exists locally). Not in `names`; their facet count sits after the names (`names.length + position`).
+	 */
+	virtual?: Record<string, (v: number) => boolean>;
 }
 
 /** The Org Browser's local-vs-org status (not-in-project / equal / changed-locally / changed-in-org / conflict / partial / unknown). */
@@ -56,6 +61,8 @@ export const ORG_BROWSER_VOCAB: StatusVocab = {
 
 /** Does a row value carry the status `name`? (`false` for a name the vocabulary does not know.) */
 export function statusTest(vocab: StatusVocab, name: string): (v: number) => boolean {
+	const virtual = vocab.virtual?.[name];
+	if (virtual) return virtual;
 	const bit = vocab.names.indexOf(name);
 	if (bit < 0) return () => false;
 	return vocab.flags ? (v) => (v & (1 << bit)) !== 0 : (v) => v === bit;
@@ -66,7 +73,7 @@ function resolveStatusQuery(vocab: StatusVocab, raw: string): ((v: number) => bo
 	const key = raw.toLowerCase();
 	const shorthand = vocab.shorthands?.[key];
 	if (shorthand) return shorthand;
-	const name = vocab.aliases[key] ?? (vocab.names.includes(key) ? key : undefined);
+	const name = vocab.aliases[key] ?? (vocab.names.includes(key) || vocab.virtual?.[key] ? key : undefined);
 	return name ? statusTest(vocab, name) : null;
 }
 
@@ -396,7 +403,8 @@ export function computeFacets(idx: SearchIndex, state: FilterState, ctx: FilterC
 	const states = new Map<string, number>();
 	const vocab = ctx.vocab ?? ORG_BROWSER_VOCAB;
 	const nStatus = vocab.names.length;
-	const status: number[] = new Array(nStatus).fill(0);
+	const virtual = Object.values(vocab.virtual ?? {});
+	const status: number[] = new Array(nStatus + virtual.length).fill(0);
 	const n = idx.comps.length;
 	for (let i = 0; i < n; i++) {
 		if (!p.base(i)) continue;
@@ -410,6 +418,7 @@ export function computeFacets(idx: SearchIndex, state: FilterState, ctx: FilterC
 		if (pt && pn && ps) states.set(c.ms, (states.get(c.ms) ?? 0) + 1);
 		if (pt && pn && pm) {
 			const v = ctx.status ? ctx.status[i] : 0;
+			for (let j = 0; j < virtual.length; j++) if (virtual[j](v)) status[nStatus + j]++;
 			if (vocab.flags) {
 				for (let b = 0; b < nStatus; b++) if (v & (1 << b)) status[b]++;
 			} else if (v >= 0 && v < nStatus) status[v]++;

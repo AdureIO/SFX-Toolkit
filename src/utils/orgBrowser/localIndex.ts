@@ -277,8 +277,16 @@ export function readPackageDirectories(projectDir: string): string[] {
 
 const SKIP_DIRS = new Set(["node_modules", ".git", ".sfdx", ".sf", ".vscode", ".husky", "__tests__"]);
 
-async function walk(dir: string, out: string[]): Promise<void> {
+/** `dirsOut` (optional) receives every directory visited with its mtime, read BEFORE the directory was listed (a change during the scan makes the cached mtime older, never newer). */
+async function walk(dir: string, out: string[], dirsOut?: Map<string, number>): Promise<void> {
 	let ents: fs.Dirent[];
+	if (dirsOut) {
+		try {
+			dirsOut.set(dir, (await fs.promises.stat(dir)).mtimeMs);
+		} catch {
+			/* vanished: the readdir below fails too */
+		}
+	}
 	try {
 		ents = await fs.promises.readdir(dir, { withFileTypes: true });
 	} catch {
@@ -288,7 +296,7 @@ async function walk(dir: string, out: string[]): Promise<void> {
 	for (const e of ents) {
 		if (e.isDirectory()) {
 			if (SKIP_DIRS.has(e.name)) continue;
-			subs.push(walk(path.join(dir, e.name), out));
+			subs.push(walk(path.join(dir, e.name), out, dirsOut));
 		} else if (e.isFile()) {
 			out.push(path.join(dir, e.name));
 		}
@@ -298,15 +306,18 @@ async function walk(dir: string, out: string[]): Promise<void> {
 
 const toPosix = (p: string) => p.split(path.sep).join("/");
 
-/** Scan `packageDirs` (relative to `projectDir`) and build the local index. */
-export async function scanProject(projectDir: string, packageDirs: string[], table: TypeTable = buildTypeTable()): Promise<LocalIndex> {
+/**
+ * Scan `packageDirs` (relative to `projectDir`) and build the local index. `dirsOut` (optional) receives the
+ * directories walked (absolute path → mtime): what `projectScanCache` validates a stored index against.
+ */
+export async function scanProject(projectDir: string, packageDirs: string[], table: TypeTable = buildTypeTable(), dirsOut?: Map<string, number>): Promise<LocalIndex> {
 	const entries = new Map<string, LocalEntry>();
 	const content: { mapped: MappedFile; abs: string; pkgAbs: string }[] = [];
 
 	for (const pkg of packageDirs) {
 		const pkgAbs = path.resolve(projectDir, pkg);
 		const files: string[] = [];
-		await walk(pkgAbs, files);
+		await walk(pkgAbs, files, dirsOut);
 		for (const abs of files) {
 			const rel = toPosix(path.relative(pkgAbs, abs));
 			const mapped = mapSourceFile(rel, table);

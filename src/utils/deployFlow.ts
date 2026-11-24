@@ -25,6 +25,7 @@ import {
 import { runJsonDeploy } from "./deployEngine";
 import {
 	CoverageRow,
+	DeployLiveStatus,
 	DeployStats,
 	coverageFromResult,
 	formatElapsed,
@@ -54,6 +55,10 @@ export interface DeployRunInput {
 	root: string;
 	/** `--target-org` (alias or username); null = the CLI default. */
 	targetOrg: string | null;
+	/** Live numbers of the running deploy (the same snapshots the progress notification shows); the notification is unchanged. */
+	onProgress?: (s: DeployLiveStatus) => void;
+	/** Cancels the deploy like the notification's Cancel button (the server is told to stop; the outcome is `cancelled`). */
+	cancelToken?: vscode.CancellationToken;
 	/** Runs inside the progress notification: wrap it to track in-flight deploys. */
 	track?: <T>(run: () => PromiseLike<T>) => Promise<T>;
 }
@@ -81,11 +86,17 @@ export async function runDeploy(i: DeployRunInput): Promise<DeployRun> {
 	const liveStatus = vscode.workspace.getConfiguration("adure-sfx-toolkit").get<boolean>("deploy.liveStatus", true);
 	const handle = OperationPanelProvider.beginOperation(deployLabel(dryRun), targetOrg || undefined);
 	const track = i.track ?? (<T>(run: () => PromiseLike<T>) => Promise.resolve(run()));
+	// One token for both Cancel buttons: the notification's and the caller's (the Center's right panel).
+	const cts = new vscode.CancellationTokenSource();
+	const callerSub = i.cancelToken?.onCancellationRequested(() => cts.cancel());
+	if (i.cancelToken?.isCancellationRequested) cts.cancel();
 
 	const outcome: DeployOutcome = await track(() =>
 		vscode.window.withProgress(
 			{ location: vscode.ProgressLocation.Notification, title: dryRun ? "Validating deployment…" : "Deploying", cancellable: true },
-			async (progress, token): Promise<DeployOutcome> => {
+			async (progress, notificationToken): Promise<DeployOutcome> => {
+				notificationToken.onCancellationRequested(() => cts.cancel());
+				const token = cts.token;
 				clearDeployDiagnostics();
 				progress.report({ message: "Preparing…" });
 
@@ -119,6 +130,7 @@ export async function runDeploy(i: DeployRunInput): Promise<DeployRun> {
 						onStatus: (s) => {
 							progress.report({ message: formatStatus(s) });
 							handle.updateLiveStatus(s);
+							i.onProgress?.(s);
 						},
 					});
 					if (res.kind === "cancelled") return { kind: "cancelled" };
@@ -143,6 +155,8 @@ export async function runDeploy(i: DeployRunInput): Promise<DeployRun> {
 			}
 		)
 	);
+	callerSub?.dispose();
+	cts.dispose();
 	return { outcome, startedAt, durationMs: Date.now() - startedAt, handle };
 }
 

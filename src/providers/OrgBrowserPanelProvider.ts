@@ -22,6 +22,7 @@ import { CompareTarget } from "../utils/contentCompare";
 import { compareTargetsFor } from "../utils/compareTargetsHost";
 import { CompareLease, acquireCompare, compareMode } from "../utils/contentCompareHost";
 import { readLocalInfo } from "../utils/localChangeInfo";
+import { scanProjectCached } from "../utils/projectScanCache";
 import { orgLookupKey } from "../utils/deployStatusPure";
 import { DeployMetadataPanelProvider } from "./DeployMetadataPanelProvider";
 import { reauthenticateOrg } from "../commands/orgCommands";
@@ -29,7 +30,7 @@ import { metadataDiffForFile } from "../commands/metadataDiff";
 import { ListCancelled, expandOnlyTypes, loadListingCache, saveListingCache } from "../utils/orgBrowser/metadataLister";
 import { listFailureView, runListing } from "../utils/orgBrowser/listingRunner";
 import { hiddenSelectionPrompt, splitByVisibility } from "../utils/orgBrowser/selection";
-import { LocalEntry, LocalIndex, buildTypeTable, overwriteTargets, partialObjectKeys, readPackageDirectories, scanProject } from "../utils/orgBrowser/localIndex";
+import { LocalEntry, LocalIndex, overwriteTargets, partialObjectKeys, readPackageDirectories } from "../utils/orgBrowser/localIndex";
 import { makeSoapCall } from "../utils/orgBrowser/soapTransport";
 import { setupTarget } from "../utils/orgBrowser/setupUrl";
 import { Comp, ListFailure, TypeInfo, compKey } from "../utils/orgBrowser/types";
@@ -430,7 +431,8 @@ export class OrgBrowserPanelProvider {
 		}
 		try {
 			const dirs = readPackageDirectories(root);
-			const index = await scanProject(root, dirs.length > 0 ? dirs : ["force-app"], buildTypeTable(this.types));
+			// A stored index whose directories are unchanged is reused (shared with the other panels, kept across sessions).
+			const { index } = await scanProjectCached(root, dirs.length > 0 ? dirs : ["force-app"], this.types);
 			if (gen !== this.gen || !this.panel) return;
 			this.local = index;
 			this.byOrgKey = new Map([...index.entries.values()].map((e) => [orgLookupKey(e.type, e.name), e]));

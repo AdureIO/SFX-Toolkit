@@ -14,8 +14,9 @@ import { CompareTarget } from "../utils/contentCompare";
 import { innerFilesOfEntry, requestNameOf } from "../utils/contentComparePure";
 import { CompareLease, acquireCompare, compareMode } from "../utils/contentCompareHost";
 import { readLocalInfo } from "../utils/localChangeInfo";
+import { scanProjectCached } from "../utils/projectScanCache";
 import { ListCancelled } from "../utils/orgBrowser/metadataLister";
-import { LocalEntry, buildTypeTable, readPackageDirectories, scanProject } from "../utils/orgBrowser/localIndex";
+import { LocalEntry, buildTypeTable, readPackageDirectories } from "../utils/orgBrowser/localIndex";
 import { makeSoapCall } from "../utils/orgBrowser/soapTransport";
 import { Comp } from "../utils/orgBrowser/types";
 
@@ -116,7 +117,7 @@ export class DeployPanelHost implements vscode.Disposable {
 		}
 		const dirs = readPackageDirectories(root);
 		const types = this.status.knownTypes();
-		const index = await scanProject(root, dirs.length > 0 ? dirs : ["force-app"], buildTypeTable(types));
+		const { index } = await scanProjectCached(root, dirs.length > 0 ? dirs : ["force-app"], types);
 		if (this.disposed) return;
 		this.scannedWithTypes = types.length > 0;
 		this.entries = index.entries;

@@ -17,6 +17,17 @@ export interface SyncCenterHtmlOptions {
 	selectorScript: string;
 }
 
+/** The Delete section's test levels: the Deploy section's labels where they exist; "Run Local Tests" instead of the relevant-tests level. */
+function deleteLevels(o: SyncCenterHtmlOptions): { value: string; label: string }[] {
+	const label = (v: string, d: string) => o.testLevels.find((t) => t.value === v)?.label ?? d;
+	return [
+		{ value: "NoTestRun", label: label("NoTestRun", "No Test Run") },
+		{ value: "RunSpecifiedTests", label: label("RunSpecifiedTests", "Run Specified Tests") },
+		{ value: "RunLocalTests", label: "Run Local Tests" },
+		{ value: "RunAllTestsInOrg", label: label("RunAllTestsInOrg", "Run All Tests") },
+	];
+}
+
 export function syncCenterHtml(o: SyncCenterHtmlOptions): string {
 	return `<!DOCTYPE html>
 <html lang="en">
@@ -44,7 +55,7 @@ ${TEST_SUITE_CSS}
     <span id="cmpInfo" class="muted"></span>
     <button id="cmpBtn" class="ghost" title="Compare the contents of the components that are in the project with the org (the ones that need it; with a filter active: the shown ones again)">≈ Compare contents</button>
   </div>
-  <div id="progress" class="progress" hidden><div id="progressBar"></div></div>
+  <div id="progress" class="progress" hidden role="progressbar" aria-label="Loading"><div id="progressBar"></div></div>
   <div id="banner"></div>
   <div class="body">
     <div class="left" id="left" data-side="auto">
@@ -60,19 +71,14 @@ ${TEST_SUITE_CSS}
             <span class="spacer"></span>
             <label class="inl"><input type="checkbox" id="groupToggle"> Group by type</label>
             <button id="collapseAll" class="linkbtn" title="Collapse / expand all groups">Collapse all</button>
+            <button id="colsBtn" class="ghost sm" title="Show, hide and reorder columns (also: right-click a column header)" aria-haspopup="menu">⚙ Columns</button>
           </div>
           <div class="gridwrap">
             <div id="scroller" class="scroller" tabindex="0" role="grid" aria-label="Metadata components">
               <div class="inner">
-                <div class="ghead" role="row">
-                  <span class="hcell cb"><input type="checkbox" id="headCb" aria-label="Select all filtered"></span>
-                  <span class="hcell" data-sort="name">Name</span>
-                  <span class="hcell" data-sort="type">Type<i class="grip" data-col="type"></i></span>
-                  <span class="hcell" data-sort="ns">Namespace<i class="grip" data-col="ns"></i></span>
-                  <span class="hcell" data-sort="by">Last modified by<i class="grip" data-col="by"></i></span>
-                  <span class="hcell" data-sort="modified">Last modified<i class="grip" data-col="mod"></i></span>
-                  <span class="hcell" data-sort="status">Status<i class="grip" data-col="status"></i></span>
-                  <span class="hcell">Actions</span>
+                <div class="ghead" id="ghead" role="row">
+                  <span class="hcell cb"><input type="checkbox" id="headCb" aria-label="Select all filtered rows" title="Select all filtered (shown) rows"></span>
+                  <span id="hcols" class="hcols"></span>
                 </div>
                 <div id="spacer" class="vspacer"><div id="rowsEl" class="rowsEl"></div></div>
               </div>
@@ -86,21 +92,14 @@ ${TEST_SUITE_CSS}
     <div id="panelSplit" title="Drag to resize"><span></span></div>
     <div class="right" id="right">
       <div class="rp-body">
-        <details class="sec" id="secSync" open>
-          <summary>Sync</summary>
+        <div id="opCard" class="opcard" role="status" aria-live="polite" hidden></div>
+
+        <details class="sec" id="secPresets" open>
+          <summary>Presets</summary>
           <div class="sec-body">
-            <div class="field"><label class="field-label" for="org2">Org</label><select id="org2"></select></div>
             <div class="field"><label class="field-label" for="presetSel">Preset</label>
               <div class="inline"><select id="presetSel"><option value="">— None —</option></select><button type="button" id="presetSave" class="ghost" title="Save the current selection and options as a preset (shared with the Deploy panel)">Save preset</button></div>
             </div>
-            <div class="quick" id="quick">
-              <button type="button" data-q="changedLocally"><span>Select changed locally</span><b></b></button>
-              <button type="button" data-q="changedInOrg"><span>Select changed in org</span><b></b></button>
-              <button type="button" data-q="allChanges"><span>Select all changes</span><b></b></button>
-              <button type="button" data-q="onlyLocal"><span>Select only local</span><b></b></button>
-              <button type="button" data-q="clear"><span>Clear</span><b id="selCount"></b></button>
-            </div>
-            <div class="hint">Quick actions add the shown (filtered) components to the selection.</div>
           </div>
         </details>
 
@@ -115,6 +114,9 @@ ${TEST_SUITE_CSS}
               ${testSuiteRowHtml()}
               <input type="text" id="test-search" placeholder="Search tests…" aria-label="Search test classes" />
               <div class="test-list" id="test-list"></div>
+            </div>
+            <div class="field"><label class="field-label" for="deployLabel">Deploy name (optional)</label>
+              <input type="text" id="deployLabel" maxlength="120" placeholder="e.g. Sprint 42 hotfix" spellcheck="false" autocomplete="off" title="Shown in the History tab. Local only: Salesforce has no deploy label.">
             </div>
             <label class="opt" title="Validate the deployment without saving changes to the org (check-only / dry run)"><input type="checkbox" id="validateOnly"><span>Validate only (dry run)<span class="sub">Check the deployment against the org without committing changes</span></span></label>
             <label class="opt" title="Skip selected components that are equal in the org and the project"><input type="checkbox" id="skipEqualDeploy" checked><span>Skip equal components</span></label>
@@ -142,24 +144,49 @@ ${TEST_SUITE_CSS}
         <details class="sec danger" id="secDelete">
           <summary>Delete from org</summary>
           <div class="sec-body">
-            <div class="hint">Deletes the selected components that exist only in the org (destructive deploy). Uses the test level of the Deploy section. Production orgs ask you to type the org alias.</div>
+            <div class="hint">Deletes the selected components that exist only in the org (destructive deploy). Production orgs cannot use No Test Run and ask you to type the org alias.</div>
+            <div class="field"><span class="field-label">Test level</span>
+              <div class="radio-group" id="del-test-level">${deleteLevels(o).map((t) => `<label><input type="radio" name="delTestLevel" value="${t.value}"> ${t.label}</label>`).join("")}</div>
+            </div>
+            <div class="card" id="del-specified-tests-wrap">
+              <div class="subtitle">Test classes</div>
+              ${testSuiteRowHtml("", "del-")}
+              <input type="text" id="del-test-search" placeholder="Search tests…" aria-label="Search test classes for the delete" />
+              <div class="test-list" id="del-test-list"></div>
+            </div>
+            <div class="hint warn" id="delHint" hidden></div>
             <button type="button" class="danger-btn wide" id="deleteBtn" disabled>Delete from org (0)</button>
             <div class="result-bar" id="deleteResult"></div>
           </div>
         </details>
       </div>
       <div id="historyPane" class="history" hidden>
-        <div class="hist-head"><b>History</b><span id="histCount" class="muted"></span><span class="spacer"></span><button type="button" id="histClose" class="linkbtn">Close</button></div>
-        <div id="histList" class="hist-list"></div>
+        <div class="hist-head">
+          <span class="choice" role="group" aria-label="Activity view"><button type="button" id="segDeploys" class="on" aria-pressed="true" title="Recent deploys and validations of the org (merged with this project's history)">Deploys</button><button type="button" id="segHistory" aria-pressed="false" title="Deploys, validations, retrieves and deletes of this project">History</button></span>
+          <span id="histCount" class="muted"></span><span class="spacer"></span><button type="button" id="histClose" class="linkbtn">Close</button>
+        </div>
+        <div id="depView" class="act-view">
+          <div class="dep-bar">
+            <button type="button" id="depRefresh" class="ghost sm" title="Reload the org's recent deploys">↻ Refresh</button>
+            <button type="button" id="depFailed" class="ghost sm" aria-pressed="false" title="Only deploys that did not succeed">Failed only</button>
+            <span id="depCount" class="muted"></span>
+          </div>
+          <div id="depNotice" class="dep-notice" hidden></div>
+          <div id="depList" class="hist-list"></div>
+        </div>
+        <div id="histView" class="act-view" hidden>
+          <div id="histList" class="hist-list"></div>
+        </div>
       </div>
       <div class="rp-footer">
-        <button type="button" class="tab" id="historyTab" aria-expanded="false" title="Deploys, validations, retrieves and deletes of this project">History</button>
+        <button type="button" class="tab" id="historyTab" aria-expanded="false" title="Recent deploys of the org, and the deploys, validations, retrieves and deletes of this project">Activity</button>
         <span id="statusLine" class="status-line" role="status"></span>
       </div>
     </div>
   </div>
 </div>
 <div id="menu" class="menu" role="menu" hidden></div>
+<div id="colMenu" class="menu colmenu" role="menu" hidden></div>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 <script nonce="${o.nonce}" src="${o.scriptUri}"></script>
 <script nonce="${o.nonce}">${o.selectorScript}</script>
@@ -170,8 +197,8 @@ ${TEST_SUITE_CSS}
 const CENTER_CSS = `
 :root {
   ${FILTER_BAR_VARS}
-  --cols: 34px minmax(140px,1fr) 120px 70px 120px 90px 130px 176px;
-  --minw: 880px;
+  --cols: 34px minmax(140px,1fr) 120px 70px 120px 90px 130px 250px;
+  --minw: 964px;
   --asfx-card-bg: var(--vscode-editorWidget-background, var(--vscode-editor-inactiveSelectionBackground));
   --asfx-accent: var(--vscode-button-background);
   --ob-only-local: var(--vscode-charts-purple, #b180d7);
@@ -226,13 +253,12 @@ button.ghost.sm.on { background: color-mix(in srgb, var(--ob-accent) 16%, transp
 button.wide { width: 100%; height: 30px; }
 button.danger-btn { background: var(--ob-bad); color: var(--vscode-button-foreground, #fff); border: 1px solid transparent; border-radius: 4px; font-weight: 600; }
 button.danger-btn:hover:not(:disabled) { filter: brightness(1.1); }
-.quick { display: flex; flex-direction: column; gap: 4px; }
-.quick button { display: flex; justify-content: space-between; align-items: center; background: var(--vscode-button-secondaryBackground, transparent); color: var(--vscode-button-secondaryForeground, inherit); border: 1px solid var(--ob-border-strong); border-radius: 4px; padding: 4px 10px; font-size: 12px; text-align: left; }
-.quick button:hover:not(:disabled) { background: var(--vscode-button-secondaryHoverBackground, var(--ob-hover)); }
-.quick button b { font-weight: 600; font-variant-numeric: tabular-nums; color: var(--vscode-descriptionForeground); }
+.field input[type="text"] { width: 100%; }
 .hint { font-size: 11px; color: var(--vscode-descriptionForeground); line-height: 1.4; }
 .hint.conflict-note { color: var(--ob-bad); }
 .hint.conflict-note[hidden] { display: none; }
+.hint.warn { color: var(--ob-warn); }
+.hint.warn[hidden] { display: none; }
 .result-bar { display: none; padding: 8px 10px; font-size: 12px; border-radius: 4px; border: 1px solid var(--ob-border); border-left: 3px solid transparent; line-height: 1.5; }
 .result-bar.running { border-left-color: var(--vscode-progressBar-background); }
 .result-bar.success { border-left-color: var(--ob-ok); background: color-mix(in srgb, var(--ob-ok) 12%, transparent); }
@@ -250,9 +276,40 @@ button.danger-btn:hover:not(:disabled) { filter: brightness(1.1); }
 .cov-red { color: var(--ob-bad); }
 .badge.only-local { color: var(--ob-only-local); border-color: color-mix(in srgb, var(--ob-only-local) 55%, transparent); }
 .badge.only-org { color: var(--vscode-descriptionForeground); }
-.acts { visibility: visible; align-items: center; gap: 4px; overflow: hidden; }
-.acts .ibtn { visibility: hidden; }
-.row:hover .acts .ibtn, .row.active .acts .ibtn, .row:focus-within .acts .ibtn { visibility: visible; }
+.hcols { display: contents; }
+.hcell.dragging { opacity: .45; }
+.hcell.drop-before::before, .hcell.drop-after::before { content: ""; position: absolute; top: 3px; bottom: 3px; width: 2px; background: var(--ob-accent); z-index: 2; }
+.hcell.drop-before::before { left: 0; }
+.hcell.drop-after::before { right: 0; }
+.hcell[draggable="true"] { cursor: grab; }
+/* The Actions cell is always visible (the shared grid CSS shows it on hover only). */
+.row .c.acts, .row .acts { visibility: visible; align-items: center; justify-content: flex-start; gap: 2px; overflow: hidden; padding: 0 4px; }
+.row .acts .ibtn { visibility: visible; flex-shrink: 0; color: var(--vscode-icon-foreground, var(--vscode-foreground)); opacity: .9; }
+.row .acts .ibtn:hover { background: var(--vscode-toolbar-hoverBackground, color-mix(in srgb, var(--vscode-foreground) 16%, transparent)); opacity: 1; }
+.row .acts .ibtn.deploy:hover { color: var(--ob-accent); }
+.row .acts .ibtn.retrieve:hover { color: var(--ob-accent); }
+.ibtn svg { display: block; }
+.ibtn.ph { display: inline-block; width: 24px; height: 24px; flex-shrink: 0; }
+.c.nm.ind { padding-left: 28px; }
+.c.mono { font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; }
+/* Refresh icon of a group row: readable at rest, hover background. */
+.row.grp .gref { opacity: 1; display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 4px; color: var(--vscode-icon-foreground, var(--vscode-foreground)); }
+.row.grp:hover .gref, .row.grp .gref:hover { opacity: 1; }
+.row.grp .gref:hover { background: var(--vscode-toolbar-hoverBackground, color-mix(in srgb, var(--vscode-foreground) 16%, transparent)); }
+.gref svg { display: block; }
+/* Loading: thin indeterminate bar under the top bar. */
+.progress { position: relative; overflow: hidden; }
+.progress.indet #progressBar { position: absolute; top: 0; bottom: 0; left: 0; width: 30%; transition: none; animation: asfx-indet 1.4s ease-in-out infinite; }
+@keyframes asfx-indet { 0% { left: -30%; } 100% { left: 100%; } }
+@media (prefers-reduced-motion: reduce) { .progress.indet #progressBar { animation-duration: 3s; } }
+.skel { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+.skel i { display: block; height: 10px; border-radius: 4px; background: color-mix(in srgb, var(--vscode-foreground) 12%, transparent); animation: asfx-pulse 1.4s ease-in-out infinite; }
+@keyframes asfx-pulse { 50% { opacity: .45; } }
+.colmenu { min-width: 220px; max-height: 70vh; overflow-y: auto; }
+.colmenu label { display: flex; align-items: center; gap: 8px; padding: 5px 10px; border-radius: 4px; cursor: pointer; }
+.colmenu label:hover { background: var(--vscode-menu-selectionBackground, var(--ob-hover)); }
+.colmenu label.fixed { opacity: .6; cursor: default; }
+.colmenu hr { border: 0; border-top: 1px solid var(--ob-border); margin: 4px 0; }
 .choice { display: inline-flex; border: 1px solid var(--ob-border-strong); border-radius: 999px; overflow: hidden; flex-shrink: 0; }
 .choice button { width: auto; height: 20px; border-radius: 0; padding: 0 8px; font-size: 11px; opacity: .85; background: transparent; border: 0; }
 .choice button:hover { background: var(--ob-hover); opacity: 1; }
@@ -276,5 +333,56 @@ button.danger-btn:hover:not(:disabled) { filter: brightness(1.1); }
 .hist-actions button { background: var(--vscode-button-secondaryBackground, transparent); color: var(--vscode-button-secondaryForeground, inherit); border: 1px solid var(--ob-border-strong); border-radius: 4px; padding: 2px 9px; font-size: 11.5px; }
 .hist-actions button:hover { background: var(--ob-hover); }
 .selhidden { margin: 0; }
+/* Operation card (top of the right panel) */
+.opcard { border: 1px solid var(--ob-border); border-left: 3px solid var(--vscode-progressBar-background); border-radius: 6px; background: var(--asfx-card-bg); padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; font-size: 12px; flex-shrink: 0; }
+.opcard[hidden] { display: none; }
+.opcard.done { border-left-color: var(--vscode-testing-iconPassed, var(--ob-ok)); }
+.opcard.failed { border-left-color: var(--vscode-testing-iconFailed, var(--vscode-errorForeground, var(--ob-bad))); }
+.opcard.cancelled { border-left-color: var(--vscode-disabledForeground, var(--ob-border-strong)); }
+.op-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.op-kind { display: inline-flex; width: 16px; justify-content: center; font-weight: 700; flex-shrink: 0; }
+.op-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.op-time { color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.op-x { background: transparent; border: 0; color: var(--vscode-icon-foreground, var(--vscode-foreground)); font-size: 15px; line-height: 1; padding: 0 4px; border-radius: 4px; cursor: pointer; }
+.op-x:hover { background: var(--vscode-toolbar-hoverBackground, var(--ob-hover)); }
+.op-badge { display: inline-flex; align-items: center; gap: 5px; padding: 0 8px; height: 18px; border-radius: 999px; font-size: 10.5px; font-weight: 600; border: 1px solid var(--ob-border-strong); white-space: nowrap; }
+.op-badge.running { color: var(--vscode-progressBar-background); border-color: currentColor; }
+.op-badge.done { color: var(--vscode-testing-iconPassed, var(--ob-ok)); border-color: currentColor; }
+.op-badge.failed { color: var(--vscode-testing-iconFailed, var(--vscode-errorForeground, var(--ob-bad))); border-color: currentColor; }
+.op-badge.cancelled, .op-badge.queued { color: var(--vscode-descriptionForeground); }
+.op-spin { width: 9px; height: 9px; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; animation: asfx-spin .9s linear infinite; }
+@keyframes asfx-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .op-spin { animation-duration: 3s; } }
+.op-bar-label { display: flex; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--vscode-descriptionForeground); }
+.op-bar-label .bad { color: var(--vscode-testing-iconFailed, var(--vscode-errorForeground, var(--ob-bad))); }
+.op-track { display: flex; height: 5px; border-radius: 3px; overflow: hidden; background: color-mix(in srgb, var(--vscode-foreground) 14%, transparent); }
+.op-fill { background: var(--vscode-progressBar-background); transition: width .25s; }
+.op-fill.err { background: var(--vscode-testing-iconFailed, var(--vscode-errorForeground, var(--ob-bad))); }
+.op-msg { color: var(--vscode-descriptionForeground); line-height: 1.4; overflow-wrap: anywhere; }
+.opcard.failed .op-msg { color: var(--vscode-errorForeground, var(--ob-bad)); }
+.op-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.op-actions button { background: var(--vscode-button-secondaryBackground, transparent); color: var(--vscode-button-secondaryForeground, inherit); border: 1px solid var(--ob-border-strong); border-radius: 4px; padding: 2px 9px; font-size: 11.5px; }
+.op-actions button:hover { background: var(--ob-hover); }
+/* Activity: Deploys segment */
+.history [hidden] { display: none !important; }
+.act-view { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.dep-bar { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-bottom: 1px solid var(--ob-border); }
+.dep-notice { padding: 6px 10px; font-size: 11.5px; color: var(--ob-warn); border-bottom: 1px solid var(--ob-border); line-height: 1.4; }
+.dep-row { padding: 6px 10px; cursor: pointer; display: flex; flex-direction: column; gap: 2px; }
+.dep-row:hover { background: var(--ob-hover); }
+.dep-l1 { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.dep-l1 .t { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.dep-l2 { padding-left: 26px; color: var(--vscode-descriptionForeground); font-size: 11px; display: flex; flex-wrap: wrap; gap: 2px 10px; }
+.dep-ic { display: inline-flex; width: 18px; justify-content: center; font-weight: 700; flex-shrink: 0; }
+.dep-ic.ok { color: var(--vscode-testing-iconPassed, var(--ob-ok)); }
+.dep-ic.bad { color: var(--vscode-testing-iconFailed, var(--vscode-errorForeground, var(--ob-bad))); }
+.dep-ic.run { color: var(--vscode-progressBar-background); }
+.dep-chip { font-size: 10px; padding: 0 6px; border-radius: 999px; border: 1px solid var(--ob-border-strong); color: var(--vscode-descriptionForeground); flex-shrink: 0; }
+.dep-bad { color: var(--vscode-testing-iconFailed, var(--vscode-errorForeground, var(--ob-bad))); }
+.dep-detail ul { margin: 0; padding-left: 16px; max-height: 180px; overflow-y: auto; }
+.dep-detail li { margin: 2px 0; overflow-wrap: anywhere; }
+.dep-detail .sub { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--vscode-descriptionForeground); }
+.dep-detail pre { margin: 4px 0 0; padding: 4px 6px; max-height: 140px; overflow: auto; font-size: 11px; background: var(--vscode-textCodeBlock-background, transparent); border-radius: 4px; white-space: pre-wrap; }
+.dep-detail summary { cursor: pointer; font-size: 11px; color: var(--vscode-descriptionForeground); }
 @media (max-width: 900px) { .right { width: 300px; } }
 `;

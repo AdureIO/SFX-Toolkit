@@ -8,13 +8,13 @@ export const TEST_SUITE_CSS = `
 .btn-suite-delete { color: var(--vscode-errorForeground); }
 `;
 
-/** The row of controls (ids: suite-select, btn-save-suite, btn-delete-suite). */
-export function testSuiteRowHtml(selectClass = ""): string {
+/** The row of controls (ids: suite-select, btn-save-suite, btn-delete-suite; `idPrefix` prefixes them for a second set on one page). */
+export function testSuiteRowHtml(selectClass = "", idPrefix = ""): string {
 	return (
 		`<div class="suite-row">` +
-		`<select id="suite-select" class="${selectClass} suite-select" aria-label="Test suite"></select>` +
-		`<button type="button" id="btn-save-suite" class="btn-suite" title="Save selected tests as a named suite">Save suite</button>` +
-		`<button type="button" id="btn-delete-suite" class="btn-suite btn-suite-delete" title="Delete this suite" style="display:none;">🗑</button>` +
+		`<select id="${idPrefix}suite-select" class="${selectClass} suite-select" aria-label="Test suite"></select>` +
+		`<button type="button" id="${idPrefix}btn-save-suite" class="btn-suite" title="Save selected tests as a named suite">Save suite</button>` +
+		`<button type="button" id="${idPrefix}btn-delete-suite" class="btn-suite btn-suite-delete" title="Delete this suite" style="display:none;">🗑</button>` +
 		`</div>`
 	);
 }

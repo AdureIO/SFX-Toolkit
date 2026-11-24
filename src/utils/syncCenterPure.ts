@@ -68,6 +68,12 @@ export const SYNC_STATUS_LABELS: Record<SyncStatus, string> = {
 
 export const syncStatusCode = (s: SyncStatus): number => SYNC_STATUS_NAMES.indexOf(s);
 
+/** The status facet "In project": every row that exists locally, i.e. everything except `only-org`. */
+export const SYNC_IN_PROJECT = "in-project";
+export const isInProjectCode = (code: number): boolean => code !== SC_ONLY_ORG;
+/** Where the facet count of "In project" sits in `Facets.status` (virtual facets come after the names). */
+export const SYNC_IN_PROJECT_FACET_INDEX = SYNC_STATUS_NAMES.length;
+
 /**
  * `status:` vocabulary of the Center: the aliases of the other two panels, with `local` / `new` meaning
  * only-local and `org` / `not-local` only-org (in the Deploy panel `local` means changed-locally; here the
@@ -98,13 +104,16 @@ export const SYNC_CENTER_VOCAB: StatusVocab = {
 		partial: "partial",
 		"partly-local": "partial",
 		"partly-in-project": "partial",
+		// In project: everything that exists locally (all but only-org).
+		project: SYNC_IN_PROJECT,
+		"in-project": SYNC_IN_PROJECT,
+		inproject: SYNC_IN_PROJECT,
 	},
 	shorthands: {
 		inorg: anyComparedShorthand,
 		"in-org": anyComparedShorthand,
-		"in-project": (v) => anyComparedShorthand(v) || v === SC_PARTIAL,
-		inproject: (v) => anyComparedShorthand(v) || v === SC_PARTIAL,
 	},
+	virtual: { [SYNC_IN_PROJECT]: isInProjectCode },
 };
 
 // ── Rows ───────────────────────────────────────────────────────────────────────

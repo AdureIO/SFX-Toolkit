@@ -18,6 +18,10 @@ export interface TestSuitesOptions {
 	onApplied: () => void;
 	/** Show a status line (e.g. "Select test classes to save as a suite."). */
 	setStatus: (text: string) => void;
+	/** Second set of controls on one page: the prefix of the ids (`testSuiteRowHtml(…, idPrefix)`). */
+	idPrefix?: string;
+	/** The element whose `.test-class` checkboxes a suite applies to (default: the whole document). */
+	scope?: () => ParentNode;
 }
 
 export interface TestSuites {
@@ -31,9 +35,10 @@ export interface TestSuites {
 
 /** Wire the controls of `testSuiteRowHtml` (already in the DOM). */
 export function mountTestSuites(opts: TestSuitesOptions): TestSuites {
-	const sel = document.getElementById("suite-select") as HTMLSelectElement;
-	const del = document.getElementById("btn-delete-suite") as HTMLElement;
-	const save = document.getElementById("btn-save-suite") as HTMLElement;
+	const pre = opts.idPrefix ?? "";
+	const sel = document.getElementById(pre + "suite-select") as HTMLSelectElement;
+	const del = document.getElementById(pre + "btn-delete-suite") as HTMLElement;
+	const save = document.getElementById(pre + "btn-save-suite") as HTMLElement;
 	let suites: TestSuite[] = [];
 
 	const syncDelete = () => {
@@ -50,7 +55,7 @@ export function mountTestSuites(opts: TestSuitesOptions): TestSuites {
 		syncDelete();
 		const names = suiteClassNames(suites, sel.value);
 		if (!names) return;
-		for (const cb of document.querySelectorAll<HTMLInputElement>(".test-class")) cb.checked = names.includes(cb.value);
+		for (const cb of (opts.scope?.() ?? document).querySelectorAll<HTMLInputElement>(".test-class")) cb.checked = names.includes(cb.value);
 		opts.onApplied();
 	};
 	save.onclick = () => {

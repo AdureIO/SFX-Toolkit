@@ -24,6 +24,8 @@ export interface StatusOption {
 	/** Facet name (a name of the panel's status vocabulary). */
 	value: string;
 	label: string;
+	/** Index of the option's count in `facets.status` when it is not the option's position (a virtual facet). */
+	facetIndex?: number;
 }
 
 export interface FilterBarConfig {
@@ -97,7 +99,7 @@ export function createFilterBar(cfg: FilterBarConfig): FilterBar {
 		const f = cfg.filter();
 
 		// Status
-		$("fStatus").innerHTML = cfg.statusOptions.map((o, i) => facetRow("status", o.value, o.label, facets.status[i] ?? 0, f.status.includes(o.value))).join("");
+		$("fStatus").innerHTML = cfg.statusOptions.map((o, i) => facetRow("status", o.value, o.label, facets.status[o.facetIndex ?? i] ?? 0, f.status.includes(o.value))).join("");
 
 		// Types
 		const names = new Set<string>(facets.types.keys());
