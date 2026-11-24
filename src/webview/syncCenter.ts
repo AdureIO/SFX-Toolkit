@@ -42,6 +42,7 @@ import {
 } from "../utils/syncCenterPure";
 import {
 	buttonState,
+	centerFilterKeptOnClear,
 	choicesFromJson,
 	choicesStoreKey,
 	choicesToJson,
@@ -164,7 +165,7 @@ const SIDE_MIN_W = 560;
 const PROV_TIP = "Based on dates — contents not compared yet";
 
 function defaultOpts(): Options {
-	return { skipEqualDeploy: true, skipEqualRetrieve: true, confirmOverwrite: true, wholeObject: false, validateOnly: false, autoGit: false, testLevel: "RunRelevantTests", delTestLevel: "RunLocalTests" };
+	return { skipEqualDeploy: true, skipEqualRetrieve: true, confirmOverwrite: true, wholeObject: false, validateOnly: false, autoGit: false, testLevel: "RunRelevantTests", delTestLevel: "NoTestRun" };
 }
 
 function defaultUi(): UiState {
@@ -182,6 +183,8 @@ function defaultUi(): UiState {
 let ui: UiState = defaultUi();
 let orgs: OrgOpt[] = [];
 let currentOrg: string | null = null;
+/** The current org is production or could not be verified (the host's `production` flag). */
+let orgIsProduction = false;
 let hasProject = true;
 let projectDir = "";
 let childTypes = new Set<string>();
@@ -1388,7 +1391,7 @@ function setupEvents(): void {
 			$("scroller").focus();
 			if (active < 0 && items.length) setActive(0);
 		},
-		preserveOnClear: () => ({ onlySelected: ui.filter.onlySelected && selected.size > 0 }),
+		preserveOnClear: () => centerFilterKeptOnClear(ui.filter.onlySelected && selected.size > 0),
 	});
 
 	const onOrgChange = (e: Event) => {
@@ -1904,6 +1907,18 @@ function applyWidths(): void {
 	if (ui.rightWidth) $("right").style.width = ui.rightWidth + "px";
 }
 
+/**
+ * On a production (or unverifiable) org the Delete section starts on Run Local Tests instead of No Test Run, which
+ * the host refuses there. Only a switch away from NoTestRun: it is never switched back automatically.
+ */
+function preselectProductionDelTest(): void {
+	if (!orgIsProduction || ui.opts.delTestLevel !== "NoTestRun") return;
+	ui.opts.delTestLevel = "RunLocalTests";
+	const radio = document.querySelector<HTMLInputElement>('input[name="delTestLevel"][value="RunLocalTests"]');
+	if (radio) radio.checked = true;
+	saveUi();
+}
+
 /** Reflect the saved options in the right panel's controls. */
 function applyOptionsToControls(): void {
 	const o = ui.opts;
@@ -2025,6 +2040,7 @@ window.addEventListener("message", (ev) => {
 		case "init":
 			orgs = m.orgs ?? [];
 			currentOrg = m.org;
+			orgIsProduction = !!m.production;
 			hasProject = m.hasProject;
 			projectDir = m.projectDir ?? "";
 			childTypes = new Set<string>(m.childTypes ?? []);
@@ -2038,6 +2054,7 @@ window.addEventListener("message", (ev) => {
 			bar.syncSearchInput();
 			applyWidths();
 			applyOptionsToControls();
+			preselectProductionDelTest();
 			applyFiltersOpen();
 			mountTestTree($("test-list"), testClasses, () => renderRight());
 			mountTestTree($("del-test-list"), testClasses, () => renderRight());
@@ -2048,6 +2065,8 @@ window.addEventListener("message", (ev) => {
 		case "orgs":
 			orgs = m.orgs ?? [];
 			if (m.org !== undefined) currentOrg = m.org;
+			orgIsProduction = !!m.production;
+			preselectProductionDelTest();
 			noOrg = orgs.length === 0;
 			renderOrgSelect();
 			renderOverlay();
@@ -2056,6 +2075,8 @@ window.addEventListener("message", (ev) => {
 		case "reset": {
 			const keep = selected;
 			currentOrg = m.org;
+			orgIsProduction = false; // the new org's flag follows in its "orgs" message
+			renderOrgSelect();
 			renderOrgSelect();
 			resetData();
 			resetActivity();

@@ -45,6 +45,14 @@ export function initialStatusFilter(stored: unknown, defaultApplied: boolean): s
 	return list.length === 0 && !defaultApplied ? defaultStatusFilter() : [...new Set(list)];
 }
 
+/**
+ * The filter fields the Center keeps on "Clear all filters": the status group goes back to its default ("In
+ * project") and the "only selected" toggle keeps its value (the caller passes whether it is in effect).
+ */
+export function centerFilterKeptOnClear(onlySelected: boolean): { status: string[]; onlySelected: boolean } {
+	return { status: defaultStatusFilter(), onlySelected };
+}
+
 // ── Objects and their children ─────────────────────────────────────────────────
 
 /** `Account` for `CustomField:Account.Foo__c` when `type` is a child type of CustomObject; else undefined. */

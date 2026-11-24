@@ -430,10 +430,12 @@ export class SyncCenterPanelProvider {
 		const testClasses = root ? await this.takeTestClasses(root) : [];
 		const selection = this.initialSelection;
 		this.initialSelection = [];
+		const production = await this.orgIsProduction(key, root);
 		this.post({
 			type: "init",
 			orgs: picker.orgs,
 			org: key === DEFAULT_ORG_KEY ? null : key,
+			production,
 			hasProject: !!root && this.hasSfdxProject(),
 			projectDir: root ?? "",
 			projectName: root ? path.basename(root) : "",
@@ -451,9 +453,18 @@ export class SyncCenterPanelProvider {
 
 	private static async sendOrgs(): Promise<void> {
 		if (!this.panel) return;
+		const key = this.orgKey;
 		const root = this.projectDir();
 		const picker = root ? await orgPickerForProject(root).catch(() => ({ orgs: [], defaultOrg: "" })) : { orgs: [], defaultOrg: "" };
-		this.post({ type: "orgs", orgs: picker.orgs, org: this.orgKey === DEFAULT_ORG_KEY ? null : this.orgKey });
+		const production = await this.orgIsProduction(key, root);
+		if (key !== this.orgKey) return; // the org changed while the check ran; its own message follows
+		this.post({ type: "orgs", orgs: picker.orgs, org: key === DEFAULT_ORG_KEY ? null : key, production });
+	}
+
+	/** Production or not verifiable: the same rule the Delete section's test check uses. */
+	private static async orgIsProduction(key: string, root: string | null | undefined): Promise<boolean> {
+		const check = await checkOrgForDestructive(orgArgForKey(key), root || undefined).catch(() => null);
+		return !check || check.production || !check.known;
 	}
 
 	private static postHistory(): void {
@@ -528,6 +539,7 @@ export class SyncCenterPanelProvider {
 		this.byOrgKey = new Map();
 		this.releaseLease();
 		this.post({ type: "reset", org: key === DEFAULT_ORG_KEY ? null : key });
+		void this.sendOrgs();
 
 		const root = this.projectDir();
 		// What does not depend on the org list starts at once and runs beside it: the local scan and the stored listing.

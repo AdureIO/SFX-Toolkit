@@ -23,6 +23,7 @@ import {
 	buttonState,
 	choicesFromJson,
 	choicesStoreKey,
+	centerFilterKeptOnClear,
 	choicesToJson,
 	deployLocalKeys,
 	defaultStatusFilter,
@@ -382,6 +383,11 @@ describe("status filter: In project", () => {
 		assert.deepStrictEqual(initialStatusFilter([], true), []);
 		assert.deepStrictEqual(initialStatusFilter(["conflict", "bogus", "conflict", 3], true), ["conflict"]);
 		assert.deepStrictEqual(initialStatusFilter(["only-org", SYNC_IN_PROJECT], false), ["only-org", SYNC_IN_PROJECT]);
+	});
+
+	it("Clear all filters keeps In project on and the only-selected toggle as it was", () => {
+		assert.deepStrictEqual(centerFilterKeptOnClear(false), { status: [SYNC_IN_PROJECT], onlySelected: false });
+		assert.deepStrictEqual(centerFilterKeptOnClear(true), { status: [SYNC_IN_PROJECT], onlySelected: true });
 	});
 });
 
