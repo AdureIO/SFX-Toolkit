@@ -41,7 +41,9 @@ import {
 	retrieveCandidates,
 	CenterMode,
 	normalizeMode,
+	syncStatusOptions,
 	takesPart,
+	unresolvedText,
 } from "../utils/syncCenterPure";
 import {
 	buttonState,
@@ -51,8 +53,12 @@ import {
 	choicesToJson,
 	historyRowKeys,
 	historyViews,
+	initialGroup,
 	initialStatusFilter,
+	choiceTitle,
+	nextChoice,
 	pruneConflictChoices,
+	selectionSummary,
 	rowDeployLocalKeys,
 	rowKeyOf,
 	rowRetrieveRef,
@@ -123,6 +129,8 @@ interface UiState {
 	collapsed: string[];
 	/** The "In project" status default was applied once (a store from before it gets it on the next load). */
 	statusDefault?: boolean;
+	/** The "Group by type" default was applied once (a store from before it gets it on the next load). */
+	groupDefault?: boolean;
 	filtersCollapsed?: boolean;
 	rightWidth?: number;
 	/** The action chosen at the top of the right panel. */
@@ -177,9 +185,10 @@ function defaultUi(): UiState {
 	return {
 		filter: { ...DEFAULT_FILTER, status: initialStatusFilter(undefined, false) },
 		sort: { key: "name", dir: 1 },
-		group: false,
+		group: true,
 		collapsed: [],
 		statusDefault: true,
+		groupDefault: true,
 		opts: defaultOpts(),
 		choices: {},
 	};
@@ -289,6 +298,8 @@ function mergeUi(saved: Partial<UiState> | null | undefined): void {
 		...saved,
 		filter: { ...d.filter, ...(saved.filter ?? {}), status: initialStatusFilter(saved.filter?.status, !!saved.statusDefault), onlySelected: false },
 		statusDefault: true,
+		group: initialGroup(saved.group, !!saved.groupDefault),
+		groupDefault: true,
 		sort: saved.sort ?? d.sort,
 		opts: { ...d.opts, ...(saved.opts ?? {}) },
 		choices: saved.choices && typeof saved.choices === "object" ? saved.choices : {},
@@ -440,7 +451,9 @@ const ICON = {
 	diff: '<svg viewBox="0 0 16 16" width="14" height="14"><path fill="currentColor" d="M2 4h9.600l-2-2 .7-.7 3.200 3.200-3.200 3.200-.7-.7 2-2H2zm12 8H4.400l2 2-.7.700L2.500 11.500l3.200-3.200.7.700-2 2H14z"/></svg>',
 	chevron: '<svg viewBox="0 0 16 16" width="12" height="12"><path fill="currentColor" d="M6 4l4.500 4L6 12z"/></svg>',
 	// Same 14 px size as the other row icons.
-	refresh: REFRESH_ICON.replace('width="13" height="13"', 'width="14" height="14"'),
+	// 16 px, full-strength stroke (the group header button sets the colour).
+	refresh: '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13 8a5 5 0 1 1-1.600-3.700"/><path d="M13 2.500v3h-3"/></svg>',
+	swap: '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.400" stroke-linecap="round" stroke-linejoin="round"><path d="M5 13V3M2.500 5.500L5 3l2.500 2.500M11 3v10M8.500 10.500L11 13l2.500-2.500"/></svg>',
 	deploy: '<svg viewBox="0 0 16 16" width="14" height="14"><path fill="currentColor" d="M8 1.500l5 5-.7.700-3.800-3.800V14h-1V3.400L3.700 7.200 3 6.500z"/></svg>',
 	retrieve: '<svg viewBox="0 0 16 16" width="14" height="14"><path fill="currentColor" d="M8 14.500l-5-5 .7-.7 3.800 3.800V2h1v10.600l3.800-3.800.7.700z"/></svg>',
 };
@@ -499,12 +512,7 @@ function badgeClass(status: string): string {
 
 function choiceHtml(r: SyncRow): string {
 	const c = choices.get(r.key);
-	const need = selected.has(r.key) && !c;
-	return (
-		`<span class="choice${need ? " need" : ""}" title="${need ? "Choose which version wins before this row can be deployed or retrieved" : "Which version wins"}">` +
-		`<button type="button" data-choice="local" class="${c === "local" ? "on" : ""}" aria-pressed="${c === "local"}">Keep local</button>` +
-		`<button type="button" data-choice="org" class="${c === "org" ? "on" : ""}" aria-pressed="${c === "org"}">Take org</button></span>`
-	);
+	return `<button type="button" class="ibtn choicebtn${c ? " on" : ""}" data-choice="cycle" title="${esc(choiceTitle(c))}" aria-label="${esc(choiceTitle(c))}" aria-pressed="${c !== undefined}">${ICON.swap}${c ? `<span class="cl">${c === "local" ? "L" : "O"}</span>` : ""}</button>`;
 }
 
 function actsHtml(r: SyncRow): string {
@@ -513,14 +521,14 @@ function actsHtml(r: SyncRow): string {
 	const ph = '<span class="ibtn ph" aria-hidden="true"></span>';
 	return (
 		`<span class="c acts">` +
-		(conflict ? choiceHtml(r) : "") +
-		(canDeploy
+				(canDeploy
 			? `<button class="ibtn deploy" data-act="deployRow" title="${conflict ? "Deploy this component and overwrite the org’s version (asks first)" : "Deploy this component to the org"}" aria-label="Deploy ${esc(r.name)}">${ICON.deploy}</button>`
 			: ph) +
 		(r.inOrg
 			? `<button class="ibtn retrieve" data-act="retrieveRow" title="${conflict ? "Retrieve this component and overwrite the local version (asks first)" : "Retrieve this component from the org"}" aria-label="Retrieve ${esc(r.name)}">${ICON.retrieve}</button>`
 			: ph) +
 		(isDiffable(r) ? `<button class="ibtn" data-act="diff" title="Compare with the org" aria-label="Compare with the org">${ICON.diff}</button>` : ph) +
+		(conflict ? choiceHtml(r) : "") +
 		`</span>`
 	);
 }
@@ -805,9 +813,17 @@ function renderRight(): void {
 	const rc = retrieveCandidates(syncRows, selected, choices, ui.opts.skipEqualRetrieve);
 	const xc = deleteCandidates(syncRows, selected);
 
-	const d = buttonState({ verb: ui.opts.validateOnly ? "Validate" : "Deploy", cands: dc, busy, blocked, conflictsBlock: true, selected: sel, hint: ui.opts.validateOnly ? "Validate the selection against the org" : "Deploy the selection to the org" });
-	const r = buttonState({ verb: "Retrieve", cands: rc, busy, blocked, conflictsBlock: true, selected: sel, hint: "Retrieve the selection into the project" });
-	const x = buttonState({ verb: "Delete from org", cands: xc, busy, blocked, conflictsBlock: false, selected: sel, hint: "Delete the selected components from the org" });
+	const d = buttonState({ verb: ui.opts.validateOnly ? "Validate" : "Deploy", cands: dc, busy, blocked, selected: sel, hint: ui.opts.validateOnly ? "Validate the selection against the org" : "Deploy the selection to the org" });
+	const r = buttonState({ verb: "Retrieve", cands: rc, busy, blocked, selected: sel, hint: "Retrieve the selection into the project" });
+	const x = buttonState({ verb: "Delete from org", cands: xc, busy, blocked, selected: sel, hint: "Delete the selected components from the org" });
+	const mode = modeOf();
+	const taking = mode === "retrieve" ? rc.keys.length : mode === "delete" ? xc.keys.length : dc.keys.length;
+	const sumText = selectionSummary(mode, sel, taking);
+	$("selSummary").textContent = sumText;
+	$("selSummary").title = sumText;
+	const showBtn = $("selShowGrid") as HTMLButtonElement;
+	showBtn.textContent = ui.filter.onlySelected ? "Show all" : "Show in grid";
+	showBtn.disabled = sel === 0 && !ui.filter.onlySelected;
 	for (const [id, st] of [
 		["deployBtn", d],
 		["retrieveBtn", r],
@@ -819,13 +835,11 @@ function renderRight(): void {
 		b.title = st.title;
 	}
 
-	// Unresolved conflicts keep Deploy and Retrieve off: say so where the buttons are, with the way to them.
-	const unresolved = dc.unresolvedConflicts;
+	// Conflicts without a choice take part; say so where the buttons are, with the way to them (the run asks first).
+	const note = unresolvedText(modeOf() === "retrieve" ? rc : dc, modeOf() === "retrieve" ? "retrieve" : "deploy");
 	for (const el of document.querySelectorAll<HTMLElement>(".conflict-note")) {
-		el.hidden = unresolved === 0;
-		if (unresolved > 0) {
-			el.innerHTML = `${esc(unresolved === 1 ? "1 conflict needs a choice (Keep local / Take org)." : `${unresolved} conflicts need a choice (Keep local / Take org).`)} <button type="button" class="linkbtn" data-showconflicts="1">Show conflicts</button>`;
-		}
+		el.hidden = note === "";
+		if (note !== "") el.innerHTML = `${esc(note)} <button type="button" class="linkbtn" data-showconflicts="1">Show conflicts</button>`;
 	}
 
 	$("specified-tests-wrap").classList.toggle("visible", currentTestLevel() === "RunSpecifiedTests");
@@ -1194,9 +1208,10 @@ function toggleGroup(g: Group): void {
 	afterSelectionChange();
 }
 
-function setChoice(key: string, c: ConflictChoice): void {
-	if (choices.get(key) === c) choices.delete(key);
-	else choices.set(key, c);
+function cycleChoice(key: string): void {
+	const c = nextChoice(choices.get(key));
+	if (c) choices.set(key, c);
+	else choices.delete(key);
 	// Choosing a side means the row takes part.
 	if (choices.has(key)) selected.add(key);
 	persistChoices();
@@ -1224,8 +1239,8 @@ function resultBar(id: string, cls: string, text: string): void {
 	b.style.display = text ? "block" : "none";
 }
 
-/** Deploy `keys` (row keys) with the Deploy section's options. `conflict`: a single conflict row; the host asks first. `withVisible`: the hidden-selection check of the main button. */
-function startDeploy(keys: string[], conflict: boolean, withVisible: boolean): void {
+/** Deploy `keys` (row keys) with the Deploy section's options. `conflictKeys`: conflict rows without a choice among `keys`; the host asks first. `withVisible`: the hidden-selection check of the main button. */
+function startDeploy(keys: string[], conflictKeys: string[], withVisible: boolean): void {
 	if (opPending || busyOp) {
 		toast("An operation is running.", "warn");
 		return;
@@ -1260,7 +1275,7 @@ function startDeploy(keys: string[], conflict: boolean, withVisible: boolean): v
 		dryRun: ui.opts.validateOnly,
 		label: label || undefined,
 		presetName: loadedPresetName(),
-		conflict: conflict || undefined,
+		conflicts: conflictKeys.length ? conflictKeys : undefined,
 	});
 }
 
@@ -1271,7 +1286,7 @@ function loadedPresetName(): string | undefined {
 }
 
 /** Retrieve `keys` (row keys) with the Retrieve section's options (see `startDeploy` for the flags). */
-function startRetrieve(keys: string[], conflict: boolean, withVisible: boolean): void {
+function startRetrieve(keys: string[], conflictKeys: string[], withVisible: boolean): void {
 	if (opPending || busyOp) {
 		toast("An operation is running.", "warn");
 		return;
@@ -1281,19 +1296,19 @@ function startRetrieve(keys: string[], conflict: boolean, withVisible: boolean):
 	results = new Map();
 	resultBar("retrieveResult", "running", "Retrieving…");
 	renderRight();
-	post({ command: "retrieve", items: itemsOut, ...(withVisible ? { visible: visibleOf(keys) } : {}), confirm: ui.opts.confirmOverwrite, conflict: conflict || undefined });
+	post({ command: "retrieve", items: itemsOut, ...(withVisible ? { visible: visibleOf(keys) } : {}), confirm: ui.opts.confirmOverwrite, conflicts: conflictKeys.length ? conflictKeys : undefined });
 }
 
 function doDeploy(): void {
 	const c = deployCandidates(syncRows, selected, choices, ui.opts.skipEqualDeploy);
-	if (c.keys.length === 0 || c.unresolvedConflicts > 0) return;
-	startDeploy(c.keys, false, true);
+	if (c.keys.length === 0) return;
+	startDeploy(c.keys, c.unresolvedKeys, true);
 }
 
 function doRetrieve(): void {
 	const c = retrieveCandidates(syncRows, selected, choices, ui.opts.skipEqualRetrieve);
-	if (c.keys.length === 0 || c.unresolvedConflicts > 0) return;
-	startRetrieve(c.keys, false, true);
+	if (c.keys.length === 0) return;
+	startRetrieve(c.keys, c.unresolvedKeys, true);
 }
 
 function doDelete(): void {
@@ -1322,10 +1337,10 @@ function rowAction(act: string, i: number): void {
 			post({ command: "diff", key: r.key, status: r.status });
 			break;
 		case "deployRow":
-			startDeploy([r.key], r.status === "conflict", false);
+			startDeploy([r.key], r.status === "conflict" ? [r.key] : [], false);
 			break;
 		case "retrieveRow":
-			startRetrieve([r.key], r.status === "conflict", false);
+			startRetrieve([r.key], r.status === "conflict" ? [r.key] : [], false);
 			break;
 		case "open":
 			post({ command: "openFile", key: r.key });
@@ -1442,10 +1457,7 @@ function setupEvents(): void {
 		filter: () => ui.filter,
 		facets: () => facets,
 		rowCount: () => idx.comps.length,
-		statusOptions: [
-			{ value: SYNC_IN_PROJECT, label: "In project", facetIndex: SYNC_IN_PROJECT_FACET_INDEX },
-			...SYNC_STATUS_NAMES.map((n) => ({ value: n, label: SYNC_STATUS_LABELS[n] })),
-		],
+		statusOptions: syncStatusOptions(),
 		me: () => me,
 		onChange: () => {
 			recompute(true);
@@ -1657,7 +1669,7 @@ function setupEvents(): void {
 		}
 		const ch = t.closest<HTMLElement>("[data-choice]");
 		if (ch) {
-			setChoice(keyAt(it), ch.dataset.choice as ConflictChoice);
+			cycleChoice(keyAt(it));
 			return;
 		}
 		const act = t.closest<HTMLElement>("[data-act]")?.dataset.act;
@@ -1762,6 +1774,14 @@ function setupEvents(): void {
 }
 
 function setupRightPanel(): void {
+	// "Show in grid" / "Show all": the "only selected" filter.
+	$("selShowGrid").addEventListener("click", () => {
+		ui.filter = { ...ui.filter, onlySelected: !ui.filter.onlySelected && selected.size > 0 };
+		bar.syncSearchInput();
+		recompute(true);
+		saveUi();
+	});
+
 	// "Show conflicts": filter to the conflicts of the selection.
 	$("right").addEventListener("click", (e) => {
 		if (!(e.target as HTMLElement).closest("[data-showconflicts]")) return;

@@ -211,9 +211,9 @@ const all = new Set(ROWS.map((r) => r.key));
 const none = new Map<string, ConflictChoice>();
 
 describe("sync center candidates", () => {
-	it("deploy: local-side rows count; equal only when not skipped; conflicts need Keep local", () => {
+	it("deploy: local-side rows count; equal only when not skipped; conflicts without a choice take part", () => {
 		const r = deployCandidates(ROWS, all, new Map([["ApexClass:CF1", "local" as const]]), true);
-		assert.deepStrictEqual(r.keys, ["ApexClass:OL", "ApexClass:CL", "ApexClass:CF1", "CustomObject:PA", "ApexClass:UN"]);
+		assert.deepStrictEqual(r.keys, ["ApexClass:OL", "ApexClass:CL", "ApexClass:CF1", "ApexClass:CF2", "CustomObject:PA", "ApexClass:UN"]);
 		assert.strictEqual(r.unresolvedConflicts, 1);
 		assert.deepStrictEqual(r.unresolvedKeys, ["ApexClass:CF2"]);
 		assert.deepStrictEqual(Object.fromEntries(r.skipped.map((s) => [s.reason, s.count])), { "only in org": 1, equal: 1, "changed in org": 1 });
@@ -229,10 +229,15 @@ describe("sync center candidates", () => {
 		assert.strictEqual(r.unresolvedConflicts, 0);
 	});
 
-	it("retrieve: org-side rows count; conflicts need Take org", () => {
+	it("retrieve: org-side rows count; conflicts without a choice take part", () => {
 		const r = retrieveCandidates(ROWS, all, new Map([["ApexClass:CF2", "org" as const]]), true);
-		assert.deepStrictEqual(r.keys, ["ApexClass:OO", "ApexClass:CO", "ApexClass:CF2", "CustomObject:PA", "ApexClass:UN"]);
+		assert.deepStrictEqual(r.keys, ["ApexClass:OO", "ApexClass:CO", "ApexClass:CF1", "ApexClass:CF2", "CustomObject:PA", "ApexClass:UN"]);
 		assert.strictEqual(r.unresolvedConflicts, 1);
+		assert.deepStrictEqual(r.unresolvedKeys, ["ApexClass:CF1"]);
+		// Keep local excludes the row in Retrieve mode.
+		const kl = retrieveCandidates(ROWS, new Set(["ApexClass:CF1"]), new Map([["ApexClass:CF1", "local" as const]]), true);
+		assert.deepStrictEqual(kl.keys, []);
+		assert.deepStrictEqual(kl.skipped, [{ reason: "conflict set to Keep local", count: 1 }]);
 		assert.deepStrictEqual(Object.fromEntries(r.skipped.map((s) => [s.reason, s.count])), { "only local": 1, equal: 1, "changed locally": 1 });
 	});
 
@@ -263,8 +268,9 @@ describe("sync center candidates", () => {
 
 	it("tooltip texts", () => {
 		const r = deployCandidates(ROWS, all, none, true);
-		assert.strictEqual(unresolvedText(r), "2 conflicts need a choice");
-		assert.strictEqual(unresolvedText({ unresolvedConflicts: 1 }), "1 conflict needs a choice");
+		assert.strictEqual(unresolvedText(r), "2 selected components were also changed in the org — deploying overwrites them.");
+		assert.strictEqual(unresolvedText(r, "retrieve"), "2 selected components were also changed locally — retrieving overwrites your local files.");
+		assert.strictEqual(unresolvedText({ unresolvedConflicts: 1 }), "1 selected component was also changed in the org — deploying overwrites it.");
 		assert.strictEqual(unresolvedText({ unresolvedConflicts: 0 }), "");
 		assert.ok(skippedText(r).includes("1 only in org skipped"));
 		assert.strictEqual(skippedText({ skipped: [] }), "");

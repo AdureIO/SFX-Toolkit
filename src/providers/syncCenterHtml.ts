@@ -97,6 +97,8 @@ ${TEST_SUITE_CSS}
 
         <div class="modebar"><span class="choice mode" id="modeSeg" role="group" aria-label="Action"><button type="button" data-mode="deploy" class="on" aria-pressed="true" title="Deploy or validate components of the project to the org">Deploy</button><button type="button" data-mode="retrieve" aria-pressed="false" title="Retrieve components of the org into the project">Retrieve</button><button type="button" data-mode="delete" aria-pressed="false" title="Delete components that exist only in the org">Delete</button></span></div>
 
+        <div class="selbar"><span id="selSummary" class="selsum">Selected: 0</span><button type="button" class="ghost" id="selShowGrid" disabled>Show in grid</button></div>
+
         <details class="sec" id="secPresets" open>
           <summary>Presets</summary>
           <div class="sec-body">
@@ -224,6 +226,8 @@ const CENTER_CSS = `
 button.ghost.sm { height: 24px; padding: 0 8px; font-size: 12px; }
 button.ghost.sm.on { background: color-mix(in srgb, var(--ob-accent) 16%, transparent); }
 .modebar { display: flex; }
+.selbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 0; font-size: 12px; }
+.selbar .selsum { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .choice.mode { width: 100%; }
 .choice.mode button { flex: 1; height: 26px; font-size: 12px; font-weight: 600; }
 .sec[hidden] { display: none; }
@@ -263,7 +267,7 @@ button.danger-btn { background: var(--ob-bad); color: var(--vscode-button-foregr
 button.danger-btn:hover:not(:disabled) { filter: brightness(1.1); }
 .field input[type="text"] { width: 100%; }
 .hint { font-size: 11px; color: var(--vscode-descriptionForeground); line-height: 1.4; }
-.hint.conflict-note { color: var(--ob-bad); }
+.hint.conflict-note { color: var(--vscode-editorWarning-foreground, var(--vscode-descriptionForeground)); }
 .hint.conflict-note[hidden] { display: none; }
 .hint.warn { color: var(--ob-warn); }
 .hint.warn[hidden] { display: none; }
@@ -301,7 +305,7 @@ button.danger-btn:hover:not(:disabled) { filter: brightness(1.1); }
 .c.nm.ind { padding-left: 28px; }
 .c.mono { font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; }
 /* Refresh icon of a group row: readable at rest, hover background. */
-.row.grp .gref { opacity: 1; display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 4px; color: var(--vscode-icon-foreground, var(--vscode-foreground)); }
+.row.grp .gref { opacity: 1; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 4px; padding: 0; background: transparent; border: 0; cursor: pointer; opacity: 1; color: var(--vscode-icon-foreground, var(--vscode-foreground)); }
 .row.grp:hover .gref, .row.grp .gref:hover { opacity: 1; }
 .row.grp .gref:hover { background: var(--vscode-toolbar-hoverBackground, color-mix(in srgb, var(--vscode-foreground) 16%, transparent)); }
 .gref svg { display: block; }
@@ -322,7 +326,8 @@ button.danger-btn:hover:not(:disabled) { filter: brightness(1.1); }
 .choice button { width: auto; height: 20px; border-radius: 0; padding: 0 8px; font-size: 11px; opacity: .85; background: transparent; border: 0; }
 .choice button:hover { background: var(--ob-hover); opacity: 1; }
 .choice button.on { background: var(--asfx-accent); color: var(--vscode-button-foreground); opacity: 1; }
-.choice.need { border-color: var(--ob-bad); }
+.ibtn.choicebtn.on { background: var(--asfx-accent); color: var(--vscode-button-foreground); opacity: 1; }
+.ibtn.choicebtn .cl { font-size: 9px; font-weight: 700; margin-left: 1px; }
 .history { flex-shrink: 0; max-height: 46%; display: flex; flex-direction: column; border-top: 1px solid var(--ob-border); background: var(--ob-surface); }
 .hist-head { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--ob-border); font-size: 12px; }
 .hist-list { overflow-y: auto; flex: 1; min-height: 0; }

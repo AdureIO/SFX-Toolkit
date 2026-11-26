@@ -54,7 +54,7 @@ import { getRetrieveTimes, recordDeployed } from "../utils/retrieveLog";
 import { SharedMetadataFilter } from "../utils/sharedFilterState";
 import { getHistory, onDidChangeHistory, recordHistory } from "../utils/syncHistory";
 import { openComponentDiff } from "../utils/syncDiff";
-import { deploymentSetupPath, historyDeployLocalKeys, onlyOrgRefs, overwriteLocalKeys, refOfKey, rowKeyOf } from "../utils/syncCenterUiPure";
+import { conflictPrompt, deploymentSetupPath, historyDeployLocalKeys, onlyOrgRefs, overwriteLocalKeys, refOfKey, rowKeyOf } from "../utils/syncCenterUiPure";
 import { reauthenticateOrg } from "../commands/orgCommands";
 import { runGitStatusSfdxPaths } from "../utils/gitStatusPaths";
 import { OperationPanelProvider } from "./OperationPanelProvider";
@@ -980,6 +980,13 @@ export class SyncCenterPanelProvider {
 		return choice === all ? items : undefined;
 	}
 
+	/** The conflict rows (no choice) the webview flagged that are still among the items to run. */
+	private static conflictKeysOf(msg: { [k: string]: any }, items: { key: string }[]): string[] {
+		if (!Array.isArray(msg.conflicts)) return [];
+		const flagged = new Set<string>(msg.conflicts.map(String));
+		return items.map((i) => i.key).filter((k) => flagged.has(k));
+	}
+
 	// ── Deploy ───────────────────────────────────────────────────────────────────
 
 	private static async deployFromWebview(msg: { [k: string]: any }): Promise<void> {
@@ -992,12 +999,12 @@ export class SyncCenterPanelProvider {
 			this.post({ type: "deployResult", cancelled: true, dryRun });
 			return;
 		}
-		// A conflict row's own Deploy icon acts directly: say what it overwrites first. A validation overwrites nothing.
-		if (msg.conflict === true && !dryRun) {
-			const name = items[0]?.key ?? "this component";
-			const go = "Overwrite org";
-			const choice = await vscode.window.showWarningMessage(`Conflict: overwrite the org’s version with your local version?`, { modal: true, detail: `${name} changed in the project and in the org. Deploying replaces the org’s version with the local one.` }, go);
-			if (choice !== go) {
+		// Conflict rows without a choice take part: say what they overwrite first. A validation overwrites nothing.
+		const conflictKeys = this.conflictKeysOf(msg, items);
+		if (conflictKeys.length > 0 && !dryRun) {
+			const p = conflictPrompt("deploy", conflictKeys);
+			const choice = await vscode.window.showWarningMessage(p.message, { modal: true, detail: p.detail }, p.action);
+			if (choice !== p.action) {
 				this.post({ type: "deployResult", cancelled: true, dryRun });
 				return;
 			}
@@ -1199,12 +1206,13 @@ export class SyncCenterPanelProvider {
 			this.post({ type: "retrieveResult", results: [], cancelled: true });
 			return;
 		}
-		// A conflict row's own Retrieve icon acts directly: say what it overwrites first.
-		if (msg.conflict === true) {
-			const name = items[0]?.key ?? "this component";
-			const go = "Overwrite local";
-			const choice = await vscode.window.showWarningMessage(`Conflict: overwrite your local version with the org’s version?`, { modal: true, detail: `${name} changed in the project and in the org. Retrieving replaces the local files with the org’s version.` }, go);
-			if (choice !== go) {
+		// Conflict rows without a choice take part: say what they overwrite first. With "Confirm before overwriting
+		// local changes" on, the retrieve's own overwrite check already lists these files: don't ask twice.
+		const conflictKeys = this.conflictKeysOf(msg, items);
+		if (conflictKeys.length > 0 && msg.confirm === false) {
+			const p = conflictPrompt("retrieve", conflictKeys);
+			const choice = await vscode.window.showWarningMessage(p.message, { modal: true, detail: p.detail }, p.action);
+			if (choice !== p.action) {
 				this.post({ type: "retrieveResult", results: [], cancelled: true });
 				return;
 			}

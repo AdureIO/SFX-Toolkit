@@ -9,6 +9,7 @@ import {
 	SC_UNKNOWN,
 	SYNC_CENTER_VOCAB,
 	SYNC_IN_PROJECT,
+	syncStatusOptions,
 	SYNC_IN_PROJECT_FACET_INDEX,
 	SYNC_STATUS_NAMES,
 	SyncInputs,
@@ -31,6 +32,8 @@ import {
 	historyDeployLocalKeys,
 	historyRowKeys,
 	historyViews,
+	conflictPrompt,
+	initialGroup,
 	initialStatusFilter,
 	objectOfChild,
 	onlyOrgRefs,
@@ -208,7 +211,7 @@ describe("sync center ui rules", () => {
 			})
 		);
 		const sel = (...k: string[]) => new Set(k);
-		const input = (cands: ReturnType<typeof deployCandidates>, over = {}) => ({ verb: "Deploy", cands, busy: false, conflictsBlock: true, selected: 1, hint: "Deploy the selection", ...over });
+		const input = (cands: ReturnType<typeof deployCandidates>, over = {}) => ({ verb: "Deploy", cands, busy: false, selected: 1, hint: "Deploy the selection", ...over });
 
 		it("counts and lists what was skipped in the tooltip", () => {
 			const c = deployCandidates(rows, sel("ApexClass:L1", "ApexClass:O1", "ApexClass:O2"), new Map(), true);
@@ -218,20 +221,34 @@ describe("sync center ui rules", () => {
 			assert.ok(s.title.includes("2 only in org skipped"), s.title);
 		});
 
-		it("unresolved conflicts disable Deploy and Retrieve and say how many", () => {
+		it("conflicts without a choice never disable Deploy or Retrieve; they count", () => {
 			const c = deployCandidates(rows, sel("ApexClass:L1", "ApexClass:C1"), new Map(), true);
 			const s = buttonState(input(c, { selected: 2 }));
-			assert.strictEqual(s.disabled, true);
-			assert.ok(s.title.startsWith("1 conflict needs a choice"), s.title);
+			assert.strictEqual(s.disabled, false);
+			assert.strictEqual(s.label, "Deploy (2)");
 			const r = retrieveCandidates(rows, sel("ApexClass:O1", "ApexClass:C1"), new Map(), true);
-			assert.strictEqual(buttonState({ ...input(r), verb: "Retrieve" }).disabled, true);
+			const rs = buttonState({ ...input(r), verb: "Retrieve" });
+			assert.strictEqual(rs.disabled, false);
+			assert.strictEqual(rs.label, "Retrieve (2)");
 		});
 
-		it("a choice releases the conflict", () => {
-			const c = deployCandidates(rows, sel("ApexClass:C1"), new Map<string, ConflictChoice>([["ApexClass:C1", "local"]]), true);
-			const s = buttonState(input(c));
-			assert.strictEqual(s.disabled, false);
-			assert.strictEqual(s.label, "Deploy (1)");
+		it("an explicit choice pointing the other way excludes the conflict", () => {
+			const c = deployCandidates(rows, sel("ApexClass:C1"), new Map<string, ConflictChoice>([["ApexClass:C1", "org"]]), true);
+			assert.strictEqual(buttonState(input(c)).label, "Deploy (0)");
+			const k = deployCandidates(rows, sel("ApexClass:C1"), new Map<string, ConflictChoice>([["ApexClass:C1", "local"]]), true);
+			assert.strictEqual(buttonState(input(k)).label, "Deploy (1)");
+			assert.strictEqual(k.unresolvedConflicts, 0);
+		});
+
+		it("conflictPrompt lists up to 10 names, then +n more", () => {
+			const one = conflictPrompt("deploy", ["ApexClass:A"]);
+			assert.strictEqual(one.action, "Overwrite org");
+			assert.ok(one.detail.includes("ApexClass:A"));
+			const keys = Array.from({ length: 13 }, (_, i) => `ApexClass:C${i}`);
+			const p = conflictPrompt("retrieve", keys);
+			assert.strictEqual(p.action, "Overwrite local");
+			assert.ok(p.detail.includes("ApexClass:C9") && !p.detail.includes("ApexClass:C10"));
+			assert.ok(p.detail.includes("+3 more"), p.detail);
 		});
 
 		it("nothing selected, nothing applicable, busy and blocked explain themselves", () => {
@@ -247,7 +264,7 @@ describe("sync center ui rules", () => {
 
 		it("Delete: conflicts never block, equal rows are skipped", () => {
 			const c = deleteCandidates(rows, sel("ApexClass:O1", "ApexClass:C1"));
-			const s = buttonState({ verb: "Delete from org", cands: c, busy: false, conflictsBlock: false, selected: 2, hint: "Delete" });
+			const s = buttonState({ verb: "Delete from org", cands: c, busy: false, selected: 2, hint: "Delete" });
 			assert.strictEqual(s.label, "Delete from org (1)");
 			assert.strictEqual(s.disabled, false);
 			assert.ok(s.title.includes("skipped"), s.title);
@@ -368,6 +385,15 @@ describe("status filter: In project", () => {
 		assert.ok(parseQuery("status:project", SYNC_CENTER_VOCAB).status[0].value(SC_ONLY_LOCAL));
 	});
 
+	it("the filter options read the facet slot of their own status (not a neighbour's)", () => {
+		// One row per status: every option's count must equal the number of rows with that status.
+		const f = computeFacets(idx, DEFAULT_FILTER, ctx);
+		for (const o of syncStatusOptions()) {
+			const expected = o.value === SYNC_IN_PROJECT ? names.length - 1 : names.filter((n) => n === o.value).length;
+			assert.strictEqual(f.status[o.facetIndex], expected, o.value);
+		}
+	});
+
 	it("is counted as a facet after the names; the other facets are unchanged", () => {
 		const f = computeFacets(idx, DEFAULT_FILTER, ctx);
 		assert.strictEqual(f.status.length, SYNC_STATUS_NAMES.length + 1);
@@ -383,6 +409,16 @@ describe("status filter: In project", () => {
 		assert.deepStrictEqual(initialStatusFilter([], true), []);
 		assert.deepStrictEqual(initialStatusFilter(["conflict", "bogus", "conflict", 3], true), ["conflict"]);
 		assert.deepStrictEqual(initialStatusFilter(["only-org", SYNC_IN_PROJECT], false), ["only-org", SYNC_IN_PROJECT]);
+	});
+
+	it("Group by type is on by default; a store from before the default gets it once, the user's choice is kept after", () => {
+		assert.strictEqual(initialGroup(undefined, false), true);
+		assert.strictEqual(initialGroup(false, false), true);
+		assert.strictEqual(initialGroup(true, false), true);
+		assert.strictEqual(initialGroup(false, true), false);
+		assert.strictEqual(initialGroup(true, true), true);
+		assert.strictEqual(initialGroup(undefined, true), true);
+		assert.strictEqual(initialGroup("yes", true), true);
 	});
 
 	it("Clear all filters keeps In project on and the only-selected toggle as it was", () => {

@@ -10,7 +10,7 @@ Status: design 2026-11-23, updated 2026-11-26 (the Deploy Metadata panel is repl
 - **Direction: smart sync plus manual.**
   - There is one selection with two buttons, `Retrieve (n)` and `Deploy (n)`.
   - The filters and the header checkbox ("select all shown rows") preselect the obvious work. There are no quick actions.
-  - A conflict row needs an explicit per-row choice before it can take part in the buttons; its own Deploy and Retrieve icons act directly (after a confirmation).
+  - Conflicts never block. A selected conflict row takes part by default; the run asks for confirmation. A per-row choice is an optional override.
 - **v1 extras:**
   - a diff per row;
   - delete from the org;
@@ -91,9 +91,10 @@ Statuses come from `compareStatusPure.ts` plus the content compare service, the 
 
 ## Button counts and rules
 
-- `Deploy (n)` counts selected rows that exist locally (`only-local`, `changed-locally`, `equal` when not skipped, `partial`) and conflict rows set to "Keep local".
-- `Retrieve (n)` counts selected rows that exist in the org (`only-org`, `changed-in-org`, `equal` when not skipped, `partial`) and conflict rows set to "Take org".
-- Selected conflict rows with no choice disable both buttons. The tooltip reads "n conflicts need a choice", and a link filters the list to them.
+- `Deploy (n)` counts selected rows that exist locally (`only-local`, `changed-locally`, `equal` when not skipped, `partial`) and conflict rows not set to "Take org" (no choice counts).
+- `Retrieve (n)` counts selected rows that exist in the org (`only-org`, `changed-in-org`, `equal` when not skipped, `partial`) and conflict rows not set to "Keep local" (no choice counts).
+- The buttons are never disabled because of conflicts. Selected conflict rows with no choice show a neutral warning line near the buttons: "n selected components were also changed in the org — deploying overwrites them." (Retrieve: "…changed locally — retrieving overwrites your local files."), with a "Show conflicts" link that filters the list to them.
+- Confirmation at run time (host modal): a deploy that includes conflict rows without a choice asks "Overwrite org" / Cancel, listing up to 10 names and "+n more". Validate only (check-only) does not ask. A retrieve with such rows asks "Overwrite local" / Cancel, unless "Confirm before overwriting local changes" is on (its own overwrite check already lists the files). A conflict row's own Deploy and Retrieve icons use the same modal.
 - A selected row that doesn't count for a button is listed in that button's tooltip ("3 only-in-org rows skipped").
 - Deploy reuses the Deploy panel's deploy path:
   - the live org check before the deploy;

@@ -46,6 +46,15 @@ export function initialStatusFilter(stored: unknown, defaultApplied: boolean): s
 }
 
 /**
+ * The "Group by type" toggle to start from. A store from before the default existed (`defaultApplied` false) gets
+ * `true` once; after that the stored boolean is kept (a non-boolean falls back to `true`).
+ */
+export function initialGroup(stored: unknown, defaultApplied: boolean): boolean {
+	if (!defaultApplied) return true;
+	return typeof stored === "boolean" ? stored : true;
+}
+
+/**
  * The filter fields the Center keeps on "Clear all filters": the status group goes back to its default ("In
  * project") and the "only selected" toggle keeps its value (the caller passes whether it is in effect).
  */
@@ -162,6 +171,16 @@ export function pruneConflictChoices(choices: ReadonlyMap<string, ConflictChoice
 	return new Map([...choices].filter(([k]) => conflicts.has(k)));
 }
 
+/** The override toggle cycles unset → keep local → take org → unset. */
+export function nextChoice(c: ConflictChoice | undefined): ConflictChoice | undefined {
+	return c === undefined ? "local" : c === "local" ? "org" : undefined;
+}
+
+/** Tooltip of the override toggle for its current state. */
+export function choiceTitle(c: ConflictChoice | undefined): string {
+	return c === "local" ? "Keep local: deploy wins (Retrieve skips this row). Click for Take org." : c === "org" ? "Take org: retrieve wins (Deploy skips this row). Click to clear." : "No override: the row takes part in Deploy and Retrieve (asks first). Click for Keep local.";
+}
+
 /** Storage key of the choices: they belong to one project and one org. */
 export function choicesStoreKey(projectDir: string, org: string | null): string {
 	return `${projectDir}|${org ?? ""}`;
@@ -194,25 +213,56 @@ export interface ButtonInput {
 	busy: boolean;
 	/** Why nothing can run at all (no project, no org, org not loaded …). */
 	blocked?: string;
-	/** Unresolved conflicts disable the button (Deploy, Retrieve); Delete never has any. */
-	conflictsBlock: boolean;
 	selected: number;
 	/** What a click does, for the tooltip of an enabled button. */
 	hint: string;
 }
 
-/** `Deploy (n)`, enabled or not, with the tooltip that says why (skipped rows, conflicts needing a choice). */
+/** `Deploy (n)`, enabled or not, with the tooltip that says why (skipped rows). Conflicts never disable it. */
 export function buttonState(i: ButtonInput): ButtonState {
 	const n = i.cands.keys.length;
 	const label = `${i.verb} (${n.toLocaleString("en-US")})`;
 	const skipped = i.cands.skipped.map((s) => `${s.count} ${s.reason} skipped`).join(", ");
-	const conflicts = i.cands.unresolvedConflicts;
-	const conflictText = conflicts === 0 ? "" : `${conflicts} conflict${conflicts === 1 ? "" : "s"} need${conflicts === 1 ? "s" : ""} a choice`;
 	if (i.blocked) return { label, disabled: true, title: i.blocked };
 	if (i.busy) return { label, disabled: true, title: "An operation is running" };
-	if (i.conflictsBlock && conflicts > 0) return { label, disabled: true, title: [conflictText, skipped].filter(Boolean).join(" · ") };
 	if (n === 0) return { label, disabled: true, title: i.selected === 0 ? "Select components first" : skipped || "None of the selected components applies" };
 	return { label, disabled: false, title: [i.hint, skipped].filter(Boolean).join(" · ") };
+}
+
+// ── Selection overview ─────────────────────────────────────────────────────────
+
+/** "Selected: 7 · 5 deploy · 2 skipped" (the breakdown only when something is selected), in the current mode's counting. */
+export function selectionSummary(verb: string, selected: number, taking: number): string {
+	if (selected === 0) return "Selected: 0";
+	return `Selected: ${selected.toLocaleString("en-US")} · ${taking.toLocaleString("en-US")} ${verb} · ${(selected - taking).toLocaleString("en-US")} skipped`;
+}
+
+// ── Run-time conflict confirmation ─────────────────────────────────────────────
+
+export interface ConflictPrompt {
+	message: string;
+	detail: string;
+	/** The one action button of the modal. */
+	action: string;
+}
+
+/** The modal before a deploy / retrieve that includes conflict rows: up to 10 names, then "+n more". */
+export function conflictPrompt(mode: "deploy" | "retrieve", keys: readonly string[]): ConflictPrompt {
+	const n = keys.length;
+	const names = keys.slice(0, 10).join("\n") + (n > 10 ? `\n+${n - 10} more` : "");
+	const deploy = mode === "deploy";
+	if (n === 1) {
+		return {
+			message: deploy ? "Conflict: overwrite the org’s version with your local version?" : "Conflict: overwrite your local version with the org’s version?",
+			detail: `${keys[0]} changed in the project and in the org. ${deploy ? "Deploying replaces the org’s version with the local one." : "Retrieving replaces the local files with the org’s version."}`,
+			action: deploy ? "Overwrite org" : "Overwrite local",
+		};
+	}
+	return {
+		message: deploy ? `${n} components changed in the org too. Overwrite the org’s versions?` : `${n} components changed locally too. Overwrite your local versions?`,
+		detail: `${deploy ? "Deploying replaces the org’s versions with your local ones" : "Retrieving replaces your local files with the org’s versions"}:\n${names}`,
+		action: deploy ? "Overwrite org" : "Overwrite local",
+	};
 }
 
 // ── History ────────────────────────────────────────────────────────────────────

@@ -66,6 +66,18 @@ export const SYNC_STATUS_LABELS: Record<SyncStatus, string> = {
 	"only-org": "Only in org",
 };
 
+/**
+ * The options of the status filter group, each with the index of its count in `Facets.status`. The names keep their
+ * code as index (the "In project" option comes first in the list but its count sits after the names), so a count
+ * is never read from a neighbour's slot.
+ */
+export function syncStatusOptions(): { value: string; label: string; facetIndex: number }[] {
+	return [
+		{ value: SYNC_IN_PROJECT, label: "In project", facetIndex: SYNC_IN_PROJECT_FACET_INDEX },
+		...SYNC_STATUS_NAMES.map((n, code) => ({ value: n, label: SYNC_STATUS_LABELS[n], facetIndex: code })),
+	];
+}
+
 export const syncStatusCode = (s: SyncStatus): number => SYNC_STATUS_NAMES.indexOf(s);
 
 /** The status facet "In project": every row that exists locally, i.e. everything except `only-org`. */
@@ -264,11 +276,11 @@ export interface SkipCount {
 export interface Candidates {
 	/** Row keys that take part in the action, in row order. */
 	keys: string[];
-	/** Selected rows that don't count, grouped by why (never contains conflicts without a choice). */
+	/** Selected rows that don't count, grouped by why. */
 	skipped: SkipCount[];
-	/** Selected conflict rows without a choice: while > 0 the buttons stay disabled. */
+	/** Selected conflict rows without a choice. They take part by default (they are in `keys`); the run asks first. Never blocks. */
 	unresolvedConflicts: number;
-	/** Their keys (for the "filter to them" link). */
+	/** Their keys (for the "show conflicts" link and the run-time confirmation). */
 	unresolvedKeys: string[];
 }
 
@@ -285,14 +297,17 @@ const TAKE: Verdict = { take: true };
 const skip = (reason: string): Verdict => ({ take: false, reason });
 
 function collect(rows: readonly SyncRow[], o: CandidateOptions, verdict: (r: SyncRow) => Verdict | "unresolved"): Candidates {
+	// "unresolved" = a conflict without a choice: it takes part (and is also reported in `unresolvedKeys`).
 	const keys: string[] = [];
 	const skipped = new Map<string, number>();
 	const unresolvedKeys: string[] = [];
 	for (const r of rows) {
 		if (!o.selection.has(r.key)) continue;
 		const v = verdict(r);
-		if (v === "unresolved") unresolvedKeys.push(r.key);
-		else if (v.take) keys.push(r.key);
+		if (v === "unresolved") {
+			unresolvedKeys.push(r.key);
+			keys.push(r.key);
+		} else if (v.take) keys.push(r.key);
 		else skipped.set(v.reason, (skipped.get(v.reason) ?? 0) + 1);
 	}
 	return {
@@ -305,7 +320,7 @@ function collect(rows: readonly SyncRow[], o: CandidateOptions, verdict: (r: Syn
 
 /**
  * `Deploy (n)`: selected rows that exist locally (only-local, changed-locally, partial, unknown-but-local,
- * equal unless skipped) and conflict rows set to "Keep local".
+ * equal unless skipped) and conflict rows not set to "Take org" (no choice = takes part; the run asks first).
  */
 export function deployCandidates(rows: readonly SyncRow[], selection: ReadonlySet<string>, conflictChoices: ReadonlyMap<string, ConflictChoice>, skipEqual: boolean): Candidates {
 	const o = { selection, conflictChoices, skipEqual };
@@ -333,7 +348,7 @@ export function deployCandidates(rows: readonly SyncRow[], selection: ReadonlySe
 
 /**
  * `Retrieve (n)`: selected rows that exist in the org (only-org, changed-in-org, partial, unknown-but-listed,
- * equal unless skipped) and conflict rows set to "Take org".
+ * equal unless skipped) and conflict rows not set to "Keep local" (no choice = takes part; the run asks first).
  */
 export function retrieveCandidates(rows: readonly SyncRow[], selection: ReadonlySet<string>, conflictChoices: ReadonlyMap<string, ConflictChoice>, skipEqual: boolean): Candidates {
 	const o = { selection, conflictChoices, skipEqual };
@@ -376,10 +391,12 @@ export function skippedText(c: Pick<Candidates, "skipped">): string {
 	return c.skipped.map((s) => `${s.count} ${s.reason} skipped`).join(", ");
 }
 
-/** "2 conflicts need a choice", or "" when none. */
-export function unresolvedText(c: Pick<Candidates, "unresolvedConflicts">): string {
+/** "2 selected components were also changed in the org — deploying overwrites them." (retrieve: locally / local files), or "" when none. */
+export function unresolvedText(c: Pick<Candidates, "unresolvedConflicts">, mode: "deploy" | "retrieve" = "deploy"): string {
 	const n = c.unresolvedConflicts;
-	return n === 0 ? "" : `${n} conflict${n === 1 ? "" : "s"} need${n === 1 ? "s" : ""} a choice`;
+	if (n === 0) return "";
+	const what = n === 1 ? "1 selected component was" : `${n} selected components were`;
+	return mode === "deploy" ? `${what} also changed in the org — deploying overwrites ${n === 1 ? "it" : "them"}.` : `${what} also changed locally — retrieving overwrites your local files.`;
 }
 
 /** `{ type, fullName }` as the retrieve engine and the destructive package want them (org naming), for row keys. */
@@ -442,7 +459,7 @@ export function normalizeMode(v: unknown): CenterMode {
 
 /**
  * Can this row take part in `mode`? Deploy needs local files, Retrieve needs the component in the org, Delete only
- * takes rows that exist only in the org. (The button counts apply further rules: equal rows, unresolved conflicts.)
+ * takes rows that exist only in the org. (The button counts apply further rules: equal rows, conflicts set the other way.)
  */
 export function takesPart(mode: CenterMode, row: Pick<SyncRow, "local" | "inOrg" | "status">): boolean {
 	return mode === "deploy" ? row.local : mode === "retrieve" ? row.inOrg : row.status === "only-org";
