@@ -8,6 +8,8 @@ import {
 	effectiveSyncedAt,
 	fileLocalTime,
 	isPathDirty,
+	compareStatusText,
+	compareSummary,
 	progressText,
 } from "../utils/compareStatusPure";
 
@@ -131,5 +133,20 @@ describe("compare status: progress text", () => {
 		assert.strictEqual(progressText({ state: "paused", done: 3, total: 9, failed: 0 }), "Comparing paused 3 / 9");
 		assert.strictEqual(progressText({ state: "idle", done: 9, total: 9, failed: 0 }), "");
 		assert.strictEqual(progressText(null), "");
+	});
+});
+
+describe("compare status: summary and top-bar text", () => {
+	it("counts valid results and takes the newest compare time; stale ones do not count", () => {
+		const info = { a: [1, 100, 100], b: [2, 300, 0], c: [0, 900, 50] } as Record<string, [number, number, number]>;
+		assert.deepStrictEqual(compareSummary(info, ["a", "b", "c", "d"]), { verified: 2, lastAt: 300 });
+		assert.deepStrictEqual(compareSummary({}, ["a"]), { verified: 0, lastAt: 0 });
+	});
+	it("shows progress while running, else the age or Not compared", () => {
+		const rel = (t: number) => `t${t}`;
+		assert.strictEqual(compareStatusText({ state: "running", done: 120, total: 732, failed: 0 }, 5, rel), "Comparing 120/732…");
+		assert.strictEqual(compareStatusText({ state: "running", done: 0, total: 0, failed: 0 }, 5, rel), "Comparing…");
+		assert.strictEqual(compareStatusText({ state: "idle", done: 0, total: 0, failed: 0 }, 5, rel), "Compared t5");
+		assert.strictEqual(compareStatusText(null, 0, rel), "Not compared");
 	});
 });

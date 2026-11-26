@@ -173,6 +173,7 @@ describe("sync center ui rules", () => {
 				org: [comp("ApexClass", "O1"), comp("ApexClass", "O2"), comp("ApexClass", "E1"), comp("ApexClass", "C1")],
 				localInfo: { "ApexClass:E1": [T0 - HOUR, 0], "ApexClass:C1": [T0 + HOUR, 1] },
 				retrieved: { "ApexClass:E1": T0, "ApexClass:C1": T0 - HOUR },
+				contentInfo: { "ApexClass:E1": [1, T0, T0] },
 			})
 		);
 		const sel = (...k: string[]) => new Set(k);
@@ -222,7 +223,7 @@ describe("sync center ui rules", () => {
 			assert.strictEqual(selectionSummary("deploy", 2, 0, false), "2 selected · 0 to deploy · 2 skipped");
 			assert.strictEqual(selectionSummary("deploy", 5, 3, false, 2), "5 selected (2 hidden) · 3 to deploy · 2 skipped");
 			assert.strictEqual(selectionSummary("retrieve", 2, 1, true), "2 selected · 1 to retrieve · 1 skipped — show all");
-			assert.ok(selectionSummaryTitle([{ reason: "equal", count: 1 }], false).startsWith("1 equal (Skip equal components is on)"));
+			assert.ok(selectionSummaryTitle([{ reason: "equal", count: 1 }], false).startsWith("1 equal (verified by compare)"));
 			assert.strictEqual(selectionSummaryTitle([], true), "Click to show all components");
 		});
 

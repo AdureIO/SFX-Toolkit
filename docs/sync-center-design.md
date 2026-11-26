@@ -52,7 +52,7 @@ Statuses come from `compareStatusPure.ts` plus the content compare service, the 
   - search (`filterSearchMarkup`);
   - "Listed …" info;
   - Refresh;
-  - **Compare contents (n)**, a primary button: compares the selected components, else the project components shown. Contents are never compared automatically (`compare.verifyContents` defaults to `manual`; `auto` still works). The progress text and a Cancel button show while it runs.
+  - **Compare contents (n)**, a primary button: compares the selected components, else the project components shown. Contents of the project components that exist in the org are also compared automatically in the background (`compare.verifyContents` = `auto`, the default; `manual` turns the automatic run off). The automatic run starts after the panel's first load, an org switch, a refresh, a file change (debounced), and after a retrieve or deploy for the affected rows; it never covers org-only rows. The top bar shows "Compared <ago>" (progress "Comparing 120/732…" while running, "Not compared" before the first run; the tooltip has the verified count and the date). The time is the newest valid compare result of the project components, persisted with the compare cache. The progress text and a Cancel button show while it runs.
 - **Left:** the filter sidebar (`filterGroupsMarkup`): status, type, namespace, modified. It is the Org Browser's former sidebar, including collapse and auto-hide below 560 px.
 - **Center:** the virtual grid (the Org Browser's former look).
   - Columns: a checkbox (header: select all shown rows), then the columns of the column layout (below).
@@ -75,12 +75,12 @@ Statuses come from `compareStatusPure.ts` plus the content compare service, the 
   2. **Deploy**
      - Test level and specified tests, Validate only, and Auto-select git changes, all as in the Deploy panel.
      - "Deploy name" (optional text): a local label, as Salesforce has none. It travels with the deploy request (`label`), is stored in the history entry and shown in Local history.
-     - "Skip equal components" (default on).
+     - "Skip equal components" (default on): only rows whose equality was verified by Compare contents (not provisional, date-based) are skipped; provisional equal rows take part.
      - Button `Deploy (n)`.
   3. **Retrieve**
      - "Confirm before overwriting local changes" (default on; uses the existing retrieve-safety check).
      - "Retrieve the whole object when a child is selected" (default off).
-     - "Skip equal components" (default on).
+     - "Skip equal components" (default on): only rows whose equality was verified by Compare contents (not provisional, date-based) are skipped; provisional equal rows take part.
      - Button `Retrieve (n)`.
   4. **Delete from org** (collapsed, danger styling)
      - Its own test level (No Test Run / Run Specified Tests / Run Local Tests / Run All Tests) and, for specified tests, the test-class tree and suites (the shared component, a second instance).
@@ -92,8 +92,8 @@ Statuses come from `compareStatusPure.ts` plus the content compare service, the 
 
 ## Button counts and rules
 
-- `Deploy (n)` counts every selected row that exists locally (`only-local`, `changed-locally`, `changed-in-org`, `conflict`, `partial`, `equal` when not skipped). A conflict set to "Take org" is excluded.
-- `Retrieve (n)` counts every selected row that exists in the org (`only-org`, `changed-in-org`, `changed-locally`, `conflict`, `partial`, `equal` when not skipped). A conflict set to "Keep local" is excluded.
+- `Deploy (n)` counts every selected row that exists locally (`only-local`, `changed-locally`, `changed-in-org`, `conflict`, `partial`, `equal` unless skipped). A conflict set to "Take org" is excluded.
+- `Retrieve (n)` counts every selected row that exists in the org (`only-org`, `changed-in-org`, `changed-locally`, `conflict`, `partial`, `equal` unless skipped). A conflict set to "Keep local" is excluded.
 - Rows whose run overwrites the other side (Deploy: `changed-in-org` and conflicts without a choice; Retrieve: `changed-locally` and conflicts without a choice) take part and are flagged. The buttons are never disabled because of them. A neutral warning line shows near the buttons: "n selected components have a newer version in the org — deploying overwrites them." (Retrieve: "…have local changes — retrieving overwrites your local files."), with a "Show conflicts" link that filters the list to the affected rows.
 - Confirmation at run time (host modal): a deploy with flagged rows asks "Overwrite org" / Cancel, listing up to 10 names and "+n more". Validate only (check-only) does not ask. A retrieve with flagged rows asks "Overwrite local" / Cancel, unless "Confirm before overwriting local changes" is on (its own overwrite check already lists the files). A row's own Deploy and Retrieve icons use the same modal.
 - Selection summary: a text link directly below the action button of the active section, "2 selected · 0 to deploy · 2 skipped". Clicking it toggles the only-selected filter (the text then ends in " — show all"). The tooltip lists why rows are skipped ("1 equal (Skip equal components is on)"). It is hidden when nothing is selected and the filter is off.
@@ -183,7 +183,7 @@ Statuses come from `compareStatusPure.ts` plus the content compare service, the 
 | Hidden-selection prompt | present |
 | Production org confirmation | present |
 | Live progress, cancel | present (operation card) |
-| Result bar, tests, coverage panel | present |
+| Operation card (outcome, failures), tests, coverage panel | present |
 | Problems-view diagnostics and notifications | present (shared `reportDeployOutcome`) |
 | Classic deployment history entries (Deployment History command) | ported: the panel writes them too |
 | New history (local) | present |
@@ -198,7 +198,7 @@ Statuses come from `compareStatusPure.ts` plus the content compare service, the 
 - **Selection link** under the action button of the active section: "5 selected (2 hidden) · 3 to deploy · 2 skipped". Clicking toggles the only-selected filter. The hidden part has small "show" and "clear hidden" links. The tooltip lists why rows are skipped.
 - **Selection banner**: while only-selected is on, a slim info bar under the toolbar reads "Showing your selection: 5 selected (2 hidden) · 3 to deploy · 2 skipped" (the current mode's counting). Actions: "Back to all components", "Clear selection" (deselects all and leaves the view) and ×. Esc in the grid or panel leaves the view unless a menu is open. The bar is hidden when the filter is off.
 - **Modified time filter** passes a row when its org last-modified date or its local change time lies in the window. The local change time is the one the date-based status uses (`localInfo`: dirty or untracked files use the file mtime, else the last commit time; the newest across the component's files). Only-org rows have only the org date, only-local rows only the local date. Facet counts use the same predicate. "Modified by me" stays org-based. An optional column "Last modified (local)" (off by default) shows the value.
-- **Retrieve project (n)**: a secondary button in the Retrieve section. It retrieves every row that exists locally and in the org, independent of selection and filters (only-local rows and, with "Skip equal components", equal rows are skipped). One modal asks "Retrieve n components of project <name> from <org>? Local files will be overwritten." and, when "Confirm before overwriting local changes" is on, lists up to 10 locally changed components (it replaces the retrieve's own overwrite check, so there is no second prompt). It uses the normal host retrieve path (history label "Retrieve project", op card, rescan, re-compare). The button waits for the org listing; there is no package-directory fallback.
+- **Retrieve project (n)**: a secondary button in the Retrieve section. It retrieves every row that exists locally and in the org, independent of the selection, filters, search, the only-selected view and "Skip equal components" (equal rows are included; only-local rows are excluded as there is nothing to retrieve). The host retrieves exactly the keys it is sent and applies no filter or skip-equal of its own. Tooltip: "All components of this project that exist in the org (n), regardless of filters and Skip equal". One modal asks "Retrieve n components of project <name> from <org>? Local files will be overwritten." and, when "Confirm before overwriting local changes" is on, lists up to 10 locally changed components (it replaces the retrieve's own overwrite check, so there is no second prompt). It uses the normal host retrieve path (history label "Retrieve project", op card, rescan, re-compare). The button waits for the org listing; there is no package-directory fallback.
 
 ## Parity with the removed Org Browser
 

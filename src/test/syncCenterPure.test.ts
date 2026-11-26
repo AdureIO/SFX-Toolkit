@@ -226,6 +226,16 @@ describe("sync center candidates", () => {
 		assert.deepStrictEqual(r.skipped, [{ reason: "equal", count: 1 }]);
 	});
 
+	it("Skip equal only skips verified equal rows; a provisional (date-based) equal takes part", () => {
+		const rows = [row("ApexClass:V", "equal"), row("ApexClass:P", "equal", { provisional: true })];
+		const sel = new Set(rows.map((r) => r.key));
+		for (const fn of [deployCandidates, retrieveCandidates]) {
+			const r = fn(rows, sel, none, true);
+			assert.deepStrictEqual(r.keys, ["ApexClass:P"]);
+			assert.deepStrictEqual(r.skipped, [{ reason: "equal", count: 1 }]);
+		}
+	});
+
 	it("deploy: a conflict set to Take org is skipped, not an overwrite", () => {
 		const r = deployCandidates(ROWS, new Set(["ApexClass:CF1"]), new Map([["ApexClass:CF1", "org" as const]]), true);
 		assert.deepStrictEqual(r.keys, []);
@@ -320,12 +330,11 @@ describe("sync center rows: local change time", () => {
 });
 
 describe("sync center: Retrieve project", () => {
-	it("every row that exists locally and in the org, independent of the selection; equal only when not skipped", () => {
-		const keys = retrieveProjectKeys(ROWS, true);
-		assert.deepStrictEqual(keys, ["ApexClass:CL", "ApexClass:CO", "ApexClass:CF1", "ApexClass:CF2", "ApexClass:UN"]);
+	it("every row that exists locally and in the org, independent of the selection; equal rows included", () => {
+		const keys = retrieveProjectKeys(ROWS);
+		assert.deepStrictEqual(keys.slice().sort(), ["ApexClass:CL", "ApexClass:CO", "ApexClass:CF1", "ApexClass:CF2", "ApexClass:EQ", "ApexClass:UN"].sort());
 		assert.ok(!keys.includes("ApexClass:OL"), "only-local has nothing to retrieve");
 		assert.ok(!keys.includes("ApexClass:OO"), "only-org is not in the project");
-		assert.ok(!keys.includes("ApexClass:EQ"), "equal skipped");
-		assert.ok(retrieveProjectKeys(ROWS, false).includes("ApexClass:EQ"));
+		assert.ok(keys.includes("ApexClass:EQ"), "equal is included");
 	});
 });

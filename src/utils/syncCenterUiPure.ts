@@ -221,9 +221,9 @@ export function selectionBannerText(verb: string, selected: number, taking: numb
 	return `Showing your selection: ${selectionSummary(verb, Math.max(selected, 0), taking, false, hidden) || "0 selected"}`;
 }
 
-/** Tooltip of the summary link: why rows are skipped ("1 equal (Skip equal components is on)"), else what a click does. */
+/** Tooltip of the summary link: why rows are skipped ("1 equal (verified by compare)"), else what a click does. */
 export function selectionSummaryTitle(skipped: readonly { reason: string; count: number }[], filterOn: boolean): string {
-	const why = skipped.map((s) => `${s.count} ${s.reason}${s.reason === "equal" ? " (Skip equal components is on)" : ""}`).join(", ");
+	const why = skipped.map((s) => `${s.count} ${s.reason}${s.reason === "equal" ? " (verified by compare)" : ""}`).join(", ");
 	const click = filterOn ? "Click to show all components" : "Click to show only the selected components";
 	return why ? `${why}. ${click}` : click;
 }

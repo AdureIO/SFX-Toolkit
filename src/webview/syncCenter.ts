@@ -27,7 +27,7 @@ import {
 } from "../utils/orgBrowser/filter";
 import { splitByVisibility } from "../utils/orgBrowser/selection";
 import { Comp, ListFailure, TypeInfo } from "../utils/orgBrowser/types";
-import { CompareProgress, ContentInfoMap, LocalInfoMap, progressText } from "../utils/compareStatusPure";
+import { CompareProgress, ContentInfoMap, LocalInfoMap, compareStatusText, compareSummary } from "../utils/compareStatusPure";
 import {
 	ConflictChoice,
 	SYNC_CENTER_VOCAB,
@@ -301,6 +301,8 @@ const suites = mountTestSuites({ post, checked: checkedTests, onApplied: () => r
 const delSuites = mountTestSuites({ post, checked: checkedDeleteTests, onApplied: () => renderRight(), setStatus, idPrefix: "del-", scope: () => $("del-test-list") });
 let testClasses: { label: string; description: string }[] = [];
 let statusText = "";
+/** True while the status line shows a transient hint (not an operation result): the next selection change clears it. */
+let statusIsHint = false;
 /** The first listing of this org finished (a selection carried in by "open in the Center" survives the `reset` before it). */
 let loadedOnce = false;
 
@@ -744,9 +746,20 @@ function renderListed(): void {
 
 function renderCompareInfo(): void {
 	const el = $("cmpInfo");
-	el.textContent = progressText(cmpProgress);
-	const failed = cmpProgress?.failed ?? 0;
-	el.title = failed > 0 ? `${failed} component${failed === 1 ? "" : "s"} could not be compared (they keep the date-based status)` : "";
+	if (noOrg || !hasProject || !listedAt) {
+		el.textContent = "";
+		el.title = "";
+	} else {
+		ensureRows();
+		const proj = syncRows.filter((r) => r.local && r.inOrg && r.localKey).map((r) => r.localKey!);
+		const sum = compareSummary(contentInfo, proj);
+		el.textContent = compareStatusText(cmpProgress, sum.lastAt, (t) => relativeTime(t, Date.now()));
+		const failed = cmpProgress?.failed ?? 0;
+		const tip = [`${sum.verified.toLocaleString("en-US")} of ${proj.length.toLocaleString("en-US")} project components verified by content compare`];
+		if (sum.lastAt > 0) tip.push(`Last compared ${new Date(sum.lastAt).toLocaleString()}`);
+		if (failed > 0) tip.push(`${failed} component${failed === 1 ? "" : "s"} could not be compared (they keep the date-based status)`);
+		el.title = tip.join("\n");
+	}
 	const running = cmpProgress?.state === "running";
 	const n = compareKeys().keys.length;
 	$("cmpBtn").textContent = `≈ Compare contents${n > 0 ? ` (${n.toLocaleString()})` : ""}`;
@@ -870,11 +883,11 @@ function renderRight(): void {
 	const d = buttonState({ verb: ui.opts.validateOnly ? "Validate" : "Deploy", cands: dc, busy, blocked, selected: sel, hint: ui.opts.validateOnly ? "Validate the selection against the org" : "Deploy the selection to the org" });
 	const r = buttonState({ verb: "Retrieve", cands: rc, busy, blocked, selected: sel, hint: "Retrieve the selection into the project" });
 	const x = buttonState({ verb: "Delete from org", cands: xc, busy, blocked, selected: sel, hint: "Delete the selected components from the org" });
-	const projKeys = retrieveProjectKeys(syncRows, ui.opts.skipEqualRetrieve);
+	const projKeys = retrieveProjectKeys(syncRows);
 	const pb = $("retrieveProjectBtn") as HTMLButtonElement;
 	pb.textContent = `Retrieve project (${projKeys.length.toLocaleString("en-US")})`;
 	pb.disabled = busy || !!blocked || projKeys.length === 0;
-	pb.title = blocked ? blocked : busy ? "An operation is running" : projKeys.length === 0 ? (local.known && orgComps.length === 0 ? "Waiting for the org listing" : "Nothing in the project to retrieve") : "Retrieve every component of the project that exists in the org (ignores the selection and filters)";
+	pb.title = blocked ? blocked : busy ? "An operation is running" : projKeys.length === 0 ? (local.known && orgComps.length === 0 ? "Waiting for the org listing" : "Nothing in the project to retrieve") : `All components of this project that exist in the org (${projKeys.length.toLocaleString("en-US")}), regardless of filters and Skip equal`;
 	const mode = modeOf();
 	const taking = mode === "retrieve" ? rc.keys.length : mode === "delete" ? xc.keys.length : dc.keys.length;
 	const cands = mode === "retrieve" ? rc : mode === "delete" ? xc : dc;
@@ -941,8 +954,9 @@ function updatePresetModified(): void {
 	mark.title = p ? `Selection differs from preset ${p.name}. Save preset to update it.` : "";
 }
 
-function setStatus(text: string): void {
+function setStatus(text: string, hint = false): void {
 	statusText = text;
+	statusIsHint = hint && text !== "";
 	$("statusLine").textContent = text;
 	$("statusLine").title = text;
 }
@@ -1270,6 +1284,7 @@ function afterSelectionChange(): void {
 }
 
 function toggleKey(key: string, on?: boolean): void {
+	if (statusIsHint) setStatus("");
 	const want = on ?? !selected.has(key);
 	// A row that cannot take part in the chosen action cannot be ticked (it can always be unticked).
 	if (want) {
@@ -1329,13 +1344,6 @@ function visibleOf(keys: string[]): string[] {
 	return splitByVisibility(keys, visibleKeys()).visible;
 }
 
-function resultBar(id: string, cls: string, text: string): void {
-	const b = $(id);
-	b.className = "result-bar " + cls;
-	b.textContent = text;
-	b.style.display = text ? "block" : "none";
-}
-
 /** Deploy `keys` (row keys) with the Deploy section's options. `conflictKeys`: conflict rows without a choice among `keys`; the host asks first. `withVisible`: the hidden-selection check of the main button. */
 function startDeploy(keys: string[], conflictKeys: string[], withVisible: boolean): void {
 	if (opPending || busyOp) {
@@ -1345,7 +1353,7 @@ function startDeploy(keys: string[], conflictKeys: string[], withVisible: boolea
 	const level = currentTestLevel();
 	const tests = level === "RunSpecifiedTests" ? checkedTests() : [];
 	if (level === "RunSpecifiedTests" && tests.length === 0) {
-		setStatus("Select at least one test class for Run Specified Tests.");
+		setStatus("Select at least one test class for Run Specified Tests.", true);
 		return;
 	}
 	const locals = local.entries;
@@ -1356,7 +1364,7 @@ function startDeploy(keys: string[], conflictKeys: string[], withVisible: boolea
 		if (lk.length > 0) itemsOut.push({ key: k, local: lk });
 	}
 	if (itemsOut.length === 0) {
-		setStatus("None of the selected components has local files.");
+		setStatus("None of the selected components has local files.", true);
 		return;
 	}
 	opPending = true;
@@ -1391,7 +1399,6 @@ function startRetrieve(keys: string[], conflictKeys: string[], withVisible: bool
 	const itemsOut = keys.map((k) => ({ key: k, refs: [rowRetrieveRef(syncRows[rowIndex.get(k)!], ui.opts.wholeObject, childTypes)] }));
 	opPending = true;
 	results = new Map();
-	resultBar("retrieveResult", "running", "Retrieving…");
 	renderRight();
 	post({ command: "retrieve", items: itemsOut, ...(withVisible ? { visible: visibleOf(keys) } : {}), confirm: ui.opts.confirmOverwrite, conflicts: conflictKeys.length ? conflictKeys : undefined });
 }
@@ -1410,7 +1417,7 @@ function doRetrieve(): void {
 
 function doRetrieveProject(): void {
 	if (opPending || busyOp) return;
-	const keys = retrieveProjectKeys(syncRows, ui.opts.skipEqualRetrieve);
+	const keys = retrieveProjectKeys(syncRows);
 	if (keys.length === 0) return;
 	const changed = keys.filter((k) => {
 		const s = syncRows[rowIndex.get(k)!].status;
@@ -1419,7 +1426,6 @@ function doRetrieveProject(): void {
 	const itemsOut = keys.map((k) => ({ key: k, refs: [rowRetrieveRef(syncRows[rowIndex.get(k)!], ui.opts.wholeObject, childTypes)] }));
 	opPending = true;
 	results = new Map();
-	resultBar("retrieveResult", "running", "Retrieving project…");
 	renderRight();
 	post({ command: "retrieve", items: itemsOut, confirm: ui.opts.confirmOverwrite, project: { changed } });
 }
@@ -1431,7 +1437,7 @@ function doDelete(): void {
 	const level = currentDeleteLevel();
 	const tests = level === "RunSpecifiedTests" ? checkedDeleteTests() : [];
 	if (level === "RunSpecifiedTests" && tests.length === 0) {
-		setStatus("Select at least one test class for Run Specified Tests (Delete section).");
+		setStatus("Select at least one test class for Run Specified Tests (Delete section).", true);
 		return;
 	}
 	const refs = c.keys.map((k) => {
@@ -2266,18 +2272,17 @@ function resetData(): void {
 	active = -1;
 	loading = null;
 	opPending = false;
-	for (const id of ["deployResult", "retrieveResult", "deleteResult"]) resultBar(id, "", "");
 	markRowsDirty();
 	recompute(true);
 }
 
 // ── Results ────────────────────────────────────────────────────────────────────
 
-function showDeployResult(id: string, verbOk: string, verbFail: string, m: Record<string, any>): void {
+/** Deploy/validate/delete finished. The outcome and its failures are in the operation card; only the coverage panel is rendered here. */
+function showDeployResult(id: string, m: Record<string, any>): void {
 	opPending = false;
 	const cov = $("coverage-panel");
 	if (m.cancelled) {
-		resultBar(id, "", "");
 		if (id === "deployResult") {
 			cov.style.display = "none";
 			cov.innerHTML = "";
@@ -2286,16 +2291,6 @@ function showDeployResult(id: string, verbOk: string, verbFail: string, m: Recor
 		return;
 	}
 	const success = !!m.success;
-	const parts = [(success ? "✅ " : "❌ ") + (success ? verbOk : verbFail)];
-	if (m.components > 0) parts.push(m.components + " component" + (m.components !== 1 ? "s" : ""));
-	if (m.componentErrors > 0) parts.push(m.componentErrors + " error" + (m.componentErrors !== 1 ? "s" : ""));
-	if (m.testsPassed > 0 || m.testsFailed > 0) parts.push("Tests: " + m.testsPassed + " passed" + (m.testsFailed > 0 ? ", " + m.testsFailed + " failed" : ""));
-	if (m.durationMs) {
-		const s = Math.round(m.durationMs / 1000);
-		parts.push(s >= 60 ? Math.floor(s / 60) + "m " + (s % 60) + "s" : s + "s");
-	}
-	if (m.error) parts.push(String(m.error));
-	resultBar(id, success ? "success" : "failure", parts.join(" · "));
 	if (id === "deployResult") {
 		const list: { name: string; pct: number }[] = success && Array.isArray(m.coverage) ? m.coverage : [];
 		if (list.length === 0) {
@@ -2515,14 +2510,10 @@ window.addEventListener("message", (ev) => {
 			renderRight();
 			break;
 		case "deployStart":
-			resultBar("deployResult", "running", m.dryRun ? "Validating…" : "Deploying…");
 			$("coverage-panel").style.display = "none";
 			break;
 		case "deployResult":
-			showDeployResult("deployResult", m.dryRun ? "Validation passed" : "Deploy succeeded", m.dryRun ? "Validation failed" : "Deploy failed", m);
-			break;
-		case "deleteStart":
-			resultBar("deleteResult", "running", "Deleting…");
+			showDeployResult("deployResult", m);
 			break;
 		case "deleteResult":
 			// Only what the org really deleted leaves the selection; everything else stays selected.
@@ -2531,21 +2522,13 @@ window.addEventListener("message", (ev) => {
 				if (selected.size === 0) ui.filter.onlySelected = false;
 				recompute();
 			}
-			showDeployResult("deleteResult", "Deleted from the org", "Delete failed", m);
+			showDeployResult("deleteResult", m);
 			break;
 		case "retrieveResult": {
 			opPending = false;
-			if (m.cancelled) resultBar("retrieveResult", "", "");
-			else {
+			if (!m.cancelled) {
 				results = new Map();
-				let ok = 0;
-				let bad = 0;
-				for (const r of m.results as { key: string; ok: boolean; error?: string }[]) {
-					results.set(r.key, { ok: r.ok, error: r.error });
-					if (r.ok) ok++;
-					else bad++;
-				}
-				resultBar("retrieveResult", bad > 0 ? "failure" : "success", bad > 0 ? `❌ Retrieved ${ok}, ${bad} failed` : `✅ Retrieved ${ok} component${ok === 1 ? "" : "s"}`);
+				for (const r of m.results as { key: string; ok: boolean; error?: string }[]) results.set(r.key, { ok: r.ok, error: r.error });
 			}
 			renderRight();
 			invalidateRows();

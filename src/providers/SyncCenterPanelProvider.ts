@@ -1225,7 +1225,7 @@ export class SyncCenterPanelProvider {
 			new Date(completedAt)
 		);
 		await this.refreshLocal();
-		void this.requestCompare(true, localKeys.map((k) => rowKeyOf(k)));
+		if (compareMode() === "auto") void this.requestCompare(true, localKeys.map((k) => rowKeyOf(k)));
 	}
 
 	// ── Retrieve ─────────────────────────────────────────────────────────────────
@@ -1332,7 +1332,7 @@ export class SyncCenterPanelProvider {
 				],
 			});
 			// The retrieved copies are the org's now: compare them again so the rows settle on Equal.
-			void this.requestCompare(true, out.retrieved.map((r) => compKey(r.type, r.fullName)));
+			if (compareMode() === "auto") void this.requestCompare(true, out.retrieved.map((r) => compKey(r.type, r.fullName)));
 		} finally {
 			op?.end("failed", "Interrupted");
 			this.setBusy(null);

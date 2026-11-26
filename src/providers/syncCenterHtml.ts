@@ -54,7 +54,7 @@ ${TEST_SUITE_CSS}
     <button id="refreshBtn" class="ghost" title="Re-list every type from the org">↻ Refresh</button>
     <span id="cmpInfo" class="muted"></span>
     <button id="cmpCancel" class="ghost" hidden title="Stop comparing contents">✕ Cancel</button>
-    <button id="cmpBtn" class="primary" title="Compare the contents of the selected components with the org; without a selection, of the project components shown. Nothing is compared until you press this.">≈ Compare contents</button>
+    <button id="cmpBtn" class="primary" title="Compare the contents of the selected components with the org; without a selection, of the project components shown. The project components that exist in the org are also compared automatically in the background (setting compare.verifyContents).">≈ Compare contents</button>
   </div>
   <div id="progress" class="progress" hidden role="progressbar" aria-label="Loading"><div id="progressBar"></div></div>
   <div id="banner"></div>
@@ -127,13 +127,12 @@ ${TEST_SUITE_CSS}
               <input type="text" id="deployLabel" maxlength="120" placeholder="e.g. Sprint 42 hotfix" spellcheck="false" autocomplete="off" title="Shown in Local history. Local only: Salesforce has no deploy label.">
             </div>
             <label class="opt" title="Validate the deployment without saving changes to the org (check-only / dry run)"><input type="checkbox" id="validateOnly"><span>Validate only (dry run)<span class="sub">Check the deployment against the org without committing changes</span></span></label>
-            <label class="opt" title="Skip selected components that are equal in the org and the project"><input type="checkbox" id="skipEqualDeploy" checked><span>Skip equal components</span></label>
+            <label class="opt" title="Only components verified equal by Compare contents are skipped."><input type="checkbox" id="skipEqualDeploy" checked><span>Skip equal components</span></label>
             <label class="opt" title="Watch file saves and update the selection with the components Git reports as changed"><input type="checkbox" id="autoGit"><span>Auto-select Git changes<span class="sub">Watch file saves and add changed components to the selection</span></span></label>
             <button type="button" class="ghost" id="gitSelect" title="Select components changed in Git">⑂ Select changed (Git)</button>
             <div class="hint conflict-note" hidden></div>
             <button type="button" class="primary wide" id="deployBtn" disabled>Deploy (0)</button>
             <div class="selrow" data-selrow hidden><button type="button" class="linkbtn selsum" data-selsum></button><span class="selhid" data-selhid hidden> · <button type="button" class="linkbtn" data-hiddenshow title="Reset the filters and show only the selected components">show</button> · <button type="button" class="linkbtn" data-hiddenclear title="Deselect the selected components the current filter hides">clear hidden</button></span></div>
-            <div class="result-bar" id="deployResult"></div>
             <div id="coverage-panel" class="coverage-panel" style="display:none;"></div>
           </div>
         </details>
@@ -143,12 +142,11 @@ ${TEST_SUITE_CSS}
           <div class="sec-body">
             <label class="opt" title="Ask before a retrieve overwrites local files that have unsaved or uncommitted changes"><input type="checkbox" id="confirmOverwrite" checked><span>Confirm before overwriting local changes</span></label>
             <label class="opt" title="Off: a selected field, record type … is retrieved on its own. On: its whole object is retrieved."><input type="checkbox" id="wholeObject"><span>Retrieve the whole object when a child is selected<span class="sub">Off: children only</span></span></label>
-            <label class="opt" title="Skip selected components that are equal in the org and the project"><input type="checkbox" id="skipEqualRetrieve" checked><span>Skip equal components</span></label>
+            <label class="opt" title="Only components verified equal by Compare contents are skipped."><input type="checkbox" id="skipEqualRetrieve" checked><span>Skip equal components</span></label>
             <div class="hint conflict-note" hidden></div>
             <button type="button" class="primary wide" id="retrieveBtn" disabled>Retrieve (0)</button>
-            <button type="button" class="ghost wide" id="retrieveProjectBtn" disabled title="Retrieve every component of the project that exists in the org">Retrieve project (0)</button>
+            <button type="button" class="ghost wide" id="retrieveProjectBtn" disabled title="All components of this project that exist in the org (0), regardless of filters and Skip equal">Retrieve project (0)</button>
             <div class="selrow" data-selrow hidden><button type="button" class="linkbtn selsum" data-selsum></button><span class="selhid" data-selhid hidden> · <button type="button" class="linkbtn" data-hiddenshow title="Reset the filters and show only the selected components">show</button> · <button type="button" class="linkbtn" data-hiddenclear title="Deselect the selected components the current filter hides">clear hidden</button></span></div>
-            <div class="result-bar" id="retrieveResult"></div>
           </div>
         </details>
 
@@ -168,7 +166,6 @@ ${TEST_SUITE_CSS}
             <div class="hint warn" id="delHint" hidden></div>
             <button type="button" class="danger-btn wide" id="deleteBtn" disabled>Delete from org (0)</button>
             <div class="selrow" data-selrow hidden><button type="button" class="linkbtn selsum" data-selsum></button><span class="selhid" data-selhid hidden> · <button type="button" class="linkbtn" data-hiddenshow title="Reset the filters and show only the selected components">show</button> · <button type="button" class="linkbtn" data-hiddenclear title="Deselect the selected components the current filter hides">clear hidden</button></span></div>
-            <div class="result-bar" id="deleteResult"></div>
           </div>
         </details>
       </div>
@@ -301,10 +298,6 @@ button.danger-btn:hover:not(:disabled) { filter: brightness(1.1); }
 .hint.conflict-note[hidden] { display: none; }
 .hint.warn { color: var(--ob-warn); }
 .hint.warn[hidden] { display: none; }
-.result-bar { display: none; padding: 8px 10px; font-size: 12px; border-radius: 4px; border: 1px solid var(--ob-border); border-left: 3px solid transparent; line-height: 1.5; }
-.result-bar.running { border-left-color: var(--vscode-progressBar-background); }
-.result-bar.success { border-left-color: var(--ob-ok); background: color-mix(in srgb, var(--ob-ok) 12%, transparent); }
-.result-bar.failure { border-left-color: var(--ob-bad); background: color-mix(in srgb, var(--ob-bad) 12%, transparent); }
 .coverage-panel { border: 1px solid var(--ob-border); border-radius: 6px; overflow: hidden; }
 .coverage-toggle { padding: 7px 10px; font-size: 12px; cursor: pointer; display: flex; gap: 6px; font-weight: 600; }
 .coverage-toggle:hover { background: var(--ob-hover); }

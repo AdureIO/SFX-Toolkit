@@ -166,6 +166,29 @@ export function progressText(p: CompareProgress | null | undefined): string {
 	return `${p.state === "paused" ? "Comparing paused" : "Comparing contents"} ${n(p.done)} / ${n(p.total)}`;
 }
 
+/**
+ * The compare summary of the project components that are in the org: how many have a valid compare result and when the
+ * newest of those was made (0 = none). Stale results (`[0, …]`) do not count.
+ */
+export function compareSummary(info: ContentInfoMap, keys: Iterable<string>): { verified: number; lastAt: number } {
+	let verified = 0;
+	let lastAt = 0;
+	for (const k of keys) {
+		const e = info[k];
+		if (!e || (e[0] !== 1 && e[0] !== 2)) continue;
+		verified++;
+		if (e[1] > lastAt) lastAt = e[1];
+	}
+	return { verified, lastAt };
+}
+
+/** Top-bar text: "Comparing 120/732…" while it runs, else "Compared 5 min ago" / "Not compared". `rel` formats a time as relative text. */
+export function compareStatusText(p: CompareProgress | null | undefined, lastAt: number, rel: (t: number) => string): string {
+	if (p?.state === "running") return p.total > 0 ? `Comparing ${p.done}/${p.total}…` : "Comparing…";
+	if (p?.state === "paused") return progressText(p);
+	return lastAt > 0 ? `Compared ${rel(lastAt)}` : "Not compared";
+}
+
 /** Decode the wire form of a content result. */
 export function contentFromCode(code: number | undefined): ContentResult | undefined {
 	return code === 1 ? "same" : code === 2 ? "different" : undefined;

@@ -340,7 +340,8 @@ export function deployCandidates(rows: readonly SyncRow[], selection: ReadonlySe
 			case "partial":
 				return TAKE;
 			case "equal":
-				return skipEqual ? skip("equal") : TAKE;
+				// Only an equality verified by the content compare may be skipped; a provisional (date-based) one takes part.
+				return skipEqual && !r.provisional ? skip("equal") : TAKE;
 			case "conflict": {
 				const c = conflictChoices.get(r.key);
 				return c === "local" ? TAKE : c === "org" ? skip("conflict set to Take org") : "overwrite";
@@ -368,7 +369,8 @@ export function retrieveCandidates(rows: readonly SyncRow[], selection: Readonly
 			case "partial":
 				return TAKE;
 			case "equal":
-				return skipEqual ? skip("equal") : TAKE;
+				// Only an equality verified by the content compare may be skipped; a provisional (date-based) one takes part.
+				return skipEqual && !r.provisional ? skip("equal") : TAKE;
 			case "conflict": {
 				const c = conflictChoices.get(r.key);
 				return c === "org" ? TAKE : c === "local" ? skip("conflict set to Keep local") : "overwrite";
@@ -385,10 +387,11 @@ export function retrieveCandidates(rows: readonly SyncRow[], selection: Readonly
 
 /**
  * `Retrieve project (n)`: every row that exists locally and in the org (the "In project" set that has an org copy),
- * independent of the selection. only-local rows have nothing to retrieve; equal rows are skipped when `skipEqual`.
+ * independent of the selection, the filters, the search and "Skip equal components" (equal rows are included).
+ * only-local rows have nothing to retrieve and are excluded.
  */
-export function retrieveProjectKeys(rows: readonly SyncRow[], skipEqual: boolean): string[] {
-	return rows.filter((r) => r.local && r.inOrg && r.status !== "only-local" && !(skipEqual && r.status === "equal")).map((r) => r.key);
+export function retrieveProjectKeys(rows: readonly SyncRow[]): string[] {
+	return rows.filter((r) => r.local && r.inOrg && r.status !== "only-local").map((r) => r.key);
 }
 
 /** `Delete from org (n)`: selected only-org rows; everything else selected is skipped (never deleted). */

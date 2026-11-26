@@ -1055,11 +1055,11 @@
           "type": "string",
           "enum": ["auto", "manual"],
           "enumDescriptions": [
-            "Compare contents in the background as soon as the org listing is available.",
+            "Compare the contents of the project components that also exist in the org in the background, as soon as the org listing is available.",
             "Only compare contents when you press Compare contents in Deploy & Retrieve Metadata."
           ],
-          "default": "manual",
-          "markdownDescription": "How **Deploy & Retrieve Metadata** confirms \"Equal\" and corrects \"Changed locally / in org\": the status first comes from dates (shown dashed), then a background content diff retrieves the org's copy of each component into a private cache (never into your project) and compares it with your local files. `manual` (default) compares only when you press the **Compare contents** button, so opening is fast; `auto` starts it when the org listing is available."
+          "default": "auto",
+          "markdownDescription": "How **Deploy & Retrieve Metadata** confirms \"Equal\" and corrects \"Changed locally / in org\": the status first comes from dates (shown dashed), then a background content diff retrieves the org's copy of each component into a private cache (never into your project) and compares it with your local files. `auto` (default) starts it in the background once the org listing is available, for the project components that also exist in the org only (never org-only components), after opening, an org switch, a refresh, a file change, and a retrieve or deploy; it never blocks the panel. `manual` compares only when you press the **Compare contents** button."
         },
         "adure-sfx-toolkit.apex.validateOnSave": {
           "type": "boolean",

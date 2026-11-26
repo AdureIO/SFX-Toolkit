@@ -31,7 +31,9 @@ All notable changes to the Adure SFX Toolkit extension are documented here.
 ### 🔀 Equal / Changed locally / Changed in org / Conflict
 - Deploy & Retrieve Metadata shows one of four statuses per component: Equal, Changed locally, Changed in org or Conflict.
 - Statuses start from dates (shown dashed), then a content diff compares each component with the org's copy. The org copy goes to a private cache, never into your project.
-- Setting `adure-sfx-toolkit.compare.verifyContents` now defaults to `manual` (compare only when you press **Compare contents**); `auto` still compares in the background once the org listing is available.
+- Setting `adure-sfx-toolkit.compare.verifyContents` defaults to `auto`: once the org listing is available, the contents of the project components that also exist in the org are compared in the background (org-only components never). `manual` compares only when you press **Compare contents**.
+- The top bar shows "Compared 5 min ago" (or the progress while comparing, "Not compared" before the first run); the tooltip gives the verified count and the exact time.
+- **Retrieve project (n)** retrieves every project component that exists in the org, regardless of filters and Skip equal. Skip equal components, for Deploy and Retrieve, only skips components verified equal by Compare contents.
 
 ### 🧪 Apex Workbench
 - The log viewer is virtual-scrolled and shows the whole log (no 8,000-line cap).

@@ -23,9 +23,9 @@ export function initContentCompare(context: vscode.ExtensionContext): void {
 	ctx = context;
 }
 
-/** `adure-sfx-toolkit.compare.verifyContents`: `auto` starts a content compare once the org listing is available; the default `manual` waits for the Compare contents button. */
+/** `adure-sfx-toolkit.compare.verifyContents`: `auto` (default) compares the project components that exist in the org in the background; `manual` waits for the Compare contents button. */
 export function compareMode(): "auto" | "manual" {
-	return vscode.workspace.getConfiguration("adure-sfx-toolkit").get<string>("compare.verifyContents", "manual") === "auto" ? "auto" : "manual";
+	return vscode.workspace.getConfiguration("adure-sfx-toolkit").get<string>("compare.verifyContents", "auto") === "manual" ? "manual" : "auto";
 }
 
 async function retrieveCopy(orgArg: string | null, req: RetrieveRequest): Promise<RetrieveReply> {
