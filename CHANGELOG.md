@@ -20,7 +20,7 @@ All notable changes to the Adure SFX Toolkit extension are documented here.
 - **In project** filter (on by default), column chooser (show, hide, reorder, resize), per-row Deploy, Retrieve and Diff actions.
 - Live operation card with phase, counts and Cancel for deploys, validations and deletes.
 - **Deployment history** tab: the org's recent deploys merged with local history (deploys, validations, retrieves, deletes). It opens instantly from a shared disk cache and refreshes in the background (and when an operation ends); details of finished deploys are cached per deploy id.
-- Deploy name (a local label shown in the history), validate only, test levels, named test suites, auto-select Git changes, coverage display, and Problems-view diagnostics on failed deploys.
+- Deploy name (a local label shown in Local history), validate only, test levels, named test suites, auto-select Git changes, coverage display, and Problems-view diagnostics on failed deploys.
 - Live org check right before a deploy: warns when a selected component changed in the org since your last retrieve or deploy. Your own deploys are recorded, so they don't show as changed in the org.
 - Diff of local and org content per component.
 - Delete components from the org with a destructive package builder, an org safety check and its own test options. No Test Run is the default; production orgs use Run Local Tests and need the org alias typed.

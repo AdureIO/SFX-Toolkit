@@ -123,7 +123,7 @@ ${TEST_SUITE_CSS}
               <div class="test-list" id="test-list"></div>
             </div>
             <div class="field"><label class="field-label" for="deployLabel">Deploy name (optional)</label>
-              <input type="text" id="deployLabel" maxlength="120" placeholder="e.g. Sprint 42 hotfix" spellcheck="false" autocomplete="off" title="Shown in the History tab. Local only: Salesforce has no deploy label.">
+              <input type="text" id="deployLabel" maxlength="120" placeholder="e.g. Sprint 42 hotfix" spellcheck="false" autocomplete="off" title="Shown in Local history. Local only: Salesforce has no deploy label.">
             </div>
             <label class="opt" title="Validate the deployment without saving changes to the org (check-only / dry run)"><input type="checkbox" id="validateOnly"><span>Validate only (dry run)<span class="sub">Check the deployment against the org without committing changes</span></span></label>
             <label class="opt" title="Skip selected components that are equal in the org and the project"><input type="checkbox" id="skipEqualDeploy" checked><span>Skip equal components</span></label>
@@ -173,7 +173,7 @@ ${TEST_SUITE_CSS}
       </div>
       <div id="historyPane" class="history" hidden>
         <div class="hist-head">
-          <span class="choice" role="group" aria-label="Deployment history view"><button type="button" id="segDeploys" class="on" aria-pressed="true" title="Recent deploys and validations of the org (merged with this project's history)">Deploys</button><button type="button" id="segHistory" aria-pressed="false" title="Deploys, validations, retrieves and deletes of this project">History</button></span>
+          <span class="choice" role="group" aria-label="Deployment history view"><button type="button" id="segDeploys" class="on" aria-pressed="true" title="Recent deploys and validations of the org (merged with this project's history)">Deploys</button><button type="button" id="segHistory" aria-pressed="false" title="Deploys, validations, retrieves and deletes run by this extension on this machine">Local history</button></span>
           <span id="histCount" class="muted"></span><span class="spacer"></span><button type="button" id="histClose" class="linkbtn">Close</button>
         </div>
         <div id="depView" class="act-view">

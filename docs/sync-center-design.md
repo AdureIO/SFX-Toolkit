@@ -73,7 +73,7 @@ Statuses come from `compareStatusPure.ts` plus the content compare service, the 
      - The preset select and "Save preset", as in the Deploy panel (shared store).
   2. **Deploy**
      - Test level and specified tests, Validate only, and Auto-select git changes, all as in the Deploy panel.
-     - "Deploy name" (optional text): a local label, as Salesforce has none. It travels with the deploy request (`label`), is stored in the history entry and shown in the History tab.
+     - "Deploy name" (optional text): a local label, as Salesforce has none. It travels with the deploy request (`label`), is stored in the history entry and shown in Local history.
      - "Skip equal components" (default on).
      - Button `Deploy (n)`.
   3. **Retrieve**
@@ -85,7 +85,7 @@ Statuses come from `compareStatusPure.ts` plus the content compare service, the 
      - Its own test level (No Test Run / Run Specified Tests / Run Local Tests / Run All Tests) and, for specified tests, the test-class tree and suites (the shared component, a second instance).
      - Production cannot use No Test Run (an org that could not be verified counts as production): the delete is refused. On a non-production org, deleting Apex classes or triggers with No Test Run is allowed and shows a hint.
      - Button `Delete from org (n)`. It counts only selected `only-org` rows.
-  - Footer tabs: **Deployment history** | status line. Segments: **Deploys** (default; the org's recent deploys merged with local history) and **History** (local deploys, validations, retrieves, deletes).
+  - Footer tabs: **Deployment history** | status line. Segments: **Deploys** (default; the org's recent deploys merged with local history) and **Local history** (local deploys, validations, retrieves, deletes; tooltip: "Deploys, validations, retrieves and deletes run by this extension on this machine").
     - The merged deploy list per org is stored in the shared disk cache (`org-browser/deploys/list-<org>.json.gz`), sent to the webview when the org loads, refreshed in the background after the first render, when an operation ends, and when the tab opens with data older than 60 s. The tab shows "updated … ago" and a spinner while it refreshes; it never shows an empty state when cached data exists.
     - Details of a finished deploy are cached per deploy id (`deploys/details/<id>.json.gz`); in-progress deploys are not cached.
 
@@ -140,7 +140,7 @@ Statuses come from `compareStatusPure.ts` plus the content compare service, the 
   - the Deploy panel's deploy;
   - the Org Browser's retrieve;
   - the right-click deploy and retrieve commands, when they go through the shared engines.
-- The UI is the History tab in the right panel, listing kind icon, org, relative time, the count and ok/failed.
+- The UI is the Local history segment of the Deployment history footer tab, listing kind icon, org, relative time, the count and ok/failed.
   - Expanding an entry shows the components and errors.
   - Actions: "Select these components", "Re-run" (same kind, same options; asks first), and "Open in Setup" for deploys with an id. "Open in Setup" uses the existing open-org-at-path helper: `/lightning/setup/DeployStatus/page?address=%2Fchangemgmt%2FmonitorDeploymentsDetails.apexp%3FasyncId%3D<id>`.
 
@@ -155,7 +155,7 @@ Statuses come from `compareStatusPure.ts` plus the content compare service, the 
 | ID | Scope | Model | Depends on |
 |---|---|---|---|
 | SC1 | Engine: union row model (pure) and center status vocab; compare service keeps org copies plus `orgCopyFiles`/`fetchOrgCopy`; diff opener; destructive-changes builder (pure) and delete runner; history store (pure plus host) wired into the Deploy panel, the Org Browser and the right-click commands; shared presets store with migration; tests | sonnet | none |
-| SC2 | Center panel: provider, webview (esbuild entry), layout above, selection rules and button counts, conflict chips, diff action, delete flow, History tab, presets, open buttons in the two existing panels, command `adure-sfx-toolkit.openSyncCenter` ("Deploy & Retrieve Metadata") in the palette | sonnet | SC1 |
+| SC2 | Center panel: provider, webview (esbuild entry), layout above, selection rules and button counts, conflict chips, diff action, delete flow, Local history segment, presets, open buttons in the two existing panels, command `adure-sfx-toolkit.openSyncCenter` ("Deploy & Retrieve Metadata") in the palette | sonnet | SC1 |
 | SC3 | Combined gate, review, test VSIX | lead | SC2 |
 
 ## Opening fast
