@@ -238,6 +238,11 @@ export function selectionSummary(verb: string, selected: number, taking: number,
 	return `${n(selected)} selected${hidden > 0 ? ` (${n(hidden)} hidden)` : ""} · ${n(taking)} to ${verb} · ${n(selected - taking)} skipped${filterOn ? " — show all" : ""}`;
 }
 
+/** The banner text while only the selection is shown: "Showing your selection: 5 selected (2 hidden) · 3 to deploy · 2 skipped". */
+export function selectionBannerText(verb: string, selected: number, taking: number, hidden = 0): string {
+	return `Showing your selection: ${selectionSummary(verb, Math.max(selected, 0), taking, false, hidden) || "0 selected"}`;
+}
+
 /** Tooltip of the summary link: why rows are skipped ("1 equal (Skip equal components is on)"), else what a click does. */
 export function selectionSummaryTitle(skipped: readonly { reason: string; count: number }[], filterOn: boolean): string {
 	const why = skipped.map((s) => `${s.count} ${s.reason}${s.reason === "equal" ? " (Skip equal components is on)" : ""}`).join(", ");

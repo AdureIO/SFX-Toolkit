@@ -36,6 +36,7 @@ import {
 	conflictPrompt,
 	nextChoice,
 	retrieveProjectPrompt,
+	selectionBannerText,
 	selectionSummary,
 	selectionSummaryTitle,
 	initialGroup,
@@ -511,5 +512,13 @@ describe("sync center: Retrieve project prompt", () => {
 		assert.strictEqual(p.message, "Retrieve 120 components of project MyProj from dev-org? Local files will be overwritten.");
 		assert.ok(p.detail.includes("ApexClass:C9") && !p.detail.includes("ApexClass:C10") && p.detail.includes("+2 more"));
 		assert.ok(!retrieveProjectPrompt(1, "P", "o", []).detail.includes("Changed locally"));
+	});
+});
+
+describe("sync center: selection banner text", () => {
+	it("uses the summary of the current mode, with the hidden part when relevant", () => {
+		assert.strictEqual(selectionBannerText("deploy", 5, 3), "Showing your selection: 5 selected · 3 to deploy · 2 skipped");
+		assert.strictEqual(selectionBannerText("retrieve", 5, 3, 2), "Showing your selection: 5 selected (2 hidden) · 3 to retrieve · 2 skipped");
+		assert.strictEqual(selectionBannerText("deploy", 0, 0), "Showing your selection: 0 selected");
 	});
 });

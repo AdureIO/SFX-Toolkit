@@ -59,6 +59,7 @@ import {
 	choiceTitle,
 	nextChoice,
 	pruneConflictChoices,
+	selectionBannerText,
 	selectionSummary,
 	selectionSummaryTitle,
 	rowDeployLocalKeys,
@@ -651,6 +652,7 @@ function renderGridChrome(): void {
 	$("spacer").style.height = items.length * ROW_H + "px";
 	const total = idx.comps.length;
 	$("countInfo").textContent = total ? (rows.length === total ? `${total.toLocaleString()} components` : `${rows.length.toLocaleString()} of ${total.toLocaleString()}`) : "";
+	if (ui.filter.onlySelected) $("countInfo").textContent = "Selection";
 	const mode = modeOf();
 	const part = rows.filter((i) => takesPart(mode, syncRows[i]));
 	const allSel = part.length > 0 && part.every((i) => selected.has(keyAt(i)));
@@ -846,6 +848,8 @@ function renderRight(): void {
 		el.title = selectionSummaryTitle(cands.skipped, ui.filter.onlySelected);
 		row.querySelector<HTMLElement>("[data-selhid]")!.hidden = hiddenN === 0;
 	}
+	$("selBanner").hidden = !ui.filter.onlySelected;
+	$("selBannerText").textContent = selectionBannerText(mode === "delete" ? "delete" : mode, sel, taking, hiddenN);
 	for (const [id, st] of [
 		["deployBtn", d],
 		["retrieveBtn", r],
@@ -1785,6 +1789,17 @@ function setupEvents(): void {
 	});
 	sc.addEventListener("keydown", onGridKey);
 
+	const leaveSelectionView = (clear: boolean) => {
+		if (clear) selected.clear();
+		ui.filter = { ...ui.filter, onlySelected: false };
+		bar.syncSearchInput();
+		recompute(true);
+		saveUi();
+	};
+	$("selBannerBack").addEventListener("click", () => leaveSelectionView(false));
+	$("selBannerX").addEventListener("click", () => leaveSelectionView(false));
+	$("selBannerClear").addEventListener("click", () => leaveSelectionView(true));
+
 	document.addEventListener("keydown", (e) => {
 		const tag = (e.target as HTMLElement).tagName;
 		const typing = tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA";
@@ -1796,6 +1811,8 @@ function setupEvents(): void {
 			hideMenu();
 		} else if (e.key === "Escape" && !$("colMenu").hidden) {
 			hideColMenu();
+		} else if (e.key === "Escape" && ui.filter.onlySelected && !typing && ((e.target as HTMLElement).closest("#scroller, #right") || e.target === document.body)) {
+			leaveSelectionView(false);
 		}
 	});
 

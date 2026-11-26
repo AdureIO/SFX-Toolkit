@@ -72,6 +72,12 @@ ${TEST_SUITE_CSS}
             <button id="collapseAll" class="tbtn" title="Collapse all" aria-label="Collapse all" hidden><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.400" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6l4 4 4-4"/><path d="M4 2.500h8M4 13.500h8" stroke-opacity=".6"/></svg></button>
             <button id="colsBtn" class="tbtn" title="Columns: show, hide and reorder (also: right-click a column header)" aria-label="Columns" aria-haspopup="menu"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.300"><rect x="2" y="2.500" width="12" height="11" rx="1"/><path d="M6 2.500v11M10 2.500v11"/></svg></button>
           </div>
+          <div id="selBanner" class="selbanner" role="status" hidden>
+            <span id="selBannerText" class="sbt"></span>
+            <button type="button" id="selBannerBack" class="linkbtn primary-link" title="Show all components again (Esc)">Back to all components</button>
+            <button type="button" id="selBannerClear" class="linkbtn" title="Deselect everything and show all components">Clear selection</button>
+            <button type="button" id="selBannerX" class="tbtn sm" title="Back to all components (Esc)" aria-label="Back to all components">×</button>
+          </div>
           <div class="gridwrap">
             <div id="scroller" class="scroller" tabindex="0" role="grid" aria-label="Metadata components">
               <div class="inner">
@@ -234,6 +240,12 @@ button.ghost.sm.on { background: color-mix(in srgb, var(--ob-accent) 16%, transp
 .tbtn[hidden] { display: none; }
 .tbtn.on, .tbtn[aria-pressed="true"] { background: color-mix(in srgb, var(--ob-accent) 22%, transparent); }
 .tbtn svg { display: block; }
+.selbanner { display: flex; align-items: center; gap: 12px; flex-wrap: nowrap; padding: 3px 12px; font-size: 12px; flex-shrink: 0; color: var(--vscode-editorInfo-foreground, var(--vscode-foreground)); background: color-mix(in srgb, var(--vscode-editorInfo-foreground, var(--vscode-focusBorder)) 12%, transparent); border-bottom: 1px solid color-mix(in srgb, var(--vscode-editorInfo-foreground, var(--vscode-focusBorder)) 35%, transparent); }
+.selbanner[hidden] { display: none; }
+.selbanner .sbt { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.selbanner .linkbtn { flex: 0 0 auto; white-space: nowrap; margin: 0; padding: 0; }
+.selbanner .primary-link { font-weight: 600; }
+.selbanner .tbtn { width: 20px; height: 20px; font-size: 16px; line-height: 1; }
 .selrow { margin: 6px 0 0; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .selrow[hidden], .selhid[hidden] { display: none; }
 .selrow .linkbtn { display: inline; margin: 0; padding: 0; }
