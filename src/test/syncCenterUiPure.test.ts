@@ -21,6 +21,7 @@ import {
 } from "../utils/syncCenterPure";
 import { DEFAULT_FILTER, FilterContext, buildIndex, computeFacets, filterIndices, parseQuery, withinWindow } from "../utils/orgBrowser/filter";
 import {
+	browseFilter,
 	buttonState,
 	choicesFromJson,
 	choicesStoreKey,
@@ -388,6 +389,18 @@ describe("status filter: In project", () => {
 		assert.deepStrictEqual(initialStatusFilter([], true), []);
 		assert.deepStrictEqual(initialStatusFilter(["conflict", "bogus", "conflict", 3], true), ["conflict"]);
 		assert.deepStrictEqual(initialStatusFilter(["only-org", SYNC_IN_PROJECT], false), ["only-org", SYNC_IN_PROJECT]);
+	});
+
+	it("browsing the org clears the status group and 'only selected'; types are replaced only when given, other facets stay", () => {
+		const f = { ...DEFAULT_FILTER, query: "foo", types: ["ApexClass"], status: [SYNC_IN_PROJECT], onlySelected: true, mine: true };
+		const all = browseFilter(f, []);
+		assert.deepStrictEqual(all.status, []);
+		assert.strictEqual(all.onlySelected, false);
+		assert.deepStrictEqual(all.types, ["ApexClass"]);
+		assert.strictEqual(all.query, "foo");
+		assert.strictEqual(all.mine, true);
+		assert.deepStrictEqual(browseFilter(f, ["Flow", "CustomObject"]).types, ["Flow", "CustomObject"]);
+		assert.deepStrictEqual(f.status, [SYNC_IN_PROJECT], "the input is not modified");
 	});
 
 	it("Group by type is on by default; a store from before the default gets it once, the user's choice is kept after", () => {

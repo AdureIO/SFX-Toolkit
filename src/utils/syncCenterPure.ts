@@ -9,7 +9,7 @@
  * entries to deploy) are keyed by that.
  *
  * The status of a component present on both sides is `compareStatus` (compareStatusPure), the same engine the
- * Deploy panel and the Org Browser use. Nothing of those rules is repeated here.
+ * Deploy panel used. Nothing of those rules is repeated here.
  */
 import { Comp, compKey } from "./orgBrowser/types";
 import { StatusVocab } from "./orgBrowser/filter";

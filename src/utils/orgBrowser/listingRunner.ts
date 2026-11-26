@@ -1,6 +1,6 @@
 /**
- * One org listing run (whole org, or a per-type refresh) with batching and the cache merge, shared by the
- * Org Browser and the Deploy & Retrieve Metadata. No `vscode` import: the SOAP transport is injected.
+ * One org listing run (whole org, or a per-type refresh) with batching and the cache merge, used by
+ * Deploy & Retrieve Metadata. No `vscode` import: the SOAP transport is injected.
  */
 import { classifyHealth } from "../schemaHealth";
 import { Comp, ListFailure, TypeInfo } from "./types";

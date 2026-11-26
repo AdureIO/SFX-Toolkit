@@ -1,6 +1,6 @@
 /**
- * Markup and styles of the Deploy & Retrieve Metadata webview (src/webview/syncCenter.ts). The grid look is the
- * Org Browser's (`GRID_CSS`); the right-hand sections follow the Deploy panel. Theme colours only, through
+ * Markup and styles of the Deploy & Retrieve Metadata webview (src/webview/syncCenter.ts). The grid look is
+ * `GRID_CSS`; the right-hand sections follow the Deploy panel. Theme colours only, through
  * VS Code variables.
  */
 import { FILTER_BAR_VARS, filterGroupsMarkup, filterSearchMarkup } from "../utils/filterBarUi";
@@ -370,7 +370,6 @@ button.danger-btn:hover:not(:disabled) { filter: brightness(1.1); }
 .hist-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .hist-actions button { background: var(--vscode-button-secondaryBackground, transparent); color: var(--vscode-button-secondaryForeground, inherit); border: 1px solid var(--ob-border-strong); border-radius: 4px; padding: 2px 9px; font-size: 11.5px; }
 .hist-actions button:hover { background: var(--ob-hover); }
-.selhidden { margin: 0; }
 /* Operation card (top of the right panel) */
 .opcard { border: 1px solid var(--ob-border); border-left: 3px solid var(--vscode-progressBar-background); border-radius: 6px; background: var(--asfx-card-bg); padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; font-size: 12px; flex-shrink: 0; }
 .opcard[hidden] { display: none; }

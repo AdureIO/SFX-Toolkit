@@ -1,5 +1,5 @@
 /**
- * Local-vs-org status of a component, shared by the Org Browser and Deploy & Retrieve Metadata. Pure (no
+ * Local-vs-org status of a component, of Deploy & Retrieve Metadata. Pure (no
  * `vscode`, no DOM): runs in the webviews, the extension host and the tests.
  *
  * Two inputs decide the status:

@@ -247,9 +247,13 @@
         "icon": "$(type-hierarchy)"
       },
       {
-        "command": "adure-sfx-toolkit.openOrgBrowser",
-        "title": "ASFXT: Org Browser",
+        "command": "adure-sfx-toolkit.browseOrgMetadata",
+        "title": "ASFXT: Browse Org Metadata",
         "icon": "$(library)"
+      },
+      {
+        "command": "adure-sfx-toolkit.openOrgBrowser",
+        "title": "ASFXT: Org Browser (alias)"
       },
       {
         "command": "adure-sfx-toolkit.openSyncCenter",
@@ -595,7 +599,7 @@
           "group": "navigation"
         },
         {
-          "command": "adure-sfx-toolkit.openOrgBrowser",
+          "command": "adure-sfx-toolkit.browseOrgMetadata",
           "when": "view == adure-sfx-toolkit.orgs",
           "group": "navigation"
         },
@@ -677,7 +681,7 @@
           "group": "inline"
         },
         {
-          "command": "adure-sfx-toolkit.openOrgBrowser",
+          "command": "adure-sfx-toolkit.browseOrgMetadata",
           "when": "view == adure-sfx-toolkit.orgs && viewItem =~ /^org-/",
           "group": "0_browse"
         },
@@ -823,6 +827,10 @@
       "commandPalette": [
         {
           "command": "adure-sfx-toolkit.deployMetadata",
+          "when": "false"
+        },
+        {
+          "command": "adure-sfx-toolkit.openOrgBrowser",
           "when": "false"
         },
         {
@@ -1048,10 +1056,10 @@
           "enum": ["auto", "manual"],
           "enumDescriptions": [
             "Compare contents in the background as soon as the org listing is available.",
-            "Only compare contents when you press Compare contents in Deploy & Retrieve Metadata or the Org Browser."
+            "Only compare contents when you press Compare contents in Deploy & Retrieve Metadata."
           ],
           "default": "manual",
-          "markdownDescription": "How **Deploy & Retrieve Metadata** and the **Org Browser** confirm \"Equal\" and correct \"Changed locally / in org\": the status first comes from dates (shown dashed), then a background content diff retrieves the org's copy of each component into a private cache (never into your project) and compares it with your local files. `manual` (default) compares only when you press the **Compare contents** button, so opening is fast; `auto` starts it when the org listing is available."
+          "markdownDescription": "How **Deploy & Retrieve Metadata** confirms \"Equal\" and corrects \"Changed locally / in org\": the status first comes from dates (shown dashed), then a background content diff retrieves the org's copy of each component into a private cache (never into your project) and compares it with your local files. `manual` (default) compares only when you press the **Compare contents** button, so opening is fast; `auto` starts it when the org listing is available."
         },
         "adure-sfx-toolkit.apex.validateOnSave": {
           "type": "boolean",

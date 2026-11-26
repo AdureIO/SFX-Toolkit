@@ -5,7 +5,7 @@
  * SyncCenterPanelProvider via postMessage.
  *
  * The rows come from `buildSyncRows` (src/utils/syncCenterPure.ts) over what the host feeds in: the org listing
- * (streamed in batches, like the Org Browser), the local index, the local change info and the compare results.
+ * (streamed in batches), the local index, the local change info and the compare results.
  * The button rules are `deployCandidates` / `retrieveCandidates` / `deleteCandidates`; nothing of them is repeated.
  */
 import {
@@ -20,6 +20,8 @@ import {
 	filterIndices,
 	highlightRanges,
 	highlightTerms,
+	matchPairs,
+	parsePastedPairs,
 	relativeTime,
 	sortIndices,
 } from "../utils/orgBrowser/filter";
@@ -44,6 +46,7 @@ import {
 	overwriteText,
 } from "../utils/syncCenterPure";
 import {
+	browseFilter,
 	buttonState,
 	centerFilterKeptOnClear,
 	choicesFromJson,
@@ -1400,6 +1403,9 @@ function rowAction(act: string, i: number): void {
 		case "retrieveRow":
 			startRetrieve([r.key], r.status === "conflict" || r.status === "changed-locally" ? [r.key] : [], false);
 			break;
+		case "retrieveSel":
+			doRetrieve();
+			break;
 		case "open":
 			post({ command: "openFile", key: r.key });
 			break;
@@ -1427,7 +1433,9 @@ let menuRow = -1;
 function showMenu(i: number, x: number, y: number): void {
 	menuRow = i;
 	const r = syncRows[i];
+	const multi = selected.has(r.key) && selected.size > 1;
 	const entries: [string, string, boolean][] = [
+		[multi ? "retrieveSel" : "retrieveRow", multi ? `Retrieve selected (${selected.size})` : "Retrieve", r.inOrg && hasProject],
 		["diff", "Compare with the org", isDiffable(r)],
 		["open", "Open local file", r.local],
 		["reveal", "Reveal in Explorer", r.local],
@@ -1525,6 +1533,27 @@ function setupEvents(): void {
 		onSearchArrowDown: () => {
 			$("scroller").focus();
 			if (active < 0 && items.length) setActive(0);
+		},
+		// Pasting a list of `Type:Name` lines selects those components (and shows only them).
+		onSearchPaste: (e) => {
+			const text = e.clipboardData?.getData("text") ?? "";
+			if (!/\r?\n/.test(text.trim())) return;
+			const known = new Set(types.map((t) => t.name));
+			for (const c of idx.comps) known.add(c.t);
+			const pairs = parsePastedPairs(text, known);
+			if (!pairs) return;
+			e.preventDefault();
+			const { indices, missing } = matchPairs(idx, pairs);
+			for (const i of indices) selected.add(keyAt(i));
+			// The status filter would hide pasted rows that are not in its group: clear it.
+			ui.filter = { ...ui.filter, query: "", status: [], onlySelected: selected.size > 0 };
+			search.value = "";
+			recompute(true);
+			saveUi();
+			toast(
+				`Selected ${indices.length} of ${pairs.length} pasted component${pairs.length === 1 ? "" : "s"}` + (missing.length ? ` (${missing.length} not found)` : ""),
+				missing.length ? "warn" : "info"
+			);
 		},
 		preserveOnClear: () => centerFilterKeptOnClear(ui.filter.onlySelected && selected.size > 0),
 	});
@@ -1823,6 +1852,10 @@ function setupEvents(): void {
 			e.preventDefault();
 			search.focus();
 			search.select();
+		} else if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && modeOf() === "retrieve") {
+			// Ctrl/Cmd+Enter retrieves the selection (Retrieve action only; Deploy and Delete stay on their buttons).
+			e.preventDefault();
+			doRetrieve();
 		} else if (e.key === "Escape" && !$("menu").hidden) {
 			hideMenu();
 		} else if (e.key === "Escape" && !$("colMenu").hidden) {
@@ -2224,6 +2257,11 @@ window.addEventListener("message", (ev) => {
 			renderHeader();
 			loadChoices();
 			sharedSync.init(m.shared);
+			// Opened to browse the org (Orgs view, org menu, Org Browser command): every status, optionally some types.
+			if (m.browse) {
+				ui.filter = browseFilter(ui.filter, Array.isArray(m.browse.types) ? m.browse.types.map(String) : []);
+				saveUi();
+			}
 			bar.syncSearchInput();
 			applyWidths();
 			applyOptionsToControls();
@@ -2444,7 +2482,7 @@ window.addEventListener("message", (ev) => {
 		}
 		case "applySelection":
 			selectKeys(Array.isArray(m.keys) ? m.keys.map(String) : [], true);
-			// Opened with a selection (right-click, Org Browser, history): adjust the filter so the selection is visible.
+			// Opened with a selection (right-click, history): adjust the filter so the selection is visible.
 			if (m.reveal && hiddenSelected().length > 0) {
 				ui.filter = { ...DEFAULT_FILTER, status: initialStatusFilter(undefined, false) };
 				recompute(true);
@@ -2455,6 +2493,12 @@ window.addEventListener("message", (ev) => {
 				bar.syncSearchInput();
 				saveUi();
 			}
+			break;
+		case "applyBrowse":
+			ui.filter = browseFilter(ui.filter, Array.isArray(m.types) ? m.types.map(String) : []);
+			bar.syncSearchInput();
+			recompute(true);
+			saveUi();
 			break;
 		case "applyPreset":
 			if (m.preset) applyPreset(m.preset as WebPreset);

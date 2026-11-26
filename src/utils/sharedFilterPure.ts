@@ -1,5 +1,5 @@
 /**
- * Search text and type selection shared between the Org Browser and Deploy & Retrieve Metadata, per
+ * Search text and type selection of Deploy & Retrieve Metadata, kept per
  * project (workspaceState key `asfx.metadataFilter.<projectDir>`). Pure (no `vscode`, no DOM).
  *
  * Status filters are NOT shared (each panel has its own vocabulary): neither the status facet nor

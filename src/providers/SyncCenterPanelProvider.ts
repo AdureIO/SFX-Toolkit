@@ -76,9 +76,19 @@ export interface SyncCenterOpenOptions {
 	paths?: string[];
 	/** A stored preset or a deploy-history entry to apply (selection, test level, validate only, tests) once the project is read. */
 	preset?: DeployPreset & { validateOnly?: boolean };
+	/** Browse the org: the status filter is cleared (the default "In project" group would hide the org-only components). */
+	browse?: boolean;
+	/** Metadata types to show (the type filter); implies `browse`. */
+	types?: string[];
 }
 
 type Busy = "deploy" | "retrieve" | "delete";
+
+/** The browse request of an open (`browse` or a type list), if any. */
+function browseOf(opts: SyncCenterOpenOptions): { types: string[] } | undefined {
+	const types = (opts.types ?? []).filter((t) => typeof t === "string" && t !== "");
+	return opts.browse || types.length > 0 ? { types } : undefined;
+}
 
 /**
  * Deploy & Retrieve Metadata: the union of the local project and the org's metadata with one selection, smart
@@ -124,6 +134,8 @@ export class SyncCenterPanelProvider {
 	private static pendingOpen: SyncCenterOpenOptions | undefined;
 	/** The selection to hand the webview with the next init. */
 	private static initialSelection: string[] = [];
+	/** The types of a browse open, handed to the webview with the next init (`undefined` = no browse). */
+	private static initialBrowse: { types: string[] } | undefined;
 	/** Paths / preset of an open that wait for the project index (applied by `applyPendingOpen`). */
 	private static openPaths: string[] | undefined;
 	private static openPreset: (DeployPreset & { validateOnly?: boolean }) | undefined;
@@ -195,6 +207,7 @@ export class SyncCenterPanelProvider {
 		const ctx = this.ctx!;
 		this.userPicked = !!opts.org;
 		this.initialSelection = opts.selection ?? [];
+		this.initialBrowse = browseOf(opts);
 		this.openPaths = opts.paths?.length ? opts.paths : undefined;
 		this.openPreset = opts.preset;
 		this.panel = panel;
@@ -263,6 +276,8 @@ export class SyncCenterPanelProvider {
 			await this.loadOrg(opts.org);
 		}
 		if (opts.selection) this.post({ type: "applySelection", keys: opts.selection, reveal: true });
+		const browse = browseOf(opts);
+		if (browse) this.post({ type: "applyBrowse", types: browse.types });
 		if (opts.paths?.length) this.openPaths = opts.paths;
 		if (opts.preset) this.openPreset = opts.preset;
 		this.applyPendingOpen();
@@ -315,6 +330,7 @@ export class SyncCenterPanelProvider {
 		this.switchPending = false;
 		this.openPaths = undefined;
 		this.openPreset = undefined;
+		this.initialBrowse = undefined;
 		this.comps = [];
 		this.compMap = new Map();
 		this.local = undefined;
@@ -356,6 +372,7 @@ export class SyncCenterPanelProvider {
 		this.pendingOpen = undefined;
 		if (open?.org) this.userPicked = true;
 		if (open?.selection) this.initialSelection = open.selection;
+		if (open && browseOf(open)) this.initialBrowse = browseOf(open);
 		if (open?.paths?.length) this.openPaths = open.paths;
 		if (open?.preset) this.openPreset = open.preset;
 		this.prefetchTestClasses();
@@ -483,12 +500,14 @@ export class SyncCenterPanelProvider {
 
 	private static async sendInit(): Promise<void> {
 		const root = this.projectDir();
-		const picker = root ? await orgPickerForProject(root).catch(() => ({ orgs: [], defaultOrg: "" })) : { orgs: [], defaultOrg: "" };
+		const picker = await this.orgPicker(root);
 		const key = canonicalOrgKey(null, root);
 		// The test class scan is not awaited either (the specified-tests list fills in when it is done).
 		const testClassesP = root ? this.takeTestClasses(root) : Promise.resolve([]);
 		const selection = this.initialSelection;
 		this.initialSelection = [];
+		const browse = this.initialBrowse;
+		this.initialBrowse = undefined;
 		// Not awaited: the org check can take a while and must not hold up the first render. Until its `orgs` message
 		// arrives (loadOrg sends it) the org counts as production, the safe side.
 		const production = true;
@@ -506,6 +525,7 @@ export class SyncCenterPanelProvider {
 			testClasses: [],
 			childTypes: [...OBJECT_CHILD_TYPES],
 			selection,
+			browse,
 		});
 		void testClassesP.then((testClasses) => {
 			if (root === this.projectDir()) this.post({ type: "testClasses", testClasses });
@@ -519,10 +539,17 @@ export class SyncCenterPanelProvider {
 		if (!this.panel) return;
 		const key = this.orgKey;
 		const root = this.projectDir();
-		const picker = root ? await orgPickerForProject(root).catch(() => ({ orgs: [], defaultOrg: "" })) : { orgs: [], defaultOrg: "" };
+		const picker = await this.orgPicker(root);
 		const production = await this.orgIsProduction(key, root);
 		if (key !== this.orgKey) return; // the org changed while the check ran; its own message follows
 		this.post({ type: "orgs", orgs: picker.orgs, org: key === DEFAULT_ORG_KEY ? null : key, production });
+	}
+
+	/** The org picker of the project without expired scratch orgs (they cannot be listed). */
+	private static async orgPicker(root: string | null | undefined): Promise<{ orgs: { label: string; username: string }[]; defaultOrg: string }> {
+		if (!root) return { orgs: [], defaultOrg: "" };
+		const picker = await orgPickerForProject(root).catch(() => ({ orgs: [], defaultOrg: "" }));
+		return { ...picker, orgs: picker.orgs.filter((o) => !getOrgByTarget(o.username)?.isExpired) };
 	}
 
 	/** Production or not verifiable: the same rule the Delete section's test check uses. */
@@ -612,7 +639,7 @@ export class SyncCenterPanelProvider {
 		// What does not depend on the org list starts at once and runs beside it: the local scan and the stored listing.
 		const t0 = Date.now();
 		void this.refreshLocal();
-		// The Org Browser's listing cache is shared: opening the Center for an org the Org Browser listed is instant.
+		// The listing cache (globalStorage/org-browser, the directory name of the former Org Browser) is shared by every listing of an org: a stored one opens instantly.
 		const cacheP =
 			key === DEFAULT_ORG_KEY
 				? Promise.resolve(null)
@@ -620,7 +647,7 @@ export class SyncCenterPanelProvider {
 					this.timings?.mark(`stored listing${c ? ` (${c.comps.length} components)` : " (none)"}`, Date.now() - t0);
 					return c;
 				});
-		const picker = root ? await orgPickerForProject(root).catch(() => ({ orgs: [], defaultOrg: "" })) : { orgs: [], defaultOrg: "" };
+		const picker = await this.orgPicker(root);
 		this.timings?.mark("org list", Date.now() - t0);
 		if (gen !== this.gen) return;
 		if (picker.orgs.length === 0) {

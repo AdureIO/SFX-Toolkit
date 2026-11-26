@@ -1,12 +1,13 @@
 # Deploy & Retrieve Metadata
 
-Status: design 2026-11-23, updated 2026-11-26 (the Deploy Metadata panel is replaced; this panel was called the Deploy & Retrieve Center before). Internal identifiers keep the `SyncCenter*` names.
+Status: design 2026-11-23, updated 2026-11-26 (the Deploy Metadata panel and the Org Browser are replaced; this panel was called the Deploy & Retrieve Center before). Internal identifiers keep the `SyncCenter*` names.
 
 ## Decisions (user)
 
-- **Replaces the Deploy Metadata panel.** The Org Browser stays as it is, with a button "Open in Deploy & Retrieve Metadata".
+- **Replaces the Deploy Metadata panel and the Org Browser.** Both panels are gone; their commands open this panel.
   - The command id `adure-sfx-toolkit.deployMetadata` stays registered as a hidden alias (user keybindings) and opens this panel; opened from an Explorer or editor context menu with files or folders it selects their components and adjusts the filter so they show.
   - The Development view button and tree item open this panel.
+  - The command id `adure-sfx-toolkit.openOrgBrowser` stays registered as a hidden alias and opens this panel to browse the org (status filter cleared). `adure-sfx-toolkit.browseOrgMetadata` ("ASFXT: Browse Org Metadata") is the visible command for it: Orgs view title button, org node context menu, Development view and the palette. Open options `browse` / `types` do the same from code.
 - **Direction: smart sync plus manual.**
   - There is one selection with two buttons, `Retrieve (n)` and `Deploy (n)`.
   - The filters and the header checkbox ("select all shown rows") preselect the obvious work. There are no quick actions.
@@ -26,13 +27,13 @@ Status: design 2026-11-23, updated 2026-11-26 (the Deploy Metadata panel is repl
 
 The rows are the union of the local index (`scanProject`) and the org listing, keyed by `compKey(type, name)`. Local names are percent-decoded the same way `orgLookupKey` does it.
 
-Statuses come from `compareStatusPure.ts` plus the content compare service, the same engine the other two panels use:
+Statuses come from `compareStatusPure.ts` plus the content compare service, the same engine the removed panels used:
 
 | Status | Meaning | Label |
 |---|---|---|
 | `only-local` | local, not in the org listing | Only local |
 | `only-org` | in the org, not local | Only in org |
-| `partial` | object partly local (the Org Browser meaning) | Partly local |
+| `partial` | object partly local (the former Org Browser's meaning) | Partly local |
 | `equal` | verified or provisional equal | Equal |
 | `changed-locally` | | Changed locally |
 | `changed-in-org` | | Changed in org (latest) |
@@ -52,10 +53,10 @@ Statuses come from `compareStatusPure.ts` plus the content compare service, the 
   - "Listed …" info;
   - Refresh;
   - **Compare contents (n)**, a primary button: compares the selected components, else the project components shown. Contents are never compared automatically (`compare.verifyContents` defaults to `manual`; `auto` still works). The progress text and a Cancel button show while it runs.
-- **Left:** the filter sidebar (`filterGroupsMarkup`): status, type, namespace, modified. It is identical to the Org Browser, including collapse and auto-hide below 560 px.
-- **Center:** the Org Browser-style virtual grid.
+- **Left:** the filter sidebar (`filterGroupsMarkup`): status, type, namespace, modified. It is the Org Browser's former sidebar, including collapse and auto-hide below 560 px.
+- **Center:** the virtual grid (the Org Browser's former look).
   - Columns: a checkbox (header: select all shown rows), then the columns of the column layout (below).
-  - "Group by type" toggle, as in the Org Browser. The rows under a group header are indented (name cell).
+  - "Group by type" toggle. The rows under a group header are indented (name cell).
   - Group header: a refresh icon (re-list this type) with the theme's icon colour and a hover background.
   - Actions cell (always visible, never hover-only), icon buttons with tooltips:
     - **Deploy**, for rows that exist locally (and partly local objects);
@@ -103,7 +104,7 @@ Statuses come from `compareStatusPure.ts` plus the content compare service, the 
   - `recordDeployed`;
   - deploy results and errors in the panel;
   - the compare service pauses during the deploy and re-compares afterwards.
-- Retrieve reuses `retrieveComponents` (with recording and the overwrite safety, as the Org Browser does), then rescans locally and re-compares.
+- Retrieve reuses `retrieveComponents` (with recording and the overwrite safety), then rescans locally and re-compares.
 
 ## Diff
 
@@ -138,7 +139,7 @@ Statuses come from `compareStatusPure.ts` plus the content compare service, the 
 - Recorded by:
   - the Center;
   - the Deploy panel's deploy;
-  - the Org Browser's retrieve;
+  - the former Org Browser's retrieve (`source: orgBrowser` stays readable in stored histories);
   - the right-click deploy and retrieve commands, when they go through the shared engines.
 - The UI is the Local history segment of the Deployment history footer tab, listing kind icon, org, relative time, the count and ok/failed.
   - Expanding an entry shows the components and errors.
@@ -169,7 +170,7 @@ Statuses come from `compareStatusPure.ts` plus the content compare service, the 
 | Deploy panel feature | Deploy & Retrieve Metadata |
 |---|---|
 | Component grid with status against the org, type groups, filters, search | present (union grid, In project filter, column chooser) |
-| Search text and type selection shared with the Org Browser | present |
+| Search text and type selection shared with the Org Browser | present (kept per project; the Org Browser is gone) |
 | Org picker, project selector, default org change | present |
 | Test level (No tests, Run local, Run relevant, Specified), test class tree, search | present |
 | Named test suites | present |
@@ -198,3 +199,44 @@ Statuses come from `compareStatusPure.ts` plus the content compare service, the 
 - **Selection banner**: while only-selected is on, a slim info bar under the toolbar reads "Showing your selection: 5 selected (2 hidden) · 3 to deploy · 2 skipped" (the current mode's counting). Actions: "Back to all components", "Clear selection" (deselects all and leaves the view) and ×. Esc in the grid or panel leaves the view unless a menu is open. The bar is hidden when the filter is off.
 - **Modified time filter** passes a row when its org last-modified date or its local change time lies in the window. The local change time is the one the date-based status uses (`localInfo`: dirty or untracked files use the file mtime, else the last commit time; the newest across the component's files). Only-org rows have only the org date, only-local rows only the local date. Facet counts use the same predicate. "Modified by me" stays org-based. An optional column "Last modified (local)" (off by default) shows the value.
 - **Retrieve project (n)**: a secondary button in the Retrieve section. It retrieves every row that exists locally and in the org, independent of selection and filters (only-local rows and, with "Skip equal components", equal rows are skipped). One modal asks "Retrieve n components of project <name> from <org>? Local files will be overwritten." and, when "Confirm before overwriting local changes" is on, lists up to 10 locally changed components (it replaces the retrieve's own overwrite check, so there is no second prompt). It uses the normal host retrieve path (history label "Retrieve project", op card, rescan, re-compare). The button waits for the org listing; there is no package-directory fallback.
+
+## Parity with the removed Org Browser
+
+The Org Browser is removed (commit of this change). Its listing cache directory `globalStorage/org-browser` keeps its name (the cache is shared and renaming it would lose the files). The default view of this panel is "In project"; browsing the org means the status filter is cleared, which the browse entry points do (below).
+
+| Org Browser feature | Deploy & Retrieve Metadata |
+|---|---|
+| Full org listing, every metadata type, org-only components | present (union grid; status "Only in org"; browse entry points clear the status filter) |
+| Streaming listing with "Loaded x/y types" progress, "Listed … ago" | present |
+| Full refresh, per-type refresh (group header, type facet) | present |
+| Failed types listed with a Retry per type | present |
+| Listing cache shared on disk, org switch loads it first | present (same directory) |
+| Namespace filter, "Unmanaged only", manageable state | present (shared filter bar) |
+| "Modified by me", time filter | present (the time filter also passes on the local change time) |
+| Type search with alt-click "only this", query grammar (`type:`, `ns:`, `by:`, wildcards, `Type:Name`) | present |
+| Paste a list of `Type:Name` lines into the search to select them | ported: selects the matches, clears the status filter and the query, shows only the selection |
+| Partial objects (object file missing, children present) | present (status "Partly local") |
+| "Retrieve the whole object when a child is selected" | present (Retrieve option) |
+| Open in Setup | present (context menu, for rows in the org) |
+| Copy `Type:Name`, copy name, open local file, reveal in Explorer, double-click opens the file | present (context menu) |
+| Row context menu with Retrieve / Retrieve selected | ported (Retrieve / Retrieve selected (n), first entry) |
+| Retrieve with the overwrite check, hidden-selection prompt, retrieve log (the package directory is chosen by the `sf` retrieve, as before) | present (shared `runRetrieveFlow`; "Confirm before overwriting local changes") |
+| Ctrl/Cmd+Enter retrieves the selection | ported, for the Retrieve action only (Deploy and Delete stay on their buttons) |
+| Compare with local, local-vs-org status, Compare contents | present (Diff action, on-demand content compare with Cancel) |
+| Keyboard navigation (arrows, page keys, Home/End, Space, Enter opens the row menu, `/` focuses the search) | present |
+| Org switching, default org change, expired scratch orgs hidden, authorize / re-authenticate / choose org overlays | present; hiding expired orgs ported |
+| No SFDX project: browse only, retrieve disabled | present (banner) |
+| Sort, resizable columns | present (column chooser) |
+| Persisted UI state (`adure-sfx-toolkit.orgBrowser.ui`) | dropped; the panel keeps its own state |
+| Button "Open in Deploy & Retrieve Metadata" | removed (it no longer applies) |
+
+Entry points that opened the Org Browser:
+
+| Entry point | Now |
+|---|---|
+| Command palette `ASFXT: Org Browser` | `ASFXT: Browse Org Metadata` (`browseOrgMetadata`); the old id is a hidden alias; default org, status filter cleared |
+| Orgs view title button | `browseOrgMetadata`, default org, status filter cleared |
+| Org node context menu ("Org Browser") | `browseOrgMetadata` with that org, status filter cleared |
+| Development view item "Org Browser" | "Browse Org Metadata", same command |
+| A metadata type | none existed; open option `types` preselects types (with `browse`) |
+| Walkthroughs, keybindings, views | none referenced the Org Browser |

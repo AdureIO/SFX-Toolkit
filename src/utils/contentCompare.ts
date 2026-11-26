@@ -1,6 +1,6 @@
 /**
- * Content diff of local components against the org's copy. One service per (project, org), shared by the Deploy
- * panel and the Org Browser.
+ * Content diff of local components against the org's copy. One service per (project, org), used by Deploy &
+ * Retrieve Metadata.
  *
  * Org copies come from `sf project retrieve start --output-dir` run inside a small STUB project in the cache
  * directory, never in the real project: `sf` insists on running in an SFDX project and on an `--output-dir`

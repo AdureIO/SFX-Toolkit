@@ -1,5 +1,5 @@
 /**
- * Metadata API SOAP transport for the Org Browser: session from AuthInfo (401/INVALID_SESSION_ID
+ * Metadata API SOAP transport for the org listing: session from AuthInfo (401/INVALID_SESSION_ID
  * triggers the single-flight token refresh), POST via httpsPost. Read-only usage only.
  */
 import { AuthInfo } from "../authInfo";

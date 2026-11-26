@@ -1,8 +1,7 @@
 /**
  * Persisted project caches (extension host side, no `vscode`): the local index, the git commit times and the last
  * local change info of a project, in `globalStorage/org-browser` next to the org listing cache, gzip JSON through
- * `diskCache`. Shared by the Org Browser, Deploy & Retrieve Metadata: whichever panel
- * scanned a project first saves it for the others (and for the next VS Code session).
+ * `diskCache`. Stored so the next opening of Deploy & Retrieve Metadata paints at once (also across VS Code sessions).
  *
  *   scanProjectCached   `scanProject`, but a stored index whose directories are unchanged is returned without a scan
  *   peekLocalIndex      the stored index without validating it (paint at once, validate in the background)

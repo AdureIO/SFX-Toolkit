@@ -1,5 +1,5 @@
 /**
- * Org Browser listing: describeMetadata + listMetadata over the Metadata SOAP API (the CLI is far too
+ * Org metadata listing: describeMetadata + listMetadata over the Metadata SOAP API (the CLI is far too
  * slow to enumerate every type), plus the on-disk listing cache. Pure (no `vscode`): the SOAP transport
  * is injected (`call`), so the parsing, batching, folder expansion and failure isolation are unit-tested
  * against XML fixtures.

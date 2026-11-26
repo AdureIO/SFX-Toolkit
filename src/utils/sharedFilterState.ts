@@ -1,14 +1,13 @@
 /**
- * Host side of the filter state the Org Browser and Deploy & Retrieve Metadata share per project
+ * Host side of the filter state of Deploy & Retrieve Metadata per project
  * (search text and type selection; see sharedFilterPure.ts). Stored in the workspaceState under
- * `asfx.metadataFilter.<projectDir>`; a change made by one panel is broadcast so the other one, if open
- * for the same project, updates live.
+ * `asfx.metadataFilter.<projectDir>`; a change is broadcast to other panels open for the same project.
  */
 import * as vscode from "vscode";
 import { SharedFilter, sameSharedFilter, sanitizeSharedFilter, sharedFilterKey } from "./sharedFilterPure";
 import { samePath } from "./projectDiscoveryPure";
 
-export type SharedFilterSource = "orgBrowser" | "deploy" | "syncCenter";
+export type SharedFilterSource = "deploy" | "syncCenter";
 
 export interface SharedFilterChange {
 	dir: string;

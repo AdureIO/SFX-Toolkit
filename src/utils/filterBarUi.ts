@@ -1,5 +1,5 @@
 /**
- * Host side of the shared metadata filter bar (search box + facet groups), used by the Org Browser and
+ * Host side of the shared metadata filter bar (search box + facet groups), used by
  * Deploy & Retrieve Metadata. Plain strings, no `vscode` import. The behaviour lives in
  * `src/webview/shared/filterBar.ts`; the query grammar and the matching in `orgBrowser/filter.ts`.
  *

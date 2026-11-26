@@ -25,7 +25,7 @@ describe("DeployOrgStatus", () => {
 	const make = (list: (o: ListOptions) => Promise<ListResult>, now = () => 5000) =>
 		new DeployOrgStatus({ cacheDir: dir, seedDir: seed, apiVersion: "67.0", makeCall: () => async () => "", list, now });
 
-	it("starts from the Org Browser's cache as a seed, with that listing's time per type", async () => {
+	it("starts from the shared listing cache as a seed, with that listing's time per type", async () => {
 		await saveListingCache(seed, {
 			v: 1,
 			orgKey: "u@x",

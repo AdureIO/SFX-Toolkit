@@ -1,5 +1,5 @@
 /**
- * Shared Org Browser types. Pure (no `vscode`): used by the extension host, the unit tests and the
+ * Org listing and component types. Pure (no `vscode`): used by the extension host, the unit tests and the
  * webview bundle. Component fields use short keys — a full org is 50k+ rows that cross the
  * host/webview boundary and sit in the disk cache.
  */
@@ -49,19 +49,7 @@ export interface ListFailure {
 	error: string;
 }
 
-/**
- * Org Browser row status codes (index into `STATUS_NAMES`). 0..4 are shared with the Deploy panel
- * (see compareStatusPure): absent on the other side, equal, changed locally, changed in org, conflict.
- */
-export const STATUS_NOT_IN_PROJECT = 0;
-export const STATUS_EQUAL = 1;
-export const STATUS_CHANGED_LOCALLY = 2;
-export const STATUS_CHANGED_IN_ORG = 3;
-export const STATUS_CONFLICT = 4;
-/** CustomObject whose object file is missing locally but some of its children (fields …) exist. */
-export const STATUS_PARTIAL = 5;
-/** The local project was not read yet (or its change info is not available yet). */
-export const STATUS_UNKNOWN = 6;
+/** Status names of the default filter vocabulary (`ORG_BROWSER_VOCAB`); the panel uses its own (`SYNC_CENTER_VOCAB`). */
 export const STATUS_NAMES = ["not-in-project", "equal", "changed-locally", "changed-in-org", "conflict", "partial", "unknown"] as const;
 /** `Type:Name` row key used across host, webview, local index and retrieve log. */
 export function compKey(type: string, fullName: string): string {

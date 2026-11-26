@@ -1,7 +1,7 @@
 /**
  * Shared retrieve engine: `sf project retrieve start --json` for a set of components and/or
  * source paths, with command-line chunking, per-component results, schema-cache invalidation and
- * the last-retrieve log. Used by the Org Browser and the right-click retrieve.
+ * the last-retrieve log. Used by Deploy & Retrieve Metadata and the right-click retrieve.
  */
 import type * as vscode from "vscode";
 import { runCommandArgs } from "./commandRunner";

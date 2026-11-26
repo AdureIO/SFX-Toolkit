@@ -79,6 +79,7 @@ const ORG: string[] = [
 	"showOutput",
 	"revealOperationPanel",
 	"openOrgBrowser",
+	"browseOrgMetadata",
 ];
 
 const SOURCE: string[] = [

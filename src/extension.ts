@@ -40,7 +40,6 @@ import { ScratchOrgDefEditorProvider } from "./editors/ScratchOrgDefEditorProvid
 import { SOQLEditorProvider } from "./providers/SOQLEditorProvider";
 import { ObjectVisualizerPanelProvider } from "./providers/ObjectVisualizerPanelProvider";
 import { ProcessMapPanelProvider } from "./providers/ProcessMapPanelProvider";
-import { OrgBrowserPanelProvider } from "./providers/OrgBrowserPanelProvider";
 import { SyncCenterOpenOptions, SyncCenterPanelProvider } from "./providers/SyncCenterPanelProvider";
 import { SharedMetadataFilter } from "./utils/sharedFilterState";
 import { initRetrieveLog, flushRetrieveLog } from "./utils/retrieveLog";
@@ -300,7 +299,6 @@ export function activate(context: vscode.ExtensionContext) {
     initSyncHistory(context);
     initProjectScanCache(path.join(context.globalStorageUri.fsPath, "org-browser"));
     SharedMetadataFilter.init(context);
-    OrgBrowserPanelProvider.init(context);
     SyncCenterPanelProvider.init(context);
 
     // Org-aware SOQL language server (JVM-free). Safe no-op outside SFDX projects.
@@ -561,11 +559,13 @@ export function activate(context: vscode.ExtensionContext) {
     const objectVisualizerCmd = register("adure-sfx-toolkit.objectVisualizer", () => {
       ObjectVisualizerPanelProvider.show(context.extensionUri);
     });
-    // Org Browser: palette (default org), Orgs view title button, and the org-node context menu (that org).
-    const orgBrowserCmd = register("adure-sfx-toolkit.openOrgBrowser", (item?: { orgData?: { username?: string } }) =>
-      OrgBrowserPanelProvider.show(item?.orgData?.username ?? undefined)
-    );
-    // Deploy & Retrieve Metadata: palette (default org), or from the Org Browser button (project, org and selection carried over).
+    // Browse Org Metadata: palette (default org), Orgs view title button, Development view and the org-node context menu (that org).
+    // Opens Deploy & Retrieve Metadata with the status filter cleared so the org-only components show. The old Org Browser
+    // command id stays as an alias (user keybindings).
+    const browseOrg = (item?: { orgData?: { username?: string } }) => SyncCenterPanelProvider.show({ org: item?.orgData?.username ?? undefined, browse: true });
+    const browseOrgCmd = register("adure-sfx-toolkit.browseOrgMetadata", browseOrg);
+    const orgBrowserCmd = register("adure-sfx-toolkit.openOrgBrowser", browseOrg);
+    // Deploy & Retrieve Metadata: palette (default org), or with open options (project, org, selection, paths, preset, browse).
     const syncCenterCmd = register("adure-sfx-toolkit.openSyncCenter", (opts?: SyncCenterOpenOptions) =>
       SyncCenterPanelProvider.show(opts && typeof opts === "object" && !("orgData" in opts) ? opts : {})
     );
@@ -780,6 +780,7 @@ export function activate(context: vscode.ExtensionContext) {
       openSOQLEditorCmd,
       objectVisualizerCmd,
       processMapCmd,
+      browseOrgCmd,
       orgBrowserCmd,
       syncCenterCmd,
       reauthCmd,

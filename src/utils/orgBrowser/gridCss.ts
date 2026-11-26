@@ -1,5 +1,5 @@
 /**
- * Shared look of the grid panels (Org Browser, Deploy & Retrieve Metadata): layout, grid, badges, menu, toast.
+ * Look of the Deploy & Retrieve Metadata grid: layout, grid, badges, menu, toast.
  * Colours come from VS Code theme variables only. A panel appends its own rules after `GRID_CSS`.
  */
 import { FILTER_BAR_CSS, FILTER_BAR_VARS } from "../filterBarUi";
@@ -28,12 +28,6 @@ button.primary { background: var(--vscode-button-background); color: var(--vscod
 button.primary:hover:not(:disabled) { background: var(--vscode-button-hoverBackground); }
 button.ghost { background: transparent; border: 1px solid var(--ob-border); border-radius: 4px; height: 28px; padding: 0 10px; }
 button.ghost:hover:not(:disabled) { background: var(--ob-hover); }
-.selhidden { font-size: 11px; color: var(--vscode-descriptionForeground); margin-right: 6px; white-space: nowrap; }
-.selhidden .link { background: transparent; border: 0; padding: 0; color: var(--vscode-textLink-foreground); cursor: pointer; text-decoration: underline; font: inherit; }
-.selchip { display: inline-flex; align-items: center; border: 1px solid var(--ob-border-strong); border-radius: 999px; overflow: hidden; }
-.selchip button { background: transparent; border: 0; padding: 3px 9px; }
-.selchip button:hover { background: var(--ob-hover); }
-.selchip.on { border-color: var(--ob-accent); background: color-mix(in srgb, var(--ob-accent) 16%, transparent); }
 .progress { height: 2px; background: var(--ob-border); flex-shrink: 0; }
 #progressBar { height: 100%; width: 0; background: var(--ob-accent); transition: width .2s; }
 .bn { padding: 6px 12px; font-size: 12px; border-bottom: 1px solid var(--ob-border); }
@@ -44,7 +38,6 @@ button.ghost:hover:not(:disabled) { background: var(--ob-hover); }
 #side { width: 248px; flex-shrink: 0; overflow-y: auto; border-right: 1px solid var(--ob-border); background: var(--ob-surface); padding: 6px 10px 12px; }
 .center { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .gridbar { display: flex; align-items: center; gap: 10px; padding: 5px 12px; border-bottom: 1px solid var(--ob-border); font-size: 12px; flex-shrink: 0; }
-.inl { display: inline-flex; gap: 5px; align-items: center; cursor: pointer; }
 .gridwrap { position: relative; flex: 1; min-height: 0; }
 .scroller { position: absolute; inset: 0; overflow: auto; outline: none; }
 .inner { min-width: var(--minw); }
@@ -112,5 +105,5 @@ mark { background: color-mix(in srgb, var(--ob-warn) 45%, transparent); color: i
 .toast.warn { border-color: var(--ob-warn); }
 .toast.error { border-color: var(--ob-bad); }
 @media (max-width: 760px) { #side { display: none; } }
-@media (forced-colors: active) { .badge, .chip, .selchip { border-color: CanvasText; } }
+@media (forced-colors: active) { .badge, .chip { border-color: CanvasText; } }
 `;

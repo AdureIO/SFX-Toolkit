@@ -62,6 +62,15 @@ export function centerFilterKeptOnClear(onlySelected: boolean): { status: string
 	return { status: defaultStatusFilter(), onlySelected };
 }
 
+/**
+ * The filter for browsing the org (Orgs view, org menu, the Org Browser command id): every status shows
+ * (the default "In project" group would hide the org-only components), no "only selected", and the given
+ * metadata types when there are any. Search text, namespace and the other facets stay as the user left them.
+ */
+export function browseFilter<F extends { status: string[]; onlySelected: boolean; types: string[] }>(filter: F, types: readonly string[]): F {
+	return { ...filter, status: [], onlySelected: false, types: types.length > 0 ? [...types] : filter.types };
+}
+
 // ── Objects and their children ─────────────────────────────────────────────────
 
 /** `Account` for `CustomField:Account.Foo__c` when `type` is a child type of CustomObject; else undefined. */

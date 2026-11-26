@@ -1,5 +1,5 @@
 /**
- * Org Browser search and filtering. Pure (no `vscode`, no DOM): runs in the webview and in tests.
+ * Metadata search and filtering. Pure (no `vscode`, no DOM): runs in the webview and in tests.
  *
  * Query language (tokens are ANDed; quote with "..." to keep spaces):
  *   foo bar              both substrings must appear in the name or the type (case-insensitive)
@@ -17,8 +17,8 @@ import { anyComparedShorthand, sharedStatusAliases } from "../compareStatusPure"
 // ── Status vocabulary ──────────────────────────────────────────────────────────
 
 /**
- * What `status:` and the status facet mean in a panel. The Org Browser has ONE local status per row
- * (a code, an index into `names`); the Deploy panel has several at once (a bitmask, bit i = names[i]),
+ * What `status:` and the status facet mean in a panel. The default vocabulary (kept from the Org Browser, used by the filter tests) has ONE local status per row
+ * (a code, an index into `names`); the Deploy & Retrieve Metadata vocabulary has several at once (a bitmask, bit i = names[i]),
  * e.g. changed-in-org + modified-locally. Each panel passes its vocabulary in `FilterContext.vocab`.
  */
 export interface StatusVocab {
@@ -37,7 +37,7 @@ export interface StatusVocab {
 	virtual?: Record<string, (v: number) => boolean>;
 }
 
-/** The Org Browser's local-vs-org status (not-in-project / equal / changed-locally / changed-in-org / conflict / partial / unknown). */
+/** The default vocabulary's local-vs-org status (not-in-project / equal / changed-locally / changed-in-org / conflict / partial / unknown). */
 export const ORG_BROWSER_VOCAB: StatusVocab = {
 	names: STATUS_NAMES,
 	flags: false,
@@ -90,12 +90,6 @@ export interface SearchIndex {
 
 export function buildIndex(comps: Comp[]): SearchIndex {
 	const idx: SearchIndex = { comps: [], ln: [], lt: [], lby: [], lns: [] };
-	appendToIndex(idx, comps);
-	return idx;
-}
-
-/** Append rows (streaming batches). Returns the same index. */
-export function appendToIndex(idx: SearchIndex, comps: Comp[]): SearchIndex {
 	for (const c of comps) {
 		idx.comps.push(c);
 		idx.ln.push(c.n.toLowerCase());
@@ -146,9 +140,9 @@ export const DEFAULT_FILTER: FilterState = {
 
 export interface FilterContext {
 	now: number;
-	/** Status per row index: a code (Org Browser: 0 not-local, 1 local, 2 changed, 3 partial) or a bitmask, per `vocab`; null = 0 for every row. */
+	/** Status per row index: a code (default vocabulary: 0 not-local, 1 local, 2 changed, 3 partial) or a bitmask, per `vocab`; null = 0 for every row. */
 	status: ArrayLike<number> | null;
-	/** The panel's status vocabulary (default: the Org Browser's). */
+	/** The panel's status vocabulary (default: `ORG_BROWSER_VOCAB`, the former Org Browser's). */
 	vocab?: StatusVocab;
 	/** Local change time per row index (epoch ms, 0 = none): the "Modified" window also passes a row whose local time is inside it. */
 	localTimes?: ArrayLike<number>;
@@ -392,7 +386,7 @@ export interface Facets {
 	/** Rows per namespace ("" = unmanaged). */
 	namespaces: Map<string, number>;
 	states: Map<string, number>;
-	/** Rows per status of the vocabulary (Org Browser: [not-local, local, changed, partial]); a row with several flags counts for each. */
+	/** Rows per status of the vocabulary (default vocabulary: [not-local, local, changed, partial]); a row with several flags counts for each. */
 	status: number[];
 }
 

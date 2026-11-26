@@ -18,7 +18,7 @@ import { OrgCompInfo, orgLookupKey } from "./deployStatusPure";
 export interface DeployOrgStatusDeps {
 	/** This panel's own listing cache (it only ever holds the types of local projects). */
 	cacheDir: string;
-	/** The Org Browser's cache: read-only seed for an org this panel has not listed yet. */
+	/** The shared listing cache (`globalStorage/org-browser`): read-only seed for an org this panel has not listed yet. */
 	seedDir?: string;
 	apiVersion: string;
 	/** SOAP transport for an org (null = default). */
@@ -95,7 +95,7 @@ export class DeployOrgStatus {
 		if (own) {
 			for (const [t, at] of Object.entries(own.typeListedAt ?? {})) this.listedAt.set(t, at);
 		} else {
-			// The Org Browser's cache is a full listing: every type of it was listed, per-type refreshes later than that.
+			// A listing cache is a full listing: every type of it was listed, per-type refreshes later than that.
 			for (const t of cache.types) this.listedAt.set(t.name, cache.typeListedAt?.[t.name] ?? cache.listedAt);
 			for (const f of cache.failures) this.listedAt.delete(baseType(f.type));
 		}

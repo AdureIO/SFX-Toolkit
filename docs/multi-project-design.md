@@ -12,7 +12,7 @@ Status: design, 2026-11-23. This document is the shared reference for tasks MP1�
   - A status bar picker switches the active project manually.
 - **Default orgs.** Every project uses its own default org. `null` / "the default org" always means **the active project's** default org. Per-file features use **the file's project's** default org.
 - **Views and panels.** They follow the active project by default.
-  - **Webview panels** (Deploy, Org Browser, Data Tools, Data Migration, REST Explorer, Package Explorer, Workbench, SOQL editor):
+  - **Webview panels** (Deploy & Retrieve Metadata, Data Tools, Data Migration, REST Explorer, Package Explorer, Workbench, SOQL editor):
     - When more than one project exists, the header has a **project selector** (dropdown), with the active project preselected.
     - Picking another project in the selector switches only that panel. It does not change the global active project.
     - While the panel's selector is still on the active project, the panel follows active-project changes.
@@ -103,6 +103,6 @@ Context keys:
 |---|---|---|---|
 | MP1 | Registry, discovery, watcher, active project, status bar picker, context keys, activation events, `projectUtils` redirect, commandRunner default cwd, default-org and orgKey resolution, cache invalidation on switch, host `orgForUri` for MDAPI | sonnet | none |
 | MP2 | Per-file features: right-click deploy and retrieve org per file project, validateApex, metadataDiff, addToIgnore, LWC providers and typings, jsconfig repair, test controller (active-project discovery, run cwd and org, ids without collisions), orgSafety per project | sonnet | MP1 |
-| MP3 | Panels get a project selector (pinning, see Decisions): Deploy panel, Org Browser, Data Tools, Data Migration, REST Explorer, Package Explorer, SOQL editor storage, Workbench storage and buffer. Snippets view lists all projects with a badge and filter. Follow the active project: logPaths, Process Map, Object Visualizer, Traces, Dev actions, coverage | sonnet | MP1 |
+| MP3 | Panels get a project selector (pinning, see Decisions): Deploy & Retrieve Metadata, Data Tools, Data Migration, REST Explorer, Package Explorer, SOQL editor storage, Workbench storage and buffer. Snippets view lists all projects with a badge and filter. Follow the active project: logPaths, Process Map, Object Visualizer, Traces, Dev actions, coverage | sonnet | MP1 |
 | MP4 | Language server partitioning by org, per-project stubs, namespace per file, host→server project map | sonnet | MP1 |
 | MP5 | Combined gate, review, test VSIX | lead | MP2–MP4 |
