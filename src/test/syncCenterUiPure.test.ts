@@ -27,6 +27,7 @@ import {
 	centerFilterKeptOnClear,
 	choicesToJson,
 	defaultStatusFilter,
+	presetModified,
 	deploymentSetupPath,
 	historyDeployLocalKeys,
 	historyRowKeys,
@@ -471,5 +472,37 @@ describe("sync center: selection banner text", () => {
 		assert.strictEqual(selectionBannerText("deploy", 5, 3), "Showing your selection: 5 selected · 3 to deploy · 2 skipped");
 		assert.strictEqual(selectionBannerText("retrieve", 5, 3, 2), "Showing your selection: 5 selected (2 hidden) · 3 to retrieve · 2 skipped");
 		assert.strictEqual(selectionBannerText("deploy", 0, 0), "Showing your selection: 0 selected");
+	});
+});
+
+describe("presetModified", () => {
+	it("is false when the selection equals the preset's keys", () => {
+		assert.strictEqual(presetModified(["ApexClass:A", "CustomObject:Account"], ["ApexClass:A", "CustomObject:Account"]), false);
+	});
+
+	it("ignores order", () => {
+		assert.strictEqual(presetModified(["ApexClass:A", "CustomObject:Account"], ["CustomObject:Account", "ApexClass:A"]), false);
+	});
+
+	it("is true when a key is added to the selection", () => {
+		assert.strictEqual(presetModified(["ApexClass:A"], ["ApexClass:A", "ApexClass:B"]), true);
+	});
+
+	it("is true when a key is removed from the selection", () => {
+		assert.strictEqual(presetModified(["ApexClass:A", "ApexClass:B"], ["ApexClass:A"]), true);
+	});
+
+	it("is true when a key is swapped for another of the same size", () => {
+		assert.strictEqual(presetModified(["ApexClass:A", "ApexClass:B"], ["ApexClass:A", "ApexClass:C"]), true);
+	});
+
+	it("treats two empty sets as equal and an empty selection against a non-empty preset as modified", () => {
+		assert.strictEqual(presetModified([], []), false);
+		assert.strictEqual(presetModified(["ApexClass:A"], []), true);
+	});
+
+	it("accepts any iterable for the selection (a Set)", () => {
+		assert.strictEqual(presetModified(["ApexClass:A"], new Set(["ApexClass:A"])), false);
+		assert.strictEqual(presetModified(["ApexClass:A"], new Set(["ApexClass:B"])), true);
 	});
 });

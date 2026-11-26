@@ -332,3 +332,17 @@ export function onlyOrgRefs<T extends { type: string; fullName: string }>(refs: 
 	for (const r of refs) (localKeys.has(compKey(r.type, r.fullName)) ? dropped : keep).push(r);
 	return { keep, dropped };
 }
+
+// ── Presets ────────────────────────────────────────────────────────────────────
+
+/**
+ * Whether the selection differs from the loaded preset: order-independent set equality of the component keys. A preset
+ * is "modified" as soon as one key is added to or removed from the selection.
+ */
+export function presetModified(presetKeys: readonly string[], selectedKeys: Iterable<string>): boolean {
+	const preset = new Set(presetKeys);
+	const selection = new Set(selectedKeys);
+	if (preset.size !== selection.size) return true;
+	for (const k of selection) if (!preset.has(k)) return true;
+	return false;
+}

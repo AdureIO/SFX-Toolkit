@@ -105,7 +105,7 @@ ${TEST_SUITE_CSS}
           <summary>Presets</summary>
           <div class="sec-body">
             <div class="field"><label class="field-label" for="presetSel">Preset</label>
-              <div class="inline"><select id="presetSel"><option value="">— None —</option></select><button type="button" id="presetSave" class="ghost" title="Save the current selection and options as a preset (shared by every action)">Save preset</button></div>
+              <div class="inline"><select id="presetSel"><option value="">— None —</option></select><span id="presetModified" class="preset-mod" hidden>● modified</span><button type="button" id="presetSave" class="ghost" title="Save the current selection and options as a preset (shared by every action)">Save preset</button></div>
             </div>
           </div>
         </details>
@@ -266,6 +266,8 @@ button.ghost.sm.on { background: color-mix(in srgb, var(--ob-accent) 16%, transp
 .field select { width: 100%; max-width: none; }
 .inline { display: flex; gap: 6px; }
 .inline select { flex: 1; min-width: 0; }
+.preset-mod { align-self: center; font-size: 11px; white-space: nowrap; color: var(--vscode-descriptionForeground); }
+.preset-mod[hidden] { display: none; }
 .radio-group { display: flex; flex-wrap: wrap; gap: 6px; }
 .radio-group label { margin: 0; cursor: pointer; display: inline-flex; align-items: center; padding: 3px 10px; border-radius: 999px; font-size: 11px; border: 1px solid var(--ob-border-strong); background: var(--vscode-input-background); user-select: none; }
 .radio-group label:hover { background: var(--ob-hover); border-color: var(--ob-accent); }

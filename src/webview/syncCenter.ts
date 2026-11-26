@@ -60,6 +60,7 @@ import {
 	selectionSummary,
 	selectionSummaryTitle,
 	rowDeployLocalKeys,
+	presetModified,
 	rowKeyOf,
 	rowRetrieveRef,
 } from "../utils/syncCenterUiPure";
@@ -265,6 +266,8 @@ const deployExpanded = new Set<string>();
 const deployDetailsCache = new Map<string, { details: DeployDetails; error?: string }>();
 const deployDetailsAsked = new Set<string>();
 let presets: WebPreset[] = [];
+/** The selection sent with a "Save preset", applied to the list when the host confirms the save. */
+let pendingPresetKeys: { name: string; keys: string[] } | undefined;
 const suites = mountTestSuites({ post, checked: checkedTests, onApplied: () => renderRight(), setStatus, scope: () => $("test-list") });
 const delSuites = mountTestSuites({ post, checked: checkedDeleteTests, onApplied: () => renderRight(), setStatus, idPrefix: "del-", scope: () => $("del-test-list") });
 let testClasses: { label: string; description: string }[] = [];
@@ -881,6 +884,22 @@ function renderPresetOptions(): void {
 	const cur = sel.value;
 	sel.innerHTML = '<option value="">— None —</option>' + presets.map((p, i) => `<option value="${i}">${esc(p.name)}</option>`).join("");
 	sel.value = cur && Number(cur) < presets.length ? cur : "";
+	updatePresetModified();
+}
+
+/** The keys a preset selects in the current list (what `applyPreset` selects: components not in the list are skipped). */
+function presetSelectedKeys(p: WebPreset): string[] {
+	return p.components.map(rowKeyOf).filter((k) => rowIndex.has(k));
+}
+
+/** Shows the "modified" marker when a loaded preset no longer matches the selection. Never a pop-up. */
+function updatePresetModified(): void {
+	const mark = $("presetModified");
+	const v = ($("presetSel") as HTMLSelectElement).value;
+	const p = v !== "" ? presets[Number(v)] : undefined;
+	const show = !!p && presetModified(presetSelectedKeys(p), selected);
+	mark.hidden = !show;
+	mark.title = p ? `Selection differs from preset ${p.name}. Save preset to update it.` : "";
 }
 
 function setStatus(text: string): void {
@@ -1900,12 +1919,14 @@ function setupRightPanel(): void {
 	($("presetSel") as HTMLSelectElement).addEventListener("change", (e) => {
 		const p = presets[Number((e.target as HTMLSelectElement).value)];
 		if (p) applyPreset(p);
+		updatePresetModified();
 	});
 	$("presetSave").addEventListener("click", () => {
 		ensureRows();
 		const sel = ($("presetSel") as HTMLSelectElement).value;
 		const current = sel !== "" ? presets[Number(sel)] : undefined;
 		const level = currentTestLevel();
+		pendingPresetKeys = { name: current?.name ?? "", keys: [...selected] };
 		post({
 			command: "savePreset",
 			presetName: current?.name ?? "",
@@ -2411,9 +2432,16 @@ window.addEventListener("message", (ev) => {
 			presets = Array.isArray(m.presets) ? m.presets : [];
 			renderPresetOptions();
 			break;
-		case "presetSaved":
+		case "presetSaved": {
+			// The saved preset now holds the selection, so the "modified" marker clears until the selection changes again.
+			const saved = presets.find((p) => p.name === m.name);
+			const pending = pendingPresetKeys;
+			if (saved && pending && pending.name === m.name) saved.components = pending.keys;
+			pendingPresetKeys = undefined;
 			setStatus(`Preset “${m.name}” saved.`);
+			renderPresetOptions();
 			break;
+		}
 		case "applySelection":
 			selectKeys(Array.isArray(m.keys) ? m.keys.map(String) : [], true);
 			// Opened with a selection (right-click, Org Browser, history): adjust the filter so the selection is visible.
