@@ -556,6 +556,9 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 	#listHead { padding:7px 10px; font-size:11px; opacity:0.7; display:flex; justify-content:space-between; border-bottom:1px solid var(--vscode-panel-border, rgba(128,128,128,0.18)); }
 	.row { padding:7px 10px; }
 	.content { flex:1; margin:0; padding:8px; overflow:auto; white-space:pre-wrap; word-break:break-word; font-family:var(--vscode-editor-font-family,monospace); font-size:12px; line-height:1.4; }
+	.content.virt { position:relative; white-space:pre; word-break:normal; }
+	.content .vwin { position:absolute; left:8px; min-width:calc(100% - 16px); }
+	.content .vl { height:1.4em; line-height:1.4; }
 	.content mark { background:var(--vscode-editor-findMatchHighlightBackground, rgba(234,92,0,0.4)); color:inherit; border-radius:2px; }
 	.content.error { color:var(--vscode-errorForeground); }
 	.muted { opacity:0.6; }
@@ -686,6 +689,8 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 	// A reusable log viewer bound to a content <pre>, a filter input and its toggle buttons.
 	function makeViewer(contentEl, filterEl){
 		const toggles={debug:false,soql:false}; let raw='';
+		// Virtual list state: only the visible window (+overscan) is in the DOM.
+		const OVERSCAN=100; let vLines=null, vRe=null, vTotal=0, lineH=0, spacer=null, win=null, raf=0, lastFirst=-1, lastLast=-1;
 		function applyToggles(lines){ if(!toggles.debug&&!toggles.soql) return lines; const out=[]; let keep=false;
 			for(let i=0;i<lines.length;i++){ const l=lines[i];
 				if(EVENT.test(l)){ let m=false;
@@ -694,19 +699,34 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 					keep=m; if(m) out.push(l);
 				} else if(keep) out.push(l);
 			} return out; }
+		function clearVirtual(){ vLines=null; vRe=null; spacer=null; win=null; lastFirst=-1; lastLast=-1; contentEl.classList.remove('virt'); }
+		function measure(){ const p=document.createElement('div'); p.style.cssText='position:absolute;visibility:hidden;white-space:pre;'; p.textContent='X'; contentEl.appendChild(p); const h=p.getBoundingClientRect().height; contentEl.removeChild(p); return h>0?h:17; }
+		// Same formula as virtualWindow() in src/utils/virtualWindowPure.ts (unit-tested there); keep in sync.
+		function paint(force){ if(!vLines||!win) return; const n=vLines.length;
+			const top=Math.max(0,contentEl.scrollTop-8); const vh=contentEl.clientHeight;
+			const first=Math.min(n,Math.max(0,Math.floor(top/lineH)-OVERSCAN)); const last=Math.max(first,Math.min(n,Math.ceil((top+vh)/lineH)+OVERSCAN));
+			if(!force&&first===lastFirst&&last===lastLast) return; lastFirst=first; lastLast=last;
+			const out=[]; for(let i=first;i<last;i++){ const l=vLines[i]; const inner=hl(l,vRe); const st=lineStyle(l); out.push('<div class="vl"'+(st?' style="'+st+'"':'')+'>'+(inner||' ')+'</div>'); }
+			win.style.top=(first*lineH+8)+'px'; win.innerHTML=out.join(''); }
+		function onScroll(){ if(raf) return; raf=requestAnimationFrame(function(){ raf=0; paint(false); }); }
 		function render(){ contentEl.classList.remove('error','muted');
 			const q=(filterEl.value||'').trim(); let re=null;
 			if(q){ try{re=new RegExp(q,'gi'); filterEl.classList.remove('invalid');}catch(e){filterEl.classList.add('invalid'); re=null;} } else filterEl.classList.remove('invalid');
-			const lines=applyToggles(raw.split('\\n')); const out=[]; const MAX=8000; let truncated=false;
-			for(let i=0;i<lines.length;i++){ const l=lines[i]; if(re){re.lastIndex=0; if(!re.test(l)) continue;}
-				if(out.length>=MAX){ truncated=true; break; }
-				const inner=hl(l,re); const st=lineStyle(l); out.push(st?'<span style="'+st+'">'+inner+'</span>':inner); }
-			if(!out.length){ contentEl.innerHTML='<span class="muted">No matching lines.</span>'; return; }
-			contentEl.innerHTML=out.join('\\n')+(truncated?('\\n<span class="muted">… showing first '+MAX+' of '+lines.length+' lines — filter, or Open to see all.</span>'):''); }
+			const lines=applyToggles(raw.split('\\n')); let out=lines;
+			if(re){ out=[]; for(let i=0;i<lines.length;i++){ re.lastIndex=0; if(re.test(lines[i])) out.push(lines[i]); } }
+			vTotal=lines.length;
+			if(!out.length){ clearVirtual(); contentEl.innerHTML='<span class="muted">No matching lines.</span>'; return; }
+			const keepTop=contentEl.scrollTop; contentEl.textContent=''; contentEl.classList.add('virt');
+			if(!lineH) lineH=measure();
+			spacer=document.createElement('div'); spacer.style.cssText='height:'+(out.length*lineH)+'px;width:1px;'; win=document.createElement('div'); win.className='vwin';
+			contentEl.appendChild(spacer); contentEl.appendChild(win); vLines=out; vRe=re; lastFirst=-1; lastLast=-1;
+			contentEl.scrollTop=keepTop; paint(true); }
 		filterEl.addEventListener('input', render);
-		return { setLog:function(t){ raw=t||''; render(); contentEl.scrollTop=0; }, render:render, toggles:toggles,
-			setText:function(t,muted){ raw=''; contentEl.classList.toggle('muted',!!muted); contentEl.classList.remove('error'); contentEl.textContent=t||''; },
-			setError:function(t){ raw=''; contentEl.classList.remove('muted'); contentEl.classList.add('error'); contentEl.textContent=t||''; } };
+		contentEl.addEventListener('scroll', onScroll);
+		if(window.ResizeObserver) new ResizeObserver(function(){ if(!vLines) return; const h=measure(); if(h!==lineH){ lineH=h; spacer.style.height=(vLines.length*lineH)+'px'; } paint(true); }).observe(contentEl);
+		return { setLog:function(t){ raw=t||''; render(); contentEl.scrollTop=0; paint(true); }, render:render, toggles:toggles,
+			setText:function(t,muted){ raw=''; clearVirtual(); contentEl.classList.toggle('muted',!!muted); contentEl.classList.remove('error'); contentEl.textContent=t||''; },
+			setError:function(t){ raw=''; clearVirtual(); contentEl.classList.remove('muted'); contentEl.classList.add('error'); contentEl.textContent=t||''; } };
 	}
 	const logView = makeViewer(document.getElementById('logContent'), document.querySelector('input[data-pane="log"]'));
 	const execView = makeViewer(document.getElementById('execContent'), document.querySelector('input[data-pane="exec"]'));
