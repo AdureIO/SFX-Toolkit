@@ -64,12 +64,27 @@ import {
 	selectionSummaryTitle,
 	rowDeployLocalKeys,
 	presetModified,
+	deselectKeys,
+	SelectionStore,
+	sameSelection,
+	storedSelection,
+	withStoredSelection,
 	rowKeyOf,
 	rowRetrieveRef,
 } from "../utils/syncCenterUiPure";
 import {
 	ColumnId,
 	ColumnLayout,
+	PaneWidths,
+	GRID_MIN,
+	SIDE_MIN,
+	RIGHT_MIN,
+	SPLITTER_W,
+	SIDE_DEFAULT,
+	RIGHT_DEFAULT,
+	defaultPanes,
+	fitPanes,
+	normalizePanes,
 	columnLabel,
 	defaultLayout,
 	gridTemplate,
@@ -83,7 +98,7 @@ import {
 import { deleteTestHint } from "../utils/deployTestArgsPure";
 import { HistoryEntry } from "../utils/historyPure";
 import type { DeployDetails, DeployListItem } from "../utils/deployListPure";
-import type { OpMessage } from "../utils/syncCenterOpPure";
+import { failureLine, visibleFailures, type OpMessage } from "../utils/syncCenterOpPure";
 import {
 	OP_KIND_GLYPH,
 	canCancelOp,
@@ -136,12 +151,15 @@ interface UiState {
 	/** The "Group by type" default was applied once (a store from before it gets it on the next load). */
 	groupDefault?: boolean;
 	filtersCollapsed?: boolean;
+	/** Superseded by the per-computer pane widths; still read once as the right panel's width. */
 	rightWidth?: number;
 	/** The action chosen at the top of the right panel. */
 	mode?: CenterMode;
 	opts: Options;
 	/** Conflict choices per project and org (`choicesStoreKey`). */
 	choices: Record<string, Record<string, ConflictChoice>>;
+	/** The selection per project (component keys are org-independent): survives org switches, hide / restore and reloads. */
+	selections?: SelectionStore;
 }
 
 interface Group {
@@ -179,6 +197,11 @@ const post = (msg: unknown) => api.postMessage(msg);
 const ROW_H = 28;
 const HEAD_H = 30;
 const SIDE_MIN_W = 560;
+/** Extra width of the checkbox column in the group-by-type view (room for the caret; rows are indented under it). */
+const GROUP_INDENT = 28;
+/** Pane widths (filter sidebar, right panel), stored per computer. */
+let panes: PaneWidths = defaultPanes();
+let panesSaveTimer: number | undefined;
 const PROV_TIP = "Based on dates — contents not compared yet";
 
 function defaultOpts(): Options {
@@ -195,6 +218,7 @@ function defaultUi(): UiState {
 		groupDefault: true,
 		opts: defaultOpts(),
 		choices: {},
+		selections: {},
 	};
 }
 
@@ -257,6 +281,8 @@ const historyExpanded = new Set<string>();
 let activitySeg: "deploys" | "history" = "deploys";
 /** The last operation started from the Center (`{type:"op"}`), shown in the card until dismissed. */
 let curOp: OpMessage | null = null;
+/** The op card lists all its failures (not just the first few). */
+let opFailuresExpanded = false;
 /** The org's recent deploys (`{type:"deploys"}`); `null` = not loaded for this org yet. */
 let deploys: DeployListItem[] | null = null;
 let deploysError = "";
@@ -311,7 +337,16 @@ function mergeUi(saved: Partial<UiState> | null | undefined): void {
 		sort: saved.sort ?? d.sort,
 		opts: { ...d.opts, ...(saved.opts ?? {}) },
 		choices: saved.choices && typeof saved.choices === "object" ? saved.choices : {},
+		selections: saved.selections && typeof saved.selections === "object" ? saved.selections : {},
 	};
+}
+
+/** Mirror the selection into the UI state (per project) and save it when it changed. */
+function syncSelectionToUi(): void {
+	if (!projectDir) return;
+	if (sameSelection(selected, storedSelection(ui.selections, projectDir))) return;
+	ui.selections = withStoredSelection(ui.selections ?? {}, projectDir, selected);
+	saveUi();
 }
 
 function loadChoices(): void {
@@ -383,7 +418,7 @@ function ensureRows(): void {
 			persistChoices();
 		}
 	}
-	if (settled()) for (const k of [...selected]) if (!rowIndex.has(k)) selected.delete(k);
+	// The selection is never pruned against the rows: a key in no row (other org, not listed yet) stays and counts as hidden.
 }
 
 // ── Recompute ──────────────────────────────────────────────────────────────────
@@ -410,6 +445,7 @@ function markRowsDirty(): void {
 
 function recompute(resetScroll = false): void {
 	sharedSync.changed();
+	syncSelectionToUi();
 	visibleKeysCache = null;
 	ensureRows();
 	const c = ctx();
@@ -604,8 +640,8 @@ function groupHtml(pos: number, g: Group): string {
 	const all = n === g.rows.length && n > 0;
 	return (
 		`<div class="row grp${pos === active ? " active" : ""}" data-pos="${pos}" data-type="${esc(g.type)}" role="row">` +
-		`<span class="c cb"><input type="checkbox" class="grpcb" tabindex="-1" ${all ? "checked" : ""} data-partial="${n > 0 && !all}" aria-label="Select all ${esc(g.type)}"></span>` +
-		`<span class="c gname"><span class="chev${g.collapsed ? "" : " open"}">${ICON.chevron}</span><b>${hl(g.type)}</b><span class="gcount">${g.rows.length.toLocaleString()}</span>` +
+		`<span class="c cb"><input type="checkbox" class="grpcb" tabindex="-1" ${all ? "checked" : ""} data-partial="${n > 0 && !all}" aria-label="Select all ${esc(g.type)}"><span class="chev${g.collapsed ? "" : " open"}">${ICON.chevron}</span></span>` +
+		`<span class="c gname"><b>${hl(g.type)}</b><span class="gcount">${g.rows.length.toLocaleString()}</span>` +
 		`<button class="gref" data-act="refreshType" title="Re-list ${esc(g.type)} only" aria-label="Re-list ${esc(g.type)} only">${ICON.refresh}</button></span></div>`
 	);
 }
@@ -645,7 +681,7 @@ function renderHeader(): void {
 			const sorted = sort && sort === ui.sort.key;
 			return (
 				`<span class="hcell${sorted ? " sorted" : ""}" data-col="${c.id}"${sort ? ` data-sort="${sort}"` : ""}${sorted ? ` data-dir="${ui.sort.dir === 1 ? "asc" : "desc"}"` : ""}${fixed ? "" : ' draggable="true"'} title="${fixed ? "" : "Drag to reorder · "}right-click for columns">` +
-				`${esc(columnLabel(c.id))}${fixed ? "" : `<i class="grip" data-col="${c.id}"></i>`}</span>`
+				`${esc(columnLabel(c.id))}<i class="grip" data-col="${c.id}" title="Drag to resize · double-click to reset"></i></span>`
 			);
 		})
 		.join("");
@@ -900,7 +936,7 @@ function updatePresetModified(): void {
 	const mark = $("presetModified");
 	const v = ($("presetSel") as HTMLSelectElement).value;
 	const p = v !== "" ? presets[Number(v)] : undefined;
-	const show = !!p && presetModified(presetSelectedKeys(p), selected);
+	const show = !!p && presetModified(presetSelectedKeys(p), [...selected].filter((k) => rowIndex.has(k)));
 	mark.hidden = !show;
 	mark.title = p ? `Selection differs from preset ${p.name}. Save preset to update it.` : "";
 }
@@ -1032,9 +1068,20 @@ function renderOpCard(): void {
 		barHtml("Components", op.components, "error") +
 		barHtml("Tests", op.tests, "failure") +
 		(op.message ? `<div class="op-msg">${esc(op.message)}</div>` : "") +
+		opFailuresHtml(op) +
 		(canCancelOp(op) || acts.details || acts.setup
 			? `<div class="op-actions">${canCancelOp(op) ? '<button type="button" data-op="cancel">Cancel</button>' : ""}${acts.details ? '<button type="button" data-op="details">Details</button>' : ""}${acts.setup ? '<button type="button" data-op="setup">Open in Setup</button>' : ""}</div>`
 			: "");
+}
+
+function opFailuresHtml(op: OpMessage): string {
+	const { shown, more } = visibleFailures(op.failures, opFailuresExpanded);
+	if (shown.length === 0) return "";
+	const total = op.failures?.length ?? shown.length;
+	return (
+		`<ul class="op-fails">${shown.map((f) => `<li title="${esc(failureLine(f))}">${f.type || f.name ? `<b>${esc([f.type, f.name].filter(Boolean).join(" "))}</b> — ` : ""}${esc(f.message)}</li>`).join("")}</ul>` +
+		(more > 0 ? `<button type="button" class="op-more" data-op="failures">Show all (${total})</button>` : opFailuresExpanded && total > 5 ? '<button type="button" class="op-more" data-op="failures">Show fewer</button>' : "")
+	);
 }
 
 function onOpCardClick(e: Event): void {
@@ -1044,6 +1091,10 @@ function onOpCardClick(e: Event): void {
 	switch (el.dataset.op) {
 		case "dismiss":
 			curOp = null;
+			renderOpCard();
+			break;
+		case "failures":
+			opFailuresExpanded = !opFailuresExpanded;
 			renderOpCard();
 			break;
 		case "cancel":
@@ -1060,6 +1111,7 @@ function onOpCardClick(e: Event): void {
 
 function onOpMessage(m: OpMessage): void {
 	const prev = curOp?.id === m.id ? curOp : undefined;
+	if (!prev) opFailuresExpanded = false;
 	curOp = m;
 	renderOpCard();
 	// The host refreshes the deploy list in the background when an operation finishes (`deploys` follows).
@@ -1598,6 +1650,7 @@ function setupEvents(): void {
 	($("headCb") as HTMLInputElement).addEventListener("click", toggleFiltered);
 	$("groupToggle").addEventListener("click", () => {
 		ui.group = !ui.group;
+		applyWidths();
 		active = -1;
 		recompute(true);
 		saveUi();
@@ -1634,7 +1687,10 @@ function setupEvents(): void {
 		e.stopPropagation();
 		const id = grip.dataset.col as ColumnId;
 		const startX = e.clientX;
-		const startW = layout.cols.find((c) => c.id === id)?.width ?? 100;
+		// The rendered width (the flexing Name column is wider than its stored minimum when there is room).
+		const startW = grip.parentElement?.getBoundingClientRect().width ?? layout.cols.find((c) => c.id === id)?.width ?? 100;
+		grip.classList.add("drag");
+		document.body.style.cursor = "col-resize";
 		const move = (ev: MouseEvent) => {
 			layout = setColumnWidth(layout, id, startW + ev.clientX - startX);
 			applyWidths();
@@ -1642,10 +1698,21 @@ function setupEvents(): void {
 		const up = () => {
 			window.removeEventListener("mousemove", move);
 			window.removeEventListener("mouseup", up);
+			grip.classList.remove("drag");
+			document.body.style.cursor = "";
+			invalidateRows();
 			saveColumns();
 		};
 		window.addEventListener("mousemove", move);
 		window.addEventListener("mouseup", up);
+	});
+	ghead.addEventListener("dblclick", (e) => {
+		const grip = (e.target as HTMLElement).closest<HTMLElement>(".grip");
+		if (!grip) return;
+		const id = grip.dataset.col as ColumnId;
+		layout = setColumnWidth(layout, id, defaultLayout().cols.find((c) => c.id === id)?.width ?? 100);
+		applyWidths();
+		saveColumns();
 	});
 	ghead.addEventListener("dragstart", (e) => {
 		const th = (e.target as HTMLElement).closest<HTMLElement>(".hcell[data-col]");
@@ -1708,28 +1775,7 @@ function setupEvents(): void {
 		layoutChanged();
 		renderColMenu();
 	});
-	$("panelSplit").addEventListener("mousedown", (e) => {
-		const right = $("right");
-		const sx = e.clientX;
-		const sw = right.getBoundingClientRect().width;
-		document.body.style.cursor = "col-resize";
-		document.body.style.userSelect = "none";
-		e.preventDefault();
-		const move = (ev: MouseEvent) => {
-			const max = Math.max(300, window.innerWidth - 420);
-			ui.rightWidth = Math.min(max, Math.max(300, sw + (sx - ev.clientX)));
-			right.style.width = ui.rightWidth + "px";
-		};
-		const up = () => {
-			window.removeEventListener("mousemove", move);
-			window.removeEventListener("mouseup", up);
-			document.body.style.cursor = "";
-			document.body.style.userSelect = "";
-			saveUi();
-		};
-		window.addEventListener("mousemove", move);
-		window.addEventListener("mouseup", up);
-	});
+	setupSplitters();
 
 	// Grid (delegated)
 	const rowsEl = $("rowsEl");
@@ -2106,11 +2152,73 @@ function onGridKey(e: KeyboardEvent): void {
 	e.preventDefault();
 }
 
+/** The body's width and whether the sidebar shows (what the pane widths must fit into). */
+function paneRoom(): { total: number; sideShown: boolean } {
+	return { total: document.querySelector<HTMLElement>(".body")?.clientWidth ?? window.innerWidth, sideShown: sideVisible() && !$("left").hasAttribute("data-narrow") };
+}
+
+/** Set the pane widths (CSS variables), fitted so the grid keeps its minimum. */
+function applyPanes(): void {
+	const { total, sideShown } = paneRoom();
+	const f = fitPanes(panes, total, sideShown);
+	document.documentElement.style.setProperty("--side-w", f.side + "px");
+	document.documentElement.style.setProperty("--right-w", f.right + "px");
+}
+
+function savePanes(): void {
+	if (panesSaveTimer) window.clearTimeout(panesSaveTimer);
+	panesSaveTimer = window.setTimeout(() => post({ command: "panes", panes }), 300);
+}
+
+/** Draggable splitters: sidebar | grid and grid | right panel. Double-click resets the pane to its default width. */
+function setupSplitters(): void {
+	const wire = (id: string, key: keyof PaneWidths, sign: 1 | -1, def: number) => {
+		const el = $(id);
+		el.addEventListener("dblclick", () => {
+			panes = { ...panes, [key]: def };
+			applyPanes();
+			savePanes();
+		});
+		el.addEventListener("mousedown", (e) => {
+			e.preventDefault();
+			const startX = e.clientX;
+			const startW = $(key === "side" ? "side" : "right").getBoundingClientRect().width;
+			el.classList.add("drag");
+			document.body.style.cursor = "col-resize";
+			document.body.style.userSelect = "none";
+			const move = (ev: MouseEvent) => {
+				// The right panel grows when dragged left, the sidebar when dragged right; the other pane keeps its width.
+				const { total, sideShown } = paneRoom();
+				const other = key === "side" ? panes.right : sideShown ? panes.side : 0;
+				const max = total - GRID_MIN - SPLITTER_W * (sideShown ? 2 : 1) - other;
+				const next = normalizePanes({ ...panes, [key]: startW + sign * (ev.clientX - startX) });
+				panes = { ...next, [key]: Math.max(key === "side" ? SIDE_MIN : RIGHT_MIN, Math.min(next[key], max)) };
+				applyPanes();
+			};
+			const up = () => {
+				window.removeEventListener("mousemove", move);
+				window.removeEventListener("mouseup", up);
+				el.classList.remove("drag");
+				document.body.style.cursor = "";
+				document.body.style.userSelect = "";
+				panes = normalizePanes(panes);
+				savePanes();
+			};
+			window.addEventListener("mousemove", move);
+			window.addEventListener("mouseup", up);
+		});
+	};
+	wire("sideSplit", "side", 1, SIDE_DEFAULT);
+	wire("panelSplit", "right", -1, RIGHT_DEFAULT);
+	window.addEventListener("resize", applyPanes);
+}
+
 function applyWidths(): void {
-	const g = gridTemplate(layout);
+	const g = gridTemplate(layout, ui.group ? GROUP_INDENT : 0);
+	$("scroller").querySelector(".inner")?.classList.toggle("grouped", ui.group);
 	document.documentElement.style.setProperty("--cols", g.cols);
 	document.documentElement.style.setProperty("--minw", g.minWidth + "px");
-	if (ui.rightWidth) $("right").style.width = ui.rightWidth + "px";
+	applyPanes();
 }
 
 /**
@@ -2153,8 +2261,8 @@ function resetData(): void {
 	cmpProgress = null;
 	me = { ids: [], name: "" };
 	results = new Map();
-	selected = new Set();
-	ui.filter.onlySelected = false;
+	// `selected` stays: component keys are org-independent. Only per-org data (rows, results, conflict choices, deploy details) is dropped.
+	if (selected.size === 0) ui.filter.onlySelected = false;
 	active = -1;
 	loading = null;
 	opPending = false;
@@ -2248,12 +2356,17 @@ window.addEventListener("message", (ev) => {
 			currentOrg = m.org;
 			orgIsProduction = !!m.production;
 			hasProject = m.hasProject;
+			syncSelectionToUi(); // the old project's selection is stored before it is replaced
+			const prevDir = projectDir;
 			projectDir = m.projectDir ?? "";
 			childTypes = new Set<string>(m.childTypes ?? []);
 			noOrg = orgs.length === 0;
 			testClasses = m.testClasses ?? [];
+			const memSelections = ui.selections ?? {};
 			mergeUi((m.ui as UiState | null) ?? (api.getState() as UiState | null));
+			ui.selections = { ...(ui.selections ?? {}), ...memSelections }; // what this session already stored wins over a stale saved state
 			layout = normalizeLayout(m.columns);
+			panes = m.panes ? normalizePanes(m.panes) : ui.rightWidth ? normalizePanes({ side: SIDE_DEFAULT, right: ui.rightWidth }) : defaultPanes();
 			renderHeader();
 			loadChoices();
 			sharedSync.init(m.shared);
@@ -2271,6 +2384,11 @@ window.addEventListener("message", (ev) => {
 			mountTestTree($("del-test-list"), testClasses, () => renderRight());
 			renderOrgSelect();
 			if (Array.isArray(m.selection) && m.selection.length > 0) selected = new Set<string>((m.selection as string[]).map(rowKeyOf));
+			else if (projectDir !== prevDir || selected.size === 0) {
+				// Another project (its own stored selection) or a fresh / reloaded panel; the same project keeps what is selected.
+				selected = new Set(storedSelection(ui.selections, projectDir));
+				if (projectDir !== prevDir) ui.filter.onlySelected = false;
+			}
 			recompute();
 			// "Auto-select Git changes" was on when the panel closed: the host watches again (it selects with the first change times).
 			if (ui.opts.autoGit) post({ command: "autoGit", on: true, restore: true });
@@ -2297,16 +2415,12 @@ window.addEventListener("message", (ev) => {
 			renderRight();
 			break;
 		case "reset": {
-			const keep = selected;
 			currentOrg = m.org;
 			orgIsProduction = false; // the new org's flag follows in its "orgs" message
-			renderOrgSelect();
 			renderOrgSelect();
 			resetData();
 			resetActivity();
 			loadChoices();
-			// A selection carried in by "open in the Center" survives the first org load.
-			if (keep.size > 0 && !loadedOnce) selected = keep;
 			break;
 		}
 		case "loadStart":
@@ -2411,6 +2525,12 @@ window.addEventListener("message", (ev) => {
 			resultBar("deleteResult", "running", "Deleting…");
 			break;
 		case "deleteResult":
+			// Only what the org really deleted leaves the selection; everything else stays selected.
+			if (Array.isArray(m.deletedKeys) && m.deletedKeys.length > 0) {
+				selected = deselectKeys(selected, m.deletedKeys.map(String));
+				if (selected.size === 0) ui.filter.onlySelected = false;
+				recompute();
+			}
 			showDeployResult("deleteResult", "Deleted from the org", "Delete failed", m);
 			break;
 		case "retrieveResult": {

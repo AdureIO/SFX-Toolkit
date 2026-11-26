@@ -23,7 +23,7 @@ import { confirmationMatches, deleteListing } from "../utils/destructivePure";
 import { getToolingApiVersion } from "../utils/constants";
 import { getNonce } from "../utils/htmlUtils";
 import { HistoryEntry, cleanLabel, historyErrorsFromDeploy } from "../utils/historyPure";
-import { COLUMNS_STORE_KEY, normalizeLayout } from "../utils/syncCenterColumnsPure";
+import { COLUMNS_STORE_KEY, PANES_STORE_KEY, normalizeLayout, normalizePanes } from "../utils/syncCenterColumnsPure";
 import { checkDeleteTestOptions } from "../utils/deployTestArgsPure";
 import { readLocalInfo } from "../utils/localChangeInfo";
 import { openOrgPath } from "../utils/openOrgPath";
@@ -54,7 +54,8 @@ import { getRetrieveTimes, recordDeployed } from "../utils/retrieveLog";
 import { SharedMetadataFilter } from "../utils/sharedFilterState";
 import { getHistory, onDidChangeHistory, recordHistory } from "../utils/syncHistory";
 import { openComponentDiff } from "../utils/syncDiff";
-import { conflictPrompt, retrieveProjectPrompt, deploymentSetupPath, historyDeployLocalKeys, onlyOrgRefs, overwriteLocalKeys, refOfKey, rowKeyOf } from "../utils/syncCenterUiPure";
+import { failuresOfRetrieve, retrieveSummary } from "../utils/syncCenterOpPure";
+import { conflictPrompt, retrieveProjectPrompt, deploymentSetupPath, historyDeployLocalKeys, deletedRowKeys, onlyOrgRefs, overwriteLocalKeys, refOfKey, rowKeyOf } from "../utils/syncCenterUiPure";
 import { reauthenticateOrg } from "../commands/orgCommands";
 import { runGitStatusSfdxPaths } from "../utils/gitStatusPaths";
 import { OperationPanelProvider } from "./OperationPanelProvider";
@@ -466,6 +467,10 @@ export class SyncCenterPanelProvider {
 			case "uiState":
 				void this.ctx?.workspaceState.update(UI_STATE_KEY, msg.state);
 				break;
+			case "panes":
+				// Per computer: widths of the filter sidebar and the right panel.
+				void this.ctx?.globalState.update(PANES_STORE_KEY, normalizePanes(msg.panes));
+				break;
 			case "columns":
 				// Per computer (not per workspace): order, visibility and widths of the grid columns.
 				void this.ctx?.globalState.update(COLUMNS_STORE_KEY, normalizeLayout(msg.layout));
@@ -521,6 +526,7 @@ export class SyncCenterPanelProvider {
 			projectName: root ? path.basename(root) : "",
 			ui: this.ctx?.workspaceState.get(UI_STATE_KEY) ?? null,
 			columns: normalizeLayout(this.ctx?.globalState.get(COLUMNS_STORE_KEY)),
+			panes: this.ctx?.globalState.get(PANES_STORE_KEY) ?? null,
 			shared: SharedMetadataFilter.get(root),
 			testClasses: [],
 			childTypes: [...OBJECT_CHILD_TYPES],
@@ -1317,7 +1323,7 @@ export class SyncCenterPanelProvider {
 				return cancel();
 			}
 			const out = flow.outcome;
-			op?.end(out.failed.length > 0 ? "failed" : "done", out.failed.length > 0 ? `Retrieved ${out.retrieved.length}, ${out.failed.length} failed` : `Retrieved ${out.retrieved.length}`);
+			op?.end(out.failed.length > 0 ? "failed" : "done", retrieveSummary(p.refs.length, out.retrieved.length, out.failed.length), failuresOfRetrieve(out.failed));
 			this.post({
 				type: "retrieveResult",
 				results: [
@@ -1424,7 +1430,7 @@ export class SyncCenterPanelProvider {
 			const out = res.outcome;
 			op?.settle(out);
 			if (out.kind === "cancelled") this.post({ type: "deleteResult", cancelled: true, success: false });
-			else this.post({ type: "deleteResult", success: out.kind === "success", cancelled: false, components: out.stats.components, componentErrors: out.stats.componentErrors, durationMs: res.durationMs });
+			else this.post({ type: "deleteResult", success: out.kind === "success", cancelled: false, components: out.stats.components, componentErrors: out.stats.componentErrors, durationMs: res.durationMs, deletedKeys: deletedRowKeys(p.refs, out.kind, out.kind === "failed" ? successesOf(out.apiResult) : []) });
 			reportDeployOutcome({ run: { outcome: out, startedAt, durationMs: res.durationMs, handle }, dryRun: false, root, targetOrg: org, label: "Delete" });
 			if (out.kind === "success") {
 				await this.list(res.types);
@@ -1626,4 +1632,10 @@ export class SyncCenterPanelProvider {
 			],
 		});
 	}
+}
+
+/** The component successes of a (failed) deploy result as a list. */
+function successesOf(r: { details?: { componentSuccesses?: unknown } } | undefined): { componentType?: string; fullName?: string; deleted?: boolean }[] {
+	const s = r?.details?.componentSuccesses;
+	return s ? (Array.isArray(s) ? s : [s]) : [];
 }

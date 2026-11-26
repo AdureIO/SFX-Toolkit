@@ -29,6 +29,12 @@ import {
 	choicesToJson,
 	defaultStatusFilter,
 	presetModified,
+	deletedRowKeys,
+	deselectKeys,
+	reconcileSelection,
+	sameSelection,
+	storedSelection,
+	withStoredSelection,
 	deploymentSetupPath,
 	historyDeployLocalKeys,
 	historyRowKeys,
@@ -517,5 +523,63 @@ describe("presetModified", () => {
 	it("accepts any iterable for the selection (a Set)", () => {
 		assert.strictEqual(presetModified(["ApexClass:A"], new Set(["ApexClass:A"])), false);
 		assert.strictEqual(presetModified(["ApexClass:A"], new Set(["ApexClass:B"])), true);
+	});
+});
+
+describe("selection across org / project / reload", () => {
+	it("reconcileSelection keeps every key and splits matched from unmatched", () => {
+		const r = reconcileSelection(["ApexClass:A", "ApexClass:B", "Flow:F"], new Set(["ApexClass:A", "Flow:F"]));
+		assert.deepStrictEqual(r.matched, ["ApexClass:A", "Flow:F"]);
+		assert.deepStrictEqual(r.unmatched, ["ApexClass:B"]);
+		assert.deepStrictEqual([...r.selected].sort(), ["ApexClass:A", "ApexClass:B", "Flow:F"]);
+	});
+
+	it("reconcileSelection with no rows keeps everything as unmatched", () => {
+		const r = reconcileSelection(["ApexClass:A"], new Set<string>());
+		assert.deepStrictEqual(r.unmatched, ["ApexClass:A"]);
+		assert.strictEqual(r.selected.size, 1);
+	});
+
+	it("storedSelection reads a project's list and tolerates garbage", () => {
+		assert.deepStrictEqual(storedSelection({ "/p": ["ApexClass:A", 5, "Flow:F"] }, "/p"), ["ApexClass:A", "Flow:F"]);
+		assert.deepStrictEqual(storedSelection({ "/p": "x" }, "/p"), []);
+		assert.deepStrictEqual(storedSelection(undefined, "/p"), []);
+		assert.deepStrictEqual(storedSelection({ "/p": ["A"] }, ""), []);
+		assert.deepStrictEqual(storedSelection({ "/p": ["A"] }, "/q"), []);
+	});
+
+	it("withStoredSelection is per project, immutable, and removes empty entries", () => {
+		const base = { "/p": ["A"], "/q": ["B"] };
+		const next = withStoredSelection(base, "/p", new Set(["C", "D"]));
+		assert.deepStrictEqual(next, { "/p": ["C", "D"], "/q": ["B"] });
+		assert.deepStrictEqual(base, { "/p": ["A"], "/q": ["B"] });
+		assert.deepStrictEqual(withStoredSelection(base, "/p", []), { "/q": ["B"] });
+	});
+
+	it("sameSelection compares order-independently", () => {
+		assert.strictEqual(sameSelection(new Set(["A", "B"]), ["B", "A"]), true);
+		assert.strictEqual(sameSelection(new Set(["A"]), ["A", "B"]), false);
+		assert.strictEqual(sameSelection(new Set(["A", "C"]), ["A", "B"]), false);
+	});
+});
+
+describe("deleted keys leave the selection, nothing else does", () => {
+	const req = [
+		{ type: "ApexClass", fullName: "A" },
+		{ type: "Layout", fullName: "Account-Account%20Layout" },
+	];
+	it("success: every requested key", () => {
+		assert.deepStrictEqual(deletedRowKeys(req, "success"), ["ApexClass:A", "Layout:Account-Account Layout"]);
+	});
+	it("failure: only those reported deleted", () => {
+		assert.deepStrictEqual(deletedRowKeys(req, "failed", [{ componentType: "ApexClass", fullName: "A", deleted: true }, { componentType: "Layout", fullName: "Account-Account Layout", deleted: false }]), ["ApexClass:A"]);
+		assert.deepStrictEqual(deletedRowKeys(req, "failed"), []);
+	});
+	it("cancelled: none", () => {
+		assert.deepStrictEqual(deletedRowKeys(req, "cancelled"), []);
+	});
+	it("deselectKeys removes exactly the given keys and keeps hidden ones", () => {
+		const out = deselectKeys(new Set(["ApexClass:A", "ApexClass:B", "Flow:Gone"]), ["ApexClass:A", "Flow:Nope"]);
+		assert.deepStrictEqual([...out].sort(), ["ApexClass:B", "Flow:Gone"]);
 	});
 });

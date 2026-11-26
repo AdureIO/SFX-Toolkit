@@ -63,6 +63,7 @@ ${TEST_SUITE_CSS}
       <div class="main">
         <aside id="side" aria-label="Filters">${filterGroupsMarkup({ statusTitle: "Status", state: false })}
         </aside>
+        <div id="sideSplit" class="vsplit" title="Drag to resize · double-click to reset" role="separator" aria-orientation="vertical" aria-label="Resize the filters"></div>
         <section class="center">
           <div class="gridbar">
             <button id="filtersToggle" class="tbtn" title="Show/hide filters" aria-label="Show/hide filters" aria-expanded="true"><svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M1.5 2h13l-5 6v5.500l-3 1.500V8z"/></svg></button>
@@ -94,7 +95,7 @@ ${TEST_SUITE_CSS}
         </section>
       </div>
     </div>
-    <div id="panelSplit" title="Drag to resize"><span></span></div>
+    <div id="panelSplit" class="vsplit" title="Drag to resize · double-click to reset" role="separator" aria-orientation="vertical" aria-label="Resize the right panel"></div>
     <div class="right" id="right">
       <div class="rp-body">
         <div id="opCard" class="opcard" role="status" aria-live="polite" hidden></div>
@@ -219,10 +220,14 @@ const CENTER_CSS = `
 .left .main { flex: 1; display: flex; min-height: 0; }
 .left[data-side="closed"] #side, .left[data-side="auto"][data-narrow] #side { display: none; }
 .left[data-side="open"] #side, .left[data-side="auto"]:not([data-narrow]) #side { display: block; }
-#panelSplit { flex: 0 0 7px; cursor: col-resize; display: flex; justify-content: center; align-items: stretch; }
-#panelSplit span { width: 3px; border-radius: 2px; background: var(--ob-border); transition: background .12s; }
-#panelSplit:hover span { background: var(--ob-accent); }
-.right { width: 360px; min-width: 300px; flex-shrink: 0; display: flex; flex-direction: column; min-height: 0; overflow: hidden; border-left: 1px solid var(--ob-border); background: var(--vscode-editor-background); }
+/* Splitters: 4px hit area, a line on hover / drag. */
+.vsplit { flex: 0 0 4px; cursor: col-resize; position: relative; z-index: 5; background: transparent; transition: background .12s; }
+.vsplit:hover, .vsplit.drag { background: var(--ob-accent); }
+#side { width: var(--side-w, 248px); }
+#sideSplit { display: none; }
+.left[data-side="open"] #sideSplit, .left[data-side="auto"]:not([data-narrow]) #sideSplit { display: block; }
+.left[data-side="closed"] #sideSplit, .left[data-side="auto"][data-narrow] #sideSplit { display: none; }
+.right { width: var(--right-w, 360px); min-width: 240px; flex-shrink: 0; display: flex; flex-direction: column; min-height: 0; overflow: hidden; border-left: 1px solid var(--ob-border); background: var(--vscode-editor-background); }
 .rp-body { flex: 1; overflow-y: auto; overflow-x: hidden; min-height: 0; padding: 8px 10px; display: flex; flex-direction: column; gap: 8px; }
 .rp-footer { flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-top: 1px solid var(--ob-border); background: var(--ob-surface); font-size: 12px; }
 .status-line { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--vscode-descriptionForeground); }
@@ -327,7 +332,21 @@ button.danger-btn:hover:not(:disabled) { filter: brightness(1.1); }
 .row .acts .ibtn.retrieve:hover { color: var(--ob-accent); }
 .ibtn svg { display: block; }
 .ibtn.ph { display: inline-block; width: 24px; height: 24px; flex-shrink: 0; }
-.c.nm.ind { padding-left: 28px; }
+.c.nm.ind { padding-left: 8px; }
+/* Column resize grip: 6px hit area on the right edge, a visible line on hover. */
+.hcell .grip { width: 6px; right: 0; top: 0; bottom: 0; border-right: 0; z-index: 2; }
+.hcell .grip::after { content: ""; position: absolute; right: 2px; top: 6px; bottom: 6px; width: 1px; background: var(--ob-border-strong); }
+.hcell:hover .grip::after { background: var(--vscode-foreground); opacity: .5; }
+.hcell .grip:hover::after, .hcell .grip.drag::after { right: 1px; width: 3px; background: var(--ob-accent); opacity: 1; }
+/* Group by type: headers read as sections, their rows are indented under a guide line. */
+.inner.grouped .ghead .hcell.cb, .inner.grouped .row .c.cb { justify-content: flex-start; padding-left: 8px; gap: 4px; }
+.inner.grouped .row:not(.grp) .c.cb { padding-left: 36px; }
+.inner.grouped .row:not(.grp) { position: relative; }
+.inner.grouped .row:not(.grp)::before { content: ""; position: absolute; left: 22px; top: 0; bottom: 0; width: 1px; background: var(--vscode-tree-indentGuidesStroke, var(--ob-border-strong)); pointer-events: none; }
+.row.grp { background: var(--vscode-sideBarSectionHeader-background, color-mix(in srgb, var(--vscode-foreground) 8%, transparent)); }
+.row.grp .gname b { font-weight: 700; }
+.row.grp .gcount { opacity: .75; }
+.row.grp .c.cb .chev { flex: 0 0 auto; }
 .c.mono { font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; }
 /* Refresh icon of a group row: readable at rest, hover background. */
 .row.grp .gref { opacity: 1; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 4px; padding: 0; background: transparent; border: 0; cursor: pointer; opacity: 1; color: var(--vscode-icon-foreground, var(--vscode-foreground)); }
@@ -382,6 +401,10 @@ button.danger-btn:hover:not(:disabled) { filter: brightness(1.1); }
 .op-time { color: var(--vscode-descriptionForeground); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .op-x { background: transparent; border: 0; color: var(--vscode-icon-foreground, var(--vscode-foreground)); font-size: 15px; line-height: 1; padding: 0 4px; border-radius: 4px; cursor: pointer; }
 .op-x:hover { background: var(--vscode-toolbar-hoverBackground, var(--ob-hover)); }
+.op-fails { margin: 0; padding-left: 16px; display: flex; flex-direction: column; gap: 2px; color: var(--vscode-errorForeground); word-break: break-word; }
+.op-fails li b { color: var(--vscode-foreground); }
+.op-more { align-self: flex-start; background: transparent; border: 0; padding: 0; color: var(--vscode-textLink-foreground); cursor: pointer; font-size: 11px; }
+.op-more:hover { text-decoration: underline; }
 .op-badge { display: inline-flex; align-items: center; gap: 5px; padding: 0 8px; height: 18px; border-radius: 999px; font-size: 10.5px; font-weight: 600; border: 1px solid var(--ob-border-strong); white-space: nowrap; }
 .op-badge.running { color: var(--vscode-progressBar-background); border-color: currentColor; }
 .op-badge.done { color: var(--vscode-testing-iconPassed, var(--ob-ok)); border-color: currentColor; }

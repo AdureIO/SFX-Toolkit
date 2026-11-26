@@ -3,6 +3,8 @@
  * webview renders and how the engine's live deploy status and a finished outcome map onto it. The host wiring is `providers/syncCenterActivityHost.ts`.
  */
 import type { DeployLiveStatus } from "./deployStatusMap";
+import { historyErrorsFromDeploy, historyErrorsFromRetrieve, type HistoryError } from "./historyPure";
+import type { ApiDeployResult } from "./deployDiagnostics";
 
 export type OpKind = "deploy" | "validate" | "retrieve" | "delete";
 export type OpPhase = "queued" | "running" | "done" | "failed" | "cancelled";
@@ -11,6 +13,40 @@ export interface OpCounts {
 	done: number;
 	total: number;
 	errors: number;
+}
+
+/** One failure of an operation as the card lists it: "Type Name — message". Without a component only the message is set. */
+export interface OpFailure {
+	type?: string;
+	name?: string;
+	message: string;
+}
+
+/** The card's failure list from history-style errors (`Type:fullName` component + message). */
+export function failuresFromErrors(errors: readonly HistoryError[]): OpFailure[] {
+	return errors.map((e) => {
+		const c = e.component ?? "";
+		const i = c.indexOf(":");
+		const message = e.message.replace(/\s+/g, " ").trim() || "Failed";
+		return i > 0 ? { type: c.slice(0, i), name: c.slice(i + 1), message } : { ...(c ? { name: c } : {}), message };
+	});
+}
+
+/** The failures of a retrieve: its failed components. */
+export function failuresOfRetrieve(failed: readonly { type: string; fullName: string; error: string }[]): OpFailure[] {
+	return failuresFromErrors(historyErrorsFromRetrieve(failed));
+}
+
+/** The failures of a deploy / validate / delete: the component failures and failing tests, else the CLI's error text. */
+export function failuresOfDeploy(api: ApiDeployResult | undefined, errorText?: string): OpFailure[] {
+	return failuresFromErrors(historyErrorsFromDeploy(api, errorText));
+}
+
+/** The summary line of a finished retrieve. Counts components (a whole object returns each of its fields … as one), not files. */
+export function retrieveSummary(requested: number, retrieved: number, failed: number): string {
+	const n = (c: number) => `${c} component${c === 1 ? "" : "s"}`;
+	const from = retrieved !== requested ? ` (${requested} requested; an object returns its fields, record types … too)` : "";
+	return failed > 0 ? `Retrieved ${n(retrieved)}${from}, ${failed} failed` : `Retrieved ${n(retrieved)}${from}`;
 }
 
 /** Host → webview: one operation started from the Center (sent again on every change). */
@@ -25,6 +61,8 @@ export interface OpMessage {
 	components?: OpCounts;
 	tests?: OpCounts;
 	message?: string;
+	/** Why it failed, per component (a failed or partly failed op). At most 50. */
+	failures?: OpFailure[];
 	startedAt: number;
 	endedAt?: number;
 }
@@ -99,7 +137,7 @@ export interface OutcomeLike {
 	stats?: { components: number; componentErrors: number; testsPassed: number; testsFailed: number };
 	deployId?: string;
 	errorText?: string;
-	apiResult?: { errorMessage?: string; stateDetail?: string };
+	apiResult?: ApiDeployResult;
 }
 
 const oneLine = (t: string, max = 300) => t.replace(/\s+/g, " ").trim().slice(0, max);
@@ -111,6 +149,10 @@ export function settleOp(op: OpMessage, outcome: OutcomeLike, now: number): OpMe
 	const st = outcome.stats;
 	if (st && !next.components && st.components + st.componentErrors > 0) next.components = { done: st.components, total: st.components + st.componentErrors, errors: st.componentErrors };
 	if (st && !next.tests && st.testsPassed + st.testsFailed > 0) next.tests = { done: st.testsPassed + st.testsFailed, total: st.testsPassed + st.testsFailed, errors: st.testsFailed };
+	if (outcome.kind !== "cancelled") {
+		const f = failuresOfDeploy(outcome.apiResult, outcome.errorText);
+		if (f.length > 0 && (outcome.kind === "failed" || (st?.componentErrors ?? 0) + (st?.testsFailed ?? 0) > 0)) next.failures = f;
+	}
 	if (outcome.kind === "cancelled") {
 		next.phase = "cancelled";
 		next.message = "Cancelled";
@@ -131,9 +173,25 @@ export function settleOp(op: OpMessage, outcome: OutcomeLike, now: number): OpMe
 }
 
 /** The op settled by something that is not a deploy outcome (a retrieve, an error thrown before the run, a cancelled confirmation). */
-export function settleSimple(op: OpMessage, phase: "done" | "failed" | "cancelled", message: string | undefined, now: number): OpMessage {
+export function settleSimple(op: OpMessage, phase: "done" | "failed" | "cancelled", message: string | undefined, now: number, failures?: OpFailure[]): OpMessage {
 	const next: OpMessage = { ...op, phase, endedAt: now };
+	if (failures && failures.length > 0) next.failures = failures;
 	if (message) next.message = oneLine(message);
 	else delete next.message;
 	return next;
+}
+
+/** How many failures the card shows before "Show all". */
+export const OP_FAILURES_SHOWN = 5;
+
+/** The failures the card lists: the first few, or all when expanded; `more` = how many are hidden. */
+export function visibleFailures(failures: readonly OpFailure[] | undefined, expanded: boolean): { shown: OpFailure[]; more: number } {
+	const all = failures ?? [];
+	return expanded || all.length <= OP_FAILURES_SHOWN ? { shown: [...all], more: 0 } : { shown: all.slice(0, OP_FAILURES_SHOWN), more: all.length - OP_FAILURES_SHOWN };
+}
+
+/** `Type Name — message` (a failure without a component: the message alone). */
+export function failureLine(f: OpFailure): string {
+	const who = [f.type, f.name].filter(Boolean).join(" ");
+	return who ? `${who} — ${f.message}` : f.message;
 }

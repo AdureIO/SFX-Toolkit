@@ -355,3 +355,65 @@ export function presetModified(presetKeys: readonly string[], selectedKeys: Iter
 	for (const k of selection) if (!preset.has(k)) return true;
 	return false;
 }
+
+// ── Selection across org / project / reload ────────────────────────────────────
+
+/** Selection per project directory, as kept in the UI state (webview state and workspace state). */
+export type SelectionStore = Record<string, string[]>;
+
+/** The stored selection of a project (empty when none / malformed). */
+export function storedSelection(store: unknown, projectDir: string): string[] {
+	if (!projectDir || !store || typeof store !== "object") return [];
+	const v = (store as Record<string, unknown>)[projectDir];
+	return Array.isArray(v) ? v.filter((k): k is string => typeof k === "string") : [];
+}
+
+/** A new store with `keys` for the project; an empty selection removes the entry. Other projects are untouched. */
+export function withStoredSelection(store: SelectionStore, projectDir: string, keys: Iterable<string>): SelectionStore {
+	const next: SelectionStore = { ...store };
+	const list = [...keys];
+	if (list.length === 0) delete next[projectDir];
+	else next[projectDir] = list;
+	return next;
+}
+
+/** Whether the selection equals the stored list (order-independent). */
+export function sameSelection(selected: ReadonlySet<string>, stored: readonly string[]): boolean {
+	if (selected.size !== stored.length) return false;
+	for (const k of stored) if (!selected.has(k)) return false;
+	return true;
+}
+
+/**
+ * Reconciles a selection with the rows now listed (after an org switch, refresh or reload). Never drops a key: the
+ * whole selection stays; `matched` shows as selected, `unmatched` are in no row (they count as hidden in the summary).
+ */
+export function reconcileSelection(selected: Iterable<string>, rowKeys: { has(key: string): boolean }): { selected: Set<string>; matched: string[]; unmatched: string[] } {
+	const all = new Set(selected);
+	const matched: string[] = [];
+	const unmatched: string[] = [];
+	for (const k of all) (rowKeys.has(k) ? matched : unmatched).push(k);
+	return { selected: all, matched, unmatched };
+}
+
+/**
+ * The row keys a "Delete from org" really removed: all requested on success; otherwise only those the org reported
+ * as deleted (a failed destructive deploy normally deletes nothing). Cancelled: none.
+ */
+export function deletedRowKeys(
+	requested: readonly { type: string; fullName: string }[],
+	kind: "success" | "failed" | "cancelled",
+	successes: readonly { componentType?: string; fullName?: string; deleted?: boolean }[] = []
+): string[] {
+	if (kind === "cancelled") return [];
+	const all = requested.map((r) => orgLookupKey(r.type, r.fullName));
+	if (kind === "success") return all;
+	const done = new Set(successes.filter((s) => s.deleted === true && s.componentType && s.fullName).map((s) => orgLookupKey(String(s.componentType), String(s.fullName))));
+	return all.filter((k) => done.has(k));
+}
+
+/** The selection without the given keys; every other key stays (also those in no row). */
+export function deselectKeys(selected: ReadonlySet<string>, keys: Iterable<string>): Set<string> {
+	const drop = new Set(keys);
+	return new Set([...selected].filter((k) => !drop.has(k)));
+}

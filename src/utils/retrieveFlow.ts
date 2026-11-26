@@ -10,6 +10,7 @@ import { retrieveComponents, RetrieveResult } from "./retrieveEngine";
 import { recordHistory } from "./syncHistory";
 import { HistorySource, historyErrorsFromRetrieve } from "./historyPure";
 import { compKey } from "./orgBrowser/types";
+import { retrieveSummary } from "./syncCenterOpPure";
 
 export interface RetrieveFlowOptions {
 	projectDir: string;
@@ -96,7 +97,7 @@ export async function runRetrieveFlow(o: RetrieveFlowOptions): Promise<RetrieveF
 	const ok = outcome.retrieved.length;
 	const bad = outcome.failed.length;
 	for (const f of outcome.failed) Logger.info(`Retrieve failed: ${f.type}:${f.fullName} — ${f.error}`);
-	const text = bad > 0 ? `Retrieved ${ok}, ${bad} failed` : `Retrieved ${ok} component${ok === 1 ? "" : "s"}`;
+	const text = retrieveSummary(components.length, ok, bad);
 	if (bad > 0) {
 		void vscode.window.showWarningMessage(text, "Show Output").then((pick) => {
 			if (pick) void vscode.commands.executeCommand("adure-sfx-toolkit.showOutput");

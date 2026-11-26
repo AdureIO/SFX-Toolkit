@@ -41,6 +41,7 @@ import {
 	newOp,
 	sameOpState,
 	settleOp,
+	type OpFailure,
 	settleSimple,
 } from "../utils/syncCenterOpPure";
 
@@ -157,9 +158,9 @@ export class OpHandle {
 		this.cts.dispose();
 	}
 
-	end(phase: "done" | "failed" | "cancelled", message?: string): void {
+	end(phase: "done" | "failed" | "cancelled", message?: string, failures?: OpFailure[]): void {
 		if (this.finished) return;
-		this.msg = settleSimple(this.msg, phase, message, Date.now());
+		this.msg = settleSimple(this.msg, phase, message, Date.now(), failures);
 		this.emit(true);
 		this.cts.dispose();
 	}

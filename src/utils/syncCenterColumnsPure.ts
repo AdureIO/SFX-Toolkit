@@ -5,7 +5,8 @@
  * `vscode`, no DOM): runs in the host, the webview and the tests.
  *
  * The checkbox column is always first and not part of the layout. `name` is always shown and always the first
- * column of the layout (it takes the remaining width; its stored width is not used).
+ * column of the layout. It flexes: its width is the minimum, it takes the remaining room (so it is only ever
+ * as wide as it has to be when the grid is tight, and it grows when there is space). It can be resized like the others.
  */
 
 export type ColumnId = "name" | "type" | "status" | "ns" | "by" | "mod" | "modLocal" | "created" | "id" | "file" | "path" | "state" | "actions";
@@ -24,7 +25,7 @@ export interface ColumnDef {
 
 /** Every column, in default order. */
 export const COLUMN_DEFS: readonly ColumnDef[] = [
-	{ id: "name", label: "Name", width: 220, min: 140, visible: true, fixed: true },
+	{ id: "name", label: "Name", width: 140, min: 140, visible: true, fixed: true },
 	{ id: "type", label: "Type", width: 120, min: 60, visible: true },
 	{ id: "ns", label: "Namespace", width: 70, min: 60, visible: true },
 	{ id: "by", label: "Last modified by", width: 120, min: 60, visible: true },
@@ -120,15 +121,20 @@ export function moveColumn(l: ColumnLayout, id: ColumnId, targetId: ColumnId, af
 	return normalizeLayout({ cols });
 }
 
-/** CSS `grid-template-columns` of the visible columns (checkbox first) and the grid's minimum width. */
-export function gridTemplate(l: ColumnLayout): { cols: string; minWidth: number } {
-	const parts = [`${CHECKBOX_WIDTH}px`];
-	let min = CHECKBOX_WIDTH;
+/**
+ * CSS `grid-template-columns` of the visible columns (checkbox first) and the grid's minimum width. `indent` widens
+ * the checkbox column (the group-by-type view indents its rows). The grid is never narrower than `minWidth`: the
+ * scroller scrolls horizontally instead of cutting columns off.
+ */
+export function gridTemplate(l: ColumnLayout, indent = 0): { cols: string; minWidth: number } {
+	const first = CHECKBOX_WIDTH + Math.max(0, indent);
+	const parts = [`${first}px`];
+	let min = first;
 	for (const c of visibleColumns(l)) {
 		const d = DEF_BY_ID.get(c.id)!;
 		if (d.fixed) {
-			parts.push(`minmax(${d.min}px,1fr)`);
-			min += d.min;
+			parts.push(`minmax(${c.width}px,1fr)`);
+			min += c.width;
 		} else {
 			parts.push(`${c.width}px`);
 			min += c.width;
@@ -143,4 +149,50 @@ export function columnLabel(id: ColumnId): string {
 
 export function isFixedColumn(id: ColumnId): boolean {
 	return !!DEF_BY_ID.get(id)?.fixed;
+}
+
+// ── Pane widths (filter sidebar, right panel) ──────────────────────────────────
+
+/** Stored per computer next to the column layout. */
+export const PANES_STORE_KEY = "syncCenter.panes";
+export const SIDE_MIN = 160;
+export const SIDE_MAX = 480;
+export const SIDE_DEFAULT = 248;
+export const RIGHT_MIN = 240;
+export const RIGHT_MAX = 600;
+export const RIGHT_DEFAULT = 360;
+/** The grid never gets narrower than this because of a pane. */
+export const GRID_MIN = 360;
+/** The two splitters (4px each). */
+export const SPLITTER_W = 4;
+
+export interface PaneWidths {
+	side: number;
+	right: number;
+}
+
+const clampTo = (v: unknown, min: number, max: number, def: number): number => (typeof v === "number" && Number.isFinite(v) ? Math.max(min, Math.min(max, Math.round(v))) : def);
+
+export function defaultPanes(): PaneWidths {
+	return { side: SIDE_DEFAULT, right: RIGHT_DEFAULT };
+}
+
+/** Anything read from storage or the webview becomes valid pane widths (static limits only). */
+export function normalizePanes(raw: unknown): PaneWidths {
+	const r = raw && typeof raw === "object" ? (raw as { side?: unknown; right?: unknown }) : {};
+	return { side: clampTo(r.side, SIDE_MIN, SIDE_MAX, SIDE_DEFAULT), right: clampTo(r.right, RIGHT_MIN, RIGHT_MAX, RIGHT_DEFAULT) };
+}
+
+/**
+ * The widths that fit `total` (the width of the body): each within its limits, the grid keeping `GRID_MIN`. The
+ * right panel gives way first, then the sidebar (only when it is shown). A window too small for the minimums keeps
+ * the minimums (the grid then scrolls).
+ */
+export function fitPanes(p: PaneWidths, total: number, sideShown: boolean): PaneWidths {
+	let { side, right } = normalizePanes(p);
+	const fixed = SPLITTER_W + (sideShown ? SPLITTER_W : 0);
+	const avail = total - GRID_MIN - fixed;
+	if (side * (sideShown ? 1 : 0) + right > avail) right = Math.max(RIGHT_MIN, avail - (sideShown ? side : 0));
+	if (sideShown && side + right > avail) side = Math.max(SIDE_MIN, avail - right);
+	return { side, right };
 }
