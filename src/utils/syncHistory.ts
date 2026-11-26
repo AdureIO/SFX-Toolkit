@@ -1,5 +1,5 @@
 /**
- * Deploy & Retrieve Center history (extension host): `globalStorage/history/<sha1(projectDir)[0:12]>.json`,
+ * Deploy & Retrieve Metadata history (extension host): `globalStorage/history/<sha1(projectDir)[0:12]>.json`,
  * newest first, capped at 200 entries per project, written debounced and flushed on deactivate.
  *
  *   recordHistory(projectDir, entry)   add an entry (never throws)

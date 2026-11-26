@@ -1,7 +1,6 @@
 import * as vscode from "vscode";
 import { listLogs } from "./commands/listLogs";
 import { addDebugTrace } from "./commands/addDebugTrace";
-import { DeployMetadataPanelProvider } from "./providers/DeployMetadataPanelProvider";
 import { executeAnonymous, rerunLastApex } from "./commands/executeAnonymous";
 import { executeSOQL } from "./commands/executeSOQL";
 import { deleteAllLogs } from "./commands/deleteAllLogs";
@@ -303,7 +302,6 @@ export function activate(context: vscode.ExtensionContext) {
     SharedMetadataFilter.init(context);
     OrgBrowserPanelProvider.init(context);
     SyncCenterPanelProvider.init(context);
-    DeployMetadataPanelProvider.init(context);
 
     // Org-aware SOQL language server (JVM-free). Safe no-op outside SFDX projects.
     try {
@@ -318,7 +316,7 @@ export function activate(context: vscode.ExtensionContext) {
       // object itself and honours `validateOnly`, so the test level carries over too.
       const preset = presetFromHistoryEntry(entry);
       if (entry.dryRun !== false) preset.validateOnly = true;
-      void DeployMetadataPanelProvider.show(preset);
+      void SyncCenterPanelProvider.show({ preset });
     });
 
     // Sync Context on Switch (dispose on deactivate to avoid leak)
@@ -339,17 +337,15 @@ export function activate(context: vscode.ExtensionContext) {
     // 3. Add Debug Trace
     const addDebugTraceCmd = register("adure-sfx-toolkit.addDebugTrace", addDebugTrace);
 
-    // 4. Deploy Metadata (panel with tree, presets, org, test level)
+    // 4. Deploy & Retrieve Metadata: the old "Deploy & Retrieve Metadata" command id stays as an alias (user keybindings) and opens the Center.
+    // Called from an Explorer / editor context menu it carries the files or folders along (their components are selected).
     context.subscriptions.push(getDeployDiagnosticCollection());
     registerDeployDiagnosticAutoClear(context);
-    const deployMetadataCmd = register("adure-sfx-toolkit.deployMetadata", () => DeployMetadataPanelProvider.show());
-    context.subscriptions.push(
-      vscode.window.registerWebviewPanelSerializer(DeployMetadataPanelProvider.viewType, {
-        async deserializeWebviewPanel(panel: vscode.WebviewPanel): Promise<void> {
-          await DeployMetadataPanelProvider.revive(panel);
-        }
-      })
-    );
+    const deployMetadataCmd = register("adure-sfx-toolkit.deployMetadata", (uri?: unknown, uris?: unknown) => {
+      const list = Array.isArray(uris) ? uris : uri ? [uri] : [];
+      const paths = list.filter((u): u is vscode.Uri => u instanceof vscode.Uri && u.scheme === "file").map((u) => u.fsPath);
+      return SyncCenterPanelProvider.show(paths.length > 0 ? { paths } : {});
+    });
 
     // 5. Execute Anonymous Apex
     const executeAnonCmd = register("adure-sfx-toolkit.executeAnonymous", executeAnonymous);
@@ -569,7 +565,7 @@ export function activate(context: vscode.ExtensionContext) {
     const orgBrowserCmd = register("adure-sfx-toolkit.openOrgBrowser", (item?: { orgData?: { username?: string } }) =>
       OrgBrowserPanelProvider.show(item?.orgData?.username ?? undefined)
     );
-    // Deploy & Retrieve Center: palette (default org), or from the Org Browser / Deploy panel buttons (project, org and selection carried over).
+    // Deploy & Retrieve Metadata: palette (default org), or from the Org Browser button (project, org and selection carried over).
     const syncCenterCmd = register("adure-sfx-toolkit.openSyncCenter", (opts?: SyncCenterOpenOptions) =>
       SyncCenterPanelProvider.show(opts && typeof opts === "object" && !("orgData" in opts) ? opts : {})
     );

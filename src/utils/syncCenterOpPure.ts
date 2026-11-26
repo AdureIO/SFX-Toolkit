@@ -1,5 +1,5 @@
 /**
- * Live operation state of the Deploy & Retrieve Center's right panel (pure, no `vscode`): the `op` message the
+ * Live operation state of the Deploy & Retrieve Metadata's right panel (pure, no `vscode`): the `op` message the
  * webview renders and how the engine's live deploy status and a finished outcome map onto it. The host wiring is `providers/syncCenterActivityHost.ts`.
  */
 import type { DeployLiveStatus } from "./deployStatusMap";

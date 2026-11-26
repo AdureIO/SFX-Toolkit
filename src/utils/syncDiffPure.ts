@@ -1,5 +1,5 @@
 /**
- * Pairing of a component's local and org files for the diff (Deploy & Retrieve Center). Pure (no `vscode`).
+ * Pairing of a component's local and org files for the diff (Deploy & Retrieve Metadata). Pure (no `vscode`).
  */
 
 export interface DiffSide {

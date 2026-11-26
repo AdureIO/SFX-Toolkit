@@ -49,7 +49,7 @@ export class DevActionsProvider implements vscode.TreeDataProvider<vscode.TreeIt
 				this.createItem("Reset Source Tracking", "adure-sfx-toolkit.resetSourceTracking", "history", "Reset source tracking for default org"),
 			]),
 			new DevGroupItem("Deploy & Retrieve", "package", [
-				this.createItem("Deploy Metadata", "adure-sfx-toolkit.deployMetadata", "package", "Deploy all or selected metadata with test options (Run All, Specified, Validate, No tests)"),
+				this.createItem("Deploy & Retrieve Metadata", "adure-sfx-toolkit.openSyncCenter", "package", "Deploy, validate, retrieve or delete project and org metadata side by side, with test options and history"),
 				this.createItem("Deploy to Default Org", "adure-sfx-toolkit.deployCurrentFile", "file-code", "Deploy the open file (right-click files or folders in the Explorer for more)"),
 				this.createItem("Retrieve from Default Org", "adure-sfx-toolkit.retrieveCurrentFile", "reply", "Retrieve the open file (right-click files or folders in the Explorer for more)"),
 				this.createItem("Update Project from Org", "adure-sfx-toolkit.updateProjectFromOrg", "sync", "Retrieve every component in the project's package directories from the default org"),

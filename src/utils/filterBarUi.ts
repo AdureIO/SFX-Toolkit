@@ -1,6 +1,6 @@
 /**
  * Host side of the shared metadata filter bar (search box + facet groups), used by the Org Browser and
- * the Deploy Metadata panel. Plain strings, no `vscode` import. The behaviour lives in
+ * Deploy & Retrieve Metadata. Plain strings, no `vscode` import. The behaviour lives in
  * `src/webview/shared/filterBar.ts`; the query grammar and the matching in `orgBrowser/filter.ts`.
  *
  *   <style>${FILTER_BAR_CSS}</style>                         (once, in <head>)

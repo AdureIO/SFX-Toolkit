@@ -1,5 +1,5 @@
 /**
- * A stored preset as a webview sees it (Deploy panel, Deploy & Retrieve Center): its components, whatever the
+ * A stored preset as a webview sees it (Deploy & Retrieve Metadata): its components, whatever the
  * file stored. Pure (no `vscode`).
  */
 import { RelComponent, presetComponents } from "./deployComponentsPure";

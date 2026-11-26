@@ -1,6 +1,6 @@
 /**
  * Test suites (named lists of test classes) for "Run Specified Tests": the pure rules shared by the Deploy panel
- * and the Deploy & Retrieve Center. Storage is in testSuites.ts; the host messaging in providers/testSuitesHost.ts.
+ * and the Deploy & Retrieve Metadata. Storage is in testSuites.ts; the host messaging in providers/testSuitesHost.ts.
  */
 
 export interface TestSuite {

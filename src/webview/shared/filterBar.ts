@@ -1,5 +1,5 @@
 /**
- * Shared metadata filter bar for webviews (Org Browser, Deploy Metadata): the search box, the facet
+ * Shared metadata filter bar for webviews (Org Browser, Deploy & Retrieve Metadata): the search box, the facet
  * groups (status, metadata type with counts, namespace, manageable state, modified) and their events.
  * The markup and CSS come from `src/utils/filterBarUi.ts`; the query grammar and matching from
  * `src/utils/orgBrowser/filter.ts`. A panel supplies its own status vocabulary through `statusOptions`

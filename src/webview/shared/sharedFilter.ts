@@ -1,5 +1,5 @@
 /**
- * Webview side of the filter state shared between the Org Browser and the Deploy Metadata panel (per
+ * Webview side of the filter state shared between the Org Browser and Deploy & Retrieve Metadata (per
  * project; see src/utils/sharedFilterPure.ts). Search text and type selection only: the panel's status
  * filters, and `status:` tokens in the query, stay its own.
  */

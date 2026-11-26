@@ -1,5 +1,5 @@
 /**
- * Host side of the test-suite controls, shared by the Deploy panel and the Deploy & Retrieve Center: the
+ * Host side of the test-suite controls, shared by Deploy & Retrieve Metadata: the
  * save / delete messages of the webview mount (webview/shared/testSuites.ts) and the live update when the
  * other panel changed the suites of the project.
  */

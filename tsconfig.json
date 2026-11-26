@@ -23,7 +23,6 @@
 		"src/webview/objectVisualizer.ts",
 		"src/webview/processMap.ts",
 		"src/webview/orgBrowser.ts",
-		"src/webview/deployPanel.ts",
 		"src/webview/syncCenter.ts",
 		"src/webview/shared/**"
 	]

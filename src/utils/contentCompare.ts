@@ -141,6 +141,9 @@ export class ContentCompareService {
 	private paused = false;
 	private disposed = false;
 	private token: SimpleToken | undefined;
+	/** Bumped by `cancelAll`: a plan made before it is dropped. */
+	private epoch = 0;
+	private dropCurrent = false;
 	private done = 0;
 	private total = 0;
 	private failed = 0;
@@ -355,6 +358,16 @@ export class ContentCompareService {
 		this.emitProgress();
 	}
 
+	/** The user's Cancel: drop the queue and the planned work, stop the running retrieve; nothing is put back. */
+	cancelAll(): void {
+		this.epoch++;
+		this.queue.clear();
+		this.work = [];
+		this.dropCurrent = !!this.token;
+		this.token?.cancel();
+		this.emitProgress();
+	}
+
 	resume(): void {
 		if (!this.paused) return;
 		this.paused = false;
@@ -398,7 +411,13 @@ export class ContentCompareService {
 			if (this.queue.size > 0) {
 				const batch = [...this.queue.values()];
 				this.queue.clear();
+				const epoch = this.epoch;
 				const todo = await this.plan(batch);
+				// Cancelled while hashing: the plan is dropped.
+				if (epoch !== this.epoch) {
+					this.emitProgress();
+					continue;
+				}
 				// Pausing while hashing: put the batch back, it is cheap to hash again.
 				if (this.paused || this.disposed) {
 					for (const q of batch) if (!this.queue.has(q.target.key)) this.queue.set(q.target.key, q);
@@ -423,8 +442,9 @@ export class ContentCompareService {
 				this.emitProgress();
 			} catch (e) {
 				if (token.isCancellationRequested) {
-					// Paused or disposed mid-retrieve: the chunk goes back to the front.
-					this.work.unshift(...group);
+					// Paused or disposed mid-retrieve: the chunk goes back to the front. Cancelled by the user: it is dropped.
+					if (!this.dropCurrent) this.work.unshift(...group);
+					this.dropCurrent = false;
 					break;
 				}
 				// A chunk that blew up: its components stay uncompared (provisional).

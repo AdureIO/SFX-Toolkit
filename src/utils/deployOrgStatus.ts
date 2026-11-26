@@ -1,5 +1,5 @@
 /**
- * What the Deploy Metadata panel knows about its target org: `listMetadata` results for the metadata
+ * What Deploy & Retrieve Metadata knows about its target org: `listMetadata` results for the metadata
  * types of the local project (cached per org on disk, refreshed per type), plus the freshness of each.
  * No `vscode` import: the SOAP transport and the listing function are injected, so it is unit-testable.
  */

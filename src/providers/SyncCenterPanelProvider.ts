@@ -45,7 +45,8 @@ import { checkOrgBeforeDeploy } from "../utils/preDeployCheck";
 import { loadTestSuites } from "../utils/testSuites";
 import { resolveRunTests } from "../utils/testSuitesPure";
 import { handleSuiteMessage, subscribeSuites } from "./testSuitesHost";
-import { listPresets, onDidChangePresets, savePreset } from "../utils/presetsStore";
+import { DeployPreset, DeployTypeKey, listPresets, onDidChangePresets, savePreset } from "../utils/presetsStore";
+import { addDeployHistoryEntry } from "../commands/deployHistory";
 import { toWebPreset } from "../utils/presetsWebPure";
 import { isSalesforceProject, primaryProjectRoot } from "../utils/projectUtils";
 import { runRetrieveFlow } from "../utils/retrieveFlow";
@@ -55,7 +56,7 @@ import { getHistory, onDidChangeHistory, recordHistory } from "../utils/syncHist
 import { openComponentDiff } from "../utils/syncDiff";
 import { deploymentSetupPath, historyDeployLocalKeys, onlyOrgRefs, overwriteLocalKeys, refOfKey, rowKeyOf } from "../utils/syncCenterUiPure";
 import { reauthenticateOrg } from "../commands/orgCommands";
-import { DeployMetadataPanelProvider } from "./DeployMetadataPanelProvider";
+import { runGitStatusSfdxPaths } from "../utils/gitStatusPaths";
 import { OperationPanelProvider } from "./OperationPanelProvider";
 import { syncCenterHtml } from "./syncCenterHtml";
 import { OpHandle, OpenTimings, SyncCenterActivity, mergeTokens } from "./syncCenterActivityHost";
@@ -71,12 +72,16 @@ export interface SyncCenterOpenOptions {
 	org?: string | null;
 	/** Components to select (`Type:name` in either naming). */
 	selection?: string[];
+	/** Absolute paths (files or folders) whose components are selected once the project is read; the filter is adjusted so they show. */
+	paths?: string[];
+	/** A stored preset or a deploy-history entry to apply (selection, test level, validate only, tests) once the project is read. */
+	preset?: DeployPreset & { validateOnly?: boolean };
 }
 
 type Busy = "deploy" | "retrieve" | "delete";
 
 /**
- * Deploy & Retrieve Center: the union of the local project and the org's metadata with one selection, smart
+ * Deploy & Retrieve Metadata: the union of the local project and the org's metadata with one selection, smart
  * quick actions, per-row diff, deploy, retrieve, delete from the org, history and presets. Singleton webview
  * panel; the rows are built in the webview from what this class feeds it (the org listing, the local index, the
  * compare results). The engine rules live in utils/syncCenterPure.ts and utils/syncCenterUiPure.ts.
@@ -119,6 +124,11 @@ export class SyncCenterPanelProvider {
 	private static pendingOpen: SyncCenterOpenOptions | undefined;
 	/** The selection to hand the webview with the next init. */
 	private static initialSelection: string[] = [];
+	/** Paths / preset of an open that wait for the project index (applied by `applyPendingOpen`). */
+	private static openPaths: string[] | undefined;
+	private static openPreset: (DeployPreset & { validateOnly?: boolean }) | undefined;
+	/** A project switch the user made while a deploy / retrieve / delete ran: applied when it ends. */
+	private static switchPending = false;
 	private static soapCalls = 0;
 	private static compareStartedAt = 0;
 	/** Live operations, recent deploys, cancel (see syncCenterActivityHost). */
@@ -133,7 +143,11 @@ export class SyncCenterPanelProvider {
 	private static testClassesFor: { root: string; p: Promise<{ label: string; description: string }[]> } | undefined;
 	private static endCompareBusy: (() => void) | undefined;
 
+	/** The project while an operation runs: a switch made meanwhile waits (`switchPending`), the operation keeps its project. */
+	private static busyRoot: string | undefined;
+
 	private static projectDir(): string | undefined {
+		if (this.busy && this.busyRoot) return this.busyRoot;
 		return this.binding?.current() ?? primaryProjectRoot();
 	}
 
@@ -156,7 +170,7 @@ export class SyncCenterPanelProvider {
 			await this.applyOpen(opts);
 			return;
 		}
-		const panel = vscode.window.createWebviewPanel(this.viewType, "Deploy & Retrieve Center", column, this.webviewOptions());
+		const panel = vscode.window.createWebviewPanel(this.viewType, "Deploy & Retrieve Metadata", column, this.webviewOptions());
 		this.attach(panel, opts);
 	}
 
@@ -181,6 +195,8 @@ export class SyncCenterPanelProvider {
 		const ctx = this.ctx!;
 		this.userPicked = !!opts.org;
 		this.initialSelection = opts.selection ?? [];
+		this.openPaths = opts.paths?.length ? opts.paths : undefined;
+		this.openPreset = opts.preset;
 		this.panel = panel;
 		this.timings = new OpenTimings();
 		this.activity = new SyncCenterActivity({
@@ -190,6 +206,8 @@ export class SyncCenterPanelProvider {
 			orgLabel: () => this.orgLabel(),
 			sameOrg: (o) => this.sameOrg(o),
 			generation: () => this.gen,
+			cacheDir: () => this.cacheDir(),
+			orgKey: () => this.orgKey,
 			busy: (label) => {
 				this.beginLoad(label);
 				let ended = false;
@@ -212,8 +230,8 @@ export class SyncCenterPanelProvider {
 		this.disposables.push(
 			binding,
 			binding.attach(panel.webview),
-			binding.onDidChange(() => void this.onProjectChanged().catch((e) => Logger.error("Deploy & Retrieve Center project switch failed", e))),
-			panel.webview.onDidReceiveMessage((msg) => void this.onMessage(msg, () => initialOrg).catch((e) => Logger.error("Deploy & Retrieve Center message failed", e))),
+			binding.onDidChange(() => void this.onProjectChanged().catch((e) => Logger.error("Deploy & Retrieve Metadata project switch failed", e))),
+			panel.webview.onDidReceiveMessage((msg) => void this.onMessage(msg, () => initialOrg).catch((e) => Logger.error("Deploy & Retrieve Metadata message failed", e))),
 			onDidChangeDefaultOrg(async () => {
 				await this.sendOrgs();
 				if (!this.userPicked) await this.loadOrg(null);
@@ -244,7 +262,30 @@ export class SyncCenterPanelProvider {
 			this.userPicked = true;
 			await this.loadOrg(opts.org);
 		}
-		if (opts.selection) this.post({ type: "applySelection", keys: opts.selection });
+		if (opts.selection) this.post({ type: "applySelection", keys: opts.selection, reveal: true });
+		if (opts.paths?.length) this.openPaths = opts.paths;
+		if (opts.preset) this.openPreset = opts.preset;
+		this.applyPendingOpen();
+	}
+
+	/** Paths / preset of an open, once the local index is there: select their components (and show them), apply the preset. */
+	private static applyPendingOpen(): void {
+		const root = this.projectDir();
+		if (!root || !this.local) return;
+		const rel = this.relComponents();
+		if (this.openPaths) {
+			const paths = this.openPaths;
+			this.openPaths = undefined;
+			const relPaths = paths.map((a) => path.relative(root, a).split(path.sep).join("/")).filter((r) => r !== "" && !r.startsWith(".."));
+			const { keys } = pathsToComponents(relPaths, rel);
+			if (keys.length > 0) this.post({ type: "applySelection", keys, reveal: true });
+			else this.status("None of the given files belongs to a component of this project.");
+		}
+		if (this.openPreset) {
+			const preset = this.openPreset;
+			this.openPreset = undefined;
+			this.post({ type: "applyPreset", preset: toWebPreset(preset, rel) });
+		}
 	}
 
 	private static dispose(): void {
@@ -262,6 +303,7 @@ export class SyncCenterPanelProvider {
 		this.loadDepth = 0;
 		this.releaseLease();
 		this.endCompareBusy = undefined;
+		this.activity?.dispose();
 		this.activity = undefined;
 		this.timings = undefined;
 		this.testClassesFor = undefined;
@@ -269,6 +311,10 @@ export class SyncCenterPanelProvider {
 		this.byOrgKey = new Map();
 		this.binding = undefined;
 		this.busy = null;
+		this.busyRoot = undefined;
+		this.switchPending = false;
+		this.openPaths = undefined;
+		this.openPreset = undefined;
 		this.comps = [];
 		this.compMap = new Map();
 		this.local = undefined;
@@ -296,6 +342,12 @@ export class SyncCenterPanelProvider {
 	/** The project of the panel changed: rebuild everything bound to it, as if the panel were newly opened. */
 	private static async onProjectChanged(): Promise<void> {
 		if (!this.panel) return;
+		// Reloading mid-deploy would drop its progress and result: apply the switch when the operation ends.
+		if (this.busy) {
+			this.switchPending = true;
+			this.post({ type: "toast", text: "The project switch applies after this operation.", kind: "info" });
+			return;
+		}
 		this.userPicked = false;
 		for (const d of this.watchers) d.dispose();
 		this.watchers = [];
@@ -304,6 +356,8 @@ export class SyncCenterPanelProvider {
 		this.pendingOpen = undefined;
 		if (open?.org) this.userPicked = true;
 		if (open?.selection) this.initialSelection = open.selection;
+		if (open?.paths?.length) this.openPaths = open.paths;
+		if (open?.preset) this.openPreset = open.preset;
 		this.prefetchTestClasses();
 		await this.sendInit();
 		await this.loadOrg(open?.org ?? null);
@@ -333,6 +387,9 @@ export class SyncCenterPanelProvider {
 				break;
 			case "compareContents":
 				void this.requestCompare(msg.force === true, Array.isArray(msg.keys) ? msg.keys.map(String) : undefined);
+				break;
+			case "cancelCompare":
+				this.lease?.service.cancelAll();
 				break;
 			case "deploy":
 				await this.deployFromWebview(msg);
@@ -367,7 +424,8 @@ export class SyncCenterPanelProvider {
 				break;
 			case "autoGit":
 				this.autoGit = msg.on === true;
-				if (this.autoGit) await this.gitSelect(true);
+				// `restore`: the webview only tells the saved option; the first change times select (no Git read before the index is there).
+				if (this.autoGit && msg.restore !== true) await this.gitSelect(true);
 				break;
 			case "savePreset":
 				await this.savePresetFromWebview(msg);
@@ -427,10 +485,13 @@ export class SyncCenterPanelProvider {
 		const root = this.projectDir();
 		const picker = root ? await orgPickerForProject(root).catch(() => ({ orgs: [], defaultOrg: "" })) : { orgs: [], defaultOrg: "" };
 		const key = canonicalOrgKey(null, root);
-		const testClasses = root ? await this.takeTestClasses(root) : [];
+		// The test class scan is not awaited either (the specified-tests list fills in when it is done).
+		const testClassesP = root ? this.takeTestClasses(root) : Promise.resolve([]);
 		const selection = this.initialSelection;
 		this.initialSelection = [];
-		const production = await this.orgIsProduction(key, root);
+		// Not awaited: the org check can take a while and must not hold up the first render. Until its `orgs` message
+		// arrives (loadOrg sends it) the org counts as production, the safe side.
+		const production = true;
 		this.post({
 			type: "init",
 			orgs: picker.orgs,
@@ -442,9 +503,12 @@ export class SyncCenterPanelProvider {
 			ui: this.ctx?.workspaceState.get(UI_STATE_KEY) ?? null,
 			columns: normalizeLayout(this.ctx?.globalState.get(COLUMNS_STORE_KEY)),
 			shared: SharedMetadataFilter.get(root),
-			testClasses,
+			testClasses: [],
 			childTypes: [...OBJECT_CHILD_TYPES],
 			selection,
+		});
+		void testClassesP.then((testClasses) => {
+			if (root === this.projectDir()) this.post({ type: "testClasses", testClasses });
 		});
 		this.postHistory();
 		void this.postPresets();
@@ -539,6 +603,9 @@ export class SyncCenterPanelProvider {
 		this.byOrgKey = new Map();
 		this.releaseLease();
 		this.post({ type: "reset", org: key === DEFAULT_ORG_KEY ? null : key });
+		this.activity?.reset();
+		// The org's last deploy list from disk goes out at once (the Deployment history tab never opens empty).
+		void this.activity?.sendCachedDeploys();
 		void this.sendOrgs();
 
 		const root = this.projectDir();
@@ -592,7 +659,7 @@ export class SyncCenterPanelProvider {
 			const me = await resolveCurrentUser(this.orgArg, this.apiVersion());
 			if (gen === this.gen) this.post({ type: "me", ids: me.ids, name: me.name });
 		} catch (e: any) {
-			Logger.info(`Deploy & Retrieve Center: could not resolve the current user: ${e?.message ?? e}`);
+			Logger.info(`Deploy & Retrieve Metadata: could not resolve the current user: ${e?.message ?? e}`);
 		}
 	}
 
@@ -632,11 +699,11 @@ export class SyncCenterPanelProvider {
 			this.setComps(cache.comps);
 			this.post({ type: "loadEnd", listedAt: this.listedAt, failures: this.failures, types: this.types, dropTypes: expanded });
 			void this.refreshLocal();
-			await saveListingCache(this.cacheDir(), { ...cache, types: this.types }).catch((e) => Logger.error("Deploy & Retrieve Center: could not write the listing cache", e));
+			await saveListingCache(this.cacheDir(), { ...cache, types: this.types }).catch((e) => Logger.error("Deploy & Retrieve Metadata: could not write the listing cache", e));
 		} catch (e: any) {
 			if (e instanceof ListCancelled || isCancelled()) return;
 			const view = listFailureView(e, this.orgKey, this.orgLabel());
-			Logger.error("Deploy & Retrieve Center: listing failed", view.log);
+			Logger.error("Deploy & Retrieve Metadata: listing failed", view.log);
 			this.post({ type: "loadError", state: view.state, message: view.message });
 		} finally {
 			if (this.run === run) this.run = undefined;
@@ -689,7 +756,9 @@ export class SyncCenterPanelProvider {
 			retrieved: getRetrieveTimes(this.orgKey === DEFAULT_ORG_KEY ? null : this.orgKey),
 			hasProject: true,
 		});
+		this.timings?.once("first rows");
 		void this.postPresets();
+		this.applyPendingOpen();
 	}
 
 	private static async refreshLocalInner(force: boolean): Promise<void> {
@@ -723,7 +792,7 @@ export class SyncCenterPanelProvider {
 			this.timings?.mark(r.reused ? "index check (unchanged)" : `project scan (${r.index.entries.size} components)`, Date.now() - t1);
 			await this.refreshLocalInfo();
 		} catch (e: any) {
-			Logger.error("Deploy & Retrieve Center: local scan failed", e?.message ?? e);
+			Logger.error("Deploy & Retrieve Metadata: local scan failed", e?.message ?? e);
 		}
 	}
 
@@ -770,7 +839,7 @@ export class SyncCenterPanelProvider {
 		} else if (!running && this.endCompareBusy) {
 			this.endCompareBusy();
 			this.endCompareBusy = undefined;
-			Logger.info(`Deploy & Retrieve Center: content compare finished: ${p.done} component(s) in ${Date.now() - this.compareStartedAt} ms`);
+			Logger.info(`Deploy & Retrieve Metadata: content compare finished: ${p.done} component(s) in ${Date.now() - this.compareStartedAt} ms`);
 		}
 	}
 
@@ -808,7 +877,7 @@ export class SyncCenterPanelProvider {
 			const t0 = Date.now();
 			let dirty: string[] | null = null;
 			try {
-				dirty = await DeployMetadataPanelProvider.runGitStatusSfdxPaths(root);
+				dirty = await runGitStatusSfdxPaths(root);
 			} catch {
 				dirty = null; // not a git repository: file times only
 			}
@@ -824,8 +893,10 @@ export class SyncCenterPanelProvider {
 			await this.pushContent();
 			this.timings?.mark("stored compare results", Date.now() - t2);
 			this.timings?.at("ready");
-			this.timings?.log("Deploy & Retrieve Center open");
+			this.timings?.log("Deploy & Retrieve Metadata open");
 			this.scheduleCompare(0);
+			// Idle after the first render: the org's recent deploys for the Deployment history tab.
+			this.activity?.prefetchDeploys(1500);
 		} finally {
 			this.endLoad();
 		}
@@ -879,7 +950,7 @@ export class SyncCenterPanelProvider {
 			return;
 		}
 		try {
-			const paths = await DeployMetadataPanelProvider.runGitStatusSfdxPaths(root);
+			const paths = await runGitStatusSfdxPaths(root);
 			this.postModified(paths, select);
 		} catch (e) {
 			this.post({ type: "modifiedKeys", keys: [], select, total: 0, unmatched: 0, error: String((e as Error)?.message ?? e) });
@@ -938,10 +1009,11 @@ export class SyncCenterPanelProvider {
 			testNames: Array.isArray(msg.testClassNames) ? msg.testClassNames.map(String) : [],
 			dryRun,
 			label: cleanLabel(msg.label),
+			presetName: typeof msg.presetName === "string" && msg.presetName ? msg.presetName : undefined,
 		});
 	}
 
-	private static async doDeploy(p: { localKeys: string[]; testLevel: string; testNames: string[]; dryRun: boolean; label?: string }): Promise<void> {
+	private static async doDeploy(p: { localKeys: string[]; testLevel: string; testNames: string[]; dryRun: boolean; label?: string; presetName?: string }): Promise<void> {
 		const { dryRun, testLevel } = p;
 		const root = this.projectDir();
 		const fail = (error: string, toast = true) => {
@@ -957,7 +1029,7 @@ export class SyncCenterPanelProvider {
 		const targetOrg = this.orgArg;
 		const entries = this.local.entries;
 		const { paths: absPaths, missing } = deployPathsForComponents(p.localKeys, entries);
-		if (missing.length > 0) Logger.info(`Deploy & Retrieve Center: ${missing.length} selected component(s) are not in the project any more: ${missing.slice(0, 10).join(", ")}`);
+		if (missing.length > 0) Logger.info(`Deploy & Retrieve Metadata: ${missing.length} selected component(s) are not in the project any more: ${missing.slice(0, 10).join(", ")}`);
 		if (absPaths.length === 0) return fail("None of the selected components is in the project any more.");
 		const deployedKeys = p.localKeys.filter((k) => !missing.includes(k));
 		const testFlags = testLevel === "RunSpecifiedTests" ? p.testNames.filter((t) => t.trim() !== "") : [];
@@ -967,6 +1039,24 @@ export class SyncCenterPanelProvider {
 		} catch (e) {
 			return fail(e instanceof Error ? e.message : String(e));
 		}
+		const sourcePaths = relativeFilesOf(deployedKeys, entries, root);
+		/** The classic deployment history (the "Deployment History" command) keeps working: same entry as the removed Deploy panel wrote. */
+		const legacyHistory = (status: "Succeeded" | "Failed" | "Cancelled", at: number, durationMs: number, stats?: { components: number; componentErrors: number; testsPassed: number; testsFailed: number }) =>
+			addDeployHistoryEntry({
+				timestamp: at,
+				status,
+				dryRun,
+				components: stats?.components ?? 0,
+				componentErrors: stats?.componentErrors ?? 0,
+				testsPassed: stats?.testsPassed ?? 0,
+				testsFailed: stats?.testsFailed ?? 0,
+				durationMs,
+				targetOrg,
+				sourcePaths,
+				presetName: p.presetName ?? null,
+				deployType: testLevel as DeployTypeKey,
+				testClassNames: testFlags.length ? testFlags : undefined,
+			});
 		this.setBusy("deploy");
 		const opN = deployedKeys.length;
 		const op = this.activity?.beginOp(dryRun ? "validate" : "deploy", p.label || `${dryRun ? "Validate" : "Deploy"} ${opN} component${opN === 1 ? "" : "s"}`);
@@ -984,7 +1074,7 @@ export class SyncCenterPanelProvider {
 			this.status("Checking the org for changes…");
 			const check = await this.preDeployCheck(deployedKeys, service);
 			Logger.info(
-				`Deploy & Retrieve Center pre-deploy check: ${check.types.length} type(s) listed live (${check.types.join(", ")}) in ${check.soapCalls} SOAP call(s), ${check.ms} ms; ` +
+				`Deploy & Retrieve Metadata pre-deploy check: ${check.types.length} type(s) listed live (${check.types.join(", ")}) in ${check.soapCalls} SOAP call(s), ${check.ms} ms; ` +
 					(check.decision ? `${check.decision.changed.length} changed in the org, ${check.decision.unverified.length} not verifiable` : `org not checked (${check.error ?? "unknown"}) — going on`)
 			);
 			if (check.decision?.needsConfirmation) {
@@ -1012,15 +1102,18 @@ export class SyncCenterPanelProvider {
 			op?.settle(outcome);
 			if (outcome.kind === "cancelled") {
 				this.post({ type: "deployResult", success: false, cancelled: true, dryRun, durationMs });
+				legacyHistory("Cancelled", startedAt, durationMs);
 			} else if (outcome.kind === "success") {
 				const { stats, coverage, apiResult } = outcome;
 				this.post({ type: "deployResult", success: true, cancelled: false, dryRun, ...stats, coverage, durationMs });
+				legacyHistory("Succeeded", startedAt, durationMs, stats);
 				recordHistory(root, { kind: dryRun ? "validate" : "deploy", org: targetOrg, at: startedAt, durationMs, components: deployedKeys, testLevel, tests: testFlags, deployId: outcome.deployId, ok: true, source: "center", ...(p.label ? { label: p.label } : {}) });
 				// A real deploy: record the components with the org's new lastModifiedDate (our own deploy must not show as "changed in org").
 				if (!dryRun && (apiResult !== undefined || stats.components > 0)) await this.afterDeploy(deployedKeys, outcome.completedAt ?? Date.now());
 			} else {
 				const { stats, coverage, apiResult, errorText } = outcome;
 				this.post({ type: "deployResult", success: false, cancelled: false, dryRun, ...stats, coverage, durationMs });
+				legacyHistory("Failed", startedAt, durationMs, stats);
 				recordHistory(root, {
 					kind: dryRun ? "validate" : "deploy",
 					org: targetOrg,
@@ -1298,8 +1391,14 @@ export class SyncCenterPanelProvider {
 	}
 
 	private static setBusy(b: Busy | null): void {
+		if (b && !this.busy) this.busyRoot = this.projectDir();
 		this.busy = b;
+		if (!b) this.busyRoot = undefined;
 		this.post({ type: "busy", op: b });
+		if (!b && this.switchPending) {
+			this.switchPending = false;
+			void this.onProjectChanged().catch((e) => Logger.error("Deploy & Retrieve Metadata project switch failed", e));
+		}
 	}
 
 	// ── Diff ─────────────────────────────────────────────────────────────────────
@@ -1339,7 +1438,7 @@ export class SyncCenterPanelProvider {
 				try {
 					await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `Retrieving the latest ${name} from the org…` }, () => lease.service.fetchOrgCopy({ type, name }));
 				} catch (e) {
-					Logger.info(`Deploy & Retrieve Center: could not refresh the org copy of ${rowKey}: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+					Logger.info(`Deploy & Retrieve Metadata: could not refresh the org copy of ${rowKey}: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
 				}
 			}
 		}

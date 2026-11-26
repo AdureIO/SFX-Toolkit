@@ -1,5 +1,5 @@
 /**
- * Deploy presets (shared by the Deploy panel and the Deploy & Retrieve Center): the preset type, reading the
+ * Deploy presets (shared by Deploy & Retrieve Metadata): the preset type, reading the
  * file format of every version (migration) and the list operations. Pure (no `vscode`, no I/O).
  */
 

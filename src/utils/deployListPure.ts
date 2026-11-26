@@ -1,5 +1,5 @@
 /**
- * Recent deploys of an org for the Deploy & Retrieve Center's activity list (pure, no `vscode`, no I/O):
+ * Recent deploys of an org for the Deploy & Retrieve Metadata's activity list (pure, no `vscode`, no I/O):
  *   - the Tooling API query on `DeployRequest` and the parse of its answer,
  *   - the details of one deploy (component failures, test failures) from a `deployResult`,
  *   - the merge of the org's deploys with this toolkit's own history, newest first.

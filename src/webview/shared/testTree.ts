@@ -1,5 +1,5 @@
 /**
- * The test-class tree of the deploy options (Deploy panel, Deploy & Retrieve Center): folders of the
+ * The test-class tree of the deploy options (Deploy & Retrieve Metadata): folders of the
  * project's test classes with checkboxes (`.test-class`, `.test-folder-check`), a search filter and the
  * expand / collapse toggles. One tree per webview: the elements are found by the ids the caller passes.
  */

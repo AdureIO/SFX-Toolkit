@@ -1,5 +1,5 @@
 /**
- * Deploy & Retrieve Center: the grid's column layout (which columns, in which order, how wide). Stored per
+ * Deploy & Retrieve Metadata: the grid's column layout (which columns, in which order, how wide). Stored per
  * computer by the host (`globalState`, key `syncCenter.columns`) and handed to the webview with `init`; the
  * webview posts changes back. Everything read from storage or from the webview is sanitised here. Pure (no
  * `vscode`, no DOM): runs in the host, the webview and the tests.

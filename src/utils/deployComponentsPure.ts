@@ -1,5 +1,5 @@
 /**
- * Deploy Metadata panel: components ↔ files. Pure (no `vscode`, no DOM, no `fs`).
+ * Deploy & Retrieve Metadata: components ↔ files. Pure (no `vscode`, no DOM, no `fs`).
  *
  * The selection is a set of component keys (`Type:fullName`) — LEAVES only. A ticked component deploys
  * exactly its own source files (`-d <file>`), never its folder, whatever else sits next to it and

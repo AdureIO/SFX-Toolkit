@@ -1,5 +1,5 @@
 /**
- * Deploy & Retrieve Center: the rules around the panel that the engine (`syncCenterPure`) does not cover:
+ * Deploy & Retrieve Metadata: the rules around the panel that the engine (`syncCenterPure`) does not cover:
  * partial-object expansion for a deploy, whole-object retrieves, conflict choices that follow their rows, the
  * button states and the history list. Pure (no `vscode`, no DOM): runs in the host, the webview and the tests.
  */

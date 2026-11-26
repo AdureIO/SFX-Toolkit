@@ -1,101 +1,10 @@
 import * as assert from "assert";
-import {
-	DS_CHANGED_IN_ORG,
-	DS_CHANGED_LOCALLY,
-	DS_CONFLICT,
-	DS_EQUAL,
-	DS_NEW,
-	DS_UNKNOWN,
-	DEPLOY_STATUS_NAMES,
-	DEPLOY_VOCAB,
-	OrgCompInfo,
-	deployStatus,
-	evaluatePreDeploy,
-	orgLookupKey,
-	preDeployPrompt,
-} from "../utils/deployStatusPure";
+import { OrgCompInfo, evaluatePreDeploy, orgLookupKey, preDeployPrompt } from "../utils/deployStatusPure";
 import { DEFAULT_FILTER, FilterContext, buildIndex, computeFacets, filterIndices } from "../utils/orgBrowser/filter";
 import { Comp } from "../utils/orgBrowser/types";
 
 const T0 = Date.parse("2025-06-01T10:00:00Z");
 const HOUR = 3600_000;
-
-describe("deploy status: codes", () => {
-	const base = { orgKnown: true, inOrg: true, orgLm: T0, syncedAt: T0, local: { localT: T0 - HOUR, dirty: false } };
-
-	it("new: local, but not in the org listing of its type", () => {
-		assert.deepStrictEqual(deployStatus({ ...base, inOrg: false, orgLm: 0 }), { code: DS_NEW, provisional: false });
-	});
-
-	it("unknown: the org listing of the type is missing, or the local info is not read yet", () => {
-		assert.deepStrictEqual(deployStatus({ ...base, orgKnown: false, inOrg: false }), { code: DS_UNKNOWN, provisional: true, why: "org" });
-		assert.deepStrictEqual(deployStatus({ ...base, local: undefined }), { code: DS_UNKNOWN, provisional: true, why: "local" });
-	});
-
-	it("equal / changed locally / changed in org / conflict from dates (provisional)", () => {
-		assert.deepStrictEqual(deployStatus(base), { code: DS_EQUAL, provisional: true });
-		assert.strictEqual(deployStatus({ ...base, local: { localT: T0 + HOUR, dirty: false } }).code, DS_CHANGED_LOCALLY);
-		assert.strictEqual(deployStatus({ ...base, local: { localT: T0 - HOUR, dirty: true } }).code, DS_CHANGED_LOCALLY);
-		assert.strictEqual(deployStatus({ ...base, orgLm: T0 + HOUR }).code, DS_CHANGED_IN_ORG);
-		assert.strictEqual(deployStatus({ ...base, orgLm: T0 + HOUR, local: { localT: T0 - HOUR, dirty: true } }).code, DS_CONFLICT);
-	});
-
-	it("a verified content result wins over dates", () => {
-		const same = deployStatus({ ...base, orgLm: T0 + HOUR, local: { localT: T0, dirty: true }, content: "same" });
-		assert.deepStrictEqual(same, { code: DS_EQUAL, provisional: false });
-		const diff = deployStatus({ ...base, content: "different" });
-		assert.strictEqual(diff.provisional, false);
-	});
-
-	it("verified equal does not need the local info", () => {
-		assert.strictEqual(deployStatus({ ...base, local: undefined, content: "same" }).code, DS_EQUAL);
-	});
-
-	it("looks a component up by its decoded name (source files percent-encode some characters)", () => {
-		assert.strictEqual(orgLookupKey("Layout", "Account-Account%20Layout"), "Layout:Account-Account Layout");
-		assert.strictEqual(orgLookupKey("ApexClass", "Foo"), "ApexClass:Foo");
-		assert.strictEqual(orgLookupKey("Layout", "100%"), "Layout:100%"); // not decodable: kept
-	});
-});
-
-describe("deploy status: filter vocabulary", () => {
-	const comp = (t: string, n: string): Comp => ({ t, n, ns: "", ms: "", by: "", bi: "", lm: 0, cd: 0, id: "", f: "" });
-	const rows = [comp("ApexClass", "NewOne"), comp("ApexClass", "Plain"), comp("ApexClass", "Edited"), comp("ApexClass", "OrgSide"), comp("ApexClass", "Clash"), comp("Flow", "Mystery")];
-	const status = Uint8Array.from([DS_NEW, DS_EQUAL, DS_CHANGED_LOCALLY, DS_CHANGED_IN_ORG, DS_CONFLICT, DS_UNKNOWN]);
-	const ctx: FilterContext = { now: 0, status, vocab: DEPLOY_VOCAB };
-	const q = (query: string) => filterIndices(buildIndex(rows), { ...DEFAULT_FILTER, query }, ctx).map((i) => rows[i].n);
-
-	it("status: new | equal | changed-locally | changed-in-org | conflict | unknown", () => {
-		assert.deepStrictEqual(q("status:new"), ["NewOne"]);
-		assert.deepStrictEqual(q("status:equal"), ["Plain"]);
-		assert.deepStrictEqual(q("status:changed-locally"), ["Edited"]);
-		assert.deepStrictEqual(q("status:changed-in-org"), ["OrgSide"]);
-		assert.deepStrictEqual(q("status:conflict"), ["Clash"]);
-		assert.deepStrictEqual(q("status:unknown"), ["Mystery"]);
-	});
-
-	it("keeps the old aliases working", () => {
-		assert.deepStrictEqual(q("status:changed"), ["OrgSide"]);
-		for (const a of ["modified", "local", "dirty", "modified-locally"]) assert.deepStrictEqual(q(`status:${a}`), ["Edited"], a);
-		assert.deepStrictEqual(q("status:not-in-org"), ["NewOne"]);
-	});
-
-	it("status:inorg is any of equal / changed-* / conflict", () => {
-		assert.deepStrictEqual(q("status:inorg"), ["Plain", "Edited", "OrgSide", "Clash"]);
-		assert.deepStrictEqual(q("status:in-org"), ["Plain", "Edited", "OrgSide", "Clash"]);
-		assert.deepStrictEqual(q("-status:inorg type:ApexClass"), ["NewOne"]);
-	});
-
-	it("combines with the rest of the grammar and with the facet filter", () => {
-		assert.deepStrictEqual(q("status:changed-locally edit"), ["Edited"]);
-		const idx = buildIndex(rows);
-		const f = filterIndices(idx, { ...DEFAULT_FILTER, status: ["new", "unknown"] }, ctx).map((i) => rows[i].n);
-		assert.deepStrictEqual(f, ["NewOne", "Mystery"]);
-		const facets = computeFacets(idx, DEFAULT_FILTER, ctx);
-		assert.deepStrictEqual(facets.status, [1, 1, 1, 1, 1, 1]);
-		assert.strictEqual(facets.status.length, DEPLOY_STATUS_NAMES.length);
-	});
-});
 
 describe("deploy status: pre-deploy check decision", () => {
 	const sel = (key: string) => ({ key, type: key.split(":")[0], name: key.split(":")[1] });

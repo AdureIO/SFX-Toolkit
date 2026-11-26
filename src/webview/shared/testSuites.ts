@@ -1,5 +1,5 @@
 /**
- * The test-suite controls of the deploy options (Deploy panel, Deploy & Retrieve Center): a select of the saved
+ * The test-suite controls of the deploy options (Deploy & Retrieve Metadata): a select of the saved
  * suites, "Save suite" and delete. Selecting a suite checks its classes in the test tree. The suites live in
  * the project (utils/testSuites.ts); the host messages are handled by providers/testSuitesHost.ts.
  * Markup and styles: utils/testSuitesHtml.ts.

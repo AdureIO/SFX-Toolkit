@@ -1,5 +1,5 @@
 /**
- * The retrieve flow of the panels (Org Browser, Deploy & Retrieve Center): confirm what would be
+ * The retrieve flow of the panels (Org Browser, Deploy & Retrieve Metadata): confirm what would be
  * overwritten, retrieve with a cancellable progress notification, refresh the open editors, record the
  * history entry and tell the user. Everything else (which components, what to refresh) is the caller's.
  */

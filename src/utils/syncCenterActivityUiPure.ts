@@ -1,5 +1,5 @@
 /**
- * Deploy & Retrieve Center: what the right panel's operation card and the Activity → Deploys list show (pure, no
+ * Deploy & Retrieve Metadata: what the right panel's operation card and the Activity → Deploys list show (pure, no
  * `vscode`, no DOM): phase and progress texts, elapsed / relative times, row summaries. The data comes from
  * `syncCenterOpPure` (`OpMessage`) and `deployListPure` (`DeployListItem`, `DeployDetails`).
  */

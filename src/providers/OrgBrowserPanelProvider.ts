@@ -24,7 +24,7 @@ import { CompareLease, acquireCompare, compareMode } from "../utils/contentCompa
 import { readLocalInfo } from "../utils/localChangeInfo";
 import { scanProjectCached } from "../utils/projectScanCache";
 import { orgLookupKey } from "../utils/deployStatusPure";
-import { DeployMetadataPanelProvider } from "./DeployMetadataPanelProvider";
+import { runGitStatusSfdxPaths } from "../utils/gitStatusPaths";
 import { reauthenticateOrg } from "../commands/orgCommands";
 import { metadataDiffForFile } from "../commands/metadataDiff";
 import { ListCancelled, expandOnlyTypes, loadListingCache, saveListingCache } from "../utils/orgBrowser/metadataLister";
@@ -510,7 +510,7 @@ export class OrgBrowserPanelProvider {
 		if (!root || !this.local || !this.panel || !this.hasSfdxProject()) return;
 		let dirty: string[] | null = null;
 		try {
-			dirty = await DeployMetadataPanelProvider.runGitStatusSfdxPaths(root);
+			dirty = await runGitStatusSfdxPaths(root);
 		} catch {
 			dirty = null; // not a git repository: file times only
 		}
@@ -678,7 +678,7 @@ ${PROJECT_SELECTOR_CSS}
     <button id="refreshBtn" class="ghost" title="Re-list every type from the org">↻ Refresh</button>
     <span id="cmpInfo" class="muted"></span>
     <button id="cmpBtn" class="ghost" title="Compare the contents of the components that are in the project with the org (the ones that need it; with a filter active: the shown ones again)">≈ Compare contents</button>
-    <button id="centerBtn" class="ghost" title="Open this org and the selection in the Deploy &amp; Retrieve Center">⇄ Open in Deploy &amp; Retrieve Center</button>
+    <button id="centerBtn" class="ghost" title="Open this org and the selection in Deploy &amp; Retrieve Metadata">⇄ Open in Deploy &amp; Retrieve Metadata</button>
     <span class="spacer"></span>
     <span id="selHidden" class="selhidden" hidden><span id="selHiddenText"></span> <button id="selHiddenShow" class="link" title="Reset the filters and show only the selected components">show</button> · <button id="selHiddenClear" class="link" title="Deselect the selected components the current filter hides">clear hidden</button></span>
     <span id="selChip" class="selchip" hidden><button id="selChipText" title="Show only the selected components"></button><button id="selChipClear" title="Clear selection" aria-label="Clear selection">×</button></span>

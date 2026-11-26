@@ -1,5 +1,5 @@
 /**
- * Host side of the Deploy & Retrieve Center's activity features (kept out of `SyncCenterPanelProvider`):
+ * Host side of the Deploy & Retrieve Metadata's activity features (kept out of `SyncCenterPanelProvider`):
  *   - `op`     live state of each deploy / validate / retrieve / delete started from the Center, posted as
  *              `{type:"op", …}` (see `syncCenterOpPure`), with `cancelOp`;
  *   - deploys  the org's recent deploys (Tooling API `DeployRequest`) merged with the local history, the details of
@@ -27,6 +27,8 @@ import { runCommandArgs } from "../utils/commandRunner";
 import { parseCliDeployJson, DeployLiveStatus } from "../utils/deployStatusMap";
 import { getHistory } from "../utils/syncHistory";
 import { Logger } from "../utils/outputChannel";
+import * as path from "path";
+import { readGzipJson, safeFileStem, writeGzipJson } from "../utils/diskCache";
 import { openOrgPath } from "../utils/openOrgPath";
 import { deploymentSetupPath } from "../utils/syncCenterUiPure";
 import {
@@ -56,7 +58,21 @@ export interface ActivityDeps {
 	generation(): number;
 	/** Start a busy phase (the webview's progress bar: `{type:"busy", on, label}`); returns its end. */
 	busy(label: string): () => void;
+	/** The shared disk cache directory (`globalStorage/org-browser`). */
+	cacheDir(): string;
+	/** The selected org's key (the cache is per org). */
+	orgKey(): string;
 }
+
+/** The merged deploy list of an org as stored on disk. */
+interface StoredDeploys {
+	v: 1;
+	at: number;
+	items: DeployListItem[];
+}
+
+/** Older than this, opening the tab refreshes the list in the background. */
+export const DEPLOYS_FRESH_MS = 60_000;
 
 /** Cancels when any of the given tokens does. */
 export function mergeTokens(...tokens: (vscode.CancellationToken | undefined)[]): { token: vscode.CancellationToken; dispose(): void } {
@@ -154,6 +170,7 @@ export class OpenTimings {
 	private readonly t0 = Date.now();
 	private readonly parts: string[] = [];
 	private logged = false;
+	private readonly marked = new Set<string>();
 
 	/** `name` took `ms` (use `since` for a duration from the start of the open). */
 	mark(name: string, ms: number): void {
@@ -163,6 +180,13 @@ export class OpenTimings {
 	/** `name` happened `ms` after the open started. */
 	at(name: string): void {
 		this.parts.push(`${name} @${Date.now() - this.t0} ms`);
+	}
+
+	/** `name` happened `ms` after the open started; only the first call counts. */
+	once(name: string): void {
+		if (this.marked.has(name)) return;
+		this.marked.add(name);
+		this.at(name);
 	}
 
 	log(heading: string): void {
@@ -184,7 +208,18 @@ export class SyncCenterActivity {
 	beginOp(kind: OpKind, label: string, phase: "queued" | "running" = "queued"): OpHandle {
 		const id = `op-${Date.now().toString(36)}-${++this.opSeq}`;
 		// A retrieve has no cancel from the webview (its notification keeps the existing Cancel).
-		const op = new OpHandle(kind, id, label, (m) => this.deps.post({ ...m }), kind !== "retrieve", phase);
+		const op = new OpHandle(
+			kind,
+			id,
+			label,
+			(m) => {
+				this.deps.post({ ...m });
+				// A finished operation changes the org's deploy list: refresh it in the background.
+				if (isFinished(m.phase)) this.prefetchDeploys(2000);
+			},
+			kind !== "retrieve",
+			phase
+		);
 		this.ops.set(id, op);
 		for (const [k, v] of this.ops) {
 			if (this.ops.size <= 30) break;
@@ -200,7 +235,7 @@ export class SyncCenterActivity {
 
 	cancelOp(id: string): void {
 		const op = this.ops.get(id);
-		if (op && !op.cancel()) Logger.info(`Deploy & Retrieve Center: operation ${id} cannot be cancelled from here`);
+		if (op && !op.cancel()) Logger.info(`Deploy & Retrieve Metadata: operation ${id} cannot be cancelled from here`);
 	}
 
 	// ── deploys ──────────────────────────────────────────────────────────────────
@@ -219,7 +254,7 @@ export class SyncCenterActivity {
 			} catch (e) {
 				lastError = String((e as Error)?.message ?? e);
 				const kind = isUnsupportedQueryError(lastError);
-				Logger.info(`Deploy & Retrieve Center: DeployRequest query (${level}) failed: ${lastError.slice(0, 300)}`);
+				Logger.info(`Deploy & Retrieve Metadata: DeployRequest query (${level}) failed: ${lastError.slice(0, 300)}`);
 				if (kind !== "field") break; // the object itself is not available, or the org / network failed: another query will not help
 			}
 		}
@@ -233,24 +268,95 @@ export class SyncCenterActivity {
 		return { rows: undefined, error: lastError.replace(/\s+/g, " ").slice(0, 300) || "Could not list the deploys of the org." };
 	}
 
-	/** `{type:"listDeploys", failedOnly?}` → `{type:"deploys", items, error?}`. */
-	async listDeploys(failedOnly: boolean): Promise<void> {
+	// ── the list on disk ─────────────────────────────────────────────────────────
+
+	private listFile(): string {
+		return path.join(this.deps.cacheDir(), "deploys", `list-${safeFileStem(this.deps.orgKey())}.json.gz`);
+	}
+
+	private async readStored(): Promise<StoredDeploys | undefined> {
+		const d = await readGzipJson<StoredDeploys>(this.listFile());
+		return d && d.v === 1 && Array.isArray(d.items) && typeof d.at === "number" ? d : undefined;
+	}
+
+	/** The last merged list of the selected org, from disk, straight to the webview (it renders it at once). */
+	async sendCachedDeploys(): Promise<void> {
+		if (!this.deps.orgArg()) return;
+		const gen = this.deps.generation();
+		const stored = await this.readStored();
+		if (!stored || gen !== this.deps.generation() || this.listed) return;
+		this.deps.post({ type: "deploys", items: stored.items, at: stored.at, cached: true });
+	}
+
+	private prefetchTimer: ReturnType<typeof setTimeout> | undefined;
+	/** A list newer than the stored one was posted already (a late cache read must not replace it). */
+	private listed = false;
+	private listing = false;
+	/** When the data the webview has was fetched (0 = unknown). */
+	private lastAt = 0;
+
+	/** Refresh the list in the background after `ms` (the first render and the user's clicks are not delayed by it). */
+	prefetchDeploys(ms: number): void {
+		if (this.prefetchTimer) clearTimeout(this.prefetchTimer);
+		this.prefetchTimer = setTimeout(() => {
+			this.prefetchTimer = undefined;
+			if (this.deps.orgArg()) void this.listDeploys(false, true);
+		}, ms);
+	}
+
+	/** Called when the org or project changes: nothing of the previous org is kept. */
+	reset(): void {
+		if (this.prefetchTimer) clearTimeout(this.prefetchTimer);
+		this.prefetchTimer = undefined;
+		this.listed = false;
+		this.lastAt = 0;
+	}
+
+	dispose(): void {
+		this.reset();
+	}
+
+	/** The tab was opened: refresh in the background when what the webview has is older than a minute. */
+	refreshIfStale(): void {
+		if (this.deps.orgArg() && Date.now() - this.lastAt > DEPLOYS_FRESH_MS) void this.listDeploys(false, true);
+	}
+
+	/**
+	 * `{type:"listDeploys", failedOnly?}` → `{type:"deploys", items, at, error?}`. `background`: no progress bar of the
+	 * panel, only the small spinner next to "updated … ago" (`{type:"deploysRefreshing"}`).
+	 */
+	async listDeploys(failedOnly: boolean, background = false): Promise<void> {
+		if (this.listing && background) return;
 		const gen = this.deps.generation();
 		const root = this.deps.projectDir();
 		let org: { rows: OrgDeployRow[] | undefined; error?: string } = { rows: undefined, error: "Choose an org first." };
 		if (this.deps.orgArg()) {
-			const end = this.deps.busy("Listing deploys…");
+			this.listing = true;
+			this.deps.post({ type: "deploysRefreshing", on: true });
+			const end = background ? () => undefined : this.deps.busy("Listing deploys…");
 			try {
 				org = await this.orgDeploys(failedOnly);
 			} catch (e) {
 				org = { rows: undefined, error: String((e as Error)?.message ?? e).replace(/\s+/g, " ").slice(0, 300) };
 			} finally {
 				end();
+				this.listing = false;
 			}
 		}
 		if (gen !== this.deps.generation()) return;
 		const items: DeployListItem[] = mergeDeployLists(org.rows, root ? getHistory(root) : [], { orgLabel: this.deps.orgLabel(), sameOrg: (o) => this.deps.sameOrg(o), failedOnly });
-		this.deps.post({ type: "deploys", items, ...(org.error ? { error: org.error } : {}) });
+		const at = Date.now();
+		this.listed = true;
+		// A failed fetch keeps what the webview shows (cache or earlier list); the notice says why it is not newer.
+		if (org.rows === undefined && background) {
+			this.deps.post({ type: "deploysRefreshing", on: false, ...(org.error ? { error: org.error } : {}) });
+			return;
+		}
+		if (!failedOnly && org.rows !== undefined) {
+			this.lastAt = at;
+			void writeGzipJson(this.listFile(), { v: 1, at, items } satisfies StoredDeploys).catch((e) => Logger.info(`Deploy & Retrieve Metadata: could not write the deploy list cache: ${String(e)}`));
+		}
+		this.deps.post({ type: "deploys", items, at, failedOnly, ...(org.error ? { error: org.error } : {}) });
 	}
 
 	/** `{type:"deployDetails", id}` → `{type:"deployDetails", id, details, error?}`. */
@@ -262,19 +368,33 @@ export class SyncCenterActivity {
 			this.deps.post({ type: "deployDetails", id, details: empty, error: org ? "This entry has no deploy id in the org." : "Choose an org first." });
 			return;
 		}
+		const file = path.join(this.deps.cacheDir(), "deploys", "details", `${id}.json.gz`);
+		// A finished deploy never changes: its details are kept on disk per deploy id.
+		const stored = await readGzipJson<DeployDetails>(file);
+		if (stored && Array.isArray(stored.componentErrors) && Array.isArray(stored.testErrors)) {
+			if (gen === this.deps.generation()) this.deps.post({ type: "deployDetails", id, details: stored });
+			return;
+		}
 		let details = empty;
 		let error: string | undefined;
+		let finished = false;
 		try {
-			details = parseDeployDetails(await getDeployStatus(org, id, true));
+			const raw = await getDeployStatus(org, id, true);
+			finished = raw?.done === true;
+			details = parseDeployDetails(raw);
 		} catch (e) {
 			const first = String((e as Error)?.message ?? e);
 			try {
 				const out = await runCommandArgs("sf", ["project", "deploy", "report", "--job-id", id, "--json", "--target-org", org], this.deps.projectDir(), undefined, false, 60000);
-				details = parseDeployDetails(parseCliDeployJson(out));
+				const raw = parseCliDeployJson(out);
+				finished = (raw as { done?: boolean } | undefined)?.done === true;
+				details = parseDeployDetails(raw);
 			} catch (e2) {
 				error = `${first}`.replace(/\s+/g, " ").slice(0, 300) || String((e2 as Error)?.message ?? e2).slice(0, 300);
 			}
 		}
+		// Only a finished deploy is cached (an in-progress one still changes).
+		if (finished && !error) void writeGzipJson(file, details).catch(() => undefined);
 		if (gen !== this.deps.generation()) return;
 		this.deps.post({ type: "deployDetails", id, details, ...(error ? { error } : {}) });
 	}
@@ -294,6 +414,9 @@ export class SyncCenterActivity {
 		switch (name) {
 			case "listDeploys":
 				void this.listDeploys(msg.failedOnly === true);
+				return true;
+			case "deploysTabOpened":
+				this.refreshIfStale();
 				return true;
 			case "deployDetails":
 				void this.deployDetails(String(msg.id ?? ""));

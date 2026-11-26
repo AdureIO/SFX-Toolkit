@@ -1,5 +1,5 @@
 /**
- * The check right before a deploy / validation, shared by the Deploy panel and the Deploy & Retrieve Center:
+ * The check right before a deploy / validation, shared by Deploy & Retrieve Metadata:
  * ask the org NOW (never the cache) whether any selected component changed since this toolkit last retrieved
  * or deployed it. Lists live only the metadata types of the selected components (folder types: only their
  * folders), then decides with `evaluatePreDeploy`. An org that cannot be asked (expired session, offline)

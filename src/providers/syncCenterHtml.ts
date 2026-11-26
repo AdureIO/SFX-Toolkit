@@ -1,5 +1,5 @@
 /**
- * Markup and styles of the Deploy & Retrieve Center webview (src/webview/syncCenter.ts). The grid look is the
+ * Markup and styles of the Deploy & Retrieve Metadata webview (src/webview/syncCenter.ts). The grid look is the
  * Org Browser's (`GRID_CSS`); the right-hand sections follow the Deploy panel. Theme colours only, through
  * VS Code variables.
  */
@@ -35,7 +35,7 @@ export function syncCenterHtml(o: SyncCenterHtmlOptions): string {
 <meta charset="UTF-8">
 <meta http-equiv="Content-Security-Policy" content="${o.csp}">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Deploy &amp; Retrieve Center</title>
+<title>Deploy &amp; Retrieve Metadata</title>
 <style>
 ${GRID_CSS}
 ${PROJECT_SELECTOR_CSS}
@@ -53,7 +53,8 @@ ${TEST_SUITE_CSS}
     <span id="listedInfo" class="muted"></span>
     <button id="refreshBtn" class="ghost" title="Re-list every type from the org">↻ Refresh</button>
     <span id="cmpInfo" class="muted"></span>
-    <button id="cmpBtn" class="ghost" title="Compare the contents of the components that are in the project with the org (the ones that need it; with a filter active: the shown ones again)">≈ Compare contents</button>
+    <button id="cmpCancel" class="ghost" hidden title="Stop comparing contents">✕ Cancel</button>
+    <button id="cmpBtn" class="primary" title="Compare the contents of the selected components with the org; without a selection, of the project components shown. Nothing is compared until you press this.">≈ Compare contents</button>
   </div>
   <div id="progress" class="progress" hidden role="progressbar" aria-label="Loading"><div id="progressBar"></div></div>
   <div id="banner"></div>
@@ -94,11 +95,13 @@ ${TEST_SUITE_CSS}
       <div class="rp-body">
         <div id="opCard" class="opcard" role="status" aria-live="polite" hidden></div>
 
+        <div class="modebar"><span class="choice mode" id="modeSeg" role="group" aria-label="Action"><button type="button" data-mode="deploy" class="on" aria-pressed="true" title="Deploy or validate components of the project to the org">Deploy</button><button type="button" data-mode="retrieve" aria-pressed="false" title="Retrieve components of the org into the project">Retrieve</button><button type="button" data-mode="delete" aria-pressed="false" title="Delete components that exist only in the org">Delete</button></span></div>
+
         <details class="sec" id="secPresets" open>
           <summary>Presets</summary>
           <div class="sec-body">
             <div class="field"><label class="field-label" for="presetSel">Preset</label>
-              <div class="inline"><select id="presetSel"><option value="">— None —</option></select><button type="button" id="presetSave" class="ghost" title="Save the current selection and options as a preset (shared with the Deploy panel)">Save preset</button></div>
+              <div class="inline"><select id="presetSel"><option value="">— None —</option></select><button type="button" id="presetSave" class="ghost" title="Save the current selection and options as a preset (shared by every action)">Save preset</button></div>
             </div>
           </div>
         </details>
@@ -162,7 +165,7 @@ ${TEST_SUITE_CSS}
       </div>
       <div id="historyPane" class="history" hidden>
         <div class="hist-head">
-          <span class="choice" role="group" aria-label="Activity view"><button type="button" id="segDeploys" class="on" aria-pressed="true" title="Recent deploys and validations of the org (merged with this project's history)">Deploys</button><button type="button" id="segHistory" aria-pressed="false" title="Deploys, validations, retrieves and deletes of this project">History</button></span>
+          <span class="choice" role="group" aria-label="Deployment history view"><button type="button" id="segDeploys" class="on" aria-pressed="true" title="Recent deploys and validations of the org (merged with this project's history)">Deploys</button><button type="button" id="segHistory" aria-pressed="false" title="Deploys, validations, retrieves and deletes of this project">History</button></span>
           <span id="histCount" class="muted"></span><span class="spacer"></span><button type="button" id="histClose" class="linkbtn">Close</button>
         </div>
         <div id="depView" class="act-view">
@@ -179,7 +182,7 @@ ${TEST_SUITE_CSS}
         </div>
       </div>
       <div class="rp-footer">
-        <button type="button" class="tab" id="historyTab" aria-expanded="false" title="Recent deploys of the org, and the deploys, validations, retrieves and deletes of this project">Activity</button>
+        <button type="button" class="tab" id="historyTab" aria-expanded="false" title="Recent deploys of the org, and the deploys, validations, retrieves and deletes of this project">Deployment history</button>
         <span id="statusLine" class="status-line" role="status"></span>
       </div>
     </div>
@@ -220,6 +223,11 @@ const CENTER_CSS = `
 .tab[aria-expanded="true"] { background: var(--asfx-accent); color: var(--vscode-button-foreground); border-color: transparent; }
 button.ghost.sm { height: 24px; padding: 0 8px; font-size: 12px; }
 button.ghost.sm.on { background: color-mix(in srgb, var(--ob-accent) 16%, transparent); }
+.modebar { display: flex; }
+.choice.mode { width: 100%; }
+.choice.mode button { flex: 1; height: 26px; font-size: 12px; font-weight: 600; }
+.sec[hidden] { display: none; }
+.row.dim { opacity: .42; }
 .sec { border: 1px solid var(--ob-border); border-radius: 6px; background: var(--asfx-card-bg); }
 .sec > summary { cursor: pointer; padding: 8px 12px; font-size: 11px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; user-select: none; }
 .sec[open] > summary { border-bottom: 1px solid var(--ob-border); }

@@ -22,7 +22,9 @@ import {
 	quickActionCounts,
 	quickActionKeys,
 	retrieveCandidates,
+	normalizeMode,
 	skippedText,
+	takesPart,
 	unresolvedText,
 } from "../utils/syncCenterPure";
 import { DEFAULT_FILTER, FilterContext, buildIndex, filterIndices, parseQuery } from "../utils/orgBrowser/filter";
@@ -286,5 +288,22 @@ describe("sync center quick actions", () => {
 
 	it("which rows can be diffed", () => {
 		assert.deepStrictEqual(ROWS.filter(isDiffable).map((r) => r.key), ["ApexClass:EQ", "ApexClass:CL", "ApexClass:CO", "ApexClass:CF1", "ApexClass:CF2"]);
+	});
+});
+
+describe("sync center action modes", () => {
+	const row = (local: boolean, inOrg: boolean, status: string) => ({ local, inOrg, status: status as SyncRow["status"] });
+	it("deploy needs local files, retrieve needs the org copy, delete only takes only-org rows", () => {
+		assert.strictEqual(takesPart("deploy", row(true, false, "only-local")), true);
+		assert.strictEqual(takesPart("deploy", row(false, true, "only-org")), false);
+		assert.strictEqual(takesPart("retrieve", row(true, false, "only-local")), false);
+		assert.strictEqual(takesPart("retrieve", row(true, true, "equal")), true);
+		assert.strictEqual(takesPart("delete", row(false, true, "only-org")), true);
+		assert.strictEqual(takesPart("delete", row(true, true, "changed-locally")), false);
+	});
+	it("an unknown stored mode is deploy", () => {
+		assert.strictEqual(normalizeMode(undefined), "deploy");
+		assert.strictEqual(normalizeMode("delete"), "delete");
+		assert.strictEqual(normalizeMode("x"), "deploy");
 	});
 });

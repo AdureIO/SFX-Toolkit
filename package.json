@@ -97,7 +97,7 @@
       },
       {
         "command": "adure-sfx-toolkit.deployMetadata",
-        "title": "ASFXT: Deploy Metadata"
+        "title": "ASFXT: Deploy & Retrieve Metadata (alias)"
       },
       {
         "command": "adure-sfx-toolkit.executeAnonymous",
@@ -253,7 +253,7 @@
       },
       {
         "command": "adure-sfx-toolkit.openSyncCenter",
-        "title": "ASFXT: Deploy & Retrieve Center",
+        "title": "ASFXT: Deploy & Retrieve Metadata",
         "icon": "$(git-compare)"
       },
       {
@@ -615,7 +615,7 @@
           "group": "navigation"
         },
         {
-          "command": "adure-sfx-toolkit.deployMetadata",
+          "command": "adure-sfx-toolkit.openSyncCenter",
           "when": "view == adure-sfx-toolkit.development",
           "group": "inline"
         },
@@ -821,6 +821,10 @@
         }
       ],
       "commandPalette": [
+        {
+          "command": "adure-sfx-toolkit.deployMetadata",
+          "when": "false"
+        },
         {
           "command": "adure-sfx-toolkit.updateProjectFromOrg",
           "when": "adure-sfx-toolkit:isSalesforceProject"
@@ -1037,17 +1041,17 @@
         "adure-sfx-toolkit.deploy.liveStatus": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "In the **Deploy Metadata** panel, show live status by polling the Metadata REST API for structured progress (stage, components X/Y, tests X/Y) and routing failures to the Problems view. Turn **off** to stream the classic `sf project deploy start` CLI output instead. (Push/Pull always run a synchronous deploy so source tracking stays correct — this setting does not affect them.)"
+          "markdownDescription": "In **Deploy & Retrieve Metadata**, show live status by polling the Metadata REST API for structured progress (stage, components X/Y, tests X/Y) and routing failures to the Problems view. Turn **off** to stream the classic `sf project deploy start` CLI output instead. (Push/Pull always run a synchronous deploy so source tracking stays correct — this setting does not affect them.)"
         },
         "adure-sfx-toolkit.compare.verifyContents": {
           "type": "string",
           "enum": ["auto", "manual"],
           "enumDescriptions": [
             "Compare contents in the background as soon as the org listing is available.",
-            "Only compare contents when you press Compare contents in the Deploy Metadata panel or the Org Browser."
+            "Only compare contents when you press Compare contents in Deploy & Retrieve Metadata or the Org Browser."
           ],
-          "default": "auto",
-          "markdownDescription": "How the **Deploy Metadata** panel and the **Org Browser** confirm \"Equal\" and correct \"Changed locally / in org\": the status first comes from dates (shown dashed), then a background content diff retrieves the org's copy of each component into a private cache (never into your project) and compares it with your local files. `auto` starts it when the org listing is available; `manual` waits for the **Compare contents** button."
+          "default": "manual",
+          "markdownDescription": "How **Deploy & Retrieve Metadata** and the **Org Browser** confirm \"Equal\" and correct \"Changed locally / in org\": the status first comes from dates (shown dashed), then a background content diff retrieves the org's copy of each component into a private cache (never into your project) and compares it with your local files. `manual` (default) compares only when you press the **Compare contents** button, so opening is fast; `auto` starts it when the org listing is available."
         },
         "adure-sfx-toolkit.apex.validateOnSave": {
           "type": "boolean",

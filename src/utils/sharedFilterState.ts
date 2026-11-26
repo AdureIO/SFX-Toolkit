@@ -1,5 +1,5 @@
 /**
- * Host side of the filter state the Org Browser and the Deploy Metadata panel share per project
+ * Host side of the filter state the Org Browser and Deploy & Retrieve Metadata share per project
  * (search text and type selection; see sharedFilterPure.ts). Stored in the workspaceState under
  * `asfx.metadataFilter.<projectDir>`; a change made by one panel is broadcast so the other one, if open
  * for the same project, updates live.

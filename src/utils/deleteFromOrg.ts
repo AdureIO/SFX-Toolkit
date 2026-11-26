@@ -1,5 +1,5 @@
 /**
- * Delete components from an org with a destructive-changes deploy (Deploy & Retrieve Center, "Delete from org").
+ * Delete components from an org with a destructive-changes deploy (Deploy & Retrieve Metadata, "Delete from org").
  *
  * The UI calls, in this order:
  *   1. `checkOrgForDestructive(org, projectDir)` (orgSafety): is a typed confirmation needed?

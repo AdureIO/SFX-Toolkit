@@ -1,5 +1,5 @@
 /**
- * Deploy & Retrieve Center: the union row model and the button / quick-action rules. Pure (no `vscode`, no
+ * Deploy & Retrieve Metadata: the union row model and the button / quick-action rules. Pure (no `vscode`, no
  * DOM): runs in the extension host, the webview and the tests.
  *
  * Rows are the union of the local index (`scanProject`) and the org listing, keyed by `compKey(type, name)`
@@ -429,4 +429,21 @@ export function quickActionCounts(rows: readonly SyncRow[], visible?: ReadonlySe
 		allChanges: quickActionKeys(rows, "allChanges", visible).length,
 		onlyLocal: quickActionKeys(rows, "onlyLocal", visible).length,
 	};
+}
+
+/** The right panel's action: it decides which section shows and which rows can take part. */
+export type CenterMode = "deploy" | "retrieve" | "delete";
+
+export const CENTER_MODES: readonly CenterMode[] = ["deploy", "retrieve", "delete"];
+
+export function normalizeMode(v: unknown): CenterMode {
+	return v === "retrieve" || v === "delete" ? v : "deploy";
+}
+
+/**
+ * Can this row take part in `mode`? Deploy needs local files, Retrieve needs the component in the org, Delete only
+ * takes rows that exist only in the org. (The button counts apply further rules: equal rows, unresolved conflicts.)
+ */
+export function takesPart(mode: CenterMode, row: Pick<SyncRow, "local" | "inOrg" | "status">): boolean {
+	return mode === "deploy" ? row.local : mode === "retrieve" ? row.inOrg : row.status === "only-org";
 }

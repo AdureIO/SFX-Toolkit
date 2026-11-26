@@ -1,5 +1,5 @@
 /**
- * Compare targets of a panel that lists the org (Org Browser, Deploy & Retrieve Center): the local components
+ * Compare targets of a panel that lists the org (Org Browser, Deploy & Retrieve Metadata): the local components
  * that exist in the org listing, ready for the content compare service, and the result maps the service keys by
  * the local index key.
  */

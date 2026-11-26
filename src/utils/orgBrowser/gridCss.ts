@@ -1,5 +1,5 @@
 /**
- * Shared look of the grid panels (Org Browser, Deploy & Retrieve Center): layout, grid, badges, menu, toast.
+ * Shared look of the grid panels (Org Browser, Deploy & Retrieve Metadata): layout, grid, badges, menu, toast.
  * Colours come from VS Code theme variables only. A panel appends its own rules after `GRID_CSS`.
  */
 import { FILTER_BAR_CSS, FILTER_BAR_VARS } from "../filterBarUi";

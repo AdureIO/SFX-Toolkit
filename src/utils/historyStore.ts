@@ -1,5 +1,5 @@
 /**
- * File store of the Deploy & Retrieve Center history (no `vscode`): one JSON file per project under `dir`
+ * File store of the Deploy & Retrieve Metadata history (no `vscode`): one JSON file per project under `dir`
  * (`<sha1(projectDir)[0:12]>.json`), newest entry first, capped, written debounced and flushable synchronously
  * (deactivate).
  */

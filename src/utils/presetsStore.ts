@@ -1,5 +1,5 @@
 /**
- * Deploy presets of a project, shared by the Deploy panel and the Deploy & Retrieve Center.
+ * Deploy presets of a project, shared by Deploy & Retrieve Metadata.
  *
  * Storage is the file every version has used (`<project>/.vscode/deploy-presets.json`, so presets stay in git
  * and existing users keep theirs); older formats are migrated when read (`migratePreset`), the file is

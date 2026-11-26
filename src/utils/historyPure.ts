@@ -1,5 +1,5 @@
 /**
- * Deploy & Retrieve Center history: the entry type, adding with a cap, (de)serializing, and turning a deploy /
+ * Deploy & Retrieve Metadata history: the entry type, adding with a cap, (de)serializing, and turning a deploy /
  * retrieve result into the entry's error list. Pure (no `vscode`, no I/O).
  */
 import type { ApiDeployResult } from "./deployDiagnostics";

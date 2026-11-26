@@ -1,11 +1,12 @@
-# Deploy & Retrieve Center
+# Deploy & Retrieve Metadata
 
-Status: design, 2026-11-23. This is the shared reference for tasks SC1 and SC2.
+Status: design 2026-11-23, updated 2026-11-26 (the Deploy Metadata panel is replaced; this panel was called the Deploy & Retrieve Center before). Internal identifiers keep the `SyncCenter*` names.
 
 ## Decisions (user)
 
-- **New panel.** The Org Browser and the Deploy Metadata panel stay as they are.
-  - Both get a title-bar or toolbar button "Open in Deploy & Retrieve Center".
+- **Replaces the Deploy Metadata panel.** The Org Browser stays as it is, with a button "Open in Deploy & Retrieve Metadata".
+  - The command id `adure-sfx-toolkit.deployMetadata` stays registered as a hidden alias (user keybindings) and opens this panel; opened from an Explorer or editor context menu with files or folders it selects their components and adjusts the filter so they show.
+  - The Development view button and tree item open this panel.
 - **Direction: smart sync plus manual.**
   - There is one selection with two buttons, `Retrieve (n)` and `Deploy (n)`.
   - The filters and the header checkbox ("select all shown rows") preselect the obvious work. There are no quick actions.
@@ -15,11 +16,11 @@ Status: design, 2026-11-23. This is the shared reference for tasks SC1 and SC2.
   - delete from the org;
   - history;
   - presets shared with the Deploy panel.
-- **Right-hand options are contextual:**
-  - a Presets section (the preset select and "Save preset"); the org is chosen in the top bar only;
-  - a Deploy section;
-  - a Retrieve section;
-  - a Delete section (danger, collapsed).
+- **Right-hand options follow the chosen action:**
+  - a segmented control **Deploy | Retrieve | Delete** under the operation card (default Deploy, remembered in the UI state);
+  - a Presets section (always visible; the org is chosen in the top bar only);
+  - only the chosen action's section (Deploy, Retrieve or Delete with danger styling); the others are hidden, not collapsed;
+  - the grid follows: rows that cannot take part in the action (Deploy needs local files, Retrieve needs the org copy, Delete takes only-org rows) are dimmed and cannot be ticked; select-all and the counts use the participating rows.
 
 ## Rows
 
@@ -50,7 +51,7 @@ Statuses come from `compareStatusPure.ts` plus the content compare service, the 
   - search (`filterSearchMarkup`);
   - "Listed …" info;
   - Refresh;
-  - "Compare contents" plus the compare progress text.
+  - **Compare contents (n)**, a primary button: compares the selected components, else the project components shown. Contents are never compared automatically (`compare.verifyContents` defaults to `manual`; `auto` still works). The progress text and a Cancel button show while it runs.
 - **Left:** the filter sidebar (`filterGroupsMarkup`): status, type, namespace, modified. It is identical to the Org Browser, including collapse and auto-hide below 560 px.
 - **Center:** the Org Browser-style virtual grid.
   - Columns: a checkbox (header: select all shown rows), then the columns of the column layout (below).
@@ -84,7 +85,9 @@ Statuses come from `compareStatusPure.ts` plus the content compare service, the 
      - Its own test level (No Test Run / Run Specified Tests / Run Local Tests / Run All Tests) and, for specified tests, the test-class tree and suites (the shared component, a second instance).
      - Production cannot use No Test Run (an org that could not be verified counts as production): the delete is refused. On a non-production org, deleting Apex classes or triggers with No Test Run is allowed and shows a hint.
      - Button `Delete from org (n)`. It counts only selected `only-org` rows.
-  - Footer tabs: **History** | status line.
+  - Footer tabs: **Deployment history** | status line. Segments: **Deploys** (default; the org's recent deploys merged with local history) and **History** (local deploys, validations, retrieves, deletes).
+    - The merged deploy list per org is stored in the shared disk cache (`org-browser/deploys/list-<org>.json.gz`), sent to the webview when the org loads, refreshed in the background after the first render, when an operation ends, and when the tab opens with data older than 60 s. The tab shows "updated … ago" and a spinner while it refreshes; it never shows an empty state when cached data exists.
+    - Details of a finished deploy are cached per deploy id (`deploys/details/<id>.json.gz`); in-progress deploys are not cached.
 
 ## Button counts and rules
 
@@ -150,5 +153,39 @@ Statuses come from `compareStatusPure.ts` plus the content compare service, the 
 | ID | Scope | Model | Depends on |
 |---|---|---|---|
 | SC1 | Engine: union row model (pure) and center status vocab; compare service keeps org copies plus `orgCopyFiles`/`fetchOrgCopy`; diff opener; destructive-changes builder (pure) and delete runner; history store (pure plus host) wired into the Deploy panel, the Org Browser and the right-click commands; shared presets store with migration; tests | sonnet | none |
-| SC2 | Center panel: provider, webview (esbuild entry), layout above, selection rules and button counts, quick actions, conflict chips, diff action, delete flow, History tab, presets, open buttons in the two existing panels, command `adure-sfx-toolkit.openSyncCenter` ("Deploy & Retrieve Center") in the palette | sonnet | SC1 |
+| SC2 | Center panel: provider, webview (esbuild entry), layout above, selection rules and button counts, quick actions, conflict chips, diff action, delete flow, History tab, presets, open buttons in the two existing panels, command `adure-sfx-toolkit.openSyncCenter` ("Deploy & Retrieve Metadata") in the palette | sonnet | SC1 |
 | SC3 | Combined gate, review, test VSIX | lead | SC2 |
+
+## Opening fast
+
+- The project's components render from the stored local index (and stored change times) before the org list, the org check or the test-class scan are done; those follow in separate messages (`orgs`, `testClasses`).
+- The org listing comes from the shared cache first and refreshes in the background; statuses update when it arrives.
+- The "open:" log line carries a `first rows @… ms` timestamp (first local index posted to the webview).
+
+## Parity with the removed Deploy Metadata panel
+
+| Deploy panel feature | Deploy & Retrieve Metadata |
+|---|---|
+| Component grid with status against the org, type groups, filters, search | present (union grid, In project filter, column chooser) |
+| Search text and type selection shared with the Org Browser | present |
+| Org picker, project selector, default org change | present |
+| Test level (No tests, Run local, Run relevant, Specified), test class tree, search | present |
+| Named test suites | present |
+| Validate only (dry run) | present |
+| Auto-select Git changes, "Select changed (Git)" | present; the saved auto option is restored when the panel opens |
+| Presets (select, save, shared store) | present |
+| Re-deploy from the Deployment History command | ported: opens the panel with selection, test level, validate flag and tests |
+| Deploy from Explorer / editor context with paths | ported: `deployMetadata` alias takes the URIs (the context-menu commands "Deploy to Default Org" never opened the panel) |
+| Pre-deploy live org check and confirmation | present |
+| Hidden-selection prompt | present |
+| Production org confirmation | present |
+| Live progress, cancel | present (operation card) |
+| Result bar, tests, coverage panel | present |
+| Problems-view diagnostics and notifications | present (shared `reportDeployOutcome`) |
+| Classic deployment history entries (Deployment History command) | ported: the panel writes them too |
+| New history (local) | present |
+| Compare contents button, progress | present (on demand, with Cancel) |
+| Project switch deferred while a deploy runs | ported (also for retrieve and delete) |
+| Keyboard navigation in the grid | present |
+| Quality gate (`deployQualityGate.ts`) | not wired in the removed panel either; open question |
+| Dirty-preset "save changes?" modal when switching presets | missing; open question |

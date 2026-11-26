@@ -1,5 +1,5 @@
 /**
- * Deploy & Retrieve Center webview: the union of the local project and the org's metadata in a virtualized grid
+ * Deploy & Retrieve Metadata webview: the union of the local project and the org's metadata in a virtualized grid
  * with the filter sidebar, one selection, per-row Deploy / Retrieve / Diff and conflict choices, and the Deploy / Retrieve /
  * Delete sections plus the history. Bundled by esbuild to resources/webview/syncCenter.js; talks to
  * SyncCenterPanelProvider via postMessage.
@@ -39,6 +39,9 @@ import {
 	deployCandidates,
 	isDiffable,
 	retrieveCandidates,
+	CenterMode,
+	normalizeMode,
+	takesPart,
 } from "../utils/syncCenterPure";
 import {
 	buttonState,
@@ -122,6 +125,8 @@ interface UiState {
 	statusDefault?: boolean;
 	filtersCollapsed?: boolean;
 	rightWidth?: number;
+	/** The action chosen at the top of the right panel. */
+	mode?: CenterMode;
 	opts: Options;
 	/** Conflict choices per project and org (`choicesStoreKey`). */
 	choices: Record<string, Record<string, ConflictChoice>>;
@@ -241,8 +246,8 @@ let curOp: OpMessage | null = null;
 let deploys: DeployListItem[] | null = null;
 let deploysError = "";
 let deploysLoading = false;
-/** The list is out of date (an op finished or the org changed while the tab was closed): reload on the next open. */
-let deploysStale = true;
+/** When the shown list was fetched (a cached list: when it was cached); 0 = none. */
+let deploysAt = 0;
 let deployFailedOnly = false;
 const deployExpanded = new Set<string>();
 /** Details fetched per deploy id (kept until the org changes). */
@@ -551,6 +556,8 @@ function cellHtml(id: ColumnId, r: SyncRow, c: Comp): string {
 	}
 }
 
+const modeOf = (): CenterMode => normalizeMode(ui.mode);
+
 function rowHtml(pos: number, i: number): string {
 	const r = syncRows[i];
 	const c = idx.comps[i];
@@ -558,9 +565,11 @@ function rowHtml(pos: number, i: number): string {
 	const failed = results.get(r.key);
 	let cells = "";
 	for (const col of visibleColumns(layout)) cells += cellHtml(col.id, r, c);
+	// Rows that cannot take part in the chosen action are dimmed (and cannot be ticked, unless they already are).
+	const part = takesPart(modeOf(), r);
 	return (
-		`<div class="row${sel ? " sel" : ""}${pos === active ? " active" : ""}${failed && !failed.ok ? " failed" : ""}" data-pos="${pos}" role="row" aria-selected="${sel}">` +
-		`<span class="c cb"><input type="checkbox" class="rowcb" tabindex="-1" ${sel ? "checked" : ""} aria-label="Select ${esc(r.name)}"></span>` +
+		`<div class="row${sel ? " sel" : ""}${pos === active ? " active" : ""}${failed && !failed.ok ? " failed" : ""}${part ? "" : " dim"}" data-pos="${pos}" role="row" aria-selected="${sel}">` +
+		`<span class="c cb"><input type="checkbox" class="rowcb" tabindex="-1" ${sel ? "checked" : ""}${part || sel ? "" : " disabled"} aria-label="Select ${esc(r.name)}"></span>` +
 		cells +
 		`</div>`
 	);
@@ -623,14 +632,17 @@ function renderGridChrome(): void {
 	$("spacer").style.height = items.length * ROW_H + "px";
 	const total = idx.comps.length;
 	$("countInfo").textContent = total ? (rows.length === total ? `${total.toLocaleString()} components` : `${rows.length.toLocaleString()} of ${total.toLocaleString()} components`) : "";
-	const allSel = rows.length > 0 && rows.every((i) => selected.has(keyAt(i)));
+	const mode = modeOf();
+	const part = rows.filter((i) => takesPart(mode, syncRows[i]));
+	const allSel = part.length > 0 && part.every((i) => selected.has(keyAt(i)));
 	const selAll = $("selAll");
-	selAll.textContent = allSel ? `Deselect filtered (${rows.length.toLocaleString()})` : `Select all filtered (${rows.length.toLocaleString()})`;
-	selAll.toggleAttribute("disabled", rows.length === 0);
+	selAll.textContent = allSel ? `Deselect filtered (${part.length.toLocaleString()})` : `Select all filtered (${part.length.toLocaleString()})`;
+	selAll.title = part.length < rows.length ? `${(rows.length - part.length).toLocaleString()} shown row(s) cannot take part in ${mode === "deploy" ? "a deploy" : mode === "retrieve" ? "a retrieve" : "a delete"}` : "";
+	selAll.toggleAttribute("disabled", part.length === 0);
 	($("groupToggle") as HTMLInputElement).checked = ui.group;
 	const hc = $("headCb") as HTMLInputElement;
 	hc.checked = allSel;
-	hc.indeterminate = !allSel && rows.some((i) => selected.has(keyAt(i)));
+	hc.indeterminate = !allSel && part.some((i) => selected.has(keyAt(i)));
 	for (const th of document.querySelectorAll<HTMLElement>(".hcell[data-sort]")) {
 		const k = th.dataset.sort;
 		th.classList.toggle("sorted", k === ui.sort.key);
@@ -639,6 +651,7 @@ function renderGridChrome(): void {
 	const hidden = hiddenSelected().length;
 	$("selHidden").hidden = hidden === 0;
 	$("selHiddenText").textContent = `${hidden.toLocaleString()} selected hidden by filter —`;
+	renderCompareInfo(); // the button's count follows the selection and the filter
 }
 
 // ── Rendering: top bar, listing state ──────────────────────────────────────────
@@ -672,7 +685,22 @@ function renderCompareInfo(): void {
 	el.textContent = progressText(cmpProgress);
 	const failed = cmpProgress?.failed ?? 0;
 	el.title = failed > 0 ? `${failed} component${failed === 1 ? "" : "s"} could not be compared (they keep the date-based status)` : "";
-	$("cmpBtn").toggleAttribute("disabled", noOrg || !hasProject);
+	const running = cmpProgress?.state === "running";
+	const n = compareKeys().keys.length;
+	$("cmpBtn").textContent = `≈ Compare contents${n > 0 ? ` (${n.toLocaleString()})` : ""}`;
+	$("cmpBtn").toggleAttribute("disabled", noOrg || !hasProject || !listedAt || n === 0);
+	$("cmpCancel").hidden = !running;
+}
+
+/** What "Compare contents" works on: the selected rows that are in the project, else the project rows the filter shows. */
+function compareKeys(): { keys: string[]; force: boolean } {
+	ensureRows();
+	const isLocal = (k: string) => {
+		const i = rowIndex.get(k);
+		return i !== undefined && syncRows[i].local;
+	};
+	if (selected.size > 0) return { keys: [...selected].filter(isLocal), force: true };
+	return { keys: rows.map(keyAt).filter(isLocal), force: rows.length < idx.comps.length };
 }
 
 function renderOverlay(): void {
@@ -754,7 +782,22 @@ function currentDeleteLevel(): string {
 	return document.querySelector<HTMLInputElement>('input[name="delTestLevel"]:checked')?.value || ui.opts.delTestLevel;
 }
 
+/** Show only the chosen action's section (the others are hidden, not collapsed); Presets stay. */
+function applyMode(): void {
+	const mode = modeOf();
+	$("secDeploy").hidden = mode !== "deploy";
+	$("secRetrieve").hidden = mode !== "retrieve";
+	$("secDelete").hidden = mode !== "delete";
+	for (const b of document.querySelectorAll<HTMLButtonElement>("#modeSeg button")) {
+		const on = b.dataset.mode === mode;
+		b.classList.toggle("on", on);
+		b.setAttribute("aria-pressed", String(on));
+	}
+	$("secDelete").setAttribute("open", "");
+}
+
 function renderRight(): void {
+	applyMode();
 	const blocked = blockedReason();
 	const busy = opPending || busyOp !== null;
 	const sel = selected.size;
@@ -960,19 +1003,23 @@ function onOpMessage(m: OpMessage): void {
 	const prev = curOp?.id === m.id ? curOp : undefined;
 	curOp = m;
 	renderOpCard();
-	if (opJustFinished(prev, m)) {
-		deploysStale = true;
-		if (historyOpen && activitySeg === "deploys") loadDeploys();
-	}
+	// The host refreshes the deploy list in the background when an operation finishes (`deploys` follows).
+	void opJustFinished(prev, m);
 }
 
 // ── Activity: recent deploys ───────────────────────────────────────────────────
 
 function loadDeploys(): void {
-	deploysStale = false;
 	deploysLoading = true;
-	post({ command: "listDeploys", failedOnly: deployFailedOnly });
+	// The host always lists everything (the cache holds that list); "Failed only" filters here.
+	post({ command: "listDeploys", failedOnly: false });
 	renderDeploys();
+}
+
+/** The Deploys segment is shown: nothing yet = fetch; something = the host refreshes it if it is older than a minute. */
+function openedDeploys(): void {
+	if (deploys === null && !deploysLoading) loadDeploys();
+	else post({ command: "deploysTabOpened" });
 }
 
 /** Open the Activity tab on the Deploys segment, expand the deploy and fetch its details. */
@@ -981,7 +1028,7 @@ function showDeployDetails(deployId: string): void {
 	activitySeg = "deploys";
 	deployExpanded.add(deployId);
 	requestDeployDetails(deployId);
-	if (deploysStale || deploys === null) loadDeploys();
+	if (deploys === null && !deploysLoading) loadDeploys();
 	else renderHistory();
 }
 
@@ -1029,15 +1076,17 @@ function renderDeploys(): void {
 	notice.hidden = !deploysError;
 	notice.textContent = deploysError;
 	const list = $("depList");
-	$("histCount").textContent = deploys && !deploysLoading ? `${deploys.length} deploy${deploys.length === 1 ? "" : "s"}` : "";
-	$("depCount").textContent = deploysLoading ? "Loading…" : "";
-	if (deploys === null) {
+	const shown = deploys ? (deployFailedOnly ? deploys.filter((d) => d.ok === false) : deploys) : null;
+	$("histCount").textContent = shown ? `${shown.length} deploy${shown.length === 1 ? "" : "s"}` : "";
+	// "updated 2 min ago" plus a small spinner while a refresh runs; cached data stays on screen meanwhile.
+	$("depCount").innerHTML = `${deploysLoading ? '<span class="op-spin" aria-hidden="true"></span> ' : ""}${deploysAt ? `updated ${esc(relativeTime(deploysAt, Date.now()))}` : deploysLoading ? "Loading…" : ""}`;
+	if (shown === null) {
 		list.innerHTML = `<div class="muted" style="padding:10px">${deploysLoading ? "Loading recent deploys…" : "Not loaded yet."}</div>`;
 		return;
 	}
 	const now = Date.now();
 	list.innerHTML =
-		deploys
+		shown
 			.map((i) => {
 				const v = deployRowView(i, now);
 				const open = deployExpanded.has(i.id);
@@ -1089,11 +1138,11 @@ function resetActivity(): void {
 	deploys = null;
 	deploysError = "";
 	deploysLoading = false;
-	deploysStale = true;
+	deploysAt = 0;
 	deployExpanded.clear();
 	deployDetailsCache.clear();
 	deployDetailsAsked.clear();
-	if (historyOpen && activitySeg === "deploys") loadDeploys();
+	// The host sends the new org's cached list with its `reset`, then refreshes it in the background.
 }
 
 // ── Selection ──────────────────────────────────────────────────────────────────
@@ -1111,6 +1160,11 @@ function afterSelectionChange(): void {
 
 function toggleKey(key: string, on?: boolean): void {
 	const want = on ?? !selected.has(key);
+	// A row that cannot take part in the chosen action cannot be ticked (it can always be unticked).
+	if (want) {
+		const i = rowIndex.get(key);
+		if (i !== undefined && !takesPart(modeOf(), syncRows[i])) return;
+	}
 	if (want) selected.add(key);
 	else selected.delete(key);
 }
@@ -1125,14 +1179,18 @@ function selectRange(a: number, b: number, on: boolean): void {
 }
 
 function toggleFiltered(): void {
-	const allSel = rows.length > 0 && rows.every((i) => selected.has(keyAt(i)));
-	for (const i of rows) toggleKey(keyAt(i), !allSel);
+	const mode = modeOf();
+	const part = rows.filter((i) => takesPart(mode, syncRows[i]));
+	const allSel = part.length > 0 && part.every((i) => selected.has(keyAt(i)));
+	for (const i of part) toggleKey(keyAt(i), !allSel);
 	afterSelectionChange();
 }
 
 function toggleGroup(g: Group): void {
-	const all = g.rows.every((i) => selected.has(keyAt(i)));
-	for (const i of g.rows) toggleKey(keyAt(i), !all);
+	const mode = modeOf();
+	const part = g.rows.filter((i) => takesPart(mode, syncRows[i]));
+	const all = part.length > 0 && part.every((i) => selected.has(keyAt(i)));
+	for (const i of part) toggleKey(keyAt(i), !all);
 	afterSelectionChange();
 }
 
@@ -1201,8 +1259,15 @@ function startDeploy(keys: string[], conflict: boolean, withVisible: boolean): v
 		testClassNames: tests.length ? tests : undefined,
 		dryRun: ui.opts.validateOnly,
 		label: label || undefined,
+		presetName: loadedPresetName(),
 		conflict: conflict || undefined,
 	});
+}
+
+/** The name of the preset chosen in the Presets section (it goes into the deployment history). */
+function loadedPresetName(): string | undefined {
+	const v = ($("presetSel") as HTMLSelectElement).value;
+	return v !== "" ? presets[Number(v)]?.name : undefined;
 }
 
 /** Retrieve `keys` (row keys) with the Retrieve section's options (see `startDeploy` for the flags). */
@@ -1405,12 +1470,14 @@ function setupEvents(): void {
 	};
 	$("org").addEventListener("change", onOrgChange);
 	$("refreshBtn").addEventListener("click", () => post({ command: "refresh" }));
-	// Compare contents: what needs it; with a filter active, the shown components again (forced).
+	// Compare contents: only on demand. The selected components, else the project components the filter shows.
 	$("cmpBtn").addEventListener("click", () => {
-		const filtered = rows.length < idx.comps.length;
-		post(filtered ? { command: "compareContents", force: true, keys: rows.map(keyAt) } : { command: "compareContents", force: false });
-		toast(filtered ? `Comparing the contents of ${rows.length.toLocaleString()} shown component${rows.length === 1 ? "" : "s"}…` : "Comparing contents…");
+		const { keys, force } = compareKeys();
+		if (keys.length === 0) return;
+		post({ command: "compareContents", force, keys });
+		toast(`Comparing the contents of ${keys.length.toLocaleString()} component${keys.length === 1 ? "" : "s"}…`);
 	});
+	$("cmpCancel").addEventListener("click", () => post({ command: "cancelCompare" }));
 	$("filtersToggle").addEventListener("click", () => {
 		ui.filtersCollapsed = sideVisible();
 		applyFiltersOpen();
@@ -1741,6 +1808,15 @@ function setupRightPanel(): void {
 		post({ command: "gitSelect" });
 	});
 
+	$("modeSeg").addEventListener("click", (e) => {
+		const b = (e.target as HTMLElement).closest<HTMLElement>("button[data-mode]");
+		if (!b) return;
+		ui.mode = normalizeMode(b.dataset.mode);
+		renderRight();
+		renderGridChrome();
+		invalidateRows();
+		saveUi();
+	});
 	$("deployBtn").addEventListener("click", doDeploy);
 	$("retrieveBtn").addEventListener("click", doRetrieve);
 	$("deleteBtn").addEventListener("click", doDelete);
@@ -1769,13 +1845,14 @@ function setupRightPanel(): void {
 	// History
 	$("historyTab").addEventListener("click", () => {
 		historyOpen = !historyOpen;
-		if (historyOpen && activitySeg === "deploys" && (deploysStale || deploys === null)) loadDeploys();
-		else renderHistory();
+		// Only renders what is there; the host refreshes in the background when it is older than a minute.
+		renderHistory();
+		if (historyOpen && activitySeg === "deploys") openedDeploys();
 	});
 	$("segDeploys").addEventListener("click", () => {
 		activitySeg = "deploys";
-		if (deploysStale || deploys === null) loadDeploys();
-		else renderHistory();
+		renderHistory();
+		openedDeploys();
 	});
 	$("segHistory").addEventListener("click", () => {
 		activitySeg = "history";
@@ -1784,7 +1861,7 @@ function setupRightPanel(): void {
 	$("depRefresh").addEventListener("click", loadDeploys);
 	$("depFailed").addEventListener("click", () => {
 		deployFailedOnly = !deployFailedOnly;
-		loadDeploys();
+		renderDeploys();
 	});
 	$("depList").addEventListener("click", onDeployListClick);
 	$("opCard").addEventListener("click", onOpCardClick);
@@ -2061,7 +2138,20 @@ window.addEventListener("message", (ev) => {
 			renderOrgSelect();
 			if (Array.isArray(m.selection) && m.selection.length > 0) selected = new Set<string>((m.selection as string[]).map(rowKeyOf));
 			recompute();
+			// "Auto-select Git changes" was on when the panel closed: the host watches again (it selects with the first change times).
+			if (ui.opts.autoGit) post({ command: "autoGit", on: true, restore: true });
 			break;
+		case "testClasses": {
+			// The scan finished after the first render: fill both lists, keeping what was already ticked.
+			testClasses = m.testClasses ?? [];
+			const ticked = new Map<string, Set<string>>();
+			for (const id of ["test-list", "del-test-list"]) ticked.set(id, new Set([...$(id).querySelectorAll<HTMLInputElement>(".test-class:checked")].map((c) => c.value)));
+			mountTestTree($("test-list"), testClasses, () => renderRight());
+			mountTestTree($("del-test-list"), testClasses, () => renderRight());
+			for (const [id, on] of ticked) for (const cb of $(id).querySelectorAll<HTMLInputElement>(".test-class")) cb.checked = on.has(cb.value);
+			renderRight();
+			break;
+		}
 		case "orgs":
 			orgs = m.orgs ?? [];
 			if (m.org !== undefined) currentOrg = m.org;
@@ -2223,7 +2313,14 @@ window.addEventListener("message", (ev) => {
 		case "deploys":
 			deploys = Array.isArray(m.items) ? (m.items as DeployListItem[]) : [];
 			deploysError = typeof m.error === "string" ? m.error : "";
+			deploysAt = typeof m.at === "number" ? m.at : Date.now();
+			// The spinner follows `deploysRefreshing`; a cached list shows at once either way.
 			deploysLoading = false;
+			if (historyOpen) renderHistory();
+			break;
+		case "deploysRefreshing":
+			deploysLoading = m.on === true;
+			if (m.on === false && typeof m.error === "string") deploysError = m.error;
 			if (historyOpen) renderHistory();
 			break;
 		case "deployDetails":
@@ -2244,6 +2341,20 @@ window.addEventListener("message", (ev) => {
 			break;
 		case "applySelection":
 			selectKeys(Array.isArray(m.keys) ? m.keys.map(String) : [], true);
+			// Opened with a selection (right-click, Org Browser, history): adjust the filter so the selection is visible.
+			if (m.reveal && hiddenSelected().length > 0) {
+				ui.filter = { ...DEFAULT_FILTER, status: initialStatusFilter(undefined, false) };
+				recompute(true);
+				if (hiddenSelected().length > 0) {
+					ui.filter = { ...DEFAULT_FILTER };
+					recompute(true);
+				}
+				bar.syncSearchInput();
+				saveUi();
+			}
+			break;
+		case "applyPreset":
+			if (m.preset) applyPreset(m.preset as WebPreset);
 			break;
 		case "modifiedKeys": {
 			if (m.error) {
