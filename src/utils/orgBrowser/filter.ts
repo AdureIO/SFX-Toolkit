@@ -150,6 +150,8 @@ export interface FilterContext {
 	status: ArrayLike<number> | null;
 	/** The panel's status vocabulary (default: the Org Browser's). */
 	vocab?: StatusVocab;
+	/** Local change time per row index (epoch ms, 0 = none): the "Modified" window also passes a row whose local time is inside it. */
+	localTimes?: ArrayLike<number>;
 	/** Selected row keys (`Type:fullName`). */
 	selected?: ReadonlySet<string>;
 	/** Current user: ids (lastModifiedById) and/or display name. */
@@ -308,6 +310,11 @@ interface Predicates {
 
 const always: RowTest = () => true;
 
+/** A row passes the "Modified" window when its org date OR its local change time lies inside it (0 = unknown). */
+export function withinWindow(orgLm: number, localT: number, lo: number, hi: number): boolean {
+	return (orgLm > 0 && orgLm >= lo && orgLm <= hi) || (localT > 0 && localT >= lo && localT <= hi);
+}
+
 function buildPredicates(idx: SearchIndex, state: FilterState, ctx: FilterContext): Predicates {
 	const comps = idx.comps;
 	const vocab = ctx.vocab ?? ORG_BROWSER_VOCAB;
@@ -330,10 +337,8 @@ function buildPredicates(idx: SearchIndex, state: FilterState, ctx: FilterContex
 		} else {
 			lo = ctx.now - (WINDOW_MS[state.within] ?? 0);
 		}
-		baseTests.push((i) => {
-			const lm = comps[i].lm;
-			return lm > 0 && lm >= lo && lm <= hi;
-		});
+		const lt = ctx.localTimes;
+		baseTests.push((i) => withinWindow(comps[i].lm, lt ? lt[i] : 0, lo, hi));
 	}
 	if (state.onlySelected) {
 		const sel = ctx.selected ?? new Set<string>();

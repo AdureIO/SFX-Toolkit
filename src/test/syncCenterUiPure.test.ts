@@ -19,7 +19,7 @@ import {
 	deleteCandidates,
 	retrieveCandidates,
 } from "../utils/syncCenterPure";
-import { DEFAULT_FILTER, FilterContext, buildIndex, computeFacets, filterIndices, parseQuery } from "../utils/orgBrowser/filter";
+import { DEFAULT_FILTER, FilterContext, buildIndex, computeFacets, filterIndices, parseQuery, withinWindow } from "../utils/orgBrowser/filter";
 import {
 	buttonState,
 	choicesFromJson,
@@ -32,7 +32,12 @@ import {
 	historyDeployLocalKeys,
 	historyRowKeys,
 	historyViews,
+	choiceTitle,
 	conflictPrompt,
+	nextChoice,
+	retrieveProjectPrompt,
+	selectionSummary,
+	selectionSummaryTitle,
 	initialGroup,
 	initialStatusFilter,
 	objectOfChild,
@@ -240,6 +245,27 @@ describe("sync center ui rules", () => {
 			assert.strictEqual(k.unresolvedConflicts, 0);
 		});
 
+		it("a changed-in-org row deploys (button enabled) and is flagged for the confirmation", () => {
+			const c = deployCandidates(rows, sel("ApexClass:E1", "ApexClass:O1"), new Map(), true);
+			// E1 is equal (skipped), O1 only in org (skipped): nothing. Now a changed-in-org row:
+			assert.strictEqual(buttonState(input(c, { selected: 2 })).disabled, true);
+			const co = [{ ...rows.find((r) => r.key === "ApexClass:E1")!, status: "changed-in-org" as const, code: 3 }, rows.find((r) => r.key === "ApexClass:E1")!];
+			const d = deployCandidates([co[0]], sel("ApexClass:E1"), new Map(), true);
+			assert.strictEqual(buttonState(input(d)).label, "Deploy (1)");
+			assert.strictEqual(buttonState(input(d)).disabled, false);
+			assert.deepStrictEqual(d.unresolvedKeys, ["ApexClass:E1"]);
+		});
+
+		it("selectionSummary: hidden with nothing selected, link text and tooltip", () => {
+			assert.strictEqual(selectionSummary("deploy", 0, 0, false), "");
+			assert.strictEqual(selectionSummary("deploy", 0, 0, true), "0 selected · 0 to deploy · 0 skipped — show all");
+			assert.strictEqual(selectionSummary("deploy", 2, 0, false), "2 selected · 0 to deploy · 2 skipped");
+			assert.strictEqual(selectionSummary("deploy", 5, 3, false, 2), "5 selected (2 hidden) · 3 to deploy · 2 skipped");
+			assert.strictEqual(selectionSummary("retrieve", 2, 1, true), "2 selected · 1 to retrieve · 1 skipped — show all");
+			assert.ok(selectionSummaryTitle([{ reason: "equal", count: 1 }], false).startsWith("1 equal (Skip equal components is on)"));
+			assert.strictEqual(selectionSummaryTitle([], true), "Click to show all components");
+		});
+
 		it("conflictPrompt lists up to 10 names, then +n more", () => {
 			const one = conflictPrompt("deploy", ["ApexClass:A"]);
 			assert.strictEqual(one.action, "Overwrite org");
@@ -434,5 +460,56 @@ describe("history views: label", () => {
 		assert.strictEqual(v.label, "Sprint 42");
 		const [w] = historyViews([{ ...e, label: undefined }], T0 + HOUR);
 		assert.ok(!("label" in w));
+	});
+});
+
+describe("sync center: override toggle", () => {
+	it("cycles unset, keep local, take org, unset", () => {
+		assert.strictEqual(nextChoice(undefined), "local");
+		assert.strictEqual(nextChoice("local"), "org");
+		assert.strictEqual(nextChoice("org"), undefined);
+		assert.ok(choiceTitle("local").startsWith("Keep local"));
+		assert.ok(choiceTitle(undefined).startsWith("No override"));
+	});
+});
+
+describe("sync center: Modified window uses the org date or the local change time", () => {
+	const NOW = Date.UTC(2026, 5, 15, 12);
+	const DAY = 86400_000;
+	const mk = (n: string, lm: number) => ({ t: "ApexClass", n, ns: "", ms: "", by: "", bi: "", lm, cd: 0, id: "", f: "" });
+	// 0 org old / local old, 1 org recent, 2 local recent only (org old), 3 only-local recent (no org date), 4 only-org old
+	const comps = [mk("OldBoth", NOW - 90 * DAY), mk("OrgRecent", NOW - DAY), mk("LocalRecent", NOW - 90 * DAY), mk("OnlyLocal", 0), mk("OnlyOrgOld", NOW - 90 * DAY)];
+	const localTimes = [NOW - 80 * DAY, 0, NOW - 2 * DAY, NOW - 3 * DAY, 0];
+	const idx = buildIndex(comps);
+	const ctx = (lt: ArrayLike<number> | undefined): FilterContext => ({ now: NOW, status: null, localTimes: lt });
+	const names = (lt: ArrayLike<number> | undefined, within: "7d" | "any" = "7d") => filterIndices(idx, { ...DEFAULT_FILTER, within }, ctx(lt)).map((i) => comps[i].n);
+
+	it("withinWindow: either date inside the window passes; 0 means unknown", () => {
+		assert.strictEqual(withinWindow(0, 0, 1, 10), false);
+		assert.strictEqual(withinWindow(5, 0, 1, 10), true);
+		assert.strictEqual(withinWindow(50, 5, 1, 10), true);
+		assert.strictEqual(withinWindow(50, 0, 1, 10), false);
+	});
+
+	it("a row passes when its org date or its local change time is in the last 7 days", () => {
+		assert.deepStrictEqual(names(localTimes), ["OrgRecent", "LocalRecent", "OnlyLocal"]);
+		// without local times only the org date counts (the old behaviour)
+		assert.deepStrictEqual(names(undefined), ["OrgRecent"]);
+		assert.strictEqual(names(localTimes, "any").length, 5);
+	});
+
+	it("the facet counts use the same predicate", () => {
+		const f = computeFacets(idx, { ...DEFAULT_FILTER, within: "7d" }, ctx(localTimes));
+		assert.strictEqual([...f.types.values()].reduce((a, b) => a + b, 0), 3);
+	});
+});
+
+describe("sync center: Retrieve project prompt", () => {
+	it("names count, project and org, and lists up to 10 locally changed components", () => {
+		const changed = Array.from({ length: 12 }, (_, i) => `ApexClass:C${i}`);
+		const p = retrieveProjectPrompt(120, "MyProj", "dev-org", changed);
+		assert.strictEqual(p.message, "Retrieve 120 components of project MyProj from dev-org? Local files will be overwritten.");
+		assert.ok(p.detail.includes("ApexClass:C9") && !p.detail.includes("ApexClass:C10") && p.detail.includes("+2 more"));
+		assert.ok(!retrieveProjectPrompt(1, "P", "o", []).detail.includes("Changed locally"));
 	});
 });

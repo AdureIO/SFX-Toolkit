@@ -231,10 +231,18 @@ export function buttonState(i: ButtonInput): ButtonState {
 
 // ── Selection overview ─────────────────────────────────────────────────────────
 
-/** "Selected: 7 · 5 deploy · 2 skipped" (the breakdown only when something is selected), in the current mode's counting. */
-export function selectionSummary(verb: string, selected: number, taking: number): string {
-	if (selected === 0) return "Selected: 0";
-	return `Selected: ${selected.toLocaleString("en-US")} · ${taking.toLocaleString("en-US")} ${verb} · ${(selected - taking).toLocaleString("en-US")} skipped`;
+/** "5 selected (2 hidden) · 3 to deploy · 2 skipped" (the hidden part when the filter hides selected rows). Form: "2 selected · 0 to deploy · 2 skipped" (+ " — show all" while the only-selected filter is on); "" = hide the link. */
+export function selectionSummary(verb: string, selected: number, taking: number, filterOn = false, hidden = 0): string {
+	if (selected === 0 && !filterOn) return "";
+	const n = (v: number) => v.toLocaleString("en-US");
+	return `${n(selected)} selected${hidden > 0 ? ` (${n(hidden)} hidden)` : ""} · ${n(taking)} to ${verb} · ${n(selected - taking)} skipped${filterOn ? " — show all" : ""}`;
+}
+
+/** Tooltip of the summary link: why rows are skipped ("1 equal (Skip equal components is on)"), else what a click does. */
+export function selectionSummaryTitle(skipped: readonly { reason: string; count: number }[], filterOn: boolean): string {
+	const why = skipped.map((s) => `${s.count} ${s.reason}${s.reason === "equal" ? " (Skip equal components is on)" : ""}`).join(", ");
+	const click = filterOn ? "Click to show all components" : "Click to show only the selected components";
+	return why ? `${why}. ${click}` : click;
 }
 
 // ── Run-time conflict confirmation ─────────────────────────────────────────────
@@ -253,16 +261,22 @@ export function conflictPrompt(mode: "deploy" | "retrieve", keys: readonly strin
 	const deploy = mode === "deploy";
 	if (n === 1) {
 		return {
-			message: deploy ? "Conflict: overwrite the org’s version with your local version?" : "Conflict: overwrite your local version with the org’s version?",
-			detail: `${keys[0]} changed in the project and in the org. ${deploy ? "Deploying replaces the org’s version with the local one." : "Retrieving replaces the local files with the org’s version."}`,
+			message: deploy ? "Overwrite the org’s version with your local version?" : "Overwrite your local version with the org’s version?",
+			detail: `${keys[0]} ${deploy ? "has a newer version in the org. Deploying replaces it with the local one." : "has local changes. Retrieving replaces the local files with the org’s version."}`,
 			action: deploy ? "Overwrite org" : "Overwrite local",
 		};
 	}
 	return {
-		message: deploy ? `${n} components changed in the org too. Overwrite the org’s versions?` : `${n} components changed locally too. Overwrite your local versions?`,
+		message: deploy ? `${n} components have a newer version in the org. Overwrite them?` : `${n} components have local changes. Overwrite them?`,
 		detail: `${deploy ? "Deploying replaces the org’s versions with your local ones" : "Retrieving replaces your local files with the org’s versions"}:\n${names}`,
 		action: deploy ? "Overwrite org" : "Overwrite local",
 	};
+}
+
+/** The modal of "Retrieve project": count, project and org, plus the locally changed components (up to 10, then "+n more"). */
+export function retrieveProjectPrompt(count: number, project: string, org: string, changed: readonly string[]): { message: string; detail: string } {
+	const list = changed.length === 0 ? "" : `\n\nChanged locally (${changed.length}):\n${changed.slice(0, 10).join("\n")}${changed.length > 10 ? `\n+${changed.length - 10} more` : ""}`;
+	return { message: `Retrieve ${count.toLocaleString("en-US")} component${count === 1 ? "" : "s"} of project ${project} from ${org}? Local files will be overwritten.`, detail: `Your local versions are replaced by the org's.${list}` };
 }
 
 // ── History ────────────────────────────────────────────────────────────────────

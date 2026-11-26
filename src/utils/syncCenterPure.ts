@@ -157,6 +157,8 @@ export interface SyncRow {
 	provisional: boolean;
 	/** For `unknown`: the org listing of the type is missing (`org`), or the local change info is not read yet (`local`). */
 	why?: "org" | "local";
+	/** The local change time (epoch ms; the same value the date-based status uses: dirty/untracked → file mtime, else last commit); 0/absent = none known. */
+	localT?: number;
 	/** The org listing entry (namespace, last modified by / date, …); absent for local-only rows. */
 	comp?: Comp;
 }
@@ -225,6 +227,13 @@ export function buildSyncRows(inp: SyncInputs): SyncRow[] {
 		rows.push(row);
 		byKey.set(key, row);
 	}
+	// The local change time of every row that exists locally (one source: `localInfo`, shared with the status).
+	if (inp.localInfo) {
+		for (const r of rows) {
+			const t = r.localKey ? inp.localInfo[r.localKey]?.[0] : 0;
+			if (t && t > 0) r.localT = t;
+		}
+	}
 	return rows;
 }
 
@@ -278,7 +287,7 @@ export interface Candidates {
 	keys: string[];
 	/** Selected rows that don't count, grouped by why. */
 	skipped: SkipCount[];
-	/** Selected conflict rows without a choice. They take part by default (they are in `keys`); the run asks first. Never blocks. */
+	/** Selected rows whose run overwrites the other side: conflicts without a choice, plus changed-in-org (Deploy) / changed-locally (Retrieve). They take part (they are in `keys`); the run asks first. Never blocks. */
 	unresolvedConflicts: number;
 	/** Their keys (for the "show conflicts" link and the run-time confirmation). */
 	unresolvedKeys: string[];
@@ -297,7 +306,7 @@ const TAKE: Verdict = { take: true };
 const skip = (reason: string): Verdict => ({ take: false, reason });
 
 function collect(rows: readonly SyncRow[], o: CandidateOptions, verdict: (r: SyncRow) => Verdict | "unresolved"): Candidates {
-	// "unresolved" = a conflict without a choice: it takes part (and is also reported in `unresolvedKeys`).
+	// "unresolved" = a row whose run overwrites the other side (a conflict without a choice, changed-in-org on Deploy, changed-locally on Retrieve): it takes part (and is also reported in `unresolvedKeys`).
 	const keys: string[] = [];
 	const skipped = new Map<string, number>();
 	const unresolvedKeys: string[] = [];
@@ -320,7 +329,7 @@ function collect(rows: readonly SyncRow[], o: CandidateOptions, verdict: (r: Syn
 
 /**
  * `Deploy (n)`: selected rows that exist locally (only-local, changed-locally, partial, unknown-but-local,
- * equal unless skipped) and conflict rows not set to "Take org" (no choice = takes part; the run asks first).
+ * equal unless skipped, changed-in-org) and conflict rows not set to "Take org" (no choice = takes part; the run asks first).
  */
 export function deployCandidates(rows: readonly SyncRow[], selection: ReadonlySet<string>, conflictChoices: ReadonlyMap<string, ConflictChoice>, skipEqual: boolean): Candidates {
 	const o = { selection, conflictChoices, skipEqual };
@@ -339,7 +348,7 @@ export function deployCandidates(rows: readonly SyncRow[], selection: ReadonlySe
 			case "unknown":
 				return r.local ? TAKE : skip("not in the project");
 			case "changed-in-org":
-				return skip("changed in org");
+				return "unresolved"; // takes part; deploying overwrites the newer org version (the run asks first)
 			case "only-org":
 				return skip("only in org");
 		}
@@ -348,7 +357,7 @@ export function deployCandidates(rows: readonly SyncRow[], selection: ReadonlySe
 
 /**
  * `Retrieve (n)`: selected rows that exist in the org (only-org, changed-in-org, partial, unknown-but-listed,
- * equal unless skipped) and conflict rows not set to "Keep local" (no choice = takes part; the run asks first).
+ * equal unless skipped, changed-locally) and conflict rows not set to "Keep local" (no choice = takes part; the run asks first).
  */
 export function retrieveCandidates(rows: readonly SyncRow[], selection: ReadonlySet<string>, conflictChoices: ReadonlyMap<string, ConflictChoice>, skipEqual: boolean): Candidates {
 	const o = { selection, conflictChoices, skipEqual };
@@ -367,11 +376,19 @@ export function retrieveCandidates(rows: readonly SyncRow[], selection: Readonly
 			case "unknown":
 				return r.inOrg ? TAKE : skip("not in the org");
 			case "changed-locally":
-				return skip("changed locally");
+				return "unresolved"; // takes part; retrieving overwrites the local changes (the run asks first)
 			case "only-local":
 				return skip("only local");
 		}
 	});
+}
+
+/**
+ * `Retrieve project (n)`: every row that exists locally and in the org (the "In project" set that has an org copy),
+ * independent of the selection. only-local rows have nothing to retrieve; equal rows are skipped when `skipEqual`.
+ */
+export function retrieveProjectKeys(rows: readonly SyncRow[], skipEqual: boolean): string[] {
+	return rows.filter((r) => r.local && r.inOrg && r.status !== "only-local" && !(skipEqual && r.status === "equal")).map((r) => r.key);
 }
 
 /** `Delete from org (n)`: selected only-org rows; everything else selected is skipped (never deleted). */
@@ -391,12 +408,12 @@ export function skippedText(c: Pick<Candidates, "skipped">): string {
 	return c.skipped.map((s) => `${s.count} ${s.reason} skipped`).join(", ");
 }
 
-/** "2 selected components were also changed in the org — deploying overwrites them." (retrieve: locally / local files), or "" when none. */
+/** "2 selected components have a newer version in the org — deploying overwrites them." (retrieve: "have local changes … your local files"), or "" when none. */
 export function unresolvedText(c: Pick<Candidates, "unresolvedConflicts">, mode: "deploy" | "retrieve" = "deploy"): string {
 	const n = c.unresolvedConflicts;
 	if (n === 0) return "";
-	const what = n === 1 ? "1 selected component was" : `${n} selected components were`;
-	return mode === "deploy" ? `${what} also changed in the org — deploying overwrites ${n === 1 ? "it" : "them"}.` : `${what} also changed locally — retrieving overwrites your local files.`;
+	const what = n === 1 ? "1 selected component has" : `${n} selected components have`;
+	return mode === "deploy" ? `${what} a newer version in the org — deploying overwrites ${n === 1 ? "it" : "them"}.` : `${what} local changes — retrieving overwrites your local files.`;
 }
 
 /** `{ type, fullName }` as the retrieve engine and the destructive package want them (org naming), for row keys. */

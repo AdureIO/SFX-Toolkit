@@ -8,7 +8,7 @@
  * column of the layout (it takes the remaining width; its stored width is not used).
  */
 
-export type ColumnId = "name" | "type" | "status" | "ns" | "by" | "mod" | "created" | "id" | "file" | "path" | "state" | "actions";
+export type ColumnId = "name" | "type" | "status" | "ns" | "by" | "mod" | "modLocal" | "created" | "id" | "file" | "path" | "state" | "actions";
 
 export interface ColumnDef {
 	id: ColumnId;
@@ -29,6 +29,7 @@ export const COLUMN_DEFS: readonly ColumnDef[] = [
 	{ id: "ns", label: "Namespace", width: 70, min: 60, visible: true },
 	{ id: "by", label: "Last modified by", width: 120, min: 60, visible: true },
 	{ id: "mod", label: "Last modified", width: 90, min: 60, visible: true },
+	{ id: "modLocal", label: "Last modified (local)", width: 110, min: 60, visible: false },
 	{ id: "status", label: "Status", width: 130, min: 60, visible: true },
 	{ id: "created", label: "Created date", width: 100, min: 60, visible: false },
 	{ id: "id", label: "Id", width: 150, min: 60, visible: false },

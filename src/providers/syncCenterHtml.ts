@@ -65,20 +65,18 @@ ${TEST_SUITE_CSS}
         </aside>
         <section class="center">
           <div class="gridbar">
-            <button id="filtersToggle" class="ghost sm" title="Show / hide the filter sidebar" aria-expanded="true">Filters</button>
-            <span id="countInfo" class="muted"></span>
-            <button id="selAll" class="linkbtn">Select all filtered (0)</button>
-            <span id="selHidden" class="selhidden" hidden><span id="selHiddenText"></span> <button id="selHiddenShow" class="link" title="Reset the filters and show only the selected components">show</button> · <button id="selHiddenClear" class="link" title="Deselect the selected components the current filter hides">clear hidden</button></span>
+            <button id="filtersToggle" class="tbtn" title="Show/hide filters" aria-label="Show/hide filters" aria-expanded="true"><svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><path d="M1.5 2h13l-5 6v5.500l-3 1.500V8z"/></svg></button>
+            <span id="countInfo" class="muted cnt"></span>
             <span class="spacer"></span>
-            <label class="inl"><input type="checkbox" id="groupToggle"> Group by type</label>
-            <button id="collapseAll" class="linkbtn" title="Collapse / expand all groups">Collapse all</button>
-            <button id="colsBtn" class="ghost sm" title="Show, hide and reorder columns (also: right-click a column header)" aria-haspopup="menu">⚙ Columns</button>
+            <button id="groupToggle" class="tbtn" title="Group by type" aria-label="Group by type" aria-pressed="false"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.300"><path d="M2 3.500h12M2 8h12M2 12.500h12"/><path d="M4.500 3.500v9" stroke-opacity=".0"/><rect x="2" y="2" width="5" height="3" fill="currentColor" stroke="none"/><rect x="2" y="7" width="5" height="3" fill="currentColor" stroke="none"/></svg></button>
+            <button id="collapseAll" class="tbtn" title="Collapse all" aria-label="Collapse all" hidden><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.400" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6l4 4 4-4"/><path d="M4 2.500h8M4 13.500h8" stroke-opacity=".6"/></svg></button>
+            <button id="colsBtn" class="tbtn" title="Columns: show, hide and reorder (also: right-click a column header)" aria-label="Columns" aria-haspopup="menu"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.300"><rect x="2" y="2.500" width="12" height="11" rx="1"/><path d="M6 2.500v11M10 2.500v11"/></svg></button>
           </div>
           <div class="gridwrap">
             <div id="scroller" class="scroller" tabindex="0" role="grid" aria-label="Metadata components">
               <div class="inner">
                 <div class="ghead" id="ghead" role="row">
-                  <span class="hcell cb"><input type="checkbox" id="headCb" aria-label="Select all filtered rows" title="Select all filtered (shown) rows"></span>
+                  <span class="hcell cb"><input type="checkbox" id="headCb" aria-label="Select all filtered rows" title="Select all filtered (0)"></span>
                   <span id="hcols" class="hcols"></span>
                 </div>
                 <div id="spacer" class="vspacer"><div id="rowsEl" class="rowsEl"></div></div>
@@ -96,8 +94,6 @@ ${TEST_SUITE_CSS}
         <div id="opCard" class="opcard" role="status" aria-live="polite" hidden></div>
 
         <div class="modebar"><span class="choice mode" id="modeSeg" role="group" aria-label="Action"><button type="button" data-mode="deploy" class="on" aria-pressed="true" title="Deploy or validate components of the project to the org">Deploy</button><button type="button" data-mode="retrieve" aria-pressed="false" title="Retrieve components of the org into the project">Retrieve</button><button type="button" data-mode="delete" aria-pressed="false" title="Delete components that exist only in the org">Delete</button></span></div>
-
-        <div class="selbar"><span id="selSummary" class="selsum">Selected: 0</span><button type="button" class="ghost" id="selShowGrid" disabled>Show in grid</button></div>
 
         <details class="sec" id="secPresets" open>
           <summary>Presets</summary>
@@ -129,6 +125,7 @@ ${TEST_SUITE_CSS}
             <button type="button" class="ghost" id="gitSelect" title="Select components changed in Git">⑂ Select changed (Git)</button>
             <div class="hint conflict-note" hidden></div>
             <button type="button" class="primary wide" id="deployBtn" disabled>Deploy (0)</button>
+            <div class="selrow" data-selrow hidden><button type="button" class="linkbtn selsum" data-selsum></button><span class="selhid" data-selhid hidden> · <button type="button" class="linkbtn" data-hiddenshow title="Reset the filters and show only the selected components">show</button> · <button type="button" class="linkbtn" data-hiddenclear title="Deselect the selected components the current filter hides">clear hidden</button></span></div>
             <div class="result-bar" id="deployResult"></div>
             <div id="coverage-panel" class="coverage-panel" style="display:none;"></div>
           </div>
@@ -142,6 +139,8 @@ ${TEST_SUITE_CSS}
             <label class="opt" title="Skip selected components that are equal in the org and the project"><input type="checkbox" id="skipEqualRetrieve" checked><span>Skip equal components</span></label>
             <div class="hint conflict-note" hidden></div>
             <button type="button" class="primary wide" id="retrieveBtn" disabled>Retrieve (0)</button>
+            <button type="button" class="ghost wide" id="retrieveProjectBtn" disabled title="Retrieve every component of the project that exists in the org">Retrieve project (0)</button>
+            <div class="selrow" data-selrow hidden><button type="button" class="linkbtn selsum" data-selsum></button><span class="selhid" data-selhid hidden> · <button type="button" class="linkbtn" data-hiddenshow title="Reset the filters and show only the selected components">show</button> · <button type="button" class="linkbtn" data-hiddenclear title="Deselect the selected components the current filter hides">clear hidden</button></span></div>
             <div class="result-bar" id="retrieveResult"></div>
           </div>
         </details>
@@ -161,6 +160,7 @@ ${TEST_SUITE_CSS}
             </div>
             <div class="hint warn" id="delHint" hidden></div>
             <button type="button" class="danger-btn wide" id="deleteBtn" disabled>Delete from org (0)</button>
+            <div class="selrow" data-selrow hidden><button type="button" class="linkbtn selsum" data-selsum></button><span class="selhid" data-selhid hidden> · <button type="button" class="linkbtn" data-hiddenshow title="Reset the filters and show only the selected components">show</button> · <button type="button" class="linkbtn" data-hiddenclear title="Deselect the selected components the current filter hides">clear hidden</button></span></div>
             <div class="result-bar" id="deleteResult"></div>
           </div>
         </details>
@@ -226,8 +226,19 @@ const CENTER_CSS = `
 button.ghost.sm { height: 24px; padding: 0 8px; font-size: 12px; }
 button.ghost.sm.on { background: color-mix(in srgb, var(--ob-accent) 16%, transparent); }
 .modebar { display: flex; }
-.selbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 0; font-size: 12px; }
-.selbar .selsum { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gridbar { flex-wrap: nowrap; gap: 6px; min-width: 0; }
+.gridbar .cnt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; flex: 0 1 auto; }
+.gridbar .spacer { flex: 1 1 0; min-width: 0; }
+.tbtn { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--vscode-icon-foreground, var(--vscode-foreground)); cursor: pointer; }
+.tbtn:hover { background: var(--vscode-toolbar-hoverBackground, color-mix(in srgb, var(--vscode-foreground) 16%, transparent)); }
+.tbtn[hidden] { display: none; }
+.tbtn.on, .tbtn[aria-pressed="true"] { background: color-mix(in srgb, var(--ob-accent) 22%, transparent); }
+.tbtn svg { display: block; }
+.selrow { margin: 6px 0 0; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.selrow[hidden], .selhid[hidden] { display: none; }
+.selrow .linkbtn { display: inline; margin: 0; padding: 0; }
+.linkbtn.selsum { display: inline; margin: 0; padding: 0; font-size: 12px; text-align: left; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.linkbtn.selsum[hidden] { display: none; }
 .choice.mode { width: 100%; }
 .choice.mode button { flex: 1; height: 26px; font-size: 12px; font-weight: 600; }
 .sec[hidden] { display: none; }

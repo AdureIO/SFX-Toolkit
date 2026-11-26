@@ -25,6 +25,8 @@ export interface RetrieveFlowOptions {
 	/** Ask before overwriting local changes (default true). */
 	confirm?: boolean;
 	source: HistorySource;
+	/** History label (e.g. "Retrieve project"). */
+	label?: string;
 	/** Runs after the open editors were refreshed, also when the retrieve failed or was cancelled (rescan the project). */
 	afterWrite?: () => Promise<void>;
 	/** Components retrieved so far (the same numbers the progress notification shows); the notification is unchanged. */
@@ -89,6 +91,7 @@ export async function runRetrieveFlow(o: RetrieveFlowOptions): Promise<RetrieveF
 		ok: outcome.failed.length === 0,
 		errors: outcome.failed.length > 0 ? historyErrorsFromRetrieve(outcome.failed) : undefined,
 		source: o.source,
+		...(o.label ? { label: o.label } : {}),
 	});
 	const ok = outcome.retrieved.length;
 	const bad = outcome.failed.length;

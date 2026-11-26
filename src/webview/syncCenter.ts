@@ -39,6 +39,7 @@ import {
 	deployCandidates,
 	isDiffable,
 	retrieveCandidates,
+	retrieveProjectKeys,
 	CenterMode,
 	normalizeMode,
 	syncStatusOptions,
@@ -59,6 +60,7 @@ import {
 	nextChoice,
 	pruneConflictChoices,
 	selectionSummary,
+	selectionSummaryTitle,
 	rowDeployLocalKeys,
 	rowKeyOf,
 	rowRetrieveRef,
@@ -228,6 +230,8 @@ let rowIndex = new Map<string, number>();
 let localKeyToRow = new Map<string, string>();
 let idx: SearchIndex = buildIndex([]);
 let statusArr: Uint8Array = new Uint8Array(0);
+/** Local change time per row index (see `SyncRow.localT`). */
+let localTimes: Float64Array = new Float64Array(0);
 let rowsDirty = true;
 let selected = new Set<string>();
 let choices = new Map<string, ConflictChoice>();
@@ -353,17 +357,20 @@ function ensureRows(): void {
 	});
 	const comps: Comp[] = new Array(syncRows.length);
 	const st = new Uint8Array(syncRows.length);
+	const lts = new Float64Array(syncRows.length);
 	rowIndex = new Map();
 	localKeyToRow = new Map();
 	for (let i = 0; i < syncRows.length; i++) {
 		const r = syncRows[i];
 		comps[i] = r.comp ?? { t: r.type, n: r.name, ns: "", ms: "", by: "", bi: "", lm: 0, cd: 0, id: "", f: "" };
 		st[i] = r.code;
+		lts[i] = r.localT ?? 0;
 		rowIndex.set(r.key, i);
 		if (r.localKey) localKeyToRow.set(r.localKey, r.key);
 	}
 	idx = buildIndex(comps);
 	statusArr = st;
+	localTimes = lts;
 	// A conflict choice belongs to its row while it is a conflict; a vanished or resolved row drops it.
 	if (settled() && choices.size > 0) {
 		const kept = pruneConflictChoices(choices, syncRows);
@@ -378,7 +385,7 @@ function ensureRows(): void {
 // ── Recompute ──────────────────────────────────────────────────────────────────
 
 function ctx(): FilterContext {
-	return { now: Date.now(), status: statusArr, vocab: SYNC_CENTER_VOCAB, selected, meIds: me.ids, meName: me.name };
+	return { now: Date.now(), status: statusArr, localTimes, vocab: SYNC_CENTER_VOCAB, selected, meIds: me.ids, meName: me.name };
 }
 
 let visibleKeysCache: Set<string> | null = null;
@@ -545,6 +552,10 @@ function cellHtml(id: ColumnId, r: SyncRow, c: Comp): string {
 			return `<span class="c by" title="${esc(c.by)}">${esc(c.by)}</span>`;
 		case "mod":
 			return `<span class="c md" title="${esc(c.lm ? new Date(c.lm).toLocaleString() : "")}">${esc(relativeTime(c.lm, Date.now()))}</span>`;
+		case "modLocal": {
+			const t = r.localT ?? 0;
+			return `<span class="c md" title="${esc(t ? new Date(t).toLocaleString() : "")}">${esc(t ? relativeTime(t, Date.now()) : "")}</span>`;
+		}
 		case "status":
 			return `<span class="c st">${statusBadge(r)}</span>`;
 		case "created":
@@ -639,16 +650,21 @@ function renderHeader(): void {
 function renderGridChrome(): void {
 	$("spacer").style.height = items.length * ROW_H + "px";
 	const total = idx.comps.length;
-	$("countInfo").textContent = total ? (rows.length === total ? `${total.toLocaleString()} components` : `${rows.length.toLocaleString()} of ${total.toLocaleString()} components`) : "";
+	$("countInfo").textContent = total ? (rows.length === total ? `${total.toLocaleString()} components` : `${rows.length.toLocaleString()} of ${total.toLocaleString()}`) : "";
 	const mode = modeOf();
 	const part = rows.filter((i) => takesPart(mode, syncRows[i]));
 	const allSel = part.length > 0 && part.every((i) => selected.has(keyAt(i)));
-	const selAll = $("selAll");
-	selAll.textContent = allSel ? `Deselect filtered (${part.length.toLocaleString()})` : `Select all filtered (${part.length.toLocaleString()})`;
-	selAll.title = part.length < rows.length ? `${(rows.length - part.length).toLocaleString()} shown row(s) cannot take part in ${mode === "deploy" ? "a deploy" : mode === "retrieve" ? "a retrieve" : "a delete"}` : "";
-	selAll.toggleAttribute("disabled", part.length === 0);
-	($("groupToggle") as HTMLInputElement).checked = ui.group;
+	const gt = $("groupToggle");
+	gt.setAttribute("aria-pressed", String(ui.group));
+	gt.classList.toggle("on", ui.group);
+	$("collapseAll").hidden = !ui.group;
+	const allCollapsed = ui.group && ui.collapsed.length > 0 && ui.collapsed.length >= new Set(rows.map((i) => idx.comps[i].t)).size;
+	$("collapseAll").title = allCollapsed ? "Expand all" : "Collapse all";
+	$("collapseAll").setAttribute("aria-label", allCollapsed ? "Expand all" : "Collapse all");
 	const hc = $("headCb") as HTMLInputElement;
+	const selTitle = `${allSel ? "Deselect" : "Select"} all filtered (${part.length.toLocaleString()})` + (part.length < rows.length ? ` · ${(rows.length - part.length).toLocaleString()} shown row(s) cannot take part in ${mode === "deploy" ? "a deploy" : mode === "retrieve" ? "a retrieve" : "a delete"}` : "");
+	hc.title = selTitle;
+	hc.setAttribute("aria-label", selTitle);
 	hc.checked = allSel;
 	hc.indeterminate = !allSel && part.some((i) => selected.has(keyAt(i)));
 	for (const th of document.querySelectorAll<HTMLElement>(".hcell[data-sort]")) {
@@ -656,9 +672,6 @@ function renderGridChrome(): void {
 		th.classList.toggle("sorted", k === ui.sort.key);
 		th.dataset.dir = k === ui.sort.key ? (ui.sort.dir === 1 ? "asc" : "desc") : "";
 	}
-	const hidden = hiddenSelected().length;
-	$("selHidden").hidden = hidden === 0;
-	$("selHiddenText").textContent = `${hidden.toLocaleString()} selected hidden by filter —`;
 	renderCompareInfo(); // the button's count follows the selection and the filter
 }
 
@@ -816,14 +829,23 @@ function renderRight(): void {
 	const d = buttonState({ verb: ui.opts.validateOnly ? "Validate" : "Deploy", cands: dc, busy, blocked, selected: sel, hint: ui.opts.validateOnly ? "Validate the selection against the org" : "Deploy the selection to the org" });
 	const r = buttonState({ verb: "Retrieve", cands: rc, busy, blocked, selected: sel, hint: "Retrieve the selection into the project" });
 	const x = buttonState({ verb: "Delete from org", cands: xc, busy, blocked, selected: sel, hint: "Delete the selected components from the org" });
+	const projKeys = retrieveProjectKeys(syncRows, ui.opts.skipEqualRetrieve);
+	const pb = $("retrieveProjectBtn") as HTMLButtonElement;
+	pb.textContent = `Retrieve project (${projKeys.length.toLocaleString("en-US")})`;
+	pb.disabled = busy || !!blocked || projKeys.length === 0;
+	pb.title = blocked ? blocked : busy ? "An operation is running" : projKeys.length === 0 ? (local.known && orgComps.length === 0 ? "Waiting for the org listing" : "Nothing in the project to retrieve") : "Retrieve every component of the project that exists in the org (ignores the selection and filters)";
 	const mode = modeOf();
 	const taking = mode === "retrieve" ? rc.keys.length : mode === "delete" ? xc.keys.length : dc.keys.length;
-	const sumText = selectionSummary(mode, sel, taking);
-	$("selSummary").textContent = sumText;
-	$("selSummary").title = sumText;
-	const showBtn = $("selShowGrid") as HTMLButtonElement;
-	showBtn.textContent = ui.filter.onlySelected ? "Show all" : "Show in grid";
-	showBtn.disabled = sel === 0 && !ui.filter.onlySelected;
+	const cands = mode === "retrieve" ? rc : mode === "delete" ? xc : dc;
+	const hiddenN = hiddenSelected().length;
+	const sumText = selectionSummary(mode === "delete" ? "delete" : mode, sel, taking, ui.filter.onlySelected, hiddenN);
+	for (const row of document.querySelectorAll<HTMLElement>("[data-selrow]")) {
+		row.hidden = sumText === "";
+		const el = row.querySelector<HTMLButtonElement>("[data-selsum]")!;
+		el.textContent = sumText;
+		el.title = selectionSummaryTitle(cands.skipped, ui.filter.onlySelected);
+		row.querySelector<HTMLElement>("[data-selhid]")!.hidden = hiddenN === 0;
+	}
 	for (const [id, st] of [
 		["deployBtn", d],
 		["retrieveBtn", r],
@@ -1311,6 +1333,22 @@ function doRetrieve(): void {
 	startRetrieve(c.keys, c.unresolvedKeys, true);
 }
 
+function doRetrieveProject(): void {
+	if (opPending || busyOp) return;
+	const keys = retrieveProjectKeys(syncRows, ui.opts.skipEqualRetrieve);
+	if (keys.length === 0) return;
+	const changed = keys.filter((k) => {
+		const s = syncRows[rowIndex.get(k)!].status;
+		return s === "changed-locally" || s === "conflict";
+	});
+	const itemsOut = keys.map((k) => ({ key: k, refs: [rowRetrieveRef(syncRows[rowIndex.get(k)!], ui.opts.wholeObject, childTypes)] }));
+	opPending = true;
+	results = new Map();
+	resultBar("retrieveResult", "running", "Retrieving project…");
+	renderRight();
+	post({ command: "retrieve", items: itemsOut, confirm: ui.opts.confirmOverwrite, project: { changed } });
+}
+
 function doDelete(): void {
 	if (opPending || busyOp) return;
 	const c = deleteCandidates(syncRows, selected);
@@ -1337,10 +1375,10 @@ function rowAction(act: string, i: number): void {
 			post({ command: "diff", key: r.key, status: r.status });
 			break;
 		case "deployRow":
-			startDeploy([r.key], r.status === "conflict" ? [r.key] : [], false);
+			startDeploy([r.key], r.status === "conflict" || r.status === "changed-in-org" ? [r.key] : [], false);
 			break;
 		case "retrieveRow":
-			startRetrieve([r.key], r.status === "conflict" ? [r.key] : [], false);
+			startRetrieve([r.key], r.status === "conflict" || r.status === "changed-locally" ? [r.key] : [], false);
 			break;
 		case "open":
 			post({ command: "openFile", key: r.key });
@@ -1496,20 +1534,21 @@ function setupEvents(): void {
 		invalidateRows();
 		saveUi();
 	});
-	$("selHiddenShow").addEventListener("click", () => {
-		ui.filter = { ...DEFAULT_FILTER, onlySelected: true };
-		bar.syncSearchInput();
-		recompute(true);
-		saveUi();
+	document.addEventListener("click", (e) => {
+		const t = e.target as HTMLElement;
+		if (t.closest("[data-hiddenshow]")) {
+			ui.filter = { ...DEFAULT_FILTER, onlySelected: true };
+			bar.syncSearchInput();
+			recompute(true);
+			saveUi();
+		} else if (t.closest("[data-hiddenclear]")) {
+			for (const k of hiddenSelected()) selected.delete(k);
+			afterSelectionChange();
+		}
 	});
-	$("selHiddenClear").addEventListener("click", () => {
-		for (const k of hiddenSelected()) selected.delete(k);
-		afterSelectionChange();
-	});
-	$("selAll").addEventListener("click", toggleFiltered);
 	($("headCb") as HTMLInputElement).addEventListener("click", toggleFiltered);
-	($("groupToggle") as HTMLInputElement).addEventListener("change", (e) => {
-		ui.group = (e.target as HTMLInputElement).checked;
+	$("groupToggle").addEventListener("click", () => {
+		ui.group = !ui.group;
 		active = -1;
 		recompute(true);
 		saveUi();
@@ -1775,7 +1814,8 @@ function setupEvents(): void {
 
 function setupRightPanel(): void {
 	// "Show in grid" / "Show all": the "only selected" filter.
-	$("selShowGrid").addEventListener("click", () => {
+	document.addEventListener("click", (e) => {
+		if (!(e.target as HTMLElement).closest("[data-selsum]")) return;
 		ui.filter = { ...ui.filter, onlySelected: !ui.filter.onlySelected && selected.size > 0 };
 		bar.syncSearchInput();
 		recompute(true);
@@ -1785,7 +1825,7 @@ function setupRightPanel(): void {
 	// "Show conflicts": filter to the conflicts of the selection.
 	$("right").addEventListener("click", (e) => {
 		if (!(e.target as HTMLElement).closest("[data-showconflicts]")) return;
-		ui.filter = { ...ui.filter, status: ["conflict"], onlySelected: selected.size > 0 };
+		ui.filter = { ...ui.filter, status: modeOf() === "retrieve" ? ["conflict", "changed-locally"] : ["conflict", "changed-in-org"], onlySelected: selected.size > 0 };
 		bar.syncSearchInput();
 		recompute(true);
 		saveUi();
@@ -1839,6 +1879,7 @@ function setupRightPanel(): void {
 	});
 	$("deployBtn").addEventListener("click", doDeploy);
 	$("retrieveBtn").addEventListener("click", doRetrieve);
+	$("retrieveProjectBtn").addEventListener("click", doRetrieveProject);
 	$("deleteBtn").addEventListener("click", doDelete);
 
 	// Presets

@@ -54,7 +54,7 @@ import { getRetrieveTimes, recordDeployed } from "../utils/retrieveLog";
 import { SharedMetadataFilter } from "../utils/sharedFilterState";
 import { getHistory, onDidChangeHistory, recordHistory } from "../utils/syncHistory";
 import { openComponentDiff } from "../utils/syncDiff";
-import { conflictPrompt, deploymentSetupPath, historyDeployLocalKeys, onlyOrgRefs, overwriteLocalKeys, refOfKey, rowKeyOf } from "../utils/syncCenterUiPure";
+import { conflictPrompt, retrieveProjectPrompt, deploymentSetupPath, historyDeployLocalKeys, onlyOrgRefs, overwriteLocalKeys, refOfKey, rowKeyOf } from "../utils/syncCenterUiPure";
 import { reauthenticateOrg } from "../commands/orgCommands";
 import { runGitStatusSfdxPaths } from "../utils/gitStatusPaths";
 import { OperationPanelProvider } from "./OperationPanelProvider";
@@ -1208,7 +1208,22 @@ export class SyncCenterPanelProvider {
 		}
 		// Conflict rows without a choice take part: say what they overwrite first. With "Confirm before overwriting
 		// local changes" on, the retrieve's own overwrite check already lists these files: don't ask twice.
-		const conflictKeys = this.conflictKeysOf(msg, items);
+		// "Retrieve project": one modal (project, org, the locally changed components); it replaces the overwrite check.
+		const isProject = msg.project && typeof msg.project === "object";
+		let confirmFlow = msg.confirm !== false;
+		if (isProject) {
+			const root = this.projectDir();
+			const changed = Array.isArray(msg.project.changed) ? msg.project.changed.map(String) : [];
+			const p = retrieveProjectPrompt(items.length, root ? path.basename(root) : "project", this.orgLabel(), msg.confirm !== false ? changed : []);
+			const go = "Retrieve project";
+			const choice = await vscode.window.showWarningMessage(p.message, { modal: true, detail: p.detail }, go);
+			if (choice !== go) {
+				this.post({ type: "retrieveResult", results: [], cancelled: true });
+				return;
+			}
+			confirmFlow = false;
+		}
+		const conflictKeys = isProject ? [] : this.conflictKeysOf(msg, items);
 		if (conflictKeys.length > 0 && msg.confirm === false) {
 			const p = conflictPrompt("retrieve", conflictKeys);
 			const choice = await vscode.window.showWarningMessage(p.message, { modal: true, detail: p.detail }, p.action);
@@ -1222,10 +1237,10 @@ export class SyncCenterPanelProvider {
 			const k = compKey(r.type, r.fullName);
 			return seen.has(k) ? false : (seen.add(k), true);
 		});
-		await this.doRetrieve({ refs, confirm: msg.confirm !== false });
+		await this.doRetrieve({ refs, confirm: confirmFlow, label: isProject ? "Retrieve project" : undefined });
 	}
 
-	private static async doRetrieve(p: { refs: { type: string; fullName: string }[]; confirm: boolean }): Promise<void> {
+	private static async doRetrieve(p: { refs: { type: string; fullName: string }[]; confirm: boolean; label?: string }): Promise<void> {
 		const root = this.projectDir();
 		const cancel = () => this.post({ type: "retrieveResult", results: [], cancelled: true });
 		if (!root || !this.hasSfdxProject() || !this.local) {
@@ -1261,11 +1276,12 @@ export class SyncCenterPanelProvider {
 				components: p.refs,
 				targets,
 				confirm: p.confirm,
+				label: p.label,
 				source: "center",
 				afterWrite: () => this.refreshLocal(),
 				// A retrieve has no queued phase: it starts once the overwrite confirmation (if any) is accepted.
 				onStart: () => {
-					op = this.activity?.beginOp("retrieve", `Retrieve ${p.refs.length} component${p.refs.length === 1 ? "" : "s"}`, "running");
+					op = this.activity?.beginOp("retrieve", p.label ?? `Retrieve ${p.refs.length} component${p.refs.length === 1 ? "" : "s"}`, "running");
 				},
 				onProgress: (done, total) => op?.retrieveProgress(done, total),
 			});
