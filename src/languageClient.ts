@@ -556,15 +556,6 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
- * Tell the language server to drop its cached schema so subsequent completion/
- * hover re-fetch it — used when a webview buffer's org override changes, since the
- * server caches describes per project/buffer (it cannot see org overrides).
- */
-export function refreshLanguageServerSchema(): void {
-	if (client?.isRunning()) void client.sendNotification(NOTE_REFRESH).catch(() => {});
-}
-
-/**
  * Register buffer document URIs that must never have SObject stub files written
  * for them (their IntelliSense org may be non-default). Go-to-definition on an
  * SObject in these buffers won't generate stubs into the shared .sfdx folder.

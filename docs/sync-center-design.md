@@ -155,7 +155,7 @@ Statuses come from `compareStatusPure.ts` plus the content compare service, the 
 | ID | Scope | Model | Depends on |
 |---|---|---|---|
 | SC1 | Engine: union row model (pure) and center status vocab; compare service keeps org copies plus `orgCopyFiles`/`fetchOrgCopy`; diff opener; destructive-changes builder (pure) and delete runner; history store (pure plus host) wired into the Deploy panel, the Org Browser and the right-click commands; shared presets store with migration; tests | sonnet | none |
-| SC2 | Center panel: provider, webview (esbuild entry), layout above, selection rules and button counts, quick actions, conflict chips, diff action, delete flow, History tab, presets, open buttons in the two existing panels, command `adure-sfx-toolkit.openSyncCenter` ("Deploy & Retrieve Metadata") in the palette | sonnet | SC1 |
+| SC2 | Center panel: provider, webview (esbuild entry), layout above, selection rules and button counts, conflict chips, diff action, delete flow, History tab, presets, open buttons in the two existing panels, command `adure-sfx-toolkit.openSyncCenter` ("Deploy & Retrieve Metadata") in the palette | sonnet | SC1 |
 | SC3 | Combined gate, review, test VSIX | lead | SC2 |
 
 ## Opening fast
@@ -189,7 +189,6 @@ Statuses come from `compareStatusPure.ts` plus the content compare service, the 
 | Compare contents button, progress | present (on demand, with Cancel) |
 | Project switch deferred while a deploy runs | ported (also for retrieve and delete) |
 | Keyboard navigation in the grid | present |
-| Quality gate (`deployQualityGate.ts`) | not wired in the removed panel either; open question |
 | Dirty-preset "save changes?" modal when switching presets | missing; open question |
 
 ## Toolbar, selection view, local-time filter, Retrieve project

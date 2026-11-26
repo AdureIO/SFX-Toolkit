@@ -68,8 +68,6 @@ export function compareStatus(i: CompareInput): CompareResult {
 
 // ── Status codes (one value per row; the filter vocabularies index into the name lists) ──
 
-/** Shared by both panels: 0 = local only / org only, then the four compare statuses. */
-export const CODE_ABSENT = 0;
 export const CODE_EQUAL = 1;
 export const CODE_CHANGED_LOCALLY = 2;
 export const CODE_CHANGED_IN_ORG = 3;
@@ -137,28 +135,6 @@ export function componentLocalTime(files: readonly LocalFileTimes[]): { localT: 
 	return { localT, dirty };
 }
 
-/**
- * Parse `git log --format=%x00%ct --name-only` (newest commit first) into path → newest commit time (ms).
- * Each commit is `\0<unix seconds>\n\n<path>\n<path>…`.
- */
-export function parseGitLogTimes(out: string): Map<string, number> {
-	const map = new Map<string, number>();
-	for (const block of out.split("\0")) {
-		if (!block) continue;
-		const lines = block.split(/\r?\n/);
-		const secs = Number(lines[0]?.trim());
-		if (!Number.isFinite(secs) || secs <= 0) continue;
-		const ms = secs * 1000;
-		for (let k = 1; k < lines.length; k++) {
-			const p = lines[k].trim();
-			if (!p) continue;
-			const prev = map.get(p);
-			if (prev === undefined || ms > prev) map.set(p, ms);
-		}
-	}
-	return map;
-}
-
 /** The newest time both sides were known in sync: the toolkit's retrieve / deploy log or a content-verified "same". */
 export function effectiveSyncedAt(logTime?: number, verifiedAt?: number): number | undefined {
 	if (logTime === undefined) return verifiedAt;
@@ -172,12 +148,6 @@ export function effectiveSyncedAt(logTime?: number, verifiedAt?: number): number
 export type LocalInfoMap = Record<string, [number, number]>;
 /** `[result 1 = same / 2 = different, comparedAt, sameAt (0 = never)]` per component key. */
 export type ContentInfoMap = Record<string, [number, number, number]>;
-
-export interface ComparePush {
-	/** Replace (true) or merge into (false) the webview's content map. */
-	full: boolean;
-	content: ContentInfoMap;
-}
 
 export interface CompareProgress {
 	/** `idle`: nothing running; `running`: comparing; `paused`: stopped for a deploy (resumes after it). */

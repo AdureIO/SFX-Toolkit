@@ -26,7 +26,6 @@ import {
 	choicesStoreKey,
 	centerFilterKeptOnClear,
 	choicesToJson,
-	deployLocalKeys,
 	defaultStatusFilter,
 	deploymentSetupPath,
 	historyDeployLocalKeys,
@@ -47,7 +46,6 @@ import {
 	partialDeployLocalKeys,
 	pruneConflictChoices,
 	refOfKey,
-	retrieveRefs,
 	rowKeyOf,
 } from "../utils/syncCenterUiPure";
 import { OBJECT_CHILD_TYPES } from "../utils/orgBrowser/localIndex";
@@ -95,56 +93,9 @@ describe("sync center ui rules", () => {
 			assert.deepStrictEqual(partialDeployLocalKeys("Opportunity", locals, OBJECT_CHILD_TYPES), []);
 		});
 
-		it("a partial row deploys its local children, other rows their own entry", () => {
-			const rows = buildSyncRows(
-				inputs({
-					local: [...locals, loc("ApexClass", "Mine")],
-					partialKeys: ["CustomObject:Account"],
-					org: [comp("CustomObject", "Account"), comp("ApexClass", "Mine")],
-					localInfo: { "ApexClass:Mine": [T0 - HOUR, 1] },
-					retrieved: { "ApexClass:Mine": T0 - 2 * HOUR },
-				})
-			);
-			const partial = rows.find((r) => r.key === "CustomObject:Account")!;
-			assert.strictEqual(partial.status, "partial");
-			const keys = deployLocalKeys(rows, ["CustomObject:Account", "ApexClass:Mine", "ApexClass:Gone"], [...locals, loc("ApexClass", "Mine")], OBJECT_CHILD_TYPES);
-			assert.deepStrictEqual(keys, ["CustomField:Account.Foo__c", "CustomField:Account.Bar__c", "RecordType:Account.Big", "ApexClass:Mine"]);
-		});
-
-		it("a partial row with no local children deploys nothing", () => {
-			const rows = buildSyncRows(inputs({ local: [loc("CustomField", "Contact.Baz__c")], partialKeys: ["CustomObject:Account"], org: [comp("CustomObject", "Account")] }));
-			assert.deepStrictEqual(deployLocalKeys(rows, ["CustomObject:Account"], [loc("CustomField", "Contact.Baz__c")], OBJECT_CHILD_TYPES), []);
-		});
 	});
 
-	describe("retrieve refs", () => {
-		const rows = buildSyncRows(
-			inputs({
-				org: [comp("CustomField", "Account.Foo__c"), comp("CustomField", "Account.Bar__c"), comp("ApexClass", "A"), comp("CustomObject", "Account")],
-			})
-		);
-		const keys = ["CustomField:Account.Foo__c", "CustomField:Account.Bar__c", "ApexClass:A"];
-
-		it("off: children are retrieved on their own", () => {
-			assert.deepStrictEqual(retrieveRefs(rows, keys, false, OBJECT_CHILD_TYPES), [
-				{ type: "CustomField", fullName: "Account.Foo__c" },
-				{ type: "CustomField", fullName: "Account.Bar__c" },
-				{ type: "ApexClass", fullName: "A" },
-			]);
-		});
-
-		it("on: children become their object, once", () => {
-			assert.deepStrictEqual(retrieveRefs(rows, keys, true, OBJECT_CHILD_TYPES), [
-				{ type: "CustomObject", fullName: "Account" },
-				{ type: "ApexClass", fullName: "A" },
-			]);
-		});
-
-		it("an object selected together with its child is asked once", () => {
-			const refs = retrieveRefs(rows, ["CustomObject:Account", "CustomField:Account.Foo__c"], true, OBJECT_CHILD_TYPES);
-			assert.deepStrictEqual(refs, [{ type: "CustomObject", fullName: "Account" }]);
-		});
-
+	describe("overwrite local keys", () => {
 		it("overwriteLocalKeys: the entry of each ref, and an object's local children", () => {
 			const locals = [loc("CustomObject", "Account"), loc("CustomField", "Account.Foo__c"), loc("CustomField", "Contact.X__c"), loc("ApexClass", "A")];
 			assert.deepStrictEqual(overwriteLocalKeys([{ type: "CustomObject", fullName: "Account" }, { type: "ApexClass", fullName: "A" }], locals, OBJECT_CHILD_TYPES), [
@@ -243,7 +194,7 @@ describe("sync center ui rules", () => {
 			assert.strictEqual(buttonState(input(c)).label, "Deploy (0)");
 			const k = deployCandidates(rows, sel("ApexClass:C1"), new Map<string, ConflictChoice>([["ApexClass:C1", "local"]]), true);
 			assert.strictEqual(buttonState(input(k)).label, "Deploy (1)");
-			assert.strictEqual(k.unresolvedConflicts, 0);
+			assert.strictEqual(k.overwriteCount, 0);
 		});
 
 		it("a changed-in-org row deploys (button enabled) and is flagged for the confirmation", () => {
@@ -254,7 +205,7 @@ describe("sync center ui rules", () => {
 			const d = deployCandidates([co[0]], sel("ApexClass:E1"), new Map(), true);
 			assert.strictEqual(buttonState(input(d)).label, "Deploy (1)");
 			assert.strictEqual(buttonState(input(d)).disabled, false);
-			assert.deepStrictEqual(d.unresolvedKeys, ["ApexClass:E1"]);
+			assert.deepStrictEqual(d.overwriteKeys, ["ApexClass:E1"]);
 		});
 
 		it("selectionSummary: hidden with nothing selected, link text and tooltip", () => {

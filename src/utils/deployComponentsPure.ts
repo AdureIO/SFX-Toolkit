@@ -7,14 +7,6 @@
  * come back because no folder path ever enters the deploy arguments.
  */
 
-/** A local component with its files (the Org Browser's `LocalEntry`, narrowed to what is needed here). */
-export interface ComponentFiles {
-	/** `Type:fullName` */
-	key: string;
-	/** Absolute file paths. */
-	files: string[];
-}
-
 /** A component with project-relative, forward-slash file paths (for matching paths to components). */
 export interface RelComponent {
 	key: string;

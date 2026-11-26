@@ -3,7 +3,7 @@
  * partial-object expansion for a deploy, whole-object retrieves, conflict choices that follow their rows, the
  * button states and the history list. Pure (no `vscode`, no DOM): runs in the host, the webview and the tests.
  */
-import { Candidates, ConflictChoice, SYNC_IN_PROJECT, SYNC_STATUS_NAMES, SyncRow, componentRefs } from "./syncCenterPure";
+import { Candidates, ConflictChoice, SYNC_IN_PROJECT, SYNC_STATUS_NAMES, SyncRow } from "./syncCenterPure";
 import { orgLookupKey } from "./deployStatusPure";
 import { HistoryEntry, HistoryKind } from "./historyPure";
 import { relativeTime } from "./orgBrowser/filter";
@@ -88,20 +88,6 @@ export function rowDeployLocalKeys(row: SyncRow, locals: readonly LocalRef[], ch
 }
 
 /**
- * Local index keys to deploy for the Center's row keys: a row's own local entry, and for a `partial` row (the object
- * is not a local entry) the local entries of its children. Rows without anything local are dropped; no duplicates.
- */
-export function deployLocalKeys(rows: readonly SyncRow[], keys: readonly string[], locals: readonly LocalRef[], childTypes: ReadonlySet<string>): string[] {
-	const byKey = new Map(rows.map((r) => [r.key, r]));
-	const out = new Set<string>();
-	for (const k of keys) {
-		const r = byKey.get(k);
-		if (r) for (const lk of rowDeployLocalKeys(r, locals, childTypes)) out.add(lk);
-	}
-	return [...out];
-}
-
-/**
  * Local index keys a history entry's components stand for (re-running a deploy): the entry's own local key, and for an
  * object that is not a local entry its local children. Components that are not in the project are counted in `missing`.
  */
@@ -128,23 +114,6 @@ export function historyDeployLocalKeys(components: readonly string[], locals: re
 export function rowRetrieveRef(row: Pick<SyncRow, "type" | "name">, wholeObject: boolean, childTypes: ReadonlySet<string>): { type: string; fullName: string } {
 	const obj = wholeObject ? objectOfChild(row.type, row.name, childTypes) : undefined;
 	return obj ? { type: "CustomObject", fullName: obj } : { type: row.type, fullName: row.name };
-}
-
-/**
- * What a retrieve asks the org for. With `wholeObject` a selected child (a field, a record type …) becomes its
- * object (`CustomObject:Account`); off, children are retrieved on their own. No duplicates, order kept.
- */
-export function retrieveRefs(rows: readonly SyncRow[], keys: readonly string[], wholeObject: boolean, childTypes: ReadonlySet<string>): { type: string; fullName: string }[] {
-	const out: { type: string; fullName: string }[] = [];
-	const seen = new Set<string>();
-	for (const r of componentRefs(rows, keys)) {
-		const ref = rowRetrieveRef({ type: r.type, name: r.fullName }, wholeObject, childTypes);
-		const k = compKey(ref.type, ref.fullName);
-		if (seen.has(k)) continue;
-		seen.add(k);
-		out.push(ref);
-	}
-	return out;
 }
 
 /**

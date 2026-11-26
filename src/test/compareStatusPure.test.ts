@@ -8,7 +8,6 @@ import {
 	effectiveSyncedAt,
 	fileLocalTime,
 	isPathDirty,
-	parseGitLogTimes,
 	progressText,
 } from "../utils/compareStatusPure";
 
@@ -101,16 +100,6 @@ describe("compare status: local time", () => {
 });
 
 describe("compare status: git data", () => {
-	it("parses git log --name-only output into the newest commit time per path", () => {
-		const out = ["300\n\nsrc/a.cls\nsrc/b.cls\n", "200\n\nsrc/a.cls\nsrc/c.cls\n", "100\n\nsrc/d.cls\n"].map((b) => "\x00" + b).join("");
-		const m = parseGitLogTimes(out);
-		assert.strictEqual(m.get("src/a.cls"), 300_000);
-		assert.strictEqual(m.get("src/b.cls"), 300_000);
-		assert.strictEqual(m.get("src/c.cls"), 200_000);
-		assert.strictEqual(m.get("src/d.cls"), 100_000);
-		assert.strictEqual(m.size, 4);
-		assert.strictEqual(parseGitLogTimes("").size, 0);
-	});
 	it("a path is dirty when it, or a folder above it, is in the status", () => {
 		const dirty = new Set(["force-app/main/default/classes/A.cls", "force-app/main/default/lwc/newOne"]);
 		assert.strictEqual(isPathDirty("force-app/main/default/classes/A.cls", dirty), true);

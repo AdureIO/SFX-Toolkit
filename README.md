@@ -112,7 +112,6 @@ A unified bottom panel (sidebar **Tools → ASFX Workbench**) that brings Apex e
   - Pick the action (Deploy, Retrieve or Delete) and the components, pick a test level, target any org — it always deploys exactly the components you picked (source-tracking conflicts are overridden). Content comparison runs only when you press **Compare contents**.
   - **Deployment history**: the org's recent deploys merged with this project's history, with status, duration, test results and timestamp — browse, expand for errors and re-run in one click. The classic **Deployment History** command keeps its list too.
   - **Named Test Suites**: save groups of test classes with a preset and reload them instantly.
-  - **Pre-Deploy Quality Gate**: scans Apex before deploy for leftover `System.debug()` (warning), hardcoded record IDs (error), SOQL/DML in loops (error), and `TODO`/`FIXME` (info) — review, then abort or deploy anyway.
   - **Test Coverage Display**: post-deploy per-class coverage, colour-coded (≥75% green / ≥50% amber / <50% red) with overall average.
   - **Auto file detection** via a debounced `FileSystemWatcher`; **Deployment Presets** for reusable configs.
 - **Test Runner**: run local tests easily.

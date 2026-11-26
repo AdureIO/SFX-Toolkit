@@ -168,10 +168,6 @@ export function getCachedOrgList(): OrgOption[] | null {
   return cached;
 }
 
-export function setOrgListCache(orgs: OrgOption[]): void {
-  cached = orgs;
-}
-
 /** Update cache from `sf org list` result object. */
 export function setOrgListCacheFromSfResult(
   result:

@@ -19,14 +19,10 @@ import {
 	retrieveProjectKeys,
 	deployCandidates,
 	isDiffable,
-	localKeysOf,
-	quickActionCounts,
-	quickActionKeys,
 	retrieveCandidates,
 	normalizeMode,
-	skippedText,
 	takesPart,
-	unresolvedText,
+	overwriteText,
 } from "../utils/syncCenterPure";
 import { DEFAULT_FILTER, FilterContext, buildIndex, filterIndices, parseQuery } from "../utils/orgBrowser/filter";
 import { Comp } from "../utils/orgBrowser/types";
@@ -90,7 +86,6 @@ describe("sync center rows", () => {
 		const rows = buildSyncRows(base({ local: [loc("Layout", "Account-My%20Layout")], org: [] }));
 		assert.strictEqual(rows[0].name, "Account-My Layout");
 		assert.strictEqual(rows[0].status, "only-local");
-		assert.deepStrictEqual(localKeysOf(rows, [rows[0].key]), ["Layout:Account-My%20Layout"]);
 		assert.deepStrictEqual(componentRefs(rows, [rows[0].key]), [{ type: "Layout", fullName: "Account-My Layout" }]);
 	});
 
@@ -216,34 +211,34 @@ describe("sync center candidates", () => {
 		const r = deployCandidates(ROWS, all, new Map([["ApexClass:CF1", "local" as const]]), true);
 		assert.deepStrictEqual(r.keys, ["ApexClass:OL", "ApexClass:CL", "ApexClass:CO", "ApexClass:CF1", "ApexClass:CF2", "CustomObject:PA", "ApexClass:UN"]);
 		// Rows whose deploy overwrites a newer org version: changed-in-org and the conflict without a choice.
-		assert.strictEqual(r.unresolvedConflicts, 2);
-		assert.deepStrictEqual(r.unresolvedKeys, ["ApexClass:CO", "ApexClass:CF2"]);
+		assert.strictEqual(r.overwriteCount, 2);
+		assert.deepStrictEqual(r.overwriteKeys, ["ApexClass:CO", "ApexClass:CF2"]);
 		assert.deepStrictEqual(Object.fromEntries(r.skipped.map((s) => [s.reason, s.count])), { "only in org": 1, equal: 1 });
 		const noSkip = deployCandidates(ROWS, all, new Map([["ApexClass:CF1", "local" as const], ["ApexClass:CF2", "local" as const]]), false);
 		assert.ok(noSkip.keys.includes("ApexClass:EQ"));
-		assert.strictEqual(noSkip.unresolvedConflicts, 1); // changed-in-org
+		assert.strictEqual(noSkip.overwriteCount, 1); // changed-in-org
 	});
 
 	it("deploy: an equal row (skipped) plus a changed-in-org row deploys the changed-in-org one", () => {
 		const r = deployCandidates(ROWS, new Set(["ApexClass:EQ", "ApexClass:CO"]), none, true);
 		assert.deepStrictEqual(r.keys, ["ApexClass:CO"]);
-		assert.deepStrictEqual(r.unresolvedKeys, ["ApexClass:CO"]);
+		assert.deepStrictEqual(r.overwriteKeys, ["ApexClass:CO"]);
 		assert.deepStrictEqual(r.skipped, [{ reason: "equal", count: 1 }]);
 	});
 
-	it("deploy: a conflict set to Take org is skipped, not unresolved", () => {
+	it("deploy: a conflict set to Take org is skipped, not an overwrite", () => {
 		const r = deployCandidates(ROWS, new Set(["ApexClass:CF1"]), new Map([["ApexClass:CF1", "org" as const]]), true);
 		assert.deepStrictEqual(r.keys, []);
 		assert.deepStrictEqual(r.skipped, [{ reason: "conflict set to Take org", count: 1 }]);
-		assert.strictEqual(r.unresolvedConflicts, 0);
+		assert.strictEqual(r.overwriteCount, 0);
 	});
 
 	it("retrieve: org-side rows count; conflicts without a choice take part", () => {
 		const r = retrieveCandidates(ROWS, all, new Map([["ApexClass:CF2", "org" as const]]), true);
 		assert.deepStrictEqual(r.keys, ["ApexClass:OO", "ApexClass:CL", "ApexClass:CO", "ApexClass:CF1", "ApexClass:CF2", "CustomObject:PA", "ApexClass:UN"]);
 		// Rows whose retrieve overwrites local changes: changed-locally and the conflict without a choice.
-		assert.strictEqual(r.unresolvedConflicts, 2);
-		assert.deepStrictEqual(r.unresolvedKeys, ["ApexClass:CL", "ApexClass:CF1"]);
+		assert.strictEqual(r.overwriteCount, 2);
+		assert.deepStrictEqual(r.overwriteKeys, ["ApexClass:CL", "ApexClass:CF1"]);
 		// Keep local excludes the row in Retrieve mode.
 		const kl = retrieveCandidates(ROWS, new Set(["ApexClass:CF1"]), new Map([["ApexClass:CF1", "local" as const]]), true);
 		assert.deepStrictEqual(kl.keys, []);
@@ -269,7 +264,7 @@ describe("sync center candidates", () => {
 	it("delete: only only-org rows; the rest of the selection is skipped with a reason", () => {
 		const r = deleteCandidates(ROWS, all, none, true);
 		assert.deepStrictEqual(r.keys, ["ApexClass:OO"]);
-		assert.strictEqual(r.unresolvedConflicts, 0);
+		assert.strictEqual(r.overwriteCount, 0);
 		const reasons = Object.fromEntries(r.skipped.map((s) => [s.reason, s.count]));
 		assert.strictEqual(reasons["only local"], 1);
 		assert.strictEqual(reasons["partly local"], 1);
@@ -278,30 +273,14 @@ describe("sync center candidates", () => {
 
 	it("tooltip texts", () => {
 		const r = deployCandidates(ROWS, all, none, true);
-		assert.strictEqual(unresolvedText(r), "3 selected components have a newer version in the org — deploying overwrites them.");
-		assert.strictEqual(unresolvedText(r, "retrieve"), "3 selected components have local changes — retrieving overwrites your local files.");
-		assert.strictEqual(unresolvedText({ unresolvedConflicts: 1 }), "1 selected component has a newer version in the org — deploying overwrites it.");
-		assert.strictEqual(unresolvedText({ unresolvedConflicts: 0 }), "");
-		assert.ok(skippedText(r).includes("1 only in org skipped"));
-		assert.strictEqual(skippedText({ skipped: [] }), "");
+		assert.strictEqual(overwriteText(r), "3 selected components have a newer version in the org — deploying overwrites them.");
+		assert.strictEqual(overwriteText(r, "retrieve"), "3 selected components have local changes — retrieving overwrites your local files.");
+		assert.strictEqual(overwriteText({ overwriteCount: 1 }), "1 selected component has a newer version in the org — deploying overwrites it.");
+		assert.strictEqual(overwriteText({ overwriteCount: 0 }), "");
 	});
 });
 
-describe("sync center quick actions", () => {
-	it("select by status with counts; all changes = changed locally + changed in org + conflict", () => {
-		assert.deepStrictEqual(quickActionKeys(ROWS, "changedLocally"), ["ApexClass:CL"]);
-		assert.deepStrictEqual(quickActionKeys(ROWS, "changedInOrg"), ["ApexClass:CO"]);
-		assert.deepStrictEqual(quickActionKeys(ROWS, "allChanges"), ["ApexClass:CL", "ApexClass:CO", "ApexClass:CF1", "ApexClass:CF2"]);
-		assert.deepStrictEqual(quickActionKeys(ROWS, "onlyLocal"), ["ApexClass:OL"]);
-		assert.deepStrictEqual(quickActionCounts(ROWS), { changedLocally: 1, changedInOrg: 1, allChanges: 4, onlyLocal: 1 });
-	});
-
-	it("a visible-keys set limits the selection (the filter)", () => {
-		const visible = new Set(["ApexClass:CL", "ApexClass:CF1"]);
-		assert.deepStrictEqual(quickActionKeys(ROWS, "allChanges", visible), ["ApexClass:CL", "ApexClass:CF1"]);
-		assert.strictEqual(quickActionCounts(ROWS, visible).allChanges, 2);
-	});
-
+describe("sync center diffable rows", () => {
 	it("which rows can be diffed", () => {
 		assert.deepStrictEqual(ROWS.filter(isDiffable).map((r) => r.key), ["ApexClass:EQ", "ApexClass:CL", "ApexClass:CO", "ApexClass:CF1", "ApexClass:CF2"]);
 	});

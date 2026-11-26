@@ -29,10 +29,7 @@ import { CompareProgress, ContentInfoMap, LocalInfoMap, progressText } from "../
 import {
 	ConflictChoice,
 	SYNC_CENTER_VOCAB,
-	SYNC_IN_PROJECT,
-	SYNC_IN_PROJECT_FACET_INDEX,
 	SYNC_STATUS_LABELS,
-	SYNC_STATUS_NAMES,
 	SyncRow,
 	buildSyncRows,
 	deleteCandidates,
@@ -44,7 +41,7 @@ import {
 	normalizeMode,
 	syncStatusOptions,
 	takesPart,
-	unresolvedText,
+	overwriteText,
 } from "../utils/syncCenterPure";
 import {
 	buttonState,
@@ -101,7 +98,7 @@ import {
 	testErrorName,
 } from "../utils/syncCenterActivityUiPure";
 import { WebPreset } from "../utils/presetsWebPure";
-import { $, REFRESH_ICON, createFilterBar, esc, toggleIn, FilterBar } from "./shared/filterBar";
+import { $, createFilterBar, esc, toggleIn, FilterBar } from "./shared/filterBar";
 import { createSharedFilterSync } from "./shared/sharedFilter";
 import { filterTestList, mountTestTree } from "./shared/testTree";
 import { mountTestSuites } from "./shared/testSuites";
@@ -862,7 +859,7 @@ function renderRight(): void {
 	}
 
 	// Conflicts without a choice take part; say so where the buttons are, with the way to them (the run asks first).
-	const note = unresolvedText(modeOf() === "retrieve" ? rc : dc, modeOf() === "retrieve" ? "retrieve" : "deploy");
+	const note = overwriteText(modeOf() === "retrieve" ? rc : dc, modeOf() === "retrieve" ? "retrieve" : "deploy");
 	for (const el of document.querySelectorAll<HTMLElement>(".conflict-note")) {
 		el.hidden = note === "";
 		if (note !== "") el.innerHTML = `${esc(note)} <button type="button" class="linkbtn" data-showconflicts="1">Show conflicts</button>`;
@@ -1328,13 +1325,13 @@ function startRetrieve(keys: string[], conflictKeys: string[], withVisible: bool
 function doDeploy(): void {
 	const c = deployCandidates(syncRows, selected, choices, ui.opts.skipEqualDeploy);
 	if (c.keys.length === 0) return;
-	startDeploy(c.keys, c.unresolvedKeys, true);
+	startDeploy(c.keys, c.overwriteKeys, true);
 }
 
 function doRetrieve(): void {
 	const c = retrieveCandidates(syncRows, selected, choices, ui.opts.skipEqualRetrieve);
 	if (c.keys.length === 0) return;
-	startRetrieve(c.keys, c.unresolvedKeys, true);
+	startRetrieve(c.keys, c.overwriteKeys, true);
 }
 
 function doRetrieveProject(): void {

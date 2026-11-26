@@ -7,8 +7,6 @@ import {
 	gridTemplate,
 	moveColumn,
 	normalizeLayout,
-	parseLayout,
-	serializeLayout,
 	setColumnVisible,
 	setColumnWidth,
 	visibleColumns,
@@ -21,11 +19,6 @@ describe("sync center column layout", () => {
 	it("defaults to the current columns", () => {
 		assert.deepStrictEqual(visible(defaultLayout()), ["name", "type", "ns", "by", "mod", "status", "actions"]);
 		assert.strictEqual(defaultLayout().cols.length, COLUMN_DEFS.length);
-	});
-
-	it("round-trips through the stored text", () => {
-		const l = moveColumn(setColumnVisible(defaultLayout(), "id", true), "id", "type", false);
-		assert.deepStrictEqual(parseLayout(serializeLayout(l)), l);
 	});
 
 	it("sanitises anything stored: unknown / duplicate columns dropped, missing ones appended, widths clamped", () => {
@@ -64,8 +57,6 @@ describe("sync center column layout", () => {
 
 	it("garbage gives the default", () => {
 		for (const raw of [undefined, null, 7, "x", [], {}, { cols: "no" }]) assert.deepStrictEqual(normalizeLayout(raw), defaultLayout());
-		assert.deepStrictEqual(parseLayout(undefined), defaultLayout());
-		assert.deepStrictEqual(parseLayout("{broken"), defaultLayout());
 	});
 
 	it("hides, shows and resizes", () => {

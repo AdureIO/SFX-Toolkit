@@ -63,8 +63,6 @@ export const STATUS_PARTIAL = 5;
 /** The local project was not read yet (or its change info is not available yet). */
 export const STATUS_UNKNOWN = 6;
 export const STATUS_NAMES = ["not-in-project", "equal", "changed-locally", "changed-in-org", "conflict", "partial", "unknown"] as const;
-export type StatusName = (typeof STATUS_NAMES)[number];
-
 /** `Type:Name` row key used across host, webview, local index and retrieve log. */
 export function compKey(type: string, fullName: string): string {
 	return `${type}:${fullName}`;

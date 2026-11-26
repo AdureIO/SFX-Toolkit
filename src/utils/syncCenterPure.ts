@@ -288,9 +288,9 @@ export interface Candidates {
 	/** Selected rows that don't count, grouped by why. */
 	skipped: SkipCount[];
 	/** Selected rows whose run overwrites the other side: conflicts without a choice, plus changed-in-org (Deploy) / changed-locally (Retrieve). They take part (they are in `keys`); the run asks first. Never blocks. */
-	unresolvedConflicts: number;
+	overwriteCount: number;
 	/** Their keys (for the "show conflicts" link and the run-time confirmation). */
-	unresolvedKeys: string[];
+	overwriteKeys: string[];
 }
 
 export interface CandidateOptions {
@@ -305,16 +305,16 @@ type Verdict = { take: true } | { take: false; reason: string };
 const TAKE: Verdict = { take: true };
 const skip = (reason: string): Verdict => ({ take: false, reason });
 
-function collect(rows: readonly SyncRow[], o: CandidateOptions, verdict: (r: SyncRow) => Verdict | "unresolved"): Candidates {
-	// "unresolved" = a row whose run overwrites the other side (a conflict without a choice, changed-in-org on Deploy, changed-locally on Retrieve): it takes part (and is also reported in `unresolvedKeys`).
+function collect(rows: readonly SyncRow[], o: CandidateOptions, verdict: (r: SyncRow) => Verdict | "overwrite"): Candidates {
+	// "overwrite" = a row whose run overwrites the other side (a conflict without a choice, changed-in-org on Deploy, changed-locally on Retrieve): it takes part (and is also reported in `overwriteKeys`).
 	const keys: string[] = [];
 	const skipped = new Map<string, number>();
-	const unresolvedKeys: string[] = [];
+	const overwriteKeys: string[] = [];
 	for (const r of rows) {
 		if (!o.selection.has(r.key)) continue;
 		const v = verdict(r);
-		if (v === "unresolved") {
-			unresolvedKeys.push(r.key);
+		if (v === "overwrite") {
+			overwriteKeys.push(r.key);
 			keys.push(r.key);
 		} else if (v.take) keys.push(r.key);
 		else skipped.set(v.reason, (skipped.get(v.reason) ?? 0) + 1);
@@ -322,8 +322,8 @@ function collect(rows: readonly SyncRow[], o: CandidateOptions, verdict: (r: Syn
 	return {
 		keys,
 		skipped: [...skipped].map(([reason, count]) => ({ reason, count })),
-		unresolvedConflicts: unresolvedKeys.length,
-		unresolvedKeys,
+		overwriteCount: overwriteKeys.length,
+		overwriteKeys,
 	};
 }
 
@@ -343,12 +343,12 @@ export function deployCandidates(rows: readonly SyncRow[], selection: ReadonlySe
 				return skipEqual ? skip("equal") : TAKE;
 			case "conflict": {
 				const c = conflictChoices.get(r.key);
-				return c === "local" ? TAKE : c === "org" ? skip("conflict set to Take org") : "unresolved";
+				return c === "local" ? TAKE : c === "org" ? skip("conflict set to Take org") : "overwrite";
 			}
 			case "unknown":
 				return r.local ? TAKE : skip("not in the project");
 			case "changed-in-org":
-				return "unresolved"; // takes part; deploying overwrites the newer org version (the run asks first)
+				return "overwrite"; // takes part; deploying overwrites the newer org version (the run asks first)
 			case "only-org":
 				return skip("only in org");
 		}
@@ -371,12 +371,12 @@ export function retrieveCandidates(rows: readonly SyncRow[], selection: Readonly
 				return skipEqual ? skip("equal") : TAKE;
 			case "conflict": {
 				const c = conflictChoices.get(r.key);
-				return c === "org" ? TAKE : c === "local" ? skip("conflict set to Keep local") : "unresolved";
+				return c === "org" ? TAKE : c === "local" ? skip("conflict set to Keep local") : "overwrite";
 			}
 			case "unknown":
 				return r.inOrg ? TAKE : skip("not in the org");
 			case "changed-locally":
-				return "unresolved"; // takes part; retrieving overwrites the local changes (the run asks first)
+				return "overwrite"; // takes part; retrieving overwrites the local changes (the run asks first)
 			case "only-local":
 				return skip("only local");
 		}
@@ -403,14 +403,9 @@ export function deleteCandidates(rows: readonly SyncRow[], selection: ReadonlySe
 	});
 }
 
-/** "3 only in org skipped, 1 equal skipped" for a button tooltip; "" when nothing was skipped. */
-export function skippedText(c: Pick<Candidates, "skipped">): string {
-	return c.skipped.map((s) => `${s.count} ${s.reason} skipped`).join(", ");
-}
-
 /** "2 selected components have a newer version in the org — deploying overwrites them." (retrieve: "have local changes … your local files"), or "" when none. */
-export function unresolvedText(c: Pick<Candidates, "unresolvedConflicts">, mode: "deploy" | "retrieve" = "deploy"): string {
-	const n = c.unresolvedConflicts;
+export function overwriteText(c: Pick<Candidates, "overwriteCount">, mode: "deploy" | "retrieve" = "deploy"): string {
+	const n = c.overwriteCount;
 	if (n === 0) return "";
 	const what = n === 1 ? "1 selected component has" : `${n} selected components have`;
 	return mode === "deploy" ? `${what} a newer version in the org — deploying overwrites ${n === 1 ? "it" : "them"}.` : `${what} local changes — retrieving overwrites your local files.`;
@@ -427,48 +422,8 @@ export function componentRefs(rows: readonly SyncRow[], keys: readonly string[])
 	return out;
 }
 
-/** The local index keys of row keys (what the Deploy panel's `deployPathsForComponents` takes). Rows without a local entry are dropped. */
-export function localKeysOf(rows: readonly SyncRow[], keys: readonly string[]): string[] {
-	const byKey = new Map(rows.map((r) => [r.key, r]));
-	const out: string[] = [];
-	for (const k of keys) {
-		const lk = byKey.get(k)?.localKey;
-		if (lk) out.push(lk);
-	}
-	return out;
-}
-
-// ── Quick actions ──────────────────────────────────────────────────────────────
-
-export type QuickAction = "changedLocally" | "changedInOrg" | "allChanges" | "onlyLocal";
-
-const QUICK: Record<QuickAction, (s: SyncStatus) => boolean> = {
-	changedLocally: (s) => s === "changed-locally",
-	changedInOrg: (s) => s === "changed-in-org",
-	allChanges: (s) => s === "changed-locally" || s === "changed-in-org" || s === "conflict",
-	onlyLocal: (s) => s === "only-local",
-};
-
-/** Row keys a quick action selects. `visible` (the keys the filter shows) limits it; omitted = every row. */
-export function quickActionKeys(rows: readonly SyncRow[], action: QuickAction, visible?: ReadonlySet<string>): string[] {
-	const test = QUICK[action];
-	return rows.filter((r) => test(r.status) && (!visible || visible.has(r.key))).map((r) => r.key);
-}
-
-/** The counts shown next to the quick actions. */
-export function quickActionCounts(rows: readonly SyncRow[], visible?: ReadonlySet<string>): Record<QuickAction, number> {
-	return {
-		changedLocally: quickActionKeys(rows, "changedLocally", visible).length,
-		changedInOrg: quickActionKeys(rows, "changedInOrg", visible).length,
-		allChanges: quickActionKeys(rows, "allChanges", visible).length,
-		onlyLocal: quickActionKeys(rows, "onlyLocal", visible).length,
-	};
-}
-
 /** The right panel's action: it decides which section shows and which rows can take part. */
 export type CenterMode = "deploy" | "retrieve" | "delete";
-
-export const CENTER_MODES: readonly CenterMode[] = ["deploy", "retrieve", "delete"];
 
 export function normalizeMode(v: unknown): CenterMode {
 	return v === "retrieve" || v === "delete" ? v : "deploy";

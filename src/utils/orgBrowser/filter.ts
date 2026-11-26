@@ -261,10 +261,6 @@ export function parseQuery(q: string, vocab: StatusVocab = ORG_BROWSER_VOCAB): P
 	return parsed;
 }
 
-export function isEmptyQuery(p: ParsedQuery): boolean {
-	return !p.terms.length && !p.types.length && !p.ns.length && !p.by.length && !p.status.length && !p.typeNames.length;
-}
-
 type RowTest = (i: number) => boolean;
 
 /** Compile a parsed query into one predicate over row indexes (null = matches everything). */

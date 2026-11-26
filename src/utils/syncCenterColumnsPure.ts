@@ -92,21 +92,6 @@ export function normalizeLayout(raw: unknown): ColumnLayout {
 	return { cols };
 }
 
-/** The stored form (what `normalizeLayout` reads back). */
-export function serializeLayout(l: ColumnLayout): string {
-	return JSON.stringify(normalizeLayout(l));
-}
-
-/** Read a stored string; damaged or empty text gives the default. */
-export function parseLayout(text: string | undefined): ColumnLayout {
-	if (!text) return defaultLayout();
-	try {
-		return normalizeLayout(JSON.parse(text));
-	} catch {
-		return defaultLayout();
-	}
-}
-
 export function visibleColumns(l: ColumnLayout): ColumnPref[] {
 	return l.cols.filter((c) => c.visible);
 }

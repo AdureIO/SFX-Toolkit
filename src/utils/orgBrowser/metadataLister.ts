@@ -4,7 +4,6 @@
  * is injected (`call`), so the parsing, batching, folder expansion and failure isolation are unit-tested
  * against XML fixtures.
  */
-import * as fs from "fs";
 import * as path from "path";
 import { XMLParser } from "fast-xml-parser";
 import { readGzipJson, safeFileStem, writeGzipJson } from "../diskCache";
@@ -404,10 +403,6 @@ export async function loadListingCache(dir: string, orgKey: string): Promise<Lis
 	const parsed = await readGzipJson<ListingCache>(cacheFilePath(dir, orgKey));
 	if (parsed?.v !== 1 || !Array.isArray(parsed.comps) || !Array.isArray(parsed.types)) return null;
 	return parsed;
-}
-
-export async function deleteListingCache(dir: string, orgKey: string): Promise<void> {
-	await fs.promises.unlink(cacheFilePath(dir, orgKey)).catch(() => undefined);
 }
 
 /** Replace the rows of `types` in a cached listing with freshly listed ones (per-type refresh). */

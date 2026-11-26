@@ -525,17 +525,6 @@ export async function deleteSnippetByPath(filePath: string): Promise<boolean> {
   return true;
 }
 
-/**
- * Delete snippet by index (legacy, for tree/panel callers). Index refers to {@link loadSnippets} order,
- * which can shift between listing and deleting — prefer {@link deleteSnippetByPath}. Returns true if deleted.
- */
-export async function deleteSnippetByIndex(index: number): Promise<boolean> {
-  const snippets = await loadSnippets();
-  if (index < 0 || index >= snippets.length) return false;
-  const filePath = snippetFilePath(snippets[index]);
-  return filePath ? deleteSnippetByPath(filePath) : false;
-}
-
 /** Quick pick for the snippets view's project filter ("All projects" plus each project). */
 export async function pickSnippetFilter(): Promise<boolean> {
   const all = projects();
