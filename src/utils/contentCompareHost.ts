@@ -9,6 +9,9 @@ import { ContentCompareService, RetrieveReply, RetrieveRequest } from "./content
 import { retrieveComponents } from "./retrieveEngine";
 import { TypeInfo } from "./orgBrowser/types";
 import { buildTypeTable } from "./orgBrowser/localIndex";
+import { getSyncEntry } from "./retrieveLog";
+import { makeToolingSource, makeTrackingContext } from "./toolingCompareHost";
+import { Logger } from "./outputChannel";
 
 let ctx: vscode.ExtensionContext | undefined;
 let types: TypeInfo[] = [];
@@ -62,6 +65,11 @@ export function acquireCompare(projectDir: string, orgKey: string, orgArg: strin
 			projectDir,
 			retrieve: (req) => retrieveCopy(orgArg, req),
 			table: () => buildTypeTable(types),
+			// The layers that decide before anything is retrieved: sync record, Tooling API source, source tracking.
+			syncRecord: (lookup) => getSyncEntry(orgArg, lookup),
+			toolingSources: makeToolingSource(orgArg),
+			trackingContext: makeTrackingContext(projectDir, orgArg, (l) => Logger.info(l)),
+			log: (l) => Logger.info(l),
 		});
 		s = { service, refs: 0 };
 		shared.set(id, s);

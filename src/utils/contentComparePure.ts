@@ -8,6 +8,7 @@ import * as path from "path";
 import { ContentResult } from "./compareStatusPure";
 import { LocalEntry, TypeTable, mapSourceFile, typeFolderInnerPath } from "./orgBrowser/localIndex";
 import { orgLookupKey } from "./deployStatusPure";
+import { DecisionSource } from "./compareLayersPure";
 
 /** Types whose single-component retrieve is not the full local file (a Profile comes back reduced to what was retrieved with it): never compared. */
 export const NOT_COMPARABLE_TYPES: ReadonlySet<string> = new Set(["Profile"]);
@@ -116,6 +117,8 @@ export interface IndexEntry {
 	comparedAt: number;
 	/** The last time the result was "same" (epoch ms): the baseline of a later "different". */
 	sameAt?: number;
+	/** Which layer decided it (`sync`, `tooling`, `tracking`, `retrieve`); missing = an older result, made by a retrieve. */
+	src?: DecisionSource;
 }
 
 export interface CompareIndexFile {
@@ -137,14 +140,17 @@ export function verifiedSyncAt(entry: IndexEntry | undefined): number | undefine
 }
 
 /** The index entry after a new compare: carries the last "same" time over a "different". */
-export function nextEntry(prev: IndexEntry | undefined, orgLm: number, localHash: string, result: ContentResult, at: number): IndexEntry {
+export function nextEntry(prev: IndexEntry | undefined, orgLm: number, localHash: string, result: ContentResult, at: number, src: DecisionSource = "retrieve"): IndexEntry {
 	const carried = verifiedSyncAt(prev);
-	return { orgLm, localHash, result, comparedAt: at, sameAt: result === "same" ? at : carried };
+	return { orgLm, localHash, result, comparedAt: at, sameAt: result === "same" ? at : carried, src };
 }
 
-/** Wire form for the webviews: `[1 same | 2 different, comparedAt, verified-sync time (0 = never)]`. */
-export function toWire(entry: IndexEntry): [number, number, number] {
-	return [entry.result === "same" ? 1 : 2, entry.comparedAt, verifiedSyncAt(entry) ?? 0];
+/** Wire codes of the deciding layer. */
+export const SOURCE_CODES: Record<DecisionSource, number> = { sync: 1, tooling: 2, tracking: 3, retrieve: 4 };
+
+/** Wire form for the webviews: `[1 same | 2 different, comparedAt, verified-sync time (0 = never), source code (`SOURCE_CODES`)]`. */
+export function toWire(entry: IndexEntry): [number, number, number, number] {
+	return [entry.result === "same" ? 1 : 2, entry.comparedAt, verifiedSyncAt(entry) ?? 0, SOURCE_CODES[entry.src ?? "retrieve"]];
 }
 
 /** Split into groups of at most `size`. */

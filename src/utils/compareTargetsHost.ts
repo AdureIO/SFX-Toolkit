@@ -22,7 +22,7 @@ export function compareTargetsFor(projectDir: string, types: TypeInfo[], entries
 	for (const e of entries) {
 		const c = orgListing.get(orgLookupKey(e.type, e.name));
 		if (!c) continue;
-		out.push({ key: e.key, type: e.type, name: e.name, orgLm: c.lm, files: innerFilesOfEntry(e, pkgAbs, table) });
+		out.push({ key: e.key, type: e.type, name: e.name, orgLm: c.lm, files: innerFilesOfEntry(e, pkgAbs, table), ...(c.ns ? { ns: c.ns } : {}) });
 	}
 	return out;
 }

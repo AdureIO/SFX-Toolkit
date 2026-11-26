@@ -12,7 +12,7 @@
  */
 import * as fs from "fs";
 import * as path from "path";
-import { ContentInfoMap, CompareProgress } from "./compareStatusPure";
+import { ContentInfoMap, CompareProgress, ContentResult } from "./compareStatusPure";
 import { readGzipJson, writeGzipJson } from "./diskCache";
 import {
 	CompareIndexFile,
@@ -31,6 +31,10 @@ import {
 	verifiedSyncAt,
 } from "./contentComparePure";
 import { TypeTable } from "./orgBrowser/localIndex";
+import { CompareLayer, DecisionSource, LayerStat, layerSummary, runLayers } from "./compareLayersPure";
+import { SyncEntry, decideSync } from "./syncRecordPure";
+import { OrgSourceCandidate, TOOLING_TYPES, ToolingTarget, decideTooling, orgDeveloperName, pickCandidate } from "./toolingComparePure";
+import { TrackingContext, countChangedInOrg, decideTracking } from "./sourceTrackingPure";
 
 /** The component an org copy is asked for (`fetchOrgCopy`). */
 export interface OrgCopyTarget {
@@ -50,6 +54,8 @@ export interface CompareTarget {
 	orgLm: number;
 	/** The component's local files. */
 	files: { inner: string; abs: string }[];
+	/** Namespace of the org component (from the listing); omitted = none. */
+	ns?: string;
 }
 
 /** What the service asks the injected retriever to do. */
@@ -85,12 +91,26 @@ export interface CompareServiceDeps {
 	chunkSize?: number;
 	/** Delay before the index is written after a chunk (default 1500 ms; 0 in tests). */
 	flushDelayMs?: number;
+	/**
+	 * The layers that decide a component before anything is retrieved (all optional; a missing one is skipped):
+	 * 1 the sync record of the component (`lookup` = `orgLookupKey`), 2 the org's source from the Tooling API
+	 * (candidates by `Type:DeveloperName`), 3 the org's source tracking.
+	 */
+	syncRecord?(lookup: string): SyncEntry | undefined;
+	toolingSources?(targets: ToolingTarget[], token: CancelToken): Promise<Map<string, OrgSourceCandidate[]>>;
+	trackingContext?(token: CancelToken): Promise<TrackingContext | undefined>;
+	/** Output channel line (per-layer counts and timings). */
+	log?(line: string): void;
+	/** Components per Tooling call group (default 300). */
+	toolingBatch?: number;
 }
 
 interface Queued {
 	target: CompareTarget;
 	force: boolean;
 }
+/** A queued component as the layer runner sees it (it identifies items by `key`). */
+type LayerItem = Queued & { key: string };
 
 export type UpdateListener = (keys: string[]) => void;
 export type ProgressListener = (p: CompareProgress) => void;
@@ -147,6 +167,11 @@ export class ContentCompareService {
 	private done = 0;
 	private total = 0;
 	private failed = 0;
+	/** Per-layer results of the current run (logged when it ends). */
+	private runCounts: Record<DecisionSource, number> = { sync: 0, tooling: 0, tracking: 0, retrieve: 0 };
+	private runStats: LayerStat[] = [];
+	private retrieveMs = 0;
+	private runStartedAt = 0;
 	private readonly updateListeners = new Set<UpdateListener>();
 	private readonly progressListeners = new Set<ProgressListener>();
 	private readonly digestCache = new Map<string, { mtimeMs: number; size: number; digest: string }>();
@@ -406,6 +431,10 @@ export class ContentCompareService {
 			this.done = 0;
 			this.total = 0;
 			this.failed = 0;
+			this.runCounts = { sync: 0, tooling: 0, tracking: 0, retrieve: 0 };
+			this.runStats = [];
+			this.retrieveMs = 0;
+			this.runStartedAt = this.now();
 		}
 		while (!this.disposed && !this.paused) {
 			if (this.queue.size > 0) {
@@ -423,9 +452,21 @@ export class ContentCompareService {
 					for (const q of batch) if (!this.queue.has(q.target.key)) this.queue.set(q.target.key, q);
 					break;
 				}
-				this.work.push(...todo);
 				this.total += todo.length;
 				this.emitProgress();
+				// Cheap layers first; only what none of them decided is retrieved.
+				const rest = await this.decideByLayers(todo, epoch);
+				if (epoch !== this.epoch) {
+					this.emitProgress();
+					continue;
+				}
+				if (this.paused || this.disposed) {
+					// Stopped between layers: what is undecided is planned again on resume (decided ones are valid now).
+					for (const q of rest) if (!this.queue.has(q.target.key)) this.queue.set(q.target.key, q);
+					this.total -= rest.length;
+					break;
+				}
+				this.work.push(...rest);
 			}
 			if (this.work.length === 0) {
 				if (this.queue.size === 0) break;
@@ -435,8 +476,11 @@ export class ContentCompareService {
 			const group = this.work.splice(0, size);
 			const token = new SimpleToken();
 			this.token = token;
+			const chunkAt = this.now();
 			try {
 				const keys = await this.runChunk(group, token);
+				this.retrieveMs += this.now() - chunkAt;
+				this.runCounts.retrieve += keys.length;
 				this.done += group.length;
 				this.emitUpdate(keys);
 				this.emitProgress();
@@ -456,10 +500,133 @@ export class ContentCompareService {
 			}
 		}
 		if (this.work.length === 0 && this.queue.size === 0) {
+			this.logRun();
 			await this.flush();
 		} else {
 			this.scheduleFlush();
 		}
+	}
+
+	/** The run's per-layer counts and timings to the output channel. */
+	private logRun(): void {
+		const total = this.runCounts.sync + this.runCounts.tooling + this.runCounts.tracking + this.runCounts.retrieve;
+		if (total === 0 && this.failed === 0) return;
+		const parts = this.runStats.map((l) => `${l.name} ${l.decided}/${l.input} in ${l.ms} ms${l.error ? ` (failed: ${l.error})` : ""}`);
+		if (this.runCounts.retrieve > 0 || this.retrieveMs > 0) parts.push(`retrieve ${this.runCounts.retrieve} in ${this.retrieveMs} ms`);
+		this.deps.log?.(
+			`Content compare: ${total} component(s) decided in ${this.now() - this.runStartedAt} ms (${layerSummary(this.runCounts) || "none"})${this.failed > 0 ? `, ${this.failed} not compared` : ""}; ${parts.join("; ")}`
+		);
+	}
+
+	/** The layers in order, for the components of `todo`. Returns what none of them decided. */
+	private async decideByLayers(todo: Queued[], epoch: number): Promise<Queued[]> {
+		if (todo.length === 0) return todo;
+		const token = new SimpleToken();
+		const layers = this.layersFor(todo, token);
+		if (layers.length === 0) return todo;
+		const items: LayerItem[] = todo.map((q) => ({ ...q, key: q.target.key }));
+		// The layers' requests are cancelled by pause / cancelAll like a running retrieve.
+		this.token = token;
+		try {
+			const out = await runLayers(items, layers, {
+				now: () => this.now(),
+				isStopped: () => this.paused || this.disposed || epoch !== this.epoch,
+				onDecided: async (layer, decided, items) => {
+					if (epoch !== this.epoch) return;
+					const keys = await this.applyDecisions(layer, decided, items);
+					this.done += decided.size;
+					this.runCounts[layer] += decided.size;
+					this.emitUpdate(keys);
+					this.emitProgress();
+				},
+			});
+			this.runStats.push(...out.stats);
+			return out.undecided;
+		} finally {
+			this.token = undefined;
+			this.dropCurrent = false;
+		}
+	}
+
+	private layersFor(todo: readonly Queued[], token: CancelToken): CompareLayer<LayerItem>[] {
+		const d = this.deps;
+		const layers: CompareLayer<LayerItem>[] = [];
+		const lookupOf = (q: LayerItem) => lookupKeyOf(q.target.type, q.target.name);
+		if (d.syncRecord) {
+			layers.push({
+				name: "sync",
+				run: async (items) => {
+					const out = new Map<string, ContentResult>();
+					for (const q of items) {
+						const local = await this.localDigests(q.target);
+						if (!local) continue;
+						if (decideSync(d.syncRecord!(lookupOf(q)), q.target.orgLm, hashDigests(local)) === "same") out.set(q.target.key, "same");
+					}
+					return out;
+				},
+			});
+		}
+		if (d.toolingSources && todo.some((q) => TOOLING_TYPES.has(q.target.type))) {
+			layers.push({
+				name: "tooling",
+				batch: d.toolingBatch ?? 300,
+				run: async (items) => {
+					const out = new Map<string, ContentResult>();
+					const mine = items.filter((q) => TOOLING_TYPES.has(q.target.type));
+					if (mine.length === 0) return out;
+					const targets: ToolingTarget[] = mine.map((q) => ({ type: q.target.type, name: q.target.name, ns: q.target.ns ?? "" }));
+					const sources = await d.toolingSources!(targets, token);
+					for (const q of mine) {
+						const t = { type: q.target.type, name: q.target.name, ns: q.target.ns ?? "" };
+						const cand = pickCandidate(sources.get(`${t.type}:${orgDeveloperName(t)}`), t.ns);
+						const local = await this.localDigests(q.target);
+						if (!local) continue;
+						const r = decideTooling({ local, org: cand?.files, orgLm: q.target.orgLm, syncRecord: d.syncRecord?.(lookupOf(q)) });
+						if (r) out.set(q.target.key, r);
+					}
+					return out;
+				},
+			});
+		}
+		if (d.trackingContext) {
+			layers.push({
+				name: "tracking",
+				run: async (items) => {
+					const out = new Map<string, ContentResult>();
+					const ctx = await d.trackingContext!(token);
+					if (!ctx) return out;
+					const changed = countChangedInOrg(items.map(lookupOf), ctx);
+					d.log?.(`Content compare: source tracking: ${changed} of ${items.length} undecided component(s) changed in the org since the last CLI sync${ctx.incomplete ? " (delta cut off, nothing decided)" : ""}`);
+					for (const q of items) {
+						const local = await this.localDigests(q.target);
+						if (!local) continue;
+						if (decideTracking(lookupOf(q), ctx, d.syncRecord?.(lookupOf(q)), hashDigests(local)) === "same") out.set(q.target.key, "same");
+					}
+					return out;
+				},
+			});
+		}
+		return layers;
+	}
+
+	/** Record what a layer decided. The org copy kept by an earlier compare is dropped (it may be older than the org now). */
+	private async applyDecisions(layer: DecisionSource, decided: ReadonlyMap<string, ContentResult>, items: readonly Queued[]): Promise<string[]> {
+		const at = this.now();
+		const keys: string[] = [];
+		for (const q of items) {
+			const result = decided.get(q.target.key);
+			if (!result) continue;
+			const local = await this.localDigests(q.target);
+			if (!local) {
+				this.failed++;
+				continue;
+			}
+			this.index.entries[q.target.key] = nextEntry(this.index.entries[q.target.key], q.target.orgLm, hashDigests(local), result, at, layer);
+			await fs.promises.rm(this.orgCopyDir(q.target.key), { recursive: true, force: true }).catch(() => undefined);
+			keys.push(q.target.key);
+		}
+		this.scheduleFlush();
+		return keys;
 	}
 
 	/** Which of the queued components need a (re)compare: never compared, or org time / local contents changed. */

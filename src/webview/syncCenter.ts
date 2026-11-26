@@ -27,7 +27,8 @@ import {
 } from "../utils/orgBrowser/filter";
 import { splitByVisibility } from "../utils/orgBrowser/selection";
 import { Comp, ListFailure, TypeInfo } from "../utils/orgBrowser/types";
-import { CompareProgress, ContentInfoMap, LocalInfoMap, compareStatusText, compareSummary } from "../utils/compareStatusPure";
+import { CompareProgress, ContentInfoMap, LocalInfoMap, compareStatusText, compareSummary, sourceBreakdown } from "../utils/compareStatusPure";
+import { layerSummary } from "../utils/compareLayersPure";
 import {
 	ConflictChoice,
 	SYNC_CENTER_VOCAB,
@@ -757,6 +758,8 @@ function renderCompareInfo(): void {
 		const failed = cmpProgress?.failed ?? 0;
 		const tip = [`${sum.verified.toLocaleString("en-US")} of ${proj.length.toLocaleString("en-US")} project components verified by content compare`];
 		if (sum.lastAt > 0) tip.push(`Last compared ${new Date(sum.lastAt).toLocaleString()}`);
+		const by = layerSummary(sourceBreakdown(contentInfo, proj));
+		if (by) tip.push(`Decided by: ${by}`);
 		if (failed > 0) tip.push(`${failed} component${failed === 1 ? "" : "s"} could not be compared (they keep the date-based status)`);
 		el.title = tip.join("\n");
 	}

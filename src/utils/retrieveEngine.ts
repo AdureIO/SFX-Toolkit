@@ -9,6 +9,7 @@ import { Logger } from "./outputChannel";
 import { OrgMetadataCache } from "./orgMetadataCache";
 import { schemaObjectFromPath } from "./deployStatusMap";
 import { recordRetrieved } from "./retrieveLog";
+import { recordSyncAfter } from "./syncRecordHost";
 import {
 	buildRetrieveArgs,
 	chunkComponents,
@@ -92,9 +93,12 @@ export async function retrieveComponents(opts: RetrieveOptions): Promise<Retriev
 
 	const record = opts.record !== false;
 	const argOpts = { outputDir: opts.outputDir, ignoreConflicts: opts.ignoreConflicts };
-	const finish = () => {
+	const finish = async (): Promise<void> => {
 		if (record && retrieved.length > 0) {
-			recordRetrieved(opts.org, retrieved);
+			const at = new Date();
+			recordRetrieved(opts.org, retrieved, at);
+			// The sync record: the local contents right now; the org's lastModifiedDate is filled in at the next listing.
+			await recordSyncAfter({ org: opts.org, projectDir: opts.projectDir, kind: "retrieve", refs: retrieved.map((r) => ({ type: r.type, fullName: r.fullName })), at });
 			invalidateSchemaCaches(opts.org, retrieved.map((r) => r.filePath));
 		}
 	};
@@ -132,7 +136,7 @@ export async function retrieveComponents(opts: RetrieveOptions): Promise<Retriev
 			opts.onProgress?.(done, total);
 		}
 	} finally {
-		finish();
+		await finish();
 	}
 	return { retrieved, failed };
 }

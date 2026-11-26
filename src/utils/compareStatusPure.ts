@@ -146,8 +146,14 @@ export function effectiveSyncedAt(logTime?: number, verifiedAt?: number): number
 
 /** `[localT, dirty 0|1]` per component key. */
 export type LocalInfoMap = Record<string, [number, number]>;
-/** `[result 1 = same / 2 = different, comparedAt, sameAt (0 = never)]` per component key. */
-export type ContentInfoMap = Record<string, [number, number, number]>;
+/**
+ * `[result 1 = same / 2 = different, comparedAt, sameAt (0 = never), source]` per component key. `source` (absent
+ * on a stale result) says which layer decided it: 1 sync record, 2 Tooling API, 3 source tracking, 4 retrieve.
+ */
+export type ContentInfoMap = Record<string, [number, number, number, number?]>;
+
+/** Names of the source codes of `ContentInfoMap`. */
+export const SOURCE_NAMES: Record<number, "sync" | "tooling" | "tracking" | "retrieve"> = { 1: "sync", 2: "tooling", 3: "tracking", 4: "retrieve" };
 
 export interface CompareProgress {
 	/** `idle`: nothing running; `running`: comparing; `paused`: stopped for a deploy (resumes after it). */
@@ -180,6 +186,17 @@ export function compareSummary(info: ContentInfoMap, keys: Iterable<string>): { 
 		if (e[1] > lastAt) lastAt = e[1];
 	}
 	return { verified, lastAt };
+}
+
+/** How many of the valid compare results of `keys` each layer decided: "512 sync · 180 tooling · 40 retrieve" (see `layerSummary`). A result without a source was made by a retrieve. */
+export function sourceBreakdown(info: ContentInfoMap, keys: Iterable<string>): Record<"sync" | "tooling" | "tracking" | "retrieve", number> {
+	const out = { sync: 0, tooling: 0, tracking: 0, retrieve: 0 };
+	for (const k of keys) {
+		const e = info[k];
+		if (!e || (e[0] !== 1 && e[0] !== 2)) continue;
+		out[SOURCE_NAMES[e[3] ?? 4] ?? "retrieve"]++;
+	}
+	return out;
 }
 
 /** Top-bar text: "Comparing 120/732…" while it runs, else "Compared 5 min ago" / "Not compared". `rel` formats a time as relative text. */

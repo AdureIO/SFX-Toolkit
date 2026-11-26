@@ -8,6 +8,7 @@ import { OrgMetadataCache } from "../utils/orgMetadataCache";
 import { getAutoSaveBeforePush } from "../utils/constants";
 import { DEPLOY_TIMEOUT_MS } from "./deployMetadata";
 import { runJsonDeploy } from "../utils/deployEngine";
+import { recordSyncAfter } from "../utils/syncRecordHost";
 import { formatStatus, formatElapsed, affectedSchemaObjects, componentSuccessList, parseRetrievedComponents, schemaObjectFromPath, toApiDeployResult, type DeployedComponent } from "../utils/deployStatusMap";
 import { clearDeployDiagnostics, setDeployDiagnosticsFromApiResult, setDeployDiagnosticsFromFailure, formatApiDeployResultForLog, componentFailuresOf, withSyntheticTestFailures } from "../utils/deployDiagnostics";
 import { reportError, reportSuccess } from "../utils/reportError";
@@ -455,7 +456,16 @@ async function pushSourceHelper(force: boolean) {
             return;
           }
 
-          if (state.totalCount > 0 || state.components.length > 0) recordPush(true);
+          if (state.totalCount > 0 || state.components.length > 0) {
+            recordPush(true);
+            // The sync record of the layered content compare (org time is filled in at the next listing).
+            await recordSyncAfter({
+              org: targetUser,
+              projectDir: rootPath,
+              kind: "deploy",
+              refs: state.components.filter((c): c is { type: string; fullName: string } => !!c.type && !!c.fullName).map((c) => ({ type: c.type, fullName: c.fullName })),
+            });
+          }
 
           // Smart schema refresh: only invalidate/regenerate stubs when the push
           // actually changed objects/fields — a plain Apex push refreshes nothing.

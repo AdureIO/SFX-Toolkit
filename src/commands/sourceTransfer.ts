@@ -11,6 +11,7 @@ import { escapeShellArg } from "../utils/commandRunner";
 import { Logger, DeployLog } from "../utils/outputChannel";
 import { OrgMetadataCache } from "../utils/orgMetadataCache";
 import { runJsonDeploy } from "../utils/deployEngine";
+import { recordSyncAfter } from "../utils/syncRecordHost";
 import { DEPLOY_TIMEOUT_MS, getPackageDirectories } from "./deployMetadata";
 import { addDeployHistoryEntry } from "./deployHistory";
 import { formatStatus, schemaObjectFromPath, statsFromResult, toApiDeployResult } from "../utils/deployStatusMap";
@@ -221,6 +222,13 @@ export async function deployToDefaultOrg(uri?: vscode.Uri, uris?: vscode.Uri[]):
 				if (res.kind === "success") {
 					deployed += res.result.numberComponentsDeployed ?? 0;
 					record("Succeeded", statsFromResult(res.result), res.result);
+					// The sync record of the layered content compare (org time is filled in at the next listing).
+					await recordSyncAfter({
+						org: targetUser,
+						projectDir: group.projectDir,
+						kind: "deploy",
+						refs: componentKeysFromDeploy(res.result).map((k) => ({ type: k.slice(0, k.indexOf(":")), fullName: k.slice(k.indexOf(":") + 1) })),
+					});
 				}
 			} catch (e: any) {
 				if (e?.cancelled) {

@@ -50,7 +50,8 @@ import { addDeployHistoryEntry } from "../commands/deployHistory";
 import { toWebPreset } from "../utils/presetsWebPure";
 import { isSalesforceProject, primaryProjectRoot } from "../utils/projectUtils";
 import { runRetrieveFlow } from "../utils/retrieveFlow";
-import { getRetrieveTimes, recordDeployed } from "../utils/retrieveLog";
+import { getRetrieveTimes, recordDeployed, resolveSyncPending } from "../utils/retrieveLog";
+import { recordSyncAfter } from "../utils/syncRecordHost";
 import { SharedMetadataFilter } from "../utils/sharedFilterState";
 import { getHistory, onDidChangeHistory, recordHistory } from "../utils/syncHistory";
 import { openComponentDiff } from "../utils/syncDiff";
@@ -608,6 +609,16 @@ export class SyncCenterPanelProvider {
 		const map = new Map<string, Comp>();
 		for (const c of comps) map.set(compKey(c.t, c.n), c);
 		this.compMap = map;
+		this.resolveSyncPending();
+	}
+
+	/** Fill the sync records still waiting for the org's lastModifiedDate (retrieves, right-click deploys) from the listing. */
+	private static resolveSyncPending(): void {
+		if (this.compMap.size === 0 || this.orgKey === DEFAULT_ORG_KEY) return;
+		const lm = new Map<string, number>();
+		for (const c of this.compMap.values()) lm.set(orgLookupKey(c.t, c.n), c.lm);
+		const n = resolveSyncPending(this.orgArg, lm);
+		if (n > 0) Logger.info(`Deploy & Retrieve Metadata: ${n} sync record(s) completed from the listing`);
 	}
 
 	private static async loadOrg(org: string | null): Promise<void> {
@@ -1224,6 +1235,22 @@ export class SyncCenterPanelProvider {
 			}),
 			new Date(completedAt)
 		);
+		// The sync record of the layered compare: the org's new lastModifiedDate and the local contents now.
+		const root = this.projectDir();
+		if (root) {
+			await recordSyncAfter({
+				org: this.orgArg,
+				projectDir: root,
+				kind: "deploy",
+				refs: localKeys.map((k) => {
+					const r = refOfKey(k);
+					return { type: r.type, fullName: r.fullName, lm: this.compMap.get(orgLookupKey(r.type, r.fullName))?.lm };
+				}),
+				types: this.types,
+				entries: this.local?.entries.values(),
+				at: new Date(completedAt),
+			});
+		}
 		await this.refreshLocal();
 		if (compareMode() === "auto") void this.requestCompare(true, localKeys.map((k) => rowKeyOf(k)));
 	}
@@ -1331,7 +1358,8 @@ export class SyncCenterPanelProvider {
 					...out.failed.map((f) => ({ key: compKey(f.type, f.fullName), ok: false, error: f.error })),
 				],
 			});
-			// The retrieved copies are the org's now: compare them again so the rows settle on Equal.
+			// The retrieved copies are the org's now: complete their sync records from the listing and compare them again so the rows settle on Equal.
+			this.resolveSyncPending();
 			if (compareMode() === "auto") void this.requestCompare(true, out.retrieved.map((r) => compKey(r.type, r.fullName)));
 		} finally {
 			op?.end("failed", "Interrupted");

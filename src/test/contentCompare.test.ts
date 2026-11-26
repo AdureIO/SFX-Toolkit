@@ -247,7 +247,7 @@ describe("content compare service", () => {
 		s.request([{ ...a, orgLm: 5000 }]);
 		await s.whenIdle();
 		const w = s.contentInfo()["ApexClass:A"];
-		assert.deepStrictEqual(w, [2, 9000, 1000]);
+		assert.deepStrictEqual(w, [2, 9000, 1000, 4]);
 		assert.strictEqual(s.verifiedSyncAt("ApexClass:A"), 1000);
 	});
 
@@ -258,7 +258,7 @@ describe("content compare service", () => {
 		const s = service(f, org, 150, () => 1000);
 		s.request([a]);
 		await s.whenIdle();
-		assert.deepStrictEqual((await s.validContentInfo([a]))["ApexClass:A"], [1, 1000, 1000]);
+		assert.deepStrictEqual((await s.validContentInfo([a]))["ApexClass:A"], [1, 1000, 1000, 4]);
 		assert.deepStrictEqual((await s.validContentInfo([{ ...a, orgLm: 2 }]))["ApexClass:A"], [0, 1000, 1000]);
 		assert.ok((await s.verifiedEqualNow([a])).has("ApexClass:A"));
 		assert.ok(!(await s.verifiedEqualNow([{ ...a, orgLm: 2 }])).has("ApexClass:A"));
