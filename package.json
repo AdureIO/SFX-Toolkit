@@ -4,7 +4,7 @@
   "publisher": "AdureIO",
   "description": "Utilities for Salesforce development: Log filtering, Debug Traces, Deployment, and more.",
   "icon": "resources/icon.png",
-  "version": "4.1.1",
+  "version": "4.2.0",
   "license": "BSD-3-Clause",
   "engines": {
     "vscode": "^1.80.0"
@@ -1053,7 +1053,10 @@
         },
         "adure-sfx-toolkit.compare.verifyContents": {
           "type": "string",
-          "enum": ["auto", "manual"],
+          "enum": [
+            "auto",
+            "manual"
+          ],
           "enumDescriptions": [
             "Compare the contents of the project components that also exist in the org in the background, as soon as the org listing is available.",
             "Only compare contents when you press Compare contents in Deploy & Retrieve Metadata."
