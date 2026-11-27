@@ -4,6 +4,88 @@ All notable changes to the Adure SFX Toolkit extension are documented here.
 
 ---
 
+## [Unreleased] — Multi-project workspaces, Deploy & Retrieve Metadata
+
+### 📁 Projects
+- Salesforce projects are detected in subfolders; the active project follows the editor.
+- Project picker in the panels. Each project uses its own default org, snippets and folder.
+- Language server index is partitioned per org: each project's default org gets its own stubs and namespace.
+- Switching projects no longer triggers repeated org-list loads or stub regeneration. A project switch made during a deploy, retrieve or delete waits until it ends.
+
+### 🔁 Deploy & Retrieve Metadata
+- **Replaces the Deploy Metadata panel and the Org Browser.** `ASFXT: Deploy & Retrieve Metadata` (and the Development view button, and the old command id for existing keybindings) opens it. `ASFXT: Browse Org Metadata` (Orgs view button, org context menu, Development view, and the old Org Browser command id) opens it with every status shown, so org-only components are listed at once.
+- One list of the project and the org side by side, with a status per component (Equal, Changed locally, Changed in org, Conflict, Only local, Only in org, Partly local) and conflict choices.
+- **Pick the action first**: Deploy | Retrieve | Delete at the top of the right panel shows only that action's options and button. Rows that can't take part in the action are dimmed. Presets stay visible. The last choice is remembered.
+- **Fast open, compare on demand**: the project's components show at once from the cached index, with the "In project" filter and date-based statuses. The org listing refreshes in the background. Contents are compared only when you press **Compare contents** (selected components, else the project components shown), with progress and Cancel.
+- **In project** filter (on by default), column chooser (show, hide, reorder, resize), per-row Deploy, Retrieve and Diff actions.
+- Live operation card with phase, counts and Cancel for deploys, validations and deletes.
+- **Deployment history** tab: the org's recent deploys merged with local history (deploys, validations, retrieves, deletes). It opens instantly from a shared disk cache and refreshes in the background (and when an operation ends); details of finished deploys are cached per deploy id.
+- Deploy name (a local label shown in Local history), validate only, test levels, named test suites, auto-select Git changes, coverage display, and Problems-view diagnostics on failed deploys.
+- Live org check right before a deploy: warns when a selected component changed in the org since your last retrieve or deploy. Your own deploys are recorded, so they don't show as changed in the org.
+- Diff of local and org content per component.
+- Delete components from the org with a destructive package builder, an org safety check and its own test options. No Test Run is the default; production orgs use Run Local Tests and need the org alias typed.
+- Presets are shared and migrated from the Deploy panel's presets. "Re-deploy" in Deployment History opens the panel with the same components, test level and validate setting. Deploys made here are also listed in the classic **Deployment History** command.
+- Search text and type selection are kept per project.
+- Everything the Org Browser did is here: the full org listing with per-type refresh and failed-type retry, namespace, "Modified by me" and time filters, paste a list of `Type:Name` lines to select them, Open in Setup, Retrieve in the row menu and with Ctrl/Cmd+Enter (Retrieve action), and expired scratch orgs left out of the org list. The listing cache is the same, so listings made before this update are reused.
+
+### 🔀 Equal / Changed locally / Changed in org / Conflict
+- Deploy & Retrieve Metadata shows one of four statuses per component: Equal, Changed locally, Changed in org or Conflict.
+- Statuses start from dates (shown dashed), then a content diff compares each component with the org's copy. The org copy goes to a private cache, never into your project.
+- Setting `adure-sfx-toolkit.compare.verifyContents` defaults to `auto`: once the org listing is available, the contents of the project components that also exist in the org are compared in the background (org-only components never). `manual` compares only when you press **Compare contents**.
+- The top bar shows "Compared 5 min ago" (or the progress while comparing, "Not compared" before the first run); the tooltip gives the verified count and the exact time.
+- **Retrieve project (n)** retrieves every project component that exists in the org, regardless of filters and Skip equal. Skip equal components, for Deploy and Retrieve, only skips components verified equal by Compare contents.
+
+### 🧪 Apex Workbench
+- The log viewer is virtual-scrolled and shows the whole log (no 8,000-line cap).
+
+### 🔐 Auth
+- Access token is read with `sf org auth show-access-token`.
+
+### 🐛 Fixes
+- Delete targets are re-checked against the org before a delete runs.
+- Panels use their own project's folder and default org.
+- Git status errors stay quiet unless you asked to select changed components.
+
+---
+
+## [4.1.1] — Auth fixes
+
+### 🔐 Auth
+- No more false "session expired" or "invalid" for a working org; the connection status heals itself.
+- Re-authenticate targets the org that triggered it, or the actual default org, instead of a bare login.
+- Re-authenticate hint recognises sandbox logins when the org record is unknown.
+- Session expiry is sliding: the CLI token is re-read before a refresh is forced, and own CLI calls invalidate the cached token.
+
+---
+
+## [4.1.0] — Org Browser, deploy from org, legacy MDAPI
+
+### 🗂 Org Browser
+- New Org Browser panel: metadata listing with search, filter and retrieve.
+- Retrieve uses one shared engine with overwrite safety and a clearer overwrite prompt.
+- Hidden selections are made explicit before a retrieve.
+
+### 🚀 Deploy
+- Right-click deploy and retrieve for files, folders and multi-selection, to the default org.
+- Right-click deploy runs the relevant tests.
+- Deploy panel default test level is **Run Relevant Tests**.
+- Deploy panel deploys exactly the selected files when a filter hides their siblings.
+- **Update Project from Org** added; actions in the Development view renamed.
+
+### 📦 Projects
+- Legacy MDAPI projects are supported and can be converted to SFDX format.
+
+### 🐛 Fixes
+- Slow responses no longer fail with `read ETIMEDOUT` after about 10 s.
+
+---
+
+## [4.0.0] — Dependency and CI updates
+
+No user-facing changes.
+
+---
+
 ## [3.0.1] — Org connection status, network resilience
 
 ### 🔌 Org connection

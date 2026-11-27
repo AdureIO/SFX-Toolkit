@@ -35,6 +35,10 @@
   "activationEvents": [
     "workspaceContains:sfdx-project.json",
     "workspaceContains:src/package.xml",
+    "workspaceContains:*/sfdx-project.json",
+    "workspaceContains:*/*/sfdx-project.json",
+    "workspaceContains:*/src/package.xml",
+    "workspaceContains:*/*/src/package.xml",
     "onCustomEditor:adure-sfx-toolkit.permissionSetEditor",
     "onCustomEditor:adure-sfx-toolkit.scratchOrgDefEditor"
   ],
@@ -57,6 +61,10 @@
       {
         "command": "adure-sfx-toolkit.convertMdapiToSfdx",
         "title": "ASFXT: Convert MDAPI Project to SFDX Format"
+      },
+      {
+        "command": "adure-sfx-toolkit.selectProject",
+        "title": "ASFXT: Select Salesforce Project"
       },
       {
         "command": "adure-sfx-toolkit.listLogs",
@@ -89,7 +97,7 @@
       },
       {
         "command": "adure-sfx-toolkit.deployMetadata",
-        "title": "ASFXT: Deploy Metadata"
+        "title": "ASFXT: Deploy & Retrieve Metadata (alias)"
       },
       {
         "command": "adure-sfx-toolkit.executeAnonymous",
@@ -239,9 +247,18 @@
         "icon": "$(type-hierarchy)"
       },
       {
-        "command": "adure-sfx-toolkit.openOrgBrowser",
-        "title": "ASFXT: Org Browser",
+        "command": "adure-sfx-toolkit.browseOrgMetadata",
+        "title": "ASFXT: Browse Org Metadata",
         "icon": "$(library)"
+      },
+      {
+        "command": "adure-sfx-toolkit.openOrgBrowser",
+        "title": "ASFXT: Org Browser (alias)"
+      },
+      {
+        "command": "adure-sfx-toolkit.openSyncCenter",
+        "title": "ASFXT: Deploy & Retrieve Metadata",
+        "icon": "$(git-compare)"
       },
       {
         "command": "adure-sfx-toolkit.processMap",
@@ -324,6 +341,11 @@
         "command": "adure-sfx-toolkit.refreshSnippets",
         "title": "ASFXT: Refresh Snippets",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "adure-sfx-toolkit.filterSnippetsByProject",
+        "title": "ASFXT: Filter Snippets by Project",
+        "icon": "$(filter)"
       },
       {
         "command": "adure-sfx-toolkit.lwcNavigate",
@@ -552,6 +574,11 @@
           "group": "navigation"
         },
         {
+          "command": "adure-sfx-toolkit.filterSnippetsByProject",
+          "when": "view == adure-sfx-toolkit.snippets && adure-sfx-toolkit:multipleProjects",
+          "group": "navigation@0"
+        },
+        {
           "command": "adure-sfx-toolkit.refreshSnippets",
           "when": "view == adure-sfx-toolkit.snippets",
           "group": "navigation"
@@ -572,7 +599,7 @@
           "group": "navigation"
         },
         {
-          "command": "adure-sfx-toolkit.openOrgBrowser",
+          "command": "adure-sfx-toolkit.browseOrgMetadata",
           "when": "view == adure-sfx-toolkit.orgs",
           "group": "navigation"
         },
@@ -592,7 +619,7 @@
           "group": "navigation"
         },
         {
-          "command": "adure-sfx-toolkit.deployMetadata",
+          "command": "adure-sfx-toolkit.openSyncCenter",
           "when": "view == adure-sfx-toolkit.development",
           "group": "inline"
         },
@@ -654,7 +681,7 @@
           "group": "inline"
         },
         {
-          "command": "adure-sfx-toolkit.openOrgBrowser",
+          "command": "adure-sfx-toolkit.browseOrgMetadata",
           "when": "view == adure-sfx-toolkit.orgs && viewItem =~ /^org-/",
           "group": "0_browse"
         },
@@ -799,12 +826,28 @@
       ],
       "commandPalette": [
         {
+          "command": "adure-sfx-toolkit.deployMetadata",
+          "when": "false"
+        },
+        {
+          "command": "adure-sfx-toolkit.openOrgBrowser",
+          "when": "false"
+        },
+        {
           "command": "adure-sfx-toolkit.updateProjectFromOrg",
           "when": "adure-sfx-toolkit:isSalesforceProject"
         },
         {
           "command": "adure-sfx-toolkit.convertMdapiToSfdx",
           "when": "adure-sfx-toolkit:isMdapiProject"
+        },
+        {
+          "command": "adure-sfx-toolkit.selectProject",
+          "when": "adure-sfx-toolkit:isUsableProject"
+        },
+        {
+          "command": "adure-sfx-toolkit.filterSnippetsByProject",
+          "when": "adure-sfx-toolkit:multipleProjects"
         },
         {
           "command": "adure-sfx-toolkit.lwcGoToJs",
@@ -1006,7 +1049,17 @@
         "adure-sfx-toolkit.deploy.liveStatus": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "In the **Deploy Metadata** panel, show live status by polling the Metadata REST API for structured progress (stage, components X/Y, tests X/Y) and routing failures to the Problems view. Turn **off** to stream the classic `sf project deploy start` CLI output instead. (Push/Pull always run a synchronous deploy so source tracking stays correct — this setting does not affect them.)"
+          "markdownDescription": "In **Deploy & Retrieve Metadata**, show live status by polling the Metadata REST API for structured progress (stage, components X/Y, tests X/Y) and routing failures to the Problems view. Turn **off** to stream the classic `sf project deploy start` CLI output instead. (Push/Pull always run a synchronous deploy so source tracking stays correct — this setting does not affect them.)"
+        },
+        "adure-sfx-toolkit.compare.verifyContents": {
+          "type": "string",
+          "enum": ["auto", "manual"],
+          "enumDescriptions": [
+            "Compare the contents of the project components that also exist in the org in the background, as soon as the org listing is available.",
+            "Only compare contents when you press Compare contents in Deploy & Retrieve Metadata."
+          ],
+          "default": "auto",
+          "markdownDescription": "How **Deploy & Retrieve Metadata** confirms \"Equal\" and corrects \"Changed locally / in org\": the status first comes from dates (shown dashed), then a background content diff retrieves the org's copy of each component into a private cache (never into your project) and compares it with your local files. `auto` (default) starts it in the background once the org listing is available, for the project components that also exist in the org only (never org-only components), after opening, an org switch, a refresh, a file change, and a retrieve or deploy; it never blocks the panel. `manual` compares only when you press the **Compare contents** button."
         },
         "adure-sfx-toolkit.apex.validateOnSave": {
           "type": "boolean",
@@ -1127,7 +1180,7 @@
     "test": "node ./out/test/runTest.js",
     "package": "npx --yes @vscode/vsce@3 package",
     "test:unit": "npm run compile && npm run test:unit:run",
-    "test:unit:run": "mocha --reporter spec --exit --timeout 15000 \"out/test/**/*.test.js\" --ignore \"out/test/defaultOrg.test.js\" --ignore \"out/test/orgSafety.test.js\" --ignore \"out/test/shellEscape.test.js\"",
+    "test:unit:run": "mocha --require out/test/setupHome.js --reporter spec --exit --timeout 15000 \"out/test/**/*.test.js\" --ignore \"out/test/defaultOrg.test.js\" --ignore \"out/test/orgSafety.test.js\" --ignore \"out/test/shellEscape.test.js\"",
     "bundle": "node esbuild.js --production",
     "bundle:dev": "node esbuild.js"
   },

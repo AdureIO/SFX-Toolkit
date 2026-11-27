@@ -1,7 +1,11 @@
 import * as vscode from "vscode";
 import { runCommandArgs } from "../utils/commandRunner";
 import { Logger } from "../utils/outputChannel";
-import { isWorkspaceUsable } from "../utils/projectUtils";
+import { activeProject, onDidChangeActiveProject, onDidChangeProjects } from "../utils/projectRegistry";
+import { getPackageDirectories } from "../commands/deployMetadata";
+import { resolveDefaultTargetOrgUsernameSync } from "../utils/defaultOrg";
+import { classTestId, cliTestName, methodTestId, parseTestId } from "../utils/apexTestIds";
+import * as path from "path";
 import { apexCoverage } from "../utils/apexCoverageService";
 import { getTestRunTimeout } from "../utils/constants";
 
@@ -54,6 +58,18 @@ export function registerApexTestController(context: vscode.ExtensionContext): vs
 
   const fileToClassId = new Map<string, string>();
 
+  /** Only the ACTIVE SFDX project's test classes are shown. */
+  const activeSfdxDir = (): string | undefined => {
+    const p = activeProject();
+    return p && p.kind === "sfdx" ? p.dir : undefined;
+  };
+  const owningDir = (uri: vscode.Uri): string | undefined => {
+    const dir = activeSfdxDir();
+    if (!dir) return undefined;
+    const rel = path.relative(dir, uri.fsPath);
+    return rel && !rel.startsWith("..") && !path.isAbsolute(rel) ? dir : undefined;
+  };
+
   async function discoverFile(uri: vscode.Uri): Promise<void> {
     let text: string;
     try {
@@ -69,11 +85,13 @@ export function registerApexTestController(context: vscode.ExtensionContext): vs
       if (prev) { controller.items.delete(prev); fileToClassId.delete(uri.toString()); }
       return;
     }
-    const classId = "class:" + parsed.className;
+    const projectDir = owningDir(uri);
+    if (!projectDir) return;
+    const classId = classTestId(projectDir, parsed.className);
     const classItem = controller.createTestItem(classId, parsed.className, uri);
     classItem.canResolveChildren = false;
     for (const meth of parsed.methods) {
-      const mItem = controller.createTestItem(classId + "." + meth.name, meth.name, uri);
+      const mItem = controller.createTestItem(methodTestId(projectDir, parsed.className, meth.name), meth.name, uri);
       mItem.range = new vscode.Range(meth.line, 0, meth.line, 0);
       classItem.children.add(mItem);
     }
@@ -81,16 +99,26 @@ export function registerApexTestController(context: vscode.ExtensionContext): vs
     fileToClassId.set(uri.toString(), classId);
   }
 
+  let lastDiscoveredDir: string | undefined;
   async function discoverAll(): Promise<void> {
+    lastDiscoveredDir = activeSfdxDir();
     controller.items.replace([]);
     fileToClassId.clear();
-    if (!isWorkspaceUsable()) return;
-    let files: vscode.Uri[];
-    try {
-      files = await vscode.workspace.findFiles("**/classes/*.cls", IGNORED_GLOB, 5000);
-    } catch {
-      return;
+    const projectDir = activeSfdxDir();
+    if (!projectDir) return;
+    // Limit to the active project's package directories (the whole project when none resolve).
+    const pkgDirs = getPackageDirectories(projectDir);
+    const bases = pkgDirs.length > 0 ? pkgDirs.map((d) => path.join(projectDir, d)) : [projectDir];
+    const files: vscode.Uri[] = [];
+    for (const base of bases) {
+      try {
+        files.push(...(await vscode.workspace.findFiles(new vscode.RelativePattern(base, "**/classes/*.cls"), IGNORED_GLOB, 5000)));
+      } catch {
+        /* skip this package dir */
+      }
     }
+    // The project may have changed while scanning.
+    if (activeSfdxDir() !== projectDir) return;
     for (const f of files) await discoverFile(f);
   }
 
@@ -110,6 +138,27 @@ export function registerApexTestController(context: vscode.ExtensionContext): vs
       const prev = fileToClassId.get(u.toString());
       if (prev) { controller.items.delete(prev); fileToClassId.delete(u.toString()); }
     })
+  );
+
+  // Rebuild the tree when the active project or the project set changes.
+  // The registry fires both events on a rescan: coalesce them into one discovery (200 ms), and
+  // skip an active-project event that did not change the active SFDX project dir.
+  let discoverTimer: ReturnType<typeof setTimeout> | undefined;
+  let discoverNeeded = false;
+  const scheduleDiscover = (onlyIfDirChanged: boolean) => {
+    if (!onlyIfDirChanged || activeSfdxDir() !== lastDiscoveredDir) discoverNeeded = true;
+    if (!discoverNeeded || discoverTimer) return;
+    discoverTimer = setTimeout(() => {
+      discoverTimer = undefined;
+      if (!discoverNeeded) return;
+      discoverNeeded = false;
+      void discoverAll();
+    }, 200);
+  };
+  context.subscriptions.push(
+    new vscode.Disposable(() => { if (discoverTimer) clearTimeout(discoverTimer); }),
+    onDidChangeActiveProject(() => scheduleDiscover(true)),
+    onDidChangeProjects(() => scheduleDiscover(false))
   );
 
   // ── Run profile ────────────────────────────────────────────────────────────
@@ -177,7 +226,32 @@ async function runTests(
   withCoverage: boolean
 ): Promise<void> {
   const run = controller.createTestRun(request);
-  const items = collectItems(controller, request);
+  try {
+    // One CLI call per project: cwd = the test's project, org = that project's default org.
+    const byProject = new Map<string, vscode.TestItem[]>();
+    for (const item of collectItems(controller, request)) {
+      const parsed = parseTestId(item.id);
+      if (!parsed) continue;
+      const list = byProject.get(parsed.projectDir) ?? [];
+      list.push(item);
+      byProject.set(parsed.projectDir, list);
+    }
+    for (const [projectDir, items] of byProject) {
+      if (token.isCancellationRequested) break;
+      await runProjectTests(run, projectDir, items, token, withCoverage);
+    }
+  } finally {
+    run.end();
+  }
+}
+
+async function runProjectTests(
+  run: vscode.TestRun,
+  projectDir: string,
+  items: vscode.TestItem[],
+  token: vscode.CancellationToken,
+  withCoverage: boolean
+): Promise<void> {
   // Method items (id "class:Class.method") correlate 1:1 by FullName; whole-class items
   // (classes with no parsed methods) aggregate every result of that class.
   const methodItems = new Map<string, vscode.TestItem>();
@@ -185,14 +259,14 @@ async function runTests(
   const classNames = new Set<string>();
   const names: string[] = [];
   for (const item of items) {
-    const id = item.id.replace(/^class:/, "");
+    const id = cliTestName(parseTestId(item.id)!);
     run.enqueued(item);
     if (id.includes(".")) methodItems.set(id.toLowerCase(), item);
     else classItems.set(id.toLowerCase(), item);
     classNames.add(id.split(".")[0].toLowerCase());
     names.push(id);
   }
-  if (names.length === 0) { run.end(); return; }
+  if (names.length === 0) return;
 
   items.forEach((i) => run.started(i));
 
@@ -200,7 +274,9 @@ async function runTests(
   // selection is a whole class, otherwise `--tests` (accepts both Class and Class.method).
   const flag = methodItems.size === 0 ? "--class-names" : "--tests";
   const waitMinutes = Math.max(1, getTestRunTimeout());
-  const args = ["apex", "run", "test", ...names.flatMap((n) => [flag, n]), "--result-format", "json", "--wait", String(waitMinutes)];
+  // Explicit --target-org when the project's default resolves; otherwise the cwd makes the CLI use it.
+  const targetOrg = resolveDefaultTargetOrgUsernameSync(projectDir);
+  const args = ["apex", "run", "test", ...(targetOrg ? ["--target-org", targetOrg] : []), ...names.flatMap((n) => [flag, n]), "--result-format", "json", "--wait", String(waitMinutes)];
   // The CLI rejects --synchronous for more than one class.
   if (classNames.size === 1) args.push("--synchronous");
   if (withCoverage) args.push("--code-coverage");
@@ -222,7 +298,7 @@ async function runTests(
     if (token.isCancellationRequested) return;
     let result: any;
     try {
-      const raw = await runCommandArgs("sf", args, undefined, undefined, false, (waitMinutes + 2) * 60_000, token);
+      const raw = await runCommandArgs("sf", args, projectDir, undefined, false, (waitMinutes + 2) * 60_000, token);
       result = parseResult(raw);
     } catch (e: any) {
       if (e?.cancelled) {
@@ -278,7 +354,5 @@ async function runTests(
     const tm = new vscode.TestMessage(`Could not run Apex tests: ${message}`);
     items.forEach((i) => run.errored(i, tm));
     Logger.error("Apex test run failed", e);
-  } finally {
-    run.end();
   }
 }

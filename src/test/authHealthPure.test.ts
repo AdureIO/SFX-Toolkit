@@ -9,6 +9,7 @@ import {
 	describeCliFailure,
 	healthKeyCandidates,
 	isGenuineAuthCliError,
+	isUsableAccessToken,
 	nextReprobeDelayMs,
 } from "../utils/authHealthPure";
 import {
@@ -273,5 +274,18 @@ describe("authHealthPure: sliding session expiry", () => {
 		assert.strictEqual(parseUserId(JSON.stringify({ user_id: "x' OR '1'='1" })), undefined);
 		assert.strictEqual(parseUserId(JSON.stringify({})), undefined);
 		assert.strictEqual(parseUserId("nope"), undefined);
+	});
+});
+
+describe("isUsableAccessToken", () => {
+	it("accepts real-looking tokens", () => {
+		assert.strictEqual(isUsableAccessToken("00D5g000004abcd!AQEAQxyz0123456789"), true);
+		assert.strictEqual(isUsableAccessToken("abcDEF123.xyz"), true);
+	});
+	it("rejects placeholders and empties", () => {
+		const long = "[REDACTED - run sf org auth show-access-token ...]";
+		for (const v of ["[REDACTED]", long, "", undefined, null, "****", "abc def"]) {
+			assert.strictEqual(isUsableAccessToken(v as any), false, String(v));
+		}
 	});
 });

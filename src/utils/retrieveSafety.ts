@@ -1,7 +1,7 @@
 /**
  * Overwrite safety for retrieve: a retrieve silently replaces local files, so before it runs
  * we look for unsaved editor edits and uncommitted git changes under the target paths and ask once.
- * Shared by the Org Browser and the right-click retrieve.
+ * Shared by Deploy & Retrieve Metadata and the right-click retrieve.
  */
 import * as vscode from "vscode";
 import * as fs from "fs";

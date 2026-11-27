@@ -1,7 +1,7 @@
 /**
  * Shared retrieve engine: `sf project retrieve start --json` for a set of components and/or
  * source paths, with command-line chunking, per-component results, schema-cache invalidation and
- * the last-retrieve log. Used by the Org Browser and the right-click retrieve.
+ * the last-retrieve log. Used by Deploy & Retrieve Metadata and the right-click retrieve.
  */
 import type * as vscode from "vscode";
 import { runCommandArgs } from "./commandRunner";
@@ -9,7 +9,9 @@ import { Logger } from "./outputChannel";
 import { OrgMetadataCache } from "./orgMetadataCache";
 import { schemaObjectFromPath } from "./deployStatusMap";
 import { recordRetrieved } from "./retrieveLog";
+import { recordSyncAfter } from "./syncRecordHost";
 import {
+	buildRetrieveArgs,
 	chunkComponents,
 	chunkPaths,
 	cliErrorMessage,
@@ -32,6 +34,15 @@ export interface RetrieveOptions {
 	token?: vscode.CancellationToken;
 	/** Called after each command-line chunk with how many components/paths are done. */
 	onProgress?: (done: number, total: number) => void;
+	/**
+	 * Write the files into this directory (`--output-dir`) instead of the project's package directories.
+	 * `sf` requires it to lie inside the project it runs in and outside its package directories.
+	 */
+	outputDir?: string;
+	/** Add the retrieved components to the retrieve log and refresh the schema caches (default true). A read-only copy (`outputDir`) sets false. */
+	record?: boolean;
+	/** `--ignore-conflicts`: skip the source-tracking conflict check. */
+	ignoreConflicts?: boolean;
 }
 
 export interface RetrieveResult {
@@ -50,12 +61,6 @@ async function runOnce(args: string[], opts: RetrieveOptions): Promise<{ stdout:
 		const parsed = parseCliJson(stdout);
 		return { stdout, error: cliErrorMessage(parsed, String(e?.message ?? e)) };
 	}
-}
-
-function baseArgs(org: string | null): string[] {
-	const args = ["project", "retrieve", "start", "--json"];
-	if (org) args.push("--target-org", org);
-	return args;
 }
 
 /** Refresh describe caches for retrieved object / field files, like `retrieveCurrentFile` does. */
@@ -86,17 +91,21 @@ export async function retrieveComponents(opts: RetrieveOptions): Promise<Retriev
 	const total = components.length + sourcePaths.length;
 	let done = 0;
 
-	const finish = () => {
-		if (retrieved.length > 0) {
-			recordRetrieved(opts.org, retrieved);
+	const record = opts.record !== false;
+	const argOpts = { outputDir: opts.outputDir, ignoreConflicts: opts.ignoreConflicts };
+	const finish = async (): Promise<void> => {
+		if (record && retrieved.length > 0) {
+			const at = new Date();
+			recordRetrieved(opts.org, retrieved, at);
+			// The sync record: the local contents right now; the org's lastModifiedDate is filled in at the next listing.
+			await recordSyncAfter({ org: opts.org, projectDir: opts.projectDir, kind: "retrieve", refs: retrieved.map((r) => ({ type: r.type, fullName: r.fullName })), at });
 			invalidateSchemaCaches(opts.org, retrieved.map((r) => r.filePath));
 		}
 	};
 
 	try {
 		for (const chunk of chunkComponents(components)) {
-			const args = baseArgs(opts.org);
-			for (const c of chunk) args.push("-m", `${c.type}:${c.fullName}`);
+			const args = buildRetrieveArgs(opts.org, "metadata", chunk.map((c) => `${c.type}:${c.fullName}`), argOpts);
 			const { stdout, error } = await runOnce(args, opts);
 			const outcome = parseRetrieveJson(stdout, chunk);
 			if (outcome) {
@@ -112,8 +121,7 @@ export async function retrieveComponents(opts: RetrieveOptions): Promise<Retriev
 		}
 
 		for (const chunk of chunkPaths(sourcePaths)) {
-			const args = baseArgs(opts.org);
-			for (const p of chunk) args.push("-d", p);
+			const args = buildRetrieveArgs(opts.org, "path", chunk, argOpts);
 			const { stdout, error } = await runOnce(args, opts);
 			const outcome = parseRetrieveJson(stdout);
 			if (outcome) {
@@ -128,7 +136,7 @@ export async function retrieveComponents(opts: RetrieveOptions): Promise<Retriev
 			opts.onProgress?.(done, total);
 		}
 	} finally {
-		finish();
+		await finish();
 	}
 	return { retrieved, failed };
 }

@@ -108,11 +108,12 @@ A unified bottom panel (sidebar **Tools → ASFX Workbench**) that brings Apex e
 ### 🛠️ Development Tools
 
 - **Source Operations**: smart **Push** (diff deploy for source-tracked orgs, sequential package deploy otherwise), **Push (Force)**, **Pull**, contextual **Deploy/Retrieve** for the open file, and **Reset Source Tracking**.
-- **Flexible Metadata Deploy Flow** (`ASFXT: Deploy Metadata`):
-  - Select paths/files, pick a test level, target any org — the panel always deploys exactly the components you picked (source-tracking conflicts are overridden).
-  - **Deployment History**: every deploy persisted with status, duration, test results and timestamp — browse, search and re-run in one click.
+- **Deploy & Retrieve Metadata** (`ASFXT: Deploy & Retrieve Metadata`): one panel for the project and the org side by side.
+  - **Browse the whole org** (`ASFXT: Browse Org Metadata`, also the Orgs view button and an org's context menu): every metadata type and component of an org with streaming listing and progress, per-type refresh, failed types with Retry, and a listing cache. The default view is **In project**; these entry points open it with all statuses shown, including **Only in org**. Search (`type:`, `ns:`, `by:`, wildcards, `Type:Name`, or paste a list of `Type:Name` lines to select them), namespace, unmanaged-only, "Modified by me" and time filters, and Open in Setup from a row's menu.
+  - **Retrieve** components into the project from the row menu, the Retrieve action (Ctrl/Cmd+Enter) or a whole object when a child is selected, with a check before overwriting local changes. Objects whose file is missing locally but whose fields exist show as Partly local.
+  - Pick the action (Deploy, Retrieve or Delete) and the components, pick a test level, target any org — it always deploys exactly the components you picked (source-tracking conflicts are overridden). Content comparison runs only when you press **Compare contents**.
+  - **Deployment history**: the org's recent deploys merged with this project's history, with status, duration, test results and timestamp — browse, expand for errors and re-run in one click. The classic **Deployment History** command keeps its list too.
   - **Named Test Suites**: save groups of test classes with a preset and reload them instantly.
-  - **Pre-Deploy Quality Gate**: scans Apex before deploy for leftover `System.debug()` (warning), hardcoded record IDs (error), SOQL/DML in loops (error), and `TODO`/`FIXME` (info) — review, then abort or deploy anyway.
   - **Test Coverage Display**: post-deploy per-class coverage, colour-coded (≥75% green / ≥50% amber / <50% red) with overall average.
   - **Auto file detection** via a debounced `FileSystemWatcher`; **Deployment Presets** for reusable configs.
 - **Test Runner**: run local tests easily.

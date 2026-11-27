@@ -21,6 +21,7 @@ import { outputChannel } from "./outputChannel";
 import { canonicalOrgKey } from "./orgKey";
 import { getOrgByTarget, onOrgListUpdated } from "./orgListCache";
 import { primaryProjectRoot, isSalesforceProject } from "./projectUtils";
+import { onDidChangeActiveProject, onDidChangeProjects } from "./projectRegistry";
 import { onDidChangeDefaultOrg, onDidChangeProjectDefaultOrg } from "./defaultOrgEvents";
 import { checkExpiredScratch, checkNoDefaultOrg, knownProjectDirs, noteProjectDir, noteProjectOfFile } from "./schemaHealthMonitor";
 import { startAuthReprobe } from "./authReprobe";
@@ -48,6 +49,8 @@ export function registerSchemaHealthUi(context: vscode.ExtensionContext): void {
 		return rec?.alias || orgKey;
 	};
 
+	// The registry's active project (primaryProjectRoot) is the fallback; a project nested deeper
+	// than discovery looks still wins per file.
 	const activeProject = (): string | undefined => {
 		const ed = vscode.window.activeTextEditor;
 		const file = ed && ed.document.uri.scheme === "file" ? ed.document.uri.fsPath : undefined;
@@ -166,6 +169,8 @@ export function registerSchemaHealthUi(context: vscode.ExtensionContext): void {
 			onDefaultChanged();
 		}),
 		vscode.window.onDidChangeActiveTextEditor(() => render()),
+		onDidChangeActiveProject(() => render()),
+		onDidChangeProjects(() => void recheck()),
 		vscode.workspace.onDidChangeWorkspaceFolders(() => void recheck()),
 		new vscode.Disposable(onOrgListUpdated(() => {
 			checkExpiredScratch();

@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import * as fs from "fs";
 import * as path from "path";
 import { SoqlSchemaProvider } from "../utils/soqlSchemaProvider";
-import { findSfdxProjectDir } from "../utils/projectUtils";
+import { projectDirOfFile } from "../utils/projectUtils";
 import { resolveDefaultTargetOrgUsernameSync } from "../utils/defaultOrg";
 import {
     ambientModuleNames,
@@ -149,7 +149,7 @@ async function ambientNamesIn(file: string): Promise<string[]> {
 
 /** Module specifiers TypeScript already completes for this `@salesforce/<kind>/…` import. */
 async function typedModules(doc: vscode.TextDocument, kind: string, partial: string): Promise<Set<string>> {
-    const root = findSfdxProjectDir(doc.uri.fsPath) ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const root = projectDirOfFile(doc.uri.fsPath) ?? vscode.workspace.getWorkspaceFolder(doc.uri)?.uri.fsPath;
     const out = new Set<string>();
     if (!root) return out;
     const dir = path.join(root, ".sfdx", "typings", "lwc");
@@ -185,7 +185,7 @@ function item(label: string, kind: vscode.CompletionItemKind, detail: string): v
 /** Org whose schema backs `@salesforce/schema/…` completion for this document. */
 function orgFor(doc: vscode.TextDocument): string | null {
     try {
-        return resolveDefaultTargetOrgUsernameSync(findSfdxProjectDir(doc.uri.fsPath) ?? undefined) ?? null;
+        return resolveDefaultTargetOrgUsernameSync(projectDirOfFile(doc.uri.fsPath)) ?? null;
     } catch {
         return null;
     }

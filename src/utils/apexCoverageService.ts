@@ -5,6 +5,7 @@ import { runCommandArgs } from "./commandRunner";
 import { AuthInfo } from "./authInfo";
 import { getToolingApiVersion } from "./constants";
 import { Telemetry, categorizeError } from "./telemetry";
+import { primaryProjectRoot } from "./projectUtils";
 
 /** Coverage rollup for a single Apex class or trigger. */
 export interface CoverageRecord {
@@ -96,7 +97,7 @@ class CoverageService implements vscode.Disposable {
         raw = await runCommandArgs(
           "sf",
           ["data", "query", "--use-tooling-api", "-q", query, "--json"],
-          undefined,
+          primaryProjectRoot(),
           undefined,
           false
         );
@@ -165,13 +166,14 @@ function scheduleWatcherRefresh(): void {
 }
 
 export function registerCoverageWatchers(context: vscode.ExtensionContext): void {
-  // One watcher per workspace folder, kept in sync when folders are added/removed.
+  // One watcher per workspace folder (`**/` also covers projects nested in it), kept in sync when folders are added/removed.
   const watchers = new Map<string, vscode.Disposable>();
   const watch = (folder: vscode.WorkspaceFolder) => {
     const key = folder.uri.toString();
     if (watchers.has(key)) return;
     const watcher = vscode.workspace.createFileSystemWatcher(
-      new vscode.RelativePattern(folder, ".sfdx/tools/testresults/**")
+      // Any project below the folder (a workspace folder can hold several projects).
+      new vscode.RelativePattern(folder, "**/.sfdx/tools/testresults/**")
     );
     watchers.set(
       key,
@@ -217,8 +219,10 @@ export async function clearApexTestResults(): Promise<number> {
   }
   let removed = 0;
   try {
-    for (const folder of vscode.workspace.workspaceFolders ?? []) {
-      const dir = path.join(folder.uri.fsPath, ".sfdx", "tools", "testresults");
+    // Only the ACTIVE project's results (the coverage shown belongs to its default org).
+    const activeRoot = primaryProjectRoot();
+    for (const root of activeRoot ? [activeRoot] : []) {
+      const dir = path.join(root, ".sfdx", "tools", "testresults");
       let entries: fs.Dirent[];
       try {
         entries = await fs.promises.readdir(dir, { withFileTypes: true });

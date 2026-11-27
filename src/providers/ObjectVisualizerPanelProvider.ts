@@ -12,6 +12,7 @@ import {
 } from "../utils/orgListCache";
 import { buildObjectGraph, GraphDirection } from "../utils/objectGraph";
 import { onDidChangeDefaultOrg } from "../utils/defaultOrgEvents";
+import { inActiveProject, primaryProjectRoot } from "../utils/projectUtils";
 
 /** Max concurrent describe requests when fanning out over neighbours. */
 const DESCRIBE_CONCURRENCY = 6;
@@ -162,8 +163,8 @@ export class ObjectVisualizerPanelProvider {
       // Both shapes count as "in this project": a full object definition, and a standard object
       // that the project only extends with custom fields (those have no .object-meta.xml).
       const [objectFiles, fieldFiles] = await Promise.all([
-        vscode.workspace.findFiles("**/objects/*/*.object-meta.xml", "**/node_modules/**", 5000),
-        vscode.workspace.findFiles("**/objects/*/fields/*.field-meta.xml", "**/node_modules/**", 5000)
+        vscode.workspace.findFiles(inActiveProject("**/objects/*/*.object-meta.xml"), "**/node_modules/**", 5000),
+        vscode.workspace.findFiles(inActiveProject("**/objects/*/fields/*.field-meta.xml"), "**/node_modules/**", 5000)
       ]);
       const names = new Set<string>();
       for (const f of objectFiles) {
@@ -256,7 +257,7 @@ export class ObjectVisualizerPanelProvider {
 
   private static async saveFile(message: { content?: string; encoding?: string; suggestedName?: string }) {
     const suggested = message.suggestedName || "object-diagram.png";
-    const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const ws = primaryProjectRoot();
     const ext = path.extname(suggested).replace(".", "").toLowerCase() || "png";
     const uri = await vscode.window.showSaveDialog({
       defaultUri: ws ? vscode.Uri.file(path.join(ws, suggested)) : undefined,

@@ -1,6 +1,7 @@
 import { runCommandArgs } from "./commandRunner";
-import { readTargetOrgFromSfdxConfig } from "./sfdxConfig";
+import { readGlobalTargetOrg, readTargetOrgFromSfdxConfig } from "./sfdxConfig";
 import { primaryProjectRoot } from "./projectUtils";
+import { samePath } from "./projectDiscoveryPure";
 
 export type OrgOption = { label: string; username: string };
 
@@ -19,35 +20,51 @@ export type OrgRecord = {
 };
 
 let cachedRecords: OrgRecord[] = [];
+/** Project dir `cachedRecords` (the org list's default flags) was produced in. */
+let cachedRecordsDir: string | undefined;
 
-/** Session hint after set-as-default (until sfdx-config.json is read on next resolve). */
+/**
+ * Session hint after set-as-default (until sfdx-config.json is read on next resolve).
+ * Global singleton: it only answers for the project dir it was recorded for.
+ */
 let knownTargetOrgUsername: string | null = null;
+let knownTargetOrgDir: string | undefined;
 
-export function getKnownTargetOrgUsername(): string | null {
-  return knownTargetOrgUsername;
+/** Hint for `forDir` (default: the active project); null when it belongs to another project. */
+export function getKnownTargetOrgUsername(forDir: string | undefined = primaryProjectRoot()): string | null {
+  return samePath(forDir, knownTargetOrgDir) ? knownTargetOrgUsername : null;
 }
 
-export function setKnownTargetOrg(username: string | null): void {
+/** Record the session hint for `forDir` (default: the active project). */
+export function setKnownTargetOrg(username: string | null, forDir: string | undefined = primaryProjectRoot()): void {
   knownTargetOrgUsername = username?.trim() || null;
+  knownTargetOrgDir = forDir;
 }
 
-/** Username marked default in cached `sf org list` (may be stale — lowest-priority sync fallback). */
-export function getDefaultUsernameFromOrgCache(): string | null {
+/**
+ * Default org of `forDir` as far as it can be told without the CLI (lowest-priority sync
+ * fallback). The cached `sf org list` is global; only its `isDefault` flag is the CLI's view
+ * from one cwd, so for any project the answer is derived from that project's config files,
+ * then the CLI's global config, then (only for the dir the list was produced in) the flag.
+ */
+export function getDefaultUsernameFromOrgCache(forDir: string | undefined = primaryProjectRoot()): string | null {
+  const fromConfig = (forDir ? readTargetOrgFromSfdxConfig(forDir) : null) ?? readGlobalTargetOrg();
+  if (fromConfig) return fromConfig;
+  if (!samePath(forDir, cachedRecordsDir)) return null;
   return cachedRecords.find((o) => o.isDefault)?.username ?? null;
 }
 
 function syncKnownTargetFromSfdxConfig(): void {
-  const fromFile = readTargetOrgFromSfdxConfig();
-  if (fromFile) {
+  const fromFile = readTargetOrgFromSfdxConfig(cachedRecordsDir);
+  if (fromFile && cachedRecordsDir) {
     knownTargetOrgUsername = fromFile;
+    knownTargetOrgDir = cachedRecordsDir;
   }
 }
 
-export function getOrgByTarget(targetOrg?: string | null): OrgRecord | null {
-  const key = targetOrg?.trim();
-  if (!key) {
-    return cachedRecords.find((o) => o.isDefault) ?? null;
-  }
+export function getOrgByTarget(targetOrg?: string | null, forDir: string | undefined = primaryProjectRoot()): OrgRecord | null {
+  const key = targetOrg?.trim() || getDefaultUsernameFromOrgCache(forDir)?.trim();
+  if (!key) return null;
   const lower = key.toLowerCase();
   return (
     cachedRecords.find((o) => o.username.toLowerCase() === lower || (o.alias && o.alias.toLowerCase() === lower)) ??
@@ -59,9 +76,9 @@ export function getOrgByTarget(targetOrg?: string | null): OrgRecord | null {
  * Current default target org from Salesforce CLI (not the cached isDefault flag). Runs in the
  * project folder; in an MDAPI project (no sfdx-project.json) the CLI resolves the global config.
  */
-export async function getTargetOrgUsernameFromCli(): Promise<string | null> {
+export async function getTargetOrgUsernameFromCli(projectRoot: string | undefined = primaryProjectRoot()): Promise<string | null> {
   try {
-    const result = await runCommandArgs("sf", ["config", "get", "target-org", "--json"], primaryProjectRoot());
+    const result = await runCommandArgs("sf", ["config", "get", "target-org", "--json"], projectRoot);
     const parsed = JSON.parse(result);
     const value = parsed.result?.value;
     return typeof value === "string" && value.trim() ? value.trim() : null;
@@ -151,10 +168,6 @@ export function getCachedOrgList(): OrgOption[] | null {
   return cached;
 }
 
-export function setOrgListCache(orgs: OrgOption[]): void {
-  cached = orgs;
-}
-
 /** Update cache from `sf org list` result object. */
 export function setOrgListCacheFromSfResult(
   result:
@@ -197,13 +210,16 @@ export function invalidateOrgListCache(): void {
   cachedRaw = null;
   cachedFetchStart = 0;
   cachedRecords = [];
+  cachedRecordsDir = undefined;
 }
 
 /** Error thrown when the CLI answered with a non-zero JSON status. */
 class OrgListStatusError extends Error {}
 
 async function fetchOrgListRaw(startedAt: number): Promise<SfOrgListResult> {
-  const result = await runCommandArgs("sf", ["org", "list", "--json"]);
+  // The default flags in the result belong to the project the CLI runs in: the active one.
+  const dir = primaryProjectRoot();
+  const result = await runCommandArgs("sf", ["org", "list", "--json"], dir);
   const parsed = JSON.parse(result);
   if (parsed.status !== 0 || !parsed.result) {
     cached = [];
@@ -211,6 +227,7 @@ async function fetchOrgListRaw(startedAt: number): Promise<SfOrgListResult> {
     cachedFetchStart = 0;
     throw new OrgListStatusError(parsed.message || "Unknown error");
   }
+  cachedRecordsDir = dir;
   cachedRaw = parsed.result;
   cachedFetchStart = startedAt;
   setOrgListCacheFromSfResult(parsed.result);

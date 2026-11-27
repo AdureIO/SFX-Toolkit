@@ -11,6 +11,7 @@ import { CancellationToken, Location, SymbolKind, TypeHierarchyItem } from 'vsco
 import * as path from 'path';
 import type { ServerContext } from './context';
 import { isApex } from './textUtil';
+import { Partitions } from './partitions';
 import type { TypeNode } from './workspaceIndex';
 import { SearchSession, resolveAt, methodImplementations } from './symbolSearch';
 
@@ -81,7 +82,7 @@ async function related(
     if (!ctx.settings.apexFeatures) return null;
     const data = item.data as ItemData | undefined;
     if (!data?.file || !data.qname) return null;
-    const s = new SearchSession(ctx, token);
+    const s = new SearchSession(ctx, token, Partitions.partitionOfPath(data.file));
     const g = await s.graph();
     const n = g.find(data.file, data.qname);
     if (!n) return null;

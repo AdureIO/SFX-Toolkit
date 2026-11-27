@@ -1,6 +1,6 @@
 import * as path from "path";
 import * as vscode from "vscode";
-import { resolveDefaultTargetOrgUsernameSync } from "./defaultOrg";
+import { resolveDefaultTargetOrgUsername, resolveDefaultTargetOrgUsernameSync } from "./defaultOrg";
 import { setKnownTargetOrg, invalidateOrgListCache, refreshOrgListCache } from "./orgListCache";
 import { OrgMetadataCache } from "./orgMetadataCache";
 import { outputChannel } from "./outputChannel";
@@ -55,6 +55,39 @@ export async function notifyDefaultOrgChanged(username?: string | null): Promise
 	invalidateOrgKeyCache();
 	outputChannel.appendLine(`defaultOrg: default org changed → ${next ?? "(none)"}`);
 	emitter.fire(next);
+}
+
+/**
+ * The ACTIVE project changed (editor moved to another project, or the status bar picker).
+ * "The default org" now means the new project's. The org list is global and only its default
+ * flags are per project (derived from each project's config), so a switch never needs
+ * `sf org list`. Resolves the new project's default org; when its key is unchanged nothing
+ * org-related happens. When it changed, `onDidChangeDefaultOrg` fires (org-bound UI repaints,
+ * coverage refreshes once) without a forced stub sync (stubs are per project). Never restarts
+ * the language server. Resolves true when the default org key changed. The caller debounces.
+ */
+export async function notifyActiveProjectChanged(): Promise<boolean> {
+	// Captured at entry: bail if the active project moved on while we awaited the CLI.
+	const root = primaryProjectRoot();
+	invalidateOrgKeyCache();
+	let next: string | null | undefined = resolveDefaultTargetOrgUsernameSync(root);
+	if (!next) {
+		try {
+			next = await resolveDefaultTargetOrgUsername(root);
+		} catch {
+			next = undefined;
+		}
+		if (!samePath(primaryProjectRoot(), root)) return false;
+	}
+	const key = next ?? null;
+	if (key === lastKnown) return false;
+	lastKnown = key;
+	if (key) setKnownTargetOrg(key, root);
+	invalidateOrgKeyCache();
+	OrgMetadataCache.notifyDefaultOrgChanged("activeSwitch");
+	outputChannel.appendLine(`defaultOrg: active project default org → ${key ?? "(none)"}`);
+	emitter.fire(key);
+	return true;
 }
 
 /** Live watchers on every project's SF config files, plus their debounce timers. */

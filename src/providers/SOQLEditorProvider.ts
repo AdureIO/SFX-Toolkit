@@ -14,6 +14,10 @@ import { handleResultsTableMessage } from "../utils/resultsTableHost";
 import { resultsTableCss, resultsTableScript } from "../webview/resultsTableComponent";
 import { Telemetry } from "../utils/telemetry";
 import { onDidChangeDefaultOrg } from "../utils/defaultOrgEvents";
+import { PanelProjectBinding } from "../utils/panelProject";
+import { PROJECT_SELECTOR_CSS, projectSelectorMarkup, projectSelectorScript } from "../utils/panelProjectUi";
+import { primaryProjectRoot } from "../utils/projectUtils";
+import { resolveDefaultTargetOrgUsernameSync } from "../utils/defaultOrg";
 
 /** Buffer path per panel: soql-wb-buffer.soql, soql-wb-buffer-2.soql, … (virtual LS docs; on disk only in fallback). */
 const soqlBufferPath = (slot: number) => `.vscode/soql-wb-buffer${slot > 1 ? "-" + slot : ""}.soql`;
@@ -73,6 +77,14 @@ export class SOQLEditorProvider {
    * shared statics, so a single panel keeps them consistent; everything is released on dispose.
    */
   private static _panel: vscode.WebviewPanel | undefined;
+  /** Project selector of the panel: state (last query, history, saved queries), the buffer and the org list follow it. */
+  private static _binding: PanelProjectBinding | undefined;
+  private static _reloadSeq = 0;
+
+  /** Dir of the project the panel works on. */
+  private static projectDir(): string | undefined {
+    return SOQLEditorProvider._binding?.current() ?? primaryProjectRoot();
+  }
 
   public static async show(extensionUri: vscode.Uri, initialQuery?: string, initialOrg?: string) {
     const column = vscode.window.activeTextEditor ? vscode.window.activeTextEditor.viewColumn : undefined;
@@ -124,11 +136,16 @@ export class SOQLEditorProvider {
     // A restored panel arriving while another is open: keep just one (they share the buffer bridge).
     if (SOQLEditorProvider._panel && SOQLEditorProvider._panel !== panel) SOQLEditorProvider._panel.dispose();
     SOQLEditorProvider._panel = panel;
+    const binding = new PanelProjectBinding();
+    SOQLEditorProvider._binding = binding;
+    const selectorSub = binding.attach(panel.webview);
     const { lastQuery, history } = await SOQLEditorProvider.loadSoqlState();
     const saved = SOQLEditorProvider.loadSavedQueries();
     panel.webview.html = this._getHtmlForWebview(panel.webview, extensionUri, initialQuery || lastQuery, history, saved, initialOrg);
 
-    AuthInfo.warmAuthForOrg(null);
+    // Pinned to a non-active project: warm THAT project's default org, not the active one's.
+    const warmDir = binding.current();
+    AuthInfo.warmAuthForOrg(binding.pinned && warmDir ? resolveDefaultTargetOrgUsernameSync(warmDir) : null);
     OrgMetadataCache.warmDefaultOrg();
     warmOrgListCache();
 
@@ -137,8 +154,28 @@ export class SOQLEditorProvider {
     let slot = 1;
     while (SOQLEditorProvider._slots.has(slot)) slot++;
     SOQLEditorProvider._slots.add(slot);
-    const bridge = new ApexBufferBridge(soqlBufferPath(slot), "soql");
+    const bridge = new ApexBufferBridge(soqlBufferPath(slot), "soql", false, () => binding.current());
     bridge.setOrg(initialOrg || null);
+    let bufferDir = binding.current();
+
+    // Project selector: reload the panel from the new project (its last query, history and saved
+    // queries, its default org) and move the LS buffer there.
+    const projectSub = binding.onDidChange(async () => {
+      const old = bufferDir;
+      bufferDir = binding.current();
+      if (old && old !== bufferDir) new ApexBufferBridge(soqlBufferPath(slot), "soql", false, () => old).dispose();
+      SOQLEditorProvider.editableFieldsCache = {};
+      const state = await SOQLEditorProvider.loadSoqlState();
+      if (SOQLEditorProvider._panel !== panel) return;
+      // Pinned to a project other than the active one: "Default org" would mean the active project's, so
+      // preselect this project's default org explicitly.
+      const dir = binding.current();
+      const pinnedOrg = binding.pinned && dir ? resolveDefaultTargetOrgUsernameSync(dir) ?? undefined : undefined;
+      // A distinct HTML string forces a reload (identical html is ignored).
+      panel.webview.html =
+        SOQLEditorProvider._getHtmlForWebview(panel.webview, extensionUri, state.lastQuery, state.history, SOQLEditorProvider.loadSavedQueries(), pinnedOrg) +
+        `<!-- reload ${++SOQLEditorProvider._reloadSeq} -->`;
+    });
 
     const messageListener = panel.webview.onDidReceiveMessage(
       async (message) => {
@@ -219,7 +256,7 @@ export class SOQLEditorProvider {
           }
           case "saveFile": {
             const suggested = (message.suggestedName as string) || "soql-export.csv";
-            const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+            const ws = SOQLEditorProvider.projectDir();
             const uri = await vscode.window.showSaveDialog({
               defaultUri: ws ? vscode.Uri.file(path.join(ws, suggested)) : undefined,
               filters: suggested.endsWith(".json") ? { JSON: ["json"] } : { CSV: ["csv"], "All files": ["*"] }
@@ -252,6 +289,10 @@ export class SOQLEditorProvider {
     panel.onDidDispose(() => {
       messageListener.dispose();
       defaultOrgSub.dispose();
+      projectSub.dispose();
+      selectorSub.dispose();
+      binding.dispose();
+      if (SOQLEditorProvider._binding === binding) SOQLEditorProvider._binding = undefined;
       bridge.dispose();
       SOQLEditorProvider._slots.delete(slot);
       if (SOQLEditorProvider._panel === panel) {
@@ -263,7 +304,7 @@ export class SOQLEditorProvider {
   }
 
   private static getSoqlStorageDir(): string | null {
-    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    const root = SOQLEditorProvider.projectDir();
     if (!root) return null;
     return path.join(root, ASFX_DIR);
   }
@@ -447,6 +488,15 @@ export class SOQLEditorProvider {
   private static async sendOrgList(panel: vscode.WebviewPanel, defaultChanged = false) {
     const toWebview = (orgs: { username: string; label: string }[]) =>
       panel.webview.postMessage({ command: "orgList", orgs, defaultChanged });
+
+    // The selected project's default org first (see PanelProjectBinding.orgList).
+    const binding = SOQLEditorProvider._binding;
+    if (binding?.current()) {
+      try {
+        toWebview(await binding.orgList());
+        return;
+      } catch { /* fall back to the shared list */ }
+    }
 
     // Shared cache first (no CLI spawn). On a default-org change the notifier has already
     // invalidated + refreshed it, so a cached list here is the fresh one.
@@ -760,6 +810,7 @@ export class SOQLEditorProvider {
         }
 
         /* ── Header ── */
+        ${PROJECT_SELECTOR_CSS}
         .page-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 16px; background: var(--vscode-sideBarSectionHeader-background, var(--asfx-card-bg)); border-bottom: 1px solid var(--asfx-border); flex-shrink: 0; }
         .page-title { font-size: 13px; font-weight: 700; letter-spacing: .02em; display: flex; align-items: center; gap: 8px; }
         .header-actions { display: flex; align-items: center; gap: 6px; }
@@ -896,6 +947,7 @@ export class SOQLEditorProvider {
 <body>
     <div class="page-header">
         <div class="page-title"><span>🔍</span> SOQL Workbench</div>
+        ${projectSelectorMarkup()}
         <div class="header-actions">
             <button id="builder-toggle-btn" type="button" class="btn-secondary btn-sm">▼ Show Builder</button>
         </div>
@@ -2066,6 +2118,7 @@ export class SOQLEditorProvider {
             vscode.postMessage({ command: 'saveFile', content: content, suggestedName: 'soql-export.' + ext });
         }
     </script>
+    <script>${projectSelectorScript('vscode')}</script>
 </body>
 </html>`;
   }

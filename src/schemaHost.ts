@@ -12,7 +12,8 @@ import * as vscode from "vscode";
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { ResponseError } = require("vscode-jsonrpc") as { ResponseError: typeof import("vscode-languageclient/node").ResponseError };
 import { SoqlSchemaProvider } from "./utils/soqlSchemaProvider";
-import { findSfdxProjectDir } from "./utils/projectUtils";
+import { findSfdxProjectDir, projectDirOfFile } from "./utils/projectUtils";
+import { onDidChangeProjects, projectOfFile } from "./utils/projectRegistry";
 import { canonicalOrgKey, orgArgForKey } from "./utils/orgKey";
 import { SchemaUnavailableError } from "./utils/describeStore";
 import { getBufferOrgOverride } from "./utils/bufferOrgOverride";
@@ -33,6 +34,7 @@ export interface RequestRegistrar {
 export interface SchemaHost {
 	orgForUri(uri?: string): string | null;
 	clearProjectDirCache(): void;
+	dispose(): void;
 }
 
 export function registerSchemaHostHandlers(lc: RequestRegistrar): SchemaHost {
@@ -48,11 +50,14 @@ export function registerSchemaHostHandlers(lc: RequestRegistrar): SchemaHost {
 			const fsPath = vscode.Uri.parse(uri).fsPath;
 			// A webview buffer (ASFX Workbench) may pin its IntelliSense to a chosen org.
 			const ov = getBufferOrgOverride(fsPath);
-			if (ov.has) return orgArgForKey(canonicalOrgKey(ov.org));
+			// `null` = "the default org" of the buffer's OWN project (<project>/.sfdx/asfx/…), not the active one.
+			if (ov.has) return orgArgForKey(canonicalOrgKey(ov.org, ov.org ? undefined : projectDirOfFile(fsPath)));
 			const dir = path.dirname(fsPath);
 			let projectDir = projectDirCache.get(dir);
 			if (projectDir === undefined) {
-				projectDir = findSfdxProjectDir(fsPath);
+				// Nearest sfdx-project.json first (a project nested deeper than discovery looks), else the
+				// discovered project containing the file (MDAPI files: their own project's default org).
+				projectDir = findSfdxProjectDir(fsPath) ?? projectOfFile(fsPath)?.dir ?? null;
 				if (projectDirCache.size > 2000) projectDirCache.clear();
 				projectDirCache.set(dir, projectDir);
 			}
@@ -158,5 +163,6 @@ export function registerSchemaHostHandlers(lc: RequestRegistrar): SchemaHost {
 		}
 	});
 
-	return { orgForUri, clearProjectDirCache: () => projectDirCache.clear() };
+	const projectsSub = onDidChangeProjects(() => projectDirCache.clear());
+	return { orgForUri, clearProjectDirCache: () => projectDirCache.clear(), dispose: () => projectsSub.dispose() };
 }

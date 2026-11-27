@@ -1,7 +1,6 @@
 import * as vscode from "vscode";
 import { listLogs } from "./commands/listLogs";
 import { addDebugTrace } from "./commands/addDebugTrace";
-import { DeployMetadataPanelProvider } from "./providers/DeployMetadataPanelProvider";
 import { executeAnonymous, rerunLastApex } from "./commands/executeAnonymous";
 import { executeSOQL } from "./commands/executeSOQL";
 import { deleteAllLogs } from "./commands/deleteAllLogs";
@@ -41,8 +40,13 @@ import { ScratchOrgDefEditorProvider } from "./editors/ScratchOrgDefEditorProvid
 import { SOQLEditorProvider } from "./providers/SOQLEditorProvider";
 import { ObjectVisualizerPanelProvider } from "./providers/ObjectVisualizerPanelProvider";
 import { ProcessMapPanelProvider } from "./providers/ProcessMapPanelProvider";
-import { OrgBrowserPanelProvider } from "./providers/OrgBrowserPanelProvider";
+import { SyncCenterOpenOptions, SyncCenterPanelProvider } from "./providers/SyncCenterPanelProvider";
+import { SharedMetadataFilter } from "./utils/sharedFilterState";
 import { initRetrieveLog, flushRetrieveLog } from "./utils/retrieveLog";
+import { initContentCompare } from "./utils/contentCompareHost";
+import { initSyncDiff } from "./utils/syncDiff";
+import { initSyncHistory, flushSyncHistory } from "./utils/syncHistory";
+import { initProjectScanCache, flushProjectScanCache } from "./utils/projectScanCache";
 import { registerApexLogDecorator } from "./providers/ApexLogDecorator";
 import { ApexWorkbenchViewProvider } from "./providers/ApexWorkbenchViewProvider";
 import { Logger, outputChannel, registerOutputChannels } from "./utils/outputChannel";
@@ -91,14 +95,16 @@ import * as path from "path";
 import * as fs from "fs";
 import { startLanguageServer, stopLanguageServer, restartLanguageServerForWorkspaceChange } from "./languageClient";
 import {
-  isSalesforceProject,
   isMdapiProject,
   isWorkspaceUsable,
   updateSalesforceProjectContext,
   NOT_SFDX_PROJECT_MESSAGE,
-  CONVERT_MDAPI_COMMAND
+  CONVERT_MDAPI_COMMAND,
+  findSfdxProjectDir
 } from "./utils/projectUtils";
-import { decideCommandGate } from "./utils/commandScope";
+import { decideCommandGate, gateStateOfKind } from "./utils/commandScope";
+import { activeProject, initProjectRegistry, onDidChangeActiveProject, onDidChangeProjects, projectOfFile, projects } from "./utils/projectRegistry";
+import { registerProjectStatusBar, selectProject, SELECT_PROJECT_COMMAND } from "./commands/selectProject";
 import { convertMdapiProject, registerMdapiUi, showConvertHint } from "./commands/convertMdapi";
 import { scheduleStubSync } from "./utils/sobjectStubSync";
 import { OrgMetadataCache } from "./utils/orgMetadataCache";
@@ -106,7 +112,7 @@ import { AuthInfo } from "./utils/authInfo";
 import { getDeployDiagnosticCollection, registerDeployDiagnosticAutoClear, deployErrorsContentProvider } from "./utils/deployDiagnostics";
 import { OperationPanelProvider, REVEAL_OPERATION_PANEL_COMMAND } from "./providers/OperationPanelProvider";
 import { warmOrgListCache, invalidateOrgListCache, refreshOrgListCache } from "./utils/orgListCache";
-import { initDefaultOrgWatcher, onDidChangeDefaultOrg, resetDefaultOrgWatcher } from "./utils/defaultOrgEvents";
+import { initDefaultOrgWatcher, notifyActiveProjectChanged, onDidChangeDefaultOrg, resetDefaultOrgWatcher } from "./utils/defaultOrgEvents";
 import { killAllChildProcesses } from "./utils/commandRunner";
 import { LiveLogService } from "./utils/liveLogService";
 import { SoqlSchemaProvider } from "./utils/soqlSchemaProvider";
@@ -153,10 +159,13 @@ function warmProjectCaches(): vscode.Disposable {
   });
 }
 
-/** Identity of the open project: changes when the user switches project in the same window. */
+/**
+ * Identity of the open project set: changes when a project appears, disappears or changes
+ * kind (a folder switch, a conversion). Deliberately independent of the ACTIVE project:
+ * switching between discovered projects must not reset caches or restart the language server.
+ */
 function currentProjectKey(): string {
-  const folder = vscode.workspace.workspaceFolders?.[0];
-  return `${folder?.uri.toString() ?? ""}|${isSalesforceProject() ? "sfdx" : isMdapiProject() ? "mdapi" : "-"}`;
+  return projects().map((p) => `${p.kind}:${p.dir}`).join("|") || "-";
 }
 
 function updateLwcContext(editor: vscode.TextEditor | undefined): void {
@@ -199,11 +208,26 @@ function updateLwcContext(editor: vscode.TextEditor | undefined): void {
   );
 }
 
+/**
+ * Project kind a command acts on: a command invoked on a file (a `vscode.Uri`, or an array of
+ * them, as the explorer / editor context menus pass) acts on that file's project; without such
+ * an argument it acts on the active project.
+ */
+function gateStateForArgs(args: any[]) {
+  const first = args[0];
+  const uri: vscode.Uri | undefined = first instanceof vscode.Uri ? first : Array.isArray(first) && first[0] instanceof vscode.Uri ? first[0] : undefined;
+  if (uri && uri.scheme === "file") {
+    const kind = projectOfFile(uri.fsPath)?.kind ?? (findSfdxProjectDir(uri.fsPath) ? "sfdx" : undefined);
+    if (kind) return gateStateOfKind(kind);
+  }
+  return gateStateOfKind(activeProject()?.kind, isMdapiProject());
+}
+
 // Helper to register commands with logging; blocks execution when not in an SFDX project
 function register(command: string, callback: (...args: any[]) => any, thisArg?: any): vscode.Disposable {
   return vscode.commands.registerCommand(command, async (...args: any[]) => {
     Logger.info(`Command triggered: ${command}`);
-    const gate = decideCommandGate(command, { sfdx: isSalesforceProject(), mdapi: isMdapiProject() });
+    const gate = decideCommandGate(command, gateStateForArgs(args));
     if (gate === "not-sfdx") {
       vscode.window.showInformationMessage(NOT_SFDX_PROJECT_MESSAGE);
       return;
@@ -229,6 +253,10 @@ function register(command: string, callback: (...args: any[]) => any, thisArg?: 
 export function activate(context: vscode.ExtensionContext) {
   registerOutputChannels(context);
   Logger.info('Extension "adure-sfx-toolkit" is starting activation...');
+
+  // Discover the Salesforce projects (workspace roots and up to 2 levels below) and pick the
+  // active one, before anything below asks projectUtils for the project root.
+  initProjectRegistry(context);
 
   // Persistent trimmed describe cache (per org id + API version) — lets completion use
   // the last session's schema right after a reload while it is revalidated in background.
@@ -266,7 +294,12 @@ export function activate(context: vscode.ExtensionContext) {
     // 0. Bootstrap persistent state stores
     initDeployHistory(context);
     initRetrieveLog(context.workspaceState);
-    OrgBrowserPanelProvider.init(context);
+    initContentCompare(context);
+    initSyncDiff(context);
+    initSyncHistory(context);
+    initProjectScanCache(path.join(context.globalStorageUri.fsPath, "org-browser"));
+    SharedMetadataFilter.init(context);
+    SyncCenterPanelProvider.init(context);
 
     // Org-aware SOQL language server (JVM-free). Safe no-op outside SFDX projects.
     try {
@@ -281,7 +314,7 @@ export function activate(context: vscode.ExtensionContext) {
       // object itself and honours `validateOnly`, so the test level carries over too.
       const preset = presetFromHistoryEntry(entry);
       if (entry.dryRun !== false) preset.validateOnly = true;
-      void DeployMetadataPanelProvider.show(preset);
+      void SyncCenterPanelProvider.show({ preset });
     });
 
     // Sync Context on Switch (dispose on deactivate to avoid leak)
@@ -302,17 +335,15 @@ export function activate(context: vscode.ExtensionContext) {
     // 3. Add Debug Trace
     const addDebugTraceCmd = register("adure-sfx-toolkit.addDebugTrace", addDebugTrace);
 
-    // 4. Deploy Metadata (panel with tree, presets, org, test level)
+    // 4. Deploy & Retrieve Metadata: the old "Deploy & Retrieve Metadata" command id stays as an alias (user keybindings) and opens the Center.
+    // Called from an Explorer / editor context menu it carries the files or folders along (their components are selected).
     context.subscriptions.push(getDeployDiagnosticCollection());
     registerDeployDiagnosticAutoClear(context);
-    const deployMetadataCmd = register("adure-sfx-toolkit.deployMetadata", () => DeployMetadataPanelProvider.show());
-    context.subscriptions.push(
-      vscode.window.registerWebviewPanelSerializer(DeployMetadataPanelProvider.viewType, {
-        async deserializeWebviewPanel(panel: vscode.WebviewPanel): Promise<void> {
-          await DeployMetadataPanelProvider.revive(panel);
-        }
-      })
-    );
+    const deployMetadataCmd = register("adure-sfx-toolkit.deployMetadata", (uri?: unknown, uris?: unknown) => {
+      const list = Array.isArray(uris) ? uris : uri ? [uri] : [];
+      const paths = list.filter((u): u is vscode.Uri => u instanceof vscode.Uri && u.scheme === "file").map((u) => u.fsPath);
+      return SyncCenterPanelProvider.show(paths.length > 0 ? { paths } : {});
+    });
 
     // 5. Execute Anonymous Apex
     const executeAnonCmd = register("adure-sfx-toolkit.executeAnonymous", executeAnonymous);
@@ -528,9 +559,22 @@ export function activate(context: vscode.ExtensionContext) {
     const objectVisualizerCmd = register("adure-sfx-toolkit.objectVisualizer", () => {
       ObjectVisualizerPanelProvider.show(context.extensionUri);
     });
-    // Org Browser: palette (default org), Orgs view title button, and the org-node context menu (that org).
-    const orgBrowserCmd = register("adure-sfx-toolkit.openOrgBrowser", (item?: { orgData?: { username?: string } }) =>
-      OrgBrowserPanelProvider.show(item?.orgData?.username ?? undefined)
+    // Browse Org Metadata: palette (default org), Orgs view title button, Development view and the org-node context menu (that org).
+    // Opens Deploy & Retrieve Metadata with the status filter cleared so the org-only components show. The old Org Browser
+    // command id stays as an alias (user keybindings).
+    const browseOrg = (item?: { orgData?: { username?: string } }) => SyncCenterPanelProvider.show({ org: item?.orgData?.username ?? undefined, browse: true });
+    const browseOrgCmd = register("adure-sfx-toolkit.browseOrgMetadata", browseOrg);
+    const orgBrowserCmd = register("adure-sfx-toolkit.openOrgBrowser", browseOrg);
+    // Deploy & Retrieve Metadata: palette (default org), or with open options (project, org, selection, paths, preset, browse).
+    const syncCenterCmd = register("adure-sfx-toolkit.openSyncCenter", (opts?: SyncCenterOpenOptions) =>
+      SyncCenterPanelProvider.show(opts && typeof opts === "object" && !("orgData" in opts) ? opts : {})
+    );
+    context.subscriptions.push(
+      vscode.window.registerWebviewPanelSerializer(SyncCenterPanelProvider.viewType, {
+        async deserializeWebviewPanel(panel: vscode.WebviewPanel): Promise<void> {
+          SyncCenterPanelProvider.revive(panel);
+        }
+      })
     );
     // Re-authenticate: org-node context menu (that org), a string org from an error toast, or the palette picker.
     const reauthCmd = register("adure-sfx-toolkit.reauthenticateOrg", (arg?: string | { orgData?: { username?: string } }) => {
@@ -564,10 +608,11 @@ export function activate(context: vscode.ExtensionContext) {
     const deployHistoryCmd = register("adure-sfx-toolkit.deployHistory", () => DeployHistoryProvider.show());
 
     // 16. Apex Snippets (sidebar view like Debug Traces + quick pick + overview panel)
-    const snippetProvider = new SnippetTreeProvider();
+    const snippetProvider = new SnippetTreeProvider(context.workspaceState);
     const snippetsTreeView = vscode.window.createTreeView("adure-sfx-toolkit.snippets", {
       treeDataProvider: snippetProvider
     });
+    snippetProvider.attachView(snippetsTreeView);
     context.subscriptions.push(
       snippetProvider,
       snippetsTreeView,
@@ -601,6 +646,7 @@ export function activate(context: vscode.ExtensionContext) {
       snippetProvider.refresh();
     });
     const refreshSnippetsCmd = register("adure-sfx-toolkit.refreshSnippets", () => snippetProvider.refresh());
+    const filterSnippetsCmd = register("adure-sfx-toolkit.filterSnippetsByProject", () => snippetProvider.pickFilter());
     const editSnippetCmd = register(
       "adure-sfx-toolkit.editSnippet",
       (snippetOrItem?: { snippet?: ApexSnippet; name?: string; code?: string }) => {
@@ -734,7 +780,9 @@ export function activate(context: vscode.ExtensionContext) {
       openSOQLEditorCmd,
       objectVisualizerCmd,
       processMapCmd,
+      browseOrgCmd,
       orgBrowserCmd,
+      syncCenterCmd,
       reauthCmd,
       showOutputCmd,
       revealOperationPanelCmd,
@@ -748,6 +796,7 @@ export function activate(context: vscode.ExtensionContext) {
       showSnippetsCmd,
       openSnippetsPanelCmd,
       refreshSnippetsCmd,
+      filterSnippetsCmd,
       runSnippetCmd,
       runSnippetFromTreeCmd,
       addSnippetCmd,
@@ -824,7 +873,46 @@ export function activate(context: vscode.ExtensionContext) {
 
         warmup = warmProjectCaches();
     };
-    context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(onProjectChanged));
+    // The registry rescans on workspace-folder changes and on sfdx-project.json / package.xml
+    // events; a changed project set takes the same path as a workspace-folder change.
+    context.subscriptions.push(
+      vscode.workspace.onDidChangeWorkspaceFolders(onProjectChanged),
+      onDidChangeProjects(onProjectChanged)
+    );
+
+    // The ACTIVE project changed (editor moved to another project, or the status bar picker).
+    // No cache reset, no language server restart: `null` / "the default org" now means the new
+    // project's default org, which notifyActiveProjectChanged re-announces (UI repaints, caches warm).
+    // The org-related tail is debounced (400 ms): rapid editor moves between projects settle first.
+    // When the new project's default org is the same, nothing org-related runs (no org list,
+    // no warm-up, no coverage clear, no schema refresh); onDidChangeDefaultOrg covers the rest.
+    let activeSwitchTimer: ReturnType<typeof setTimeout> | undefined;
+    context.subscriptions.push(
+      new vscode.Disposable(() => { if (activeSwitchTimer) clearTimeout(activeSwitchTimer); }),
+      onDidChangeActiveProject((p) => {
+        Logger.info(`Active project → ${p ? `${p.name} (${p.kind})` : "(none)"}`);
+        updateSalesforceProjectContext();
+        updateSnippetStatusBar();
+        refreshMdapiUi();
+        devProvider.refresh();
+        if (activeSwitchTimer) clearTimeout(activeSwitchTimer);
+        activeSwitchTimer = setTimeout(() => {
+          activeSwitchTimer = undefined;
+          let changed = false;
+          void notifyActiveProjectChanged()
+            .then((c) => { changed = c; })
+            .catch((e) => Logger.error(`Active project change: ${e instanceof Error ? e.message : String(e)}`))
+            .finally(() => {
+              // The onDidChangeDefaultOrg handler already repaints the org tree and traces.
+              if (!changed) traceProvider.refresh();
+              snippetProvider.refresh();
+              if (changed && isWorkspaceUsable()) OrgMetadataCache.warmDefaultOrg();
+            });
+        }, 400);
+      }),
+      register(SELECT_PROJECT_COMMAND, selectProject)
+    );
+    registerProjectStatusBar(context);
 
     // MDAPI (legacy format) support: status bar hint, one-time notice, and the conversion command.
     const refreshMdapiUi = registerMdapiUi(context);
@@ -873,6 +961,11 @@ export function deactivate(): Thenable<void> | undefined {
   });
   teardownStep("stop live log polling", () => LiveLogService.disposeAll());
   teardownStep("flush retrieve log", () => flushRetrieveLog());
+  teardownStep("flush sync history", () => flushSyncHistory());
+  let scanFlush: Promise<void> | undefined;
+  teardownStep("flush project scan cache", () => {
+    scanFlush = flushProjectScanCache();
+  });
   teardownStep("dispose auth cache", () => AuthInfo.disposeAll());
   teardownStep("dispose SOQL schema cache", () => SoqlSchemaProvider.disposeAll());
   // Flushes pending disk-cache writes synchronously and leaves no timers behind.
@@ -883,8 +976,11 @@ export function deactivate(): Thenable<void> | undefined {
   // Last, after the LS stop has been kicked off: no CLI process may outlive the window.
   teardownStep("kill child processes", () => killAllChildProcesses());
 
-  if (!lsStop) return undefined;
-  return Promise.resolve(lsStop).catch((e) => {
-    Logger.error("deactivate: language server stop failed", e);
-  });
+  if (!lsStop && !scanFlush) return undefined;
+  return Promise.all([Promise.resolve(lsStop), scanFlush]).then(
+    () => undefined,
+    (e) => {
+      Logger.error("deactivate: language server stop / cache flush failed", e);
+    }
+  );
 }

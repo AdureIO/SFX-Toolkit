@@ -17,6 +17,7 @@
  */
 import * as fs from 'fs';
 import { WorkspaceIndex } from './workspaceIndex';
+import { Partitions } from './partitions';
 import { blankNonCode } from '../../src/utils/apexReferences';
 import { typeForNameRefs } from '../../src/utils/sfMetadataRefs';
 import { throwIfCancelled } from './cancel';
@@ -156,11 +157,14 @@ class TokenIndexImpl {
     }
 
     /** Files containing `token` (lower-cased identifier, or `'name` for Type.forName strings). */
-    lookup(token: string): string[] {
+    lookup(token: string, part?: string): string[] {
         const set = this.postings.get(token.toLowerCase());
         if (!set) return [];
         const out: string[] = [];
-        for (const id of set) out.push(this.paths[id]);
+        for (const id of set) {
+            const f = this.paths[id];
+            if (part === undefined || Partitions.partitionOfPath(f) === part) out.push(f);
+        }
         return out;
     }
 

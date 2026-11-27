@@ -3,6 +3,8 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { getAnonymousApexOrgList, executeAnonymousForPanel } from '../commands/executeAnonymous';
+import { PanelProjectBinding } from '../utils/panelProject';
+import { PROJECT_SELECTOR_CSS, projectSelectorMarkup, projectSelectorScript } from '../utils/panelProjectUi';
 import { fetchApexLogBody, listActiveTraceFlags, deleteAllApexLogs, createUserTrace, extractCodeUnit } from '../utils/apexLogApi';
 import { LiveLogService } from '../utils/liveLogService';
 import { getHighlightPatterns } from '../utils/apexLogHighlight';
@@ -54,8 +56,13 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 	private _listener?: vscode.Disposable;
 	private _lastLog = '';
 	/** Execute-tab buffer: virtual LS document; text persisted to WORKBENCH_BUFFER on change/blur. */
-	private readonly _bridge = new ApexBufferBridge(WORKBENCH_BUFFER, 'apex', true);
-	private readonly _soqlBridge = new ApexBufferBridge(SOQL_BUFFER, 'soql', true);
+	/** Project selector: storage, both buffers, the org list default and the log folder follow the selected project. */
+	private readonly _binding = new PanelProjectBinding();
+	private readonly _bridge = new ApexBufferBridge(WORKBENCH_BUFFER, 'apex', true, () => this._binding.current());
+	private readonly _soqlBridge = new ApexBufferBridge(SOQL_BUFFER, 'soql', true, () => this._binding.current());
+	/** Project dir the buffers were last opened under (to close their virtual documents on a switch). */
+	private _bufferDir: string | undefined;
+	private _reloadSeq = 0;
 	/** Cache of fetched log bodies (id → { text, unit }) so re-opening is instant. */
 	private readonly _bodyCache = new Map<string, { text: string; unit: string | null }>();
 	/** Live-log subscription for the Logs tab's current org (shared LiveLogService). */
@@ -76,8 +83,41 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 		// When the default org changes, re-send the org list so the selector realigns
 		// (the "(default)" marker follows, and a default-selected user follows along).
 		this._disposables.push(onDidChangeDefaultOrg(async () => {
-			if (this._view) this._post('orgList', { orgs: await getAnonymousApexOrgList(), defaultChanged: true });
+			if (this._view) this._post('orgList', { orgs: await this._orgList(), defaultChanged: true });
 		}));
+		this._disposables.push(this._binding, this._binding.onDidChange(() => void this._onProjectChanged()));
+	}
+
+	/**
+	 * Org list for the selected project (its default org first). While the panel is pinned to a project
+	 * that is not the active one, the default is offered as an explicit org (the webview's "default" entry
+	 * means "no org" = the ACTIVE project's default, which would be the wrong org).
+	 */
+	private async _orgList(): Promise<{ label: string; username: string }[]> {
+		return this._binding.current() ? this._binding.orgList() : getAnonymousApexOrgList();
+	}
+
+	/** The selected project changed: reload the buffers, history and org list from the new project. */
+	private async _onProjectChanged(): Promise<void> {
+		const view = this._view;
+		if (!view) return;
+		// Close the virtual documents of the previous project's buffers (they were keyed by its dir).
+		const old = this._bufferDir;
+		if (old && old !== this._binding.current()) {
+			new ApexBufferBridge(WORKBENCH_BUFFER, 'apex', true, () => old).dispose();
+			new ApexBufferBridge(SOQL_BUFFER, 'soql', true, () => old).dispose();
+		}
+		this._bodyCache.clear();
+		await this._renderView(view);
+	}
+
+	/** Render the webview from the selected project's buffers and history. */
+	private async _renderView(view: vscode.WebviewView): Promise<void> {
+		this._bufferDir = this._binding.current();
+		const initialCode = await this._bridge.readBuffer();
+		const initialSoql = await this._soqlBridge.readBuffer();
+		// A distinct HTML string forces a reload (identical html is ignored).
+		view.webview.html = this._html(view.webview, initialCode, initialSoql) + `<!-- reload ${++this._reloadSeq} -->`;
 	}
 
 	/** Release everything (extension deactivate): subscriptions, live-log feed, cached log bodies. */
@@ -156,7 +196,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 	}
 
 	private _storageDir(): string | null {
-		const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+		const root = this._binding.current();
 		return root ? path.join(root, ASFX_DIR) : null;
 	}
 
@@ -201,9 +241,8 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 				vscode.Uri.joinPath(this._extensionUri, 'node_modules', 'monaco-editor', 'min'),
 			],
 		};
-		const initialCode = await this._bridge.readBuffer();
-		const initialSoql = await this._soqlBridge.readBuffer();
-		view.webview.html = this._html(view.webview, initialCode, initialSoql);
+		this._viewDisposables.push(this._binding.attach(view.webview));
+		await this._renderView(view);
 
 		this._listener?.dispose();
 		this._listener = view.webview.onDidReceiveMessage(async (data: any) => {
@@ -211,7 +250,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 			if (await handleResultsTableMessage(data, (m) => view.webview.postMessage(m))) return;
 			switch (data?.type) {
 				case 'getOrgs':
-					this._post('orgList', { orgs: await getAnonymousApexOrgList() });
+					this._post('orgList', { orgs: await this._orgList() });
 					// The client only starts listening for messages once its script has run —
 					// 'getOrgs' is the first thing it sends, so it's the reliable "ready" signal
 					// for flushing a result that arrived before this webview instance existed.
@@ -437,7 +476,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 
 	/** Remove downloaded `.log` files from the local Salesforce debug-log folder (best effort). */
 	private _deleteLocalLogFiles(): void {
-		const dir = getSalesforceLogDirectory();
+		const dir = getSalesforceLogDirectory(this._binding.current());
 		if (!dir) return;
 		try {
 			for (const f of fs.readdirSync(dir)) {
@@ -448,7 +487,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 
 	private async _openLogFile(name: string, text: string): Promise<void> {
 		try {
-			const dir = getSalesforceLogDirectory() || os.tmpdir();
+			const dir = getSalesforceLogDirectory(this._binding.current()) || os.tmpdir();
 			if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 			const file = path.join(dir, name);
 			fs.writeFileSync(file, text, 'utf8');
@@ -472,6 +511,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 	* { box-sizing:border-box; }
 	body { margin:0; padding:0; height:100vh; display:flex; flex-direction:column; color:var(--vscode-foreground);
 		background:var(--vscode-editor-background); font-family:var(--vscode-font-family); font-size:var(--vscode-font-size,13px); }
+	${PROJECT_SELECTOR_CSS}
 	#bar { display:flex; align-items:center; gap:10px; padding:8px 10px; border-bottom:1px solid var(--vscode-panel-border, rgba(128,128,128,0.25)); flex-shrink:0; }
 	#title { display:inline-flex; align-items:center; gap:6px; font-size:13px; font-weight:500; white-space:nowrap; }
 	.lbl { font-size:11px; opacity:0.7; }
@@ -516,6 +556,9 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 	#listHead { padding:7px 10px; font-size:11px; opacity:0.7; display:flex; justify-content:space-between; border-bottom:1px solid var(--vscode-panel-border, rgba(128,128,128,0.18)); }
 	.row { padding:7px 10px; }
 	.content { flex:1; margin:0; padding:8px; overflow:auto; white-space:pre-wrap; word-break:break-word; font-family:var(--vscode-editor-font-family,monospace); font-size:12px; line-height:1.4; }
+	.content.virt { position:relative; white-space:pre; word-break:normal; }
+	.content .vwin { position:absolute; left:8px; min-width:calc(100% - 16px); }
+	.content .vl { height:1.4em; line-height:1.4; }
 	.content mark { background:var(--vscode-editor-findMatchHighlightBackground, rgba(234,92,0,0.4)); color:inherit; border-radius:2px; }
 	.content.error { color:var(--vscode-errorForeground); }
 	.muted { opacity:0.6; }
@@ -544,6 +587,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 <div id="bar">
 	<span class="tabs"><span class="tab active" data-t="logs">Logs</span><span class="tab" data-t="exec">Anonymous Apex</span><span class="tab" data-t="soql">SOQL</span></span>
 	<span style="flex:1;"></span>
+	${projectSelectorMarkup()}
 	<span id="busy" title="Loading schema from the org…"><span class="spinner"></span>schema…</span>
 	<select id="org" title="Target org for logs, execution and queries"><option value="">Loading…</option></select>
 	<span id="tracePill" title="Active debug traces">Trace: —</span>
@@ -645,6 +689,8 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 	// A reusable log viewer bound to a content <pre>, a filter input and its toggle buttons.
 	function makeViewer(contentEl, filterEl){
 		const toggles={debug:false,soql:false}; let raw='';
+		// Virtual list state: only the visible window (+overscan) is in the DOM.
+		const OVERSCAN=100; let vLines=null, vRe=null, vTotal=0, lineH=0, spacer=null, win=null, raf=0, lastFirst=-1, lastLast=-1;
 		function applyToggles(lines){ if(!toggles.debug&&!toggles.soql) return lines; const out=[]; let keep=false;
 			for(let i=0;i<lines.length;i++){ const l=lines[i];
 				if(EVENT.test(l)){ let m=false;
@@ -653,19 +699,34 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 					keep=m; if(m) out.push(l);
 				} else if(keep) out.push(l);
 			} return out; }
+		function clearVirtual(){ vLines=null; vRe=null; spacer=null; win=null; lastFirst=-1; lastLast=-1; contentEl.classList.remove('virt'); }
+		function measure(){ const p=document.createElement('div'); p.style.cssText='position:absolute;visibility:hidden;white-space:pre;'; p.textContent='X'; contentEl.appendChild(p); const h=p.getBoundingClientRect().height; contentEl.removeChild(p); return h>0?h:17; }
+		// Same formula as virtualWindow() in src/utils/virtualWindowPure.ts (unit-tested there); keep in sync.
+		function paint(force){ if(!vLines||!win) return; const n=vLines.length;
+			const top=Math.max(0,contentEl.scrollTop-8); const vh=contentEl.clientHeight;
+			const first=Math.min(n,Math.max(0,Math.floor(top/lineH)-OVERSCAN)); const last=Math.max(first,Math.min(n,Math.ceil((top+vh)/lineH)+OVERSCAN));
+			if(!force&&first===lastFirst&&last===lastLast) return; lastFirst=first; lastLast=last;
+			const out=[]; for(let i=first;i<last;i++){ const l=vLines[i]; const inner=hl(l,vRe); const st=lineStyle(l); out.push('<div class="vl"'+(st?' style="'+st+'"':'')+'>'+(inner||' ')+'</div>'); }
+			win.style.top=(first*lineH+8)+'px'; win.innerHTML=out.join(''); }
+		function onScroll(){ if(raf) return; raf=requestAnimationFrame(function(){ raf=0; paint(false); }); }
 		function render(){ contentEl.classList.remove('error','muted');
 			const q=(filterEl.value||'').trim(); let re=null;
 			if(q){ try{re=new RegExp(q,'gi'); filterEl.classList.remove('invalid');}catch(e){filterEl.classList.add('invalid'); re=null;} } else filterEl.classList.remove('invalid');
-			const lines=applyToggles(raw.split('\\n')); const out=[]; const MAX=8000; let truncated=false;
-			for(let i=0;i<lines.length;i++){ const l=lines[i]; if(re){re.lastIndex=0; if(!re.test(l)) continue;}
-				if(out.length>=MAX){ truncated=true; break; }
-				const inner=hl(l,re); const st=lineStyle(l); out.push(st?'<span style="'+st+'">'+inner+'</span>':inner); }
-			if(!out.length){ contentEl.innerHTML='<span class="muted">No matching lines.</span>'; return; }
-			contentEl.innerHTML=out.join('\\n')+(truncated?('\\n<span class="muted">… showing first '+MAX+' of '+lines.length+' lines — filter, or Open to see all.</span>'):''); }
+			const lines=applyToggles(raw.split('\\n')); let out=lines;
+			if(re){ out=[]; for(let i=0;i<lines.length;i++){ re.lastIndex=0; if(re.test(lines[i])) out.push(lines[i]); } }
+			vTotal=lines.length;
+			if(!out.length){ clearVirtual(); contentEl.innerHTML='<span class="muted">No matching lines.</span>'; return; }
+			const keepTop=contentEl.scrollTop; contentEl.textContent=''; contentEl.classList.add('virt');
+			if(!lineH) lineH=measure();
+			spacer=document.createElement('div'); spacer.style.cssText='height:'+(out.length*lineH)+'px;width:1px;'; win=document.createElement('div'); win.className='vwin';
+			contentEl.appendChild(spacer); contentEl.appendChild(win); vLines=out; vRe=re; lastFirst=-1; lastLast=-1;
+			contentEl.scrollTop=keepTop; paint(true); }
 		filterEl.addEventListener('input', render);
-		return { setLog:function(t){ raw=t||''; render(); contentEl.scrollTop=0; }, render:render, toggles:toggles,
-			setText:function(t,muted){ raw=''; contentEl.classList.toggle('muted',!!muted); contentEl.classList.remove('error'); contentEl.textContent=t||''; },
-			setError:function(t){ raw=''; contentEl.classList.remove('muted'); contentEl.classList.add('error'); contentEl.textContent=t||''; } };
+		contentEl.addEventListener('scroll', onScroll);
+		if(window.ResizeObserver) new ResizeObserver(function(){ if(!vLines) return; const h=measure(); if(h!==lineH){ lineH=h; spacer.style.height=(vLines.length*lineH)+'px'; } paint(true); }).observe(contentEl);
+		return { setLog:function(t){ raw=t||''; render(); contentEl.scrollTop=0; paint(true); }, render:render, toggles:toggles,
+			setText:function(t,muted){ raw=''; clearVirtual(); contentEl.classList.toggle('muted',!!muted); contentEl.classList.remove('error'); contentEl.textContent=t||''; },
+			setError:function(t){ raw=''; clearVirtual(); contentEl.classList.remove('muted'); contentEl.classList.add('error'); contentEl.textContent=t||''; } };
 	}
 	const logView = makeViewer(document.getElementById('logContent'), document.querySelector('input[data-pane="log"]'));
 	const execView = makeViewer(document.getElementById('execContent'), document.querySelector('input[data-pane="exec"]'));
@@ -848,6 +909,7 @@ export class ApexWorkbenchViewProvider implements vscode.WebviewViewProvider, vs
 	});
 	vscode.postMessage({type:'getOrgs'});
 </script>
+<script>${projectSelectorScript('vscode')}</script>
 </body></html>`;
 	}
 }

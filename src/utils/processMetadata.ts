@@ -16,12 +16,12 @@ import { scanApexBody, isApexTestClass } from "./apexFieldWrites";
 
 type Rec = Record<string, unknown>;
 
-async function query(org: string | undefined, soql: string, tooling: boolean): Promise<Rec[]> {
+async function query(org: string | undefined, soql: string, tooling: boolean, cwd?: string): Promise<Rec[]> {
     const args = ["data", "query", "-q", soql, "--json"];
     if (tooling) args.push("--use-tooling-api");
     if (org) args.push("--target-org", org);
     try {
-        const raw = await runCommandArgs("sf", args, undefined, undefined, false);
+        const raw = await runCommandArgs("sf", args, cwd, undefined, false);
         return (JSON.parse(raw) as { result?: { records?: Rec[] } }).result?.records ?? [];
     } catch {
         return [];
@@ -36,11 +36,11 @@ const rel = (r: Rec, path: string): string | undefined => {
 const isIdLike = (s: string): boolean => /^[a-zA-Z0-9]{15,18}$/.test(s);
 
 /** Resolve DurableId/object-Id references to QualifiedApiName via EntityDefinition. */
-async function resolveObjectRefs(org: string | undefined, refs: Set<string>): Promise<Map<string, string>> {
+async function resolveObjectRefs(org: string | undefined, refs: Set<string>, cwd?: string): Promise<Map<string, string>> {
     const ids = [...refs].filter(isIdLike);
     if (!ids.length) return new Map();
     const inList = ids.map((i) => `'${i}'`).join(",");
-    const recs = await query(org, `SELECT DurableId, QualifiedApiName FROM EntityDefinition WHERE DurableId IN (${inList})`, true);
+    const recs = await query(org, `SELECT DurableId, QualifiedApiName FROM EntityDefinition WHERE DurableId IN (${inList})`, true, cwd);
     const map = new Map<string, string>();
     for (const r of recs) {
         const d = str(r.DurableId);
@@ -77,7 +77,7 @@ export interface FetchProgress {
 }
 
 /** Fetch and normalize the org's automation metadata. `onProgress` reports query completion for a loading UI. */
-export async function fetchProcessMetadata(org?: string, onProgress?: (p: FetchProgress) => void): Promise<ProcessMetadata> {
+export async function fetchProcessMetadata(org?: string, onProgress?: (p: FetchProgress) => void, cwd?: string): Promise<ProcessMetadata> {
     // Named parallel queries — each reports progress as it resolves so the UI shows a real bar.
     const steps: { label: string; soql: string; tooling: boolean }[] = [
         {
@@ -110,18 +110,19 @@ export async function fetchProcessMetadata(org?: string, onProgress?: (p: FetchP
     // Launch the independent (and heavier) queries up front so different types run concurrently
     // instead of type-by-type: Flow metadata, Apex bodies and the dependency graph all fire
     // alongside the base batch. Each is isolated (a failure yields []).
-    const flowMetaP: Promise<Rec[]> = query(org, "SELECT DeveloperName, Metadata FROM Flow WHERE Status = 'Active'", true).catch(() => []);
-    const classBodyP: Promise<Rec[]> = query(org, "SELECT Name, NamespacePrefix, Body FROM ApexClass WHERE Status = 'Active'", true).catch(() => []);
-    const trigBodyP: Promise<Rec[]> = query(org, "SELECT Name, NamespacePrefix, Body, EntityDefinition.QualifiedApiName FROM ApexTrigger", true).catch(() => []);
+    const flowMetaP: Promise<Rec[]> = query(org, "SELECT DeveloperName, Metadata FROM Flow WHERE Status = 'Active'", true, cwd).catch(() => []);
+    const classBodyP: Promise<Rec[]> = query(org, "SELECT Name, NamespacePrefix, Body FROM ApexClass WHERE Status = 'Active'", true, cwd).catch(() => []);
+    const trigBodyP: Promise<Rec[]> = query(org, "SELECT Name, NamespacePrefix, Body, EntityDefinition.QualifiedApiName FROM ApexTrigger", true, cwd).catch(() => []);
     const depsP: Promise<Rec[]> = query(
               org,
               "SELECT MetadataComponentName, MetadataComponentType, RefMetadataComponentName " +
                   "FROM MetadataComponentDependency WHERE MetadataComponentType IN ('ApexClass','ApexTrigger') AND RefMetadataComponentType = 'CustomField'",
-              true
+              true,
+              cwd
           ).catch(() => []);
 
     const [triggerRecs, flowRecs, vrRecs, wrRecs, cronRecs, classRecs, wfuRecs] = await Promise.all(
-        steps.map((st) => query(org, st.soql, st.tooling).then((recs) => (tick(st.label), recs)))
+        steps.map((st) => query(org, st.soql, st.tooling, cwd).then((recs) => (tick(st.label), recs)))
     );
 
     // Normalize object refs (flows/workflows can reference an Id/DurableId).
@@ -134,7 +135,7 @@ export async function fetchProcessMetadata(org?: string, onProgress?: (p: FetchP
         const t = str(w.TableEnumOrId);
         if (t) rawRefs.add(t);
     }
-    const refMap = await resolveObjectRefs(org, rawRefs);
+    const refMap = await resolveObjectRefs(org, rawRefs, cwd);
     tick("Object references");
     const resolve = (ref: string | undefined, fallback?: string): string | undefined =>
         ref ? refMap.get(ref) ?? (isIdLike(ref) ? fallback ?? ref : ref) : undefined;

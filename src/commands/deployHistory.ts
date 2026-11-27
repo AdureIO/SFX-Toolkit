@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { Telemetry } from '../utils/telemetry';
 import { escapeHtml, getNonce } from '../utils/htmlUtils';
-import type { DeployPreset, DeployTypeKey } from '../utils/deployPresets';
+import type { DeployPreset, DeployTypeKey } from '../utils/presetsStore';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -53,7 +53,7 @@ export function disposeDeployHistory(): void {
 }
 
 /**
- * Map a history entry back to a Deploy panel preset for "Re-deploy", preserving the
+ * Map a history entry back to a Deploy & Retrieve Metadata preset for "Re-deploy", preserving the
  * test level and the validate-only (dry run) choice.
  * - dry run + no explicit test level → legacy `ValidateOnly` (the panel maps it to the
  *   validate checkbox + NoTestRun).
@@ -220,7 +220,7 @@ export class DeployHistoryProvider {
       : '';
 
     const redeployBtn = e.status !== 'Cancelled'
-      ? `<button class="btn-redeploy" data-id="${DeployHistoryProvider.escHtml(e.id)}" title="Open Deploy panel with these paths pre-selected">Re-deploy</button>`
+      ? `<button class="btn-redeploy" data-id="${DeployHistoryProvider.escHtml(e.id)}" title="Open Deploy &amp; Retrieve Metadata with these components selected">Re-deploy</button>`
       : '';
 
     const absTime = new Date(e.timestamp).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
@@ -239,7 +239,7 @@ export class DeployHistoryProvider {
 
   private static getHtml(entries: DeployHistoryEntry[]): string {
     const body = entries.length === 0
-      ? '<div class="empty">No deployments recorded yet.<br>Deployments run from the Deploy Metadata panel are saved here automatically.</div>'
+      ? '<div class="empty">No deployments recorded yet.<br>Deployments run from Deploy & Retrieve Metadata are saved here automatically.</div>'
       : entries.map((e) => DeployHistoryProvider.renderEntry(e)).join('');
 
     const nonce = getNonce();

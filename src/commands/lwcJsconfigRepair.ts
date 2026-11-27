@@ -4,6 +4,7 @@ import * as fs from "fs";
 import { buildLwcJsconfig, jsconfigNeedsUpdate, JsconfigShape } from "../utils/lwcJsconfig";
 import { reportError } from "../utils/reportError";
 import { Logger } from "../utils/outputChannel";
+import { projects } from "../utils/projectRegistry";
 
 /**
  * Repair the `jsconfig.json` in every `lwc` folder so IntelliSense resolves modules the way the
@@ -37,8 +38,8 @@ function readJson(file: string): JsconfigShape | undefined {
 }
 
 /** Every `.../lwc` directory that holds components. */
-async function findLwcDirs(): Promise<string[]> {
-    const metas = await vscode.workspace.findFiles("**/lwc/*/*.js-meta.xml", "**/node_modules/**");
+async function findLwcDirs(root: string): Promise<string[]> {
+    const metas = await vscode.workspace.findFiles(new vscode.RelativePattern(root, "**/lwc/*/*.js-meta.xml"), "**/node_modules/**");
     const dirs = new Set<string>();
     for (const m of metas) dirs.add(path.dirname(path.dirname(m.fsPath))); // component dir → lwc dir
     return [...dirs];
@@ -57,17 +58,23 @@ function repairDir(lwcDir: string, root: string): boolean {
 }
 
 export async function repairLwcJsconfigs(silent = false): Promise<number> {
-    const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-    if (!root) return 0;
-    const dirs = await findLwcDirs();
+    // Per SFDX project: each project's lwc folders point at that project's own `.sfdx/typings/lwc`.
+    const roots = projects().filter((p) => p.kind === "sfdx").map((p) => p.dir);
+    if (roots.length === 0) return 0;
+    let checked = 0;
     let fixed = 0;
-    for (const dir of dirs) {
-        try {
-            if (repairDir(dir, root)) fixed++;
-        } catch (e) {
-            Logger.warn(`LWC jsconfig: could not update ${dir}: ${e}`);
+    for (const root of roots) {
+        const dirs = await findLwcDirs(root);
+        checked += dirs.length;
+        for (const dir of dirs) {
+            try {
+                if (repairDir(dir, root)) fixed++;
+            } catch (e) {
+                Logger.warn(`LWC jsconfig: could not update ${dir}: ${e}`);
+            }
         }
     }
+    const dirs = { length: checked };
     Logger.info(`LWC jsconfig: checked ${dirs.length} folder(s), updated ${fixed}`);
     if (!silent) {
         vscode.window.showInformationMessage(

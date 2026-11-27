@@ -4,8 +4,10 @@ import * as http from "http";
 import { Logger } from "../utils/outputChannel";
 import { AuthInfo } from "../utils/authInfo";
 import { OrgMetadataCache } from "../utils/orgMetadataCache";
-import { getCachedOrgList, refreshOrgListCache, warmOrgListCache } from "../utils/orgListCache";
+import { refreshOrgListCache, warmOrgListCache } from "../utils/orgListCache";
 import { onDidChangeDefaultOrg } from "../utils/defaultOrgEvents";
+import { PanelProjectBinding, orgPickerForProject } from "../utils/panelProject";
+import { PROJECT_SELECTOR_CSS, projectSelectorMarkup, projectSelectorScript } from "../utils/panelProjectUi";
 import { getToolingApiVersion } from "../utils/constants";
 import { scanApexRestResources } from "../utils/apexRestScanner";
 import { Telemetry } from "../utils/telemetry";
@@ -127,11 +129,13 @@ export class RestExplorerPanelProvider {
   private static _panel: vscode.WebviewPanel | undefined;
 
   public static async show(extensionUri: vscode.Uri, prefill?: { method?: string; url?: string }): Promise<void> {
-    const folder = vscode.workspace.workspaceFolders?.[0];
-    if (!folder) { vscode.window.showErrorMessage("No workspace open."); return; }
+    const binding = new PanelProjectBinding();
+    const root = binding.current() ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!root) { binding.dispose(); vscode.window.showErrorMessage("No workspace open."); return; }
 
     const existing = RestExplorerPanelProvider._panel;
     if (existing) {
+      binding.dispose();
       existing.reveal();
       if (prefill) void existing.webview.postMessage({ command: "prefill", ...prefill });
       return;
@@ -144,32 +148,45 @@ export class RestExplorerPanelProvider {
       vscode.ViewColumn.One,
       { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [monacoResourceRoot(extensionUri)] }
     );
-    RestExplorerPanelProvider.attach(panel, folder.uri.fsPath, extensionUri);
+    RestExplorerPanelProvider.attach(panel, binding, root, extensionUri);
   }
 
   /** Re-attach to a panel restored by VS Code (window reload). */
   public static async revive(panel: vscode.WebviewPanel, extensionUri: vscode.Uri): Promise<void> {
-    const folder = vscode.workspace.workspaceFolders?.[0];
+    const binding = new PanelProjectBinding();
     // Restored panels keep their old options — make sure Monaco may load.
     panel.webview.options = { enableScripts: true, localResourceRoots: [monacoResourceRoot(extensionUri)] };
-    RestExplorerPanelProvider.attach(panel, folder?.uri.fsPath ?? "", extensionUri);
+    RestExplorerPanelProvider.attach(panel, binding, binding.current() ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "", extensionUri);
   }
 
-  private static attach(panel: vscode.WebviewPanel, workspaceRoot: string, extensionUri: vscode.Uri): void {
+  private static attach(panel: vscode.WebviewPanel, binding: PanelProjectBinding, initialRoot: string, extensionUri: vscode.Uri): void {
+    // The project the panel shows (project selector). A switch reloads the page: it re-inits with the
+    // new project's default org and the REST state saved for that project.
+    let liveRoot = initialRoot;
+    let reloadSeq = 0;
     // A restored panel arriving while another is open: keep just one.
     if (RestExplorerPanelProvider._panel && RestExplorerPanelProvider._panel !== panel) RestExplorerPanelProvider._panel.dispose();
     RestExplorerPanelProvider._panel = panel;
-    panel.webview.html = RestExplorerPanelProvider.getHtml(panel.webview, extensionUri);
+    panel.webview.html = RestExplorerPanelProvider.getHtml(panel.webview, extensionUri, reloadSeq);
     // Language-server completion / hover for the SOQL tab's Monaco editor (one virtual buffer).
-    const soqlInput = createSoqlInputRouter(".vscode/soql-rest-explorer-buffer.soql", panel.webview);
+    const soqlInput = createSoqlInputRouter(".vscode/soql-rest-explorer-buffer.soql", panel.webview, () => liveRoot || undefined);
 
     // Realign the org selector when the default org changes (extension command or external).
-    const defaultOrgSub = onDidChangeDefaultOrg(async (username) => {
+    const defaultOrgSub = onDidChangeDefaultOrg(async () => {
       try {
-        const orgs = getCachedOrgList() ?? await refreshOrgListCache();
-        if (RestExplorerPanelProvider._panel !== panel) return;
-        void panel.webview.postMessage({ command: "defaultOrgChanged", orgs, defaultOrg: username ?? orgs[0]?.username ?? "" });
+        const root = liveRoot;
+        const { orgs, defaultOrg } = await orgPickerForProject(root);
+        if (RestExplorerPanelProvider._panel !== panel || root !== liveRoot) return;
+        void panel.webview.postMessage({ command: "defaultOrgChanged", orgs, defaultOrg: defaultOrg || orgs[0]?.username || "" });
       } catch { /* keep the current list */ }
+    });
+    const selectorSub = binding.attach(panel.webview);
+    const projectSub = binding.onDidChange(() => {
+      const next = binding.current();
+      if (!next || next === liveRoot) return;
+      liveRoot = next;
+      // A distinct HTML string forces a reload (identical html is ignored); panelReady re-inits.
+      panel.webview.html = RestExplorerPanelProvider.getHtml(panel.webview, extensionUri, ++reloadSeq);
     });
 
     // Warm caches in background on panel open
@@ -185,17 +202,18 @@ export class RestExplorerPanelProvider {
       state?: RestExplorerState;
     }) => {
       if (await soqlInput.handle(msg)) return;
+      // Snapshot: the state of a request belongs to the project it was made in.
+      const workspaceRoot = liveRoot;
       if (msg.command === "panelReady") {
-        const cached = getCachedOrgList();
-        const orgs = cached ?? await refreshOrgListCache();
+        const { orgs, defaultOrg } = await orgPickerForProject(workspaceRoot);
         const { versions, defaultVersion } = buildVersionList();
         const savedState = RestExplorerPanelProvider.stateByWorkspace[workspaceRoot] ?? null;
         let restResources: Awaited<ReturnType<typeof scanApexRestResources>> = [];
-        try { restResources = await scanApexRestResources(); } catch { /* non-fatal */ }
+        try { restResources = await scanApexRestResources(workspaceRoot || undefined); } catch { /* non-fatal */ }
         panel.webview.postMessage({
           command: "init",
           orgs,
-          defaultOrg: orgs[0]?.username ?? "",
+          defaultOrg: defaultOrg || orgs[0]?.username || "",
           templates: TEMPLATES,
           versions,
           defaultVersion,
@@ -221,7 +239,7 @@ export class RestExplorerPanelProvider {
         AuthInfo.invalidateOrg(orgToRefresh);
         const orgs = await refreshOrgListCache();
         let restResources: Awaited<ReturnType<typeof scanApexRestResources>> = [];
-        try { restResources = await scanApexRestResources(); } catch { /* non-fatal */ }
+        try { restResources = await scanApexRestResources(workspaceRoot || undefined); } catch { /* non-fatal */ }
         panel.webview.postMessage({ command: "cacheRefreshed", orgs, restResources });
         return;
       }
@@ -305,6 +323,9 @@ export class RestExplorerPanelProvider {
     panel.onDidDispose(() => {
       messageListener.dispose();
       defaultOrgSub.dispose();
+      projectSub.dispose();
+      selectorSub.dispose();
+      binding.dispose();
       soqlInput.dispose();
       if (RestExplorerPanelProvider._panel === panel) RestExplorerPanelProvider._panel = undefined;
       RestExplorerPanelProvider._pendingPrefill = undefined;
@@ -313,11 +334,12 @@ export class RestExplorerPanelProvider {
 
   // ─── HTML ────────────────────────────────────────────────────────────────────
 
-  private static getHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
+  private static getHtml(webview: vscode.Webview, extensionUri: vscode.Uri, reload = 0): string {
     const monacoBase = monacoBaseUri(webview, extensionUri);
     return `<!DOCTYPE html>
 <html>
 <head>
+  <!-- reload ${reload} -->
   <meta charset="UTF-8">
   <meta http-equiv="Content-Security-Policy" content="${monacoPanelCsp(webview.cspSource)}">
   <style>
@@ -326,6 +348,7 @@ export class RestExplorerPanelProvider {
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: var(--vscode-scrollbarSlider-background); border-radius: 3px; }
     body { font-family: var(--vscode-font-family); font-size: 13px; color: var(--vscode-foreground); background: var(--vscode-editor-background); display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+    ${PROJECT_SELECTOR_CSS}
     .page-header { padding: 10px 16px; border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-sideBarSectionHeader-background); display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
     .page-title { font-size: 13px; font-weight: 700; letter-spacing: 0.02em; }
     .main { display: flex; flex: 1; overflow: hidden; }
@@ -435,6 +458,7 @@ ${monacoSoqlInputCss()}
 <body>
 <div class="page-header">
   <span class="page-title">🔌 Salesforce REST API Explorer</span>
+  ${projectSelectorMarkup()}
 </div>
 <!-- Full-width request bar (Postman-style) -->
 <div class="topbar">
@@ -555,6 +579,7 @@ ${monacoSoqlInputCss()}
 
 <script src="${monacoBase}/loader.js"></script>
 <script>${monacoSoqlInputScript()}</script>
+<script>${projectSelectorScript("vsc")}</script>
 <script>
   var vsc = null;
   try { if (typeof acquireVsCodeApi !== 'undefined') vsc = acquireVsCodeApi(); } catch(e) {}

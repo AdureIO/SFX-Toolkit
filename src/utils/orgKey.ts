@@ -10,7 +10,7 @@
  * stale and the warm-up was wasted.
  *
  * `canonicalOrgKey` maps every spelling to the org's username:
- *   - `null` / `""` / `"__default__"` → the default target org of the (primary or
+ *   - `null` / `""` / `"__default__"` → the default target org of the active (or
  *     given) project, resolved to its username;
  *   - an alias → its username (org list cache, else `~/.sfdx/alias.json`);
  *   - a username → itself.
@@ -39,7 +39,7 @@ let aliasMap = new Map<string, string>();
 let aliasCheckedAt = 0;
 let aliasMtimeMs = -1;
 
-/** Resolved default key per project dir ("" = primary project). */
+/** Resolved default key per project dir ("" = the ACTIVE project; dropped when the active project changes). */
 const defaultCache = new Map<string, { key: string; at: number }>();
 
 function aliasFilePath(): string {
@@ -114,8 +114,8 @@ function resolveDefaultKey(projectDir?: string): string {
 
 /**
  * Canonical cache key (the username) for an org given as alias, username or
- * `null`/default. `projectDir` selects whose default org `null` means (a nested
- * sfdx project); omitted = the primary project. Idempotent: passing a key
+ * `null`/default. `projectDir` selects whose default org `null` means (a file's
+ * project); omitted = the active project. Idempotent: passing a key
  * returned by this function returns it again.
  */
 export function canonicalOrgKey(org: string | null | undefined, projectDir?: string): string {
@@ -132,7 +132,8 @@ export function orgArgForKey(key: string): string | null {
 /**
  * Forget resolved defaults — call when the default org changes (Set-as-Default,
  * `sf config set target-org`, an edited sfdx-config). `projectDir` limits it to one
- * nested project; omitted drops every project's resolution.
+ * project (plus the active-project entry); omitted drops every project's resolution,
+ * which is what an active-project switch does.
  */
 export function invalidateOrgKeyCache(projectDir?: string): void {
 	if (projectDir === undefined) {

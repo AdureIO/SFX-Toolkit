@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { apexCoverage, clearApexTestResults, COVERAGE_THRESHOLD, CoverageRecord } from "../utils/apexCoverageService";
 import { categorizeError, Telemetry } from "../utils/telemetry";
 import { getNonce } from "../utils/htmlUtils";
+import { inActiveProject } from "../utils/projectUtils";
 
 /**
  * Structured, refreshable Apex coverage dashboard: org-wide coverage, a worst-first
@@ -140,8 +141,9 @@ export class CoveragePanelProvider {
   }
 
   private static async openApexFile(name: string): Promise<void> {
-    let files = await vscode.workspace.findFiles(`**/${name}.cls`, undefined, 1);
-    if (files.length === 0) files = await vscode.workspace.findFiles(`**/${name}.trigger`, undefined, 1);
+    // The coverage shown belongs to the active project: look for the source there.
+    let files = await vscode.workspace.findFiles(inActiveProject(`**/${name}.cls`), undefined, 1);
+    if (files.length === 0) files = await vscode.workspace.findFiles(inActiveProject(`**/${name}.trigger`), undefined, 1);
     if (files.length > 0) {
       await vscode.window.showTextDocument(files[0]);
     } else {

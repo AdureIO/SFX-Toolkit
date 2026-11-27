@@ -49,12 +49,12 @@ function read(file: string): Promise<string | undefined> {
 }
 
 /** Indexed metadata files of a kind containing every token. */
-function filesWith(kind: MetadataKind | MetadataKind[], ...tokens: string[]): string[] {
+function filesWith(s: SearchSession, kind: MetadataKind | MetadataKind[], ...tokens: string[]): string[] {
     const kinds = Array.isArray(kind) ? kind : [kind];
     if (!tokens.length) return [];
-    let set = new Set(TokenIndex.lookup(tokens[0]));
+    let set = new Set(s.lookup(tokens[0]));
     for (const t of tokens.slice(1)) {
-        const next = new Set(TokenIndex.lookup(t));
+        const next = new Set(s.lookup(t));
         set = new Set([...set].filter((f) => next.has(f)));
     }
     return [...set].filter((f) => {
@@ -80,7 +80,8 @@ export async function metadataOccurrences(s: SearchSession, sym: ResolvedSymbol,
     if (sym.kind === 'local') return [];
     await TokenIndex.ensure(s.token);
     s.check();
-    const ns = await s.namespace();
+    // The namespace of the project the symbol is declared in (not of whichever document is open).
+    const ns = await s.namespace(sym.kind === 'type' ? sym.node.file : sym.owner.file);
     const c = new Collector();
     if (sym.kind === 'type') {
         if (sym.node.header.outer) return [];
@@ -93,7 +94,7 @@ export async function metadataOccurrences(s: SearchSession, sym: ResolvedSymbol,
 
 async function classRefs(s: SearchSession, cls: string, ns: string | null, c: Collector): Promise<void> {
     const lc = cls.toLowerCase();
-    for (const f of filesWith(['lwc', 'auraCmp', 'vf', 'flow'], lc)) {
+    for (const f of filesWith(s, ['lwc', 'auraCmp', 'vf', 'flow'], lc)) {
         s.check();
         const text = await read(f);
         if (text === undefined) continue;
@@ -130,7 +131,7 @@ async function memberRefs(s: SearchSession, sym: MemberSym, family: Set<TypeNode
         const auraOk = !same.some((x) => x.modifiers.includes('@auraenabled')) || mods.includes('@auraenabled');
         {
             // LWC imports + uses of the binding.
-            for (const f of auraOk ? filesWith('lwc', cls.toLowerCase(), lc) : []) {
+            for (const f of auraOk ? filesWith(s, 'lwc', cls.toLowerCase(), lc) : []) {
                 s.check();
                 const text = await read(f);
                 if (text === undefined) continue;
@@ -145,13 +146,13 @@ async function memberRefs(s: SearchSession, sym: MemberSym, family: Set<TypeNode
                 }
             }
             // Aura: components whose controller is the class → their JS action strings.
-            for (const cmp of auraOk ? filesWith('auraCmp', cls.toLowerCase()) : []) {
+            for (const cmp of auraOk ? filesWith(s, 'auraCmp', cls.toLowerCase()) : []) {
                 s.check();
                 const text = await read(cmp);
                 const r = text === undefined ? undefined : auraControllerRef(text);
                 if (!r || !classNameMatches(r.name, r.ns, cls, ns)) continue;
                 const dir = path.dirname(cmp);
-                for (const js of WorkspaceIndex.metadataFiles()) {
+                for (const js of WorkspaceIndex.metadataFiles(s.partition)) {
                     if (path.dirname(js) !== dir || metadataKindOf(js) !== 'auraJs' || TokenIndex.has(js, lc) === false) continue;
                     const jsText = await read(js);
                     if (jsText === undefined) continue;
@@ -160,7 +161,7 @@ async function memberRefs(s: SearchSession, sym: MemberSym, family: Set<TypeNode
             }
             // Flow: an @InvocableMethod is reached through its class's apex action.
             if (mods.includes('@invocablemethod')) {
-                for (const f of filesWith('flow', cls.toLowerCase())) {
+                for (const f of filesWith(s, 'flow', cls.toLowerCase())) {
                     const text = await read(f);
                     if (text === undefined) continue;
                     for (const r of flowApexRefs(text)) {
@@ -176,7 +177,7 @@ async function memberRefs(s: SearchSession, sym: MemberSym, family: Set<TypeNode
     const role: OccurrenceRole = isMethod && names[0].toLowerCase() !== lc ? (/^get/i.test(sym.name) ? 'vf-getter' : 'vf-setter') : 'vf';
     const famNames = [...family].filter((t) => !t.header.outer).map((t) => t.header.name);
     const pages = new Set<string>();
-    for (const n of famNames) for (const f of filesWith('vf', n.toLowerCase(), names[0].toLowerCase())) pages.add(f);
+    for (const n of famNames) for (const f of filesWith(s, 'vf', n.toLowerCase(), names[0].toLowerCase())) pages.add(f);
     for (const f of pages) {
         s.check();
         const text = await read(f);

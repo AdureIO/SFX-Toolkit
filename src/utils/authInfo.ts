@@ -8,7 +8,7 @@ import { formatReauthHint } from "./reauthArgsPure";
 import { getOrgByTarget } from "./orgListCache";
 import { isWorkspaceUsable } from "./projectUtils";
 import { healAuthProblem } from "./schemaHealth";
-import { buildSessionError, classifyRefreshOutcome, cliRefreshesToken, computeExpiresAt, parseSessionTimeout, parseUserId, sessionTimeoutQuery, slidingExpiry, USERINFO_PATH, healthKeyCandidates, recoverSession, CliRefreshResult } from "./authHealthPure";
+import { isUsableAccessToken, buildSessionError, classifyRefreshOutcome, cliRefreshesToken, computeExpiresAt, parseSessionTimeout, parseUserId, sessionTimeoutQuery, slidingExpiry, USERINFO_PATH, healthKeyCandidates, recoverSession, CliRefreshResult } from "./authHealthPure";
 
 /**
  * Cap on the `sf org display` spawn used for auth (the generic runner default is 5 min).
@@ -116,9 +116,17 @@ export class AuthInfo {
 	 * Fetch org credentials from the CLI (one place for all auth retrieval).
 	 */
 	private static async fetchOrgAuth(targetOrg: string | null): Promise<OrgAuth | null> {
+		// Token: `sf org auth show-access-token` (the CLI's supported command). `sf org display` supplies
+		// the non-secret fields; its own token is only an old-CLI fallback (newer CLIs return a
+		// "[REDACTED ...]" placeholder). Both run in parallel. A token is never logged.
 		const args = ["org", "display", "--json"];
 		if (targetOrg) args.push("--target-org", targetOrg);
-		const result = await runCommandArgs("sf", args, undefined, undefined, true, AUTH_CLI_TIMEOUT_MS);
+		const tokenArgs = ["org", "auth", "show-access-token", "--json"];
+		if (targetOrg) tokenArgs.push("--target-org", targetOrg);
+		const [result, tokenOut] = await Promise.all([
+			runCommandArgs("sf", args, undefined, undefined, true, AUTH_CLI_TIMEOUT_MS),
+			runCommandArgs("sf", tokenArgs, undefined, undefined, true, AUTH_CLI_TIMEOUT_MS).catch(() => undefined),
+		]);
 		let parsed: any;
 		try {
 			parsed = JSON.parse(result);
@@ -133,14 +141,20 @@ export class AuthInfo {
 		}
 		const auth = buildOrgAuth(parsed.result);
 		this.lastAuthFailure.delete(targetOrg ?? "");
-		// Recent Salesforce CLI versions hide the access token from `sf org display`.
-		// We set SF_TEMP_SHOW_SECRETS=true to restore it; if it's still missing the
-		// token is genuinely unavailable — surface a precise, actionable error.
-		if (!auth.accessToken) {
+		let cliToken: string | undefined;
+		try {
+			const p2 = tokenOut === undefined ? undefined : JSON.parse(tokenOut);
+			if (p2?.status === 0 && isUsableAccessToken(p2.result?.accessToken)) cliToken = p2.result.accessToken;
+		} catch {
+			// Old CLI without the command or non-JSON output: fall back to the display token.
+		}
+		if (cliToken) auth.accessToken = cliToken;
+		if (!isUsableAccessToken(auth.accessToken)) {
 			outputChannel.appendLine(
-				`AuthInfo: 'sf org display' returned no access token${targetOrg ? ` (${targetOrg})` : ""}. ` +
-				`Update the Salesforce CLI, or set SF_TEMP_SHOW_SECRETS=true, then re-authenticate: sf org login web`
+				`AuthInfo: the Salesforce CLI did not return a usable access token${targetOrg ? ` (${targetOrg})` : ""}. ` +
+				`Update the Salesforce CLI (sf update), then re-authenticate: sf org login web`
 			);
+			this.lastAuthFailure.set(targetOrg ?? "", "The Salesforce CLI did not return a usable access token; update the CLI (sf update)");
 			return null;
 		}
 		if (targetOrg) auth.alias = targetOrg;

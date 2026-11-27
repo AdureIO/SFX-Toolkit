@@ -5,8 +5,11 @@ import { runCommandArgs } from "../utils/commandRunner";
 import { Logger } from "../utils/outputChannel";
 import { AuthInfo } from "../utils/authInfo";
 import { SchemaCache } from "../utils/schemaCache";
-import { getCachedOrgList, refreshOrgListCache, warmOrgListCache } from "../utils/orgListCache";
+import { refreshOrgListCache, warmOrgListCache } from "../utils/orgListCache";
 import { onDidChangeDefaultOrg } from "../utils/defaultOrgEvents";
+import { resolveDefaultTargetOrgUsernameSync } from "../utils/defaultOrg";
+import { PanelProjectBinding, orgPickerForProject } from "../utils/panelProject";
+import { PROJECT_SELECTOR_CSS, projectSelectorMarkup, projectSelectorScript } from "../utils/panelProjectUi";
 import { generateApexDataFactory, recommendedSelectFields, type RefMapping } from "../utils/apexDataFactory";
 import { extractSObjectFromQuery, queryAllRecords, sfRequest, resolveOrgToInfo, type OrgInfo } from "../utils/dataMigration";
 import { Telemetry } from "../utils/telemetry";
@@ -219,11 +222,12 @@ export class DataToolsPanelProvider {
   private static _panel: vscode.WebviewPanel | undefined;
 
   public static async show(extensionUri: vscode.Uri): Promise<void> {
-    const folder = vscode.workspace.workspaceFolders?.[0];
-    if (!folder) { vscode.window.showErrorMessage("No workspace open."); return; }
-    const workspaceRoot = folder.uri.fsPath;
+    const binding = new PanelProjectBinding();
+    let liveRoot = binding.current() ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!liveRoot) { binding.dispose(); vscode.window.showErrorMessage("No workspace open."); return; }
 
     if (DataToolsPanelProvider._panel) {
+      binding.dispose();
       DataToolsPanelProvider._panel.reveal();
       return;
     }
@@ -236,20 +240,31 @@ export class DataToolsPanelProvider {
     panel.webview.html = DataToolsPanelProvider.getHtml(panel.webview, extensionUri);
     // Language-server completion / hover for the Monaco SOQL inputs (one virtual buffer;
     // each request carries its input's org: Export → exp-org, Apex Factory → apex-org).
-    const soqlInput = createSoqlInputRouter(".vscode/soql-datatools-buffer.soql", panel.webview);
+    const soqlInput = createSoqlInputRouter(".vscode/soql-datatools-buffer.soql", panel.webview, () => liveRoot);
 
     // Realign the org selectors when the default org changes (extension command or external).
-    const defaultOrgSub = onDidChangeDefaultOrg(async (username) => {
-      try {
-        const orgs = getCachedOrgList() ?? await refreshOrgListCache();
-        if (DataToolsPanelProvider._panel !== panel) return;
-        void panel.webview.postMessage({ command: "init", orgs, defaultOrg: username ?? orgs[0]?.username ?? "" });
-      } catch { /* keep the current list */ }
+    const postInit = async (): Promise<void> => {
+      const root = liveRoot!;
+      const { orgs, defaultOrg } = await orgPickerForProject(root);
+      if (DataToolsPanelProvider._panel !== panel || root !== liveRoot) return;
+      void panel.webview.postMessage({ command: "init", orgs, defaultOrg: defaultOrg || orgs[0]?.username || "" });
+    };
+    const defaultOrgSub = onDidChangeDefaultOrg(async () => {
+      try { await postInit(); } catch { /* keep the current list */ }
+    });
+    // Project selector: output files go to the selected project and the org selectors default to its default org.
+    const selectorSub = binding.attach(panel.webview);
+    const projectSub = binding.onDidChange(() => {
+      const next = binding.current();
+      if (!next || next === liveRoot) return;
+      liveRoot = next;
+      void postInit().catch(() => { /* keep the current list */ });
     });
 
     // Warm caches in background on panel open
     warmOrgListCache();
-    AuthInfo.warmAuthForOrg(null);
+    // Pinned to a non-active project: warm THAT project's default org, not the active one's.
+    AuthInfo.warmAuthForOrg(binding.pinned ? resolveDefaultTargetOrgUsernameSync(liveRoot) : null);
 
     const messageListener = panel.webview.onDidReceiveMessage(async (msg: {
       command: string;
@@ -266,10 +281,10 @@ export class DataToolsPanelProvider {
       apexRefMappings?: RefMapping[];
     }) => {
       if (await soqlInput.handle(msg)) return;
+      // Snapshot: a project switch mid-export must not redirect where the file is written.
+      const workspaceRoot = liveRoot!;
       if (msg.command === "panelReady") {
-        const cached = getCachedOrgList();
-        const orgs = cached ?? await refreshOrgListCache();
-        panel.webview.postMessage({ command: "init", orgs, defaultOrg: orgs[0]?.username ?? "" });
+        await postInit();
         return;
       }
 
@@ -488,6 +503,9 @@ export class DataToolsPanelProvider {
     panel.onDidDispose(() => {
       messageListener.dispose();
       defaultOrgSub.dispose();
+      projectSub.dispose();
+      selectorSub.dispose();
+      binding.dispose();
       soqlInput.dispose();
       DataToolsPanelProvider._panel = undefined;
       // Release the parsed import file (can be large).
@@ -588,12 +606,14 @@ export class DataToolsPanelProvider {
     .apex-field-block { display: flex; flex-direction: column; gap: 4px; }
     .apex-field-block .field-label { font-size: 10px; }
 ${monacoSoqlInputCss()}
+${PROJECT_SELECTOR_CSS}
   </style>
 </head>
 <body>
 <div class="page-header">
   <span class="page-title">📂 Data Export / Import</span>
   <div style="margin-left:auto; display:flex; align-items:center; gap:8px;">
+    ${projectSelectorMarkup()}
     <span id="cache-status-lbl" style="font-size:10px; color:var(--vscode-descriptionForeground);"></span>
     <button id="refresh-cache-btn" onclick="refreshCache()" title="Refresh org list &amp; metadata cache" style="padding:3px 8px; font-size:11px; background:transparent; color:var(--vscode-descriptionForeground); border:1px solid var(--vscode-panel-border); border-radius:3px; cursor:pointer; font-family:inherit; opacity:.8;">🔄 Refresh cache</button>
   </div>
@@ -698,6 +718,7 @@ ${monacoSoqlInputCss()}
 
 <script src="${monacoBase}/loader.js"></script>
 <script>${monacoSoqlInputScript()}</script>
+<script>${projectSelectorScript("vsc")}</script>
 <script>
   var vsc = null;
   try { if (typeof acquireVsCodeApi !== 'undefined') vsc = acquireVsCodeApi(); } catch(e) {}

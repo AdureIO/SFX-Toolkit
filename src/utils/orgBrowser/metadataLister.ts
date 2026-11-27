@@ -1,13 +1,12 @@
 /**
- * Org Browser listing: describeMetadata + listMetadata over the Metadata SOAP API (the CLI is far too
+ * Org metadata listing: describeMetadata + listMetadata over the Metadata SOAP API (the CLI is far too
  * slow to enumerate every type), plus the on-disk listing cache. Pure (no `vscode`): the SOAP transport
  * is injected (`call`), so the parsing, batching, folder expansion and failure isolation are unit-tested
  * against XML fixtures.
  */
-import * as fs from "fs";
 import * as path from "path";
-import * as zlib from "zlib";
 import { XMLParser } from "fast-xml-parser";
+import { readGzipJson, safeFileStem, writeGzipJson } from "../diskCache";
 import { Comp, ListFailure, TypeInfo } from "./types";
 
 // ── SOAP bodies ────────────────────────────────────────────────────────────────
@@ -153,6 +152,16 @@ export const FOLDER_TYPES: Record<string, { folderType: string; suffix: string; 
 	EmailTemplate: { folderType: "EmailFolder", suffix: "emailFolder", unfiled: "unfiled$public" },
 };
 
+/** Types touched by a per-type refresh: the folder type travels with its content type and vice versa. */
+export function expandOnlyTypes(only: string[]): string[] {
+	const out = new Set(only);
+	for (const [content, f] of Object.entries(FOLDER_TYPES)) {
+		if (out.has(content)) out.add(f.folderType);
+		if (out.has(f.folderType)) out.add(content);
+	}
+	return [...out];
+}
+
 // ── Listing ────────────────────────────────────────────────────────────────────
 
 export interface ListProgress {
@@ -171,6 +180,11 @@ export interface ListOptions {
 	knownTypes?: TypeInfo[];
 	/** Restrict listing to these types (per-type refresh). Folder types are expanded automatically. */
 	only?: string[];
+	/**
+	 * Folder types (Report, Dashboard, Document, EmailTemplate): list only these folders (fullNames, e.g. `Sales/Q1`'s
+	 * folder `Sales`) instead of every folder of the org. Skips the folder list and the unfiled folder.
+	 */
+	onlyFolders?: Record<string, string[]>;
 	concurrency?: number;
 	isCancelled?: () => boolean;
 	onTypes?: (types: TypeInfo[]) => void;
@@ -304,7 +318,11 @@ export async function listOrgMetadata(opts: ListOptions): Promise<ListResult> {
 	// Phase 1: every plain type, plus the folder lists of the folder-based types.
 	const plain = targets.filter((t) => !FOLDER_TYPES[t.name]);
 	const foldered = targets.filter((t) => FOLDER_TYPES[t.name]);
-	const phase1: ListQuery[] = [...plain.map((t) => ({ type: t.name })), ...foldered.map((t) => ({ type: FOLDER_TYPES[t.name].folderType }))];
+	const restricted = (type: string): string[] | undefined => (Array.isArray(opts.onlyFolders?.[type]) ? opts.onlyFolders![type] : undefined);
+	const phase1: ListQuery[] = [
+		...plain.map((t) => ({ type: t.name })),
+		...foldered.filter((t) => !restricted(t.name)).map((t) => ({ type: FOLDER_TYPES[t.name].folderType })),
+	];
 	const folderPaths = new Map<string, string[]>(); // folder type → folder fullNames
 	const folderFailed = new Set<string>();
 	const folderTypeToContent = new Map(foldered.map((t) => [FOLDER_TYPES[t.name].folderType, t.name]));
@@ -325,6 +343,11 @@ export async function listOrgMetadata(opts: ListOptions): Promise<ListResult> {
 		}
 	}
 
+	for (const t of foldered) {
+		const r = restricted(t.name);
+		if (r) folderPaths.set(FOLDER_TYPES[t.name].folderType, [...new Set(r)]);
+	}
+
 	// Phase 2: the content of each folder, 3 per call.
 	const phase2: ListQuery[] = [];
 	const remaining = new Map<string, number>();
@@ -335,7 +358,7 @@ export async function listOrgMetadata(opts: ListOptions): Promise<ListResult> {
 			continue;
 		}
 		const qs: ListQuery[] = (folderPaths.get(f.folderType) ?? []).map((folder) => ({ type: t.name, folder }));
-		if (f.unfiled) qs.push({ type: t.name, folder: f.unfiled });
+		if (f.unfiled && !restricted(t.name)) qs.push({ type: t.name, folder: f.unfiled });
 		if (qs.length === 0) {
 			finishUnit(t.name);
 			continue;
@@ -368,33 +391,18 @@ export interface ListingCache {
 }
 
 export function cacheFilePath(dir: string, orgKey: string): string {
-	return path.join(dir, `${orgKey.replace(/[^A-Za-z0-9._@-]/g, "_")}.json.gz`);
+	return path.join(dir, `${safeFileStem(orgKey)}.json.gz`);
 }
 
 export async function saveListingCache(dir: string, cache: ListingCache): Promise<void> {
-	await fs.promises.mkdir(dir, { recursive: true });
-	const file = cacheFilePath(dir, cache.orgKey);
-	const tmp = `${file}.${process.pid}.tmp`;
-	const gz = await new Promise<Buffer>((resolve, reject) => zlib.gzip(Buffer.from(JSON.stringify(cache), "utf8"), (e, b) => (e ? reject(e) : resolve(b))));
-	await fs.promises.writeFile(tmp, gz);
-	await fs.promises.rename(tmp, file);
+	await writeGzipJson(cacheFilePath(dir, cache.orgKey), cache);
 }
 
 /** The cached listing for an org, or null when missing / unreadable / from another format version. */
 export async function loadListingCache(dir: string, orgKey: string): Promise<ListingCache | null> {
-	try {
-		const gz = await fs.promises.readFile(cacheFilePath(dir, orgKey));
-		const json = await new Promise<Buffer>((resolve, reject) => zlib.gunzip(gz, (e, b) => (e ? reject(e) : resolve(b))));
-		const parsed = JSON.parse(json.toString("utf8")) as ListingCache;
-		if (parsed?.v !== 1 || !Array.isArray(parsed.comps) || !Array.isArray(parsed.types)) return null;
-		return parsed;
-	} catch {
-		return null;
-	}
-}
-
-export async function deleteListingCache(dir: string, orgKey: string): Promise<void> {
-	await fs.promises.unlink(cacheFilePath(dir, orgKey)).catch(() => undefined);
+	const parsed = await readGzipJson<ListingCache>(cacheFilePath(dir, orgKey));
+	if (parsed?.v !== 1 || !Array.isArray(parsed.comps) || !Array.isArray(parsed.types)) return null;
+	return parsed;
 }
 
 /** Replace the rows of `types` in a cached listing with freshly listed ones (per-type refresh). */

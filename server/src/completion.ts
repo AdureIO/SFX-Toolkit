@@ -23,6 +23,7 @@ import type { ServerContext } from './context';
 import type { ApexMember, ApexParseResult } from './apexSymbols';
 import type { ParseView } from './parseCache';
 import { WorkspaceIndex } from './workspaceIndex';
+import { Partitions } from './partitions';
 import { STD_TYPES, StdMember, stdClass, stdConstructableTypes, stdNestedTypes } from './apexStdlib';
 import {
     withSchemaDoc,
@@ -73,7 +74,7 @@ export function register(connection: Connection, ctx: ServerContext): void {
     // Cross-file lookups read open buffers (unsaved edits) instead of disk.
     WorkspaceIndex.setOpenDocProvider((file) => openDocIndex(ctx, file));
     // Pre-load workspace types an open document references once its parse lands.
-    ctx.parses.onParsed((_uri, result) => prewarmReferencedTypes(result));
+    ctx.parses.onParsed((uri, result) => prewarmReferencedTypes(result, Partitions.partitionOfUri(uri)));
     ctx.onSchemaRefresh((objects, info) => {
         // A full refresh or a structural one (objects created/deleted) changes the object list.
         if (!objects || info?.structural) invalidateObjectNames();
@@ -106,7 +107,7 @@ function openDocIndex(ctx: ServerContext, file: string): ReturnType<typeof merge
     return undefined;
 }
 
-function prewarmReferencedTypes(result: ApexParseResult): void {
+function prewarmReferencedTypes(result: ApexParseResult, part: string): void {
     const names = new Set<string>();
     const own = new Set((result.index.typeDecls ?? []).map((d) => d.name.toLowerCase()));
     const add = (t: string | undefined) => {
@@ -119,7 +120,7 @@ function prewarmReferencedTypes(result: ApexParseResult): void {
         add(d.extendsType);
         for (const i of d.implementsTypes) add(i);
     }
-    WorkspaceIndex.prewarm(names);
+    WorkspaceIndex.prewarm(names, part);
 }
 
 // ─── Entry ──────────────────────────────────────────────────────────────────────
@@ -580,7 +581,7 @@ class ApexCompletion {
         const lastSeg = argsSoFar.split(',').pop() ?? '';
         if (lastSeg.includes('=')) return undefined; // typing a value, not a field name
         // Only SObjects take `Field = value` arguments; user classes / std types never describe.
-        if (findDecl(this.resolver.local, typeName) || WorkspaceIndex.hasType(typeName) || stdClass(typeName)) return undefined;
+        if (findDecl(this.resolver.local, typeName) || WorkspaceIndex.hasType(typeName, this.resolver.part) || stdClass(typeName)) return undefined;
         if (!(await isObjectName(this.ctx, this.doc.uri, typeName, this.token))) return undefined;
         const d = await this.resolver.describe(typeName);
         if (!d) return undefined;
@@ -707,9 +708,10 @@ class ApexCompletion {
             const label = d.outer && !this.resolver.local.decls.some((x) => x.name === d.outer && !x.outer) ? `${d.outer}.${d.name}` : d.name;
             if (matchesTyped(label, partial)) candidates.push(newTypeItem(label, '1', 'Apex class'));
         }
-        for (const name of WorkspaceIndex.allTypeNames()) {
+        const part = this.resolver.part;
+        for (const name of WorkspaceIndex.allTypeNames(part)) {
             // Skip known enums / interfaces / abstract classes (unknown files are kept).
-            if (matchesTyped(name, partial) && WorkspaceIndex.constructableHint(name) !== false) candidates.push(newTypeItem(name, '2', 'Apex class'));
+            if (matchesTyped(name, partial) && WorkspaceIndex.constructableHint(name, part) !== false) candidates.push(newTypeItem(name, '2', 'Apex class'));
         }
         for (const name of stdConstructableTypes()) {
             if (name.includes('.') || name === 'List' || name === 'Map' || name === 'Set') continue;
@@ -891,7 +893,7 @@ class ApexCompletion {
             candidates.push(typeItem(d.name, d.outer ? `${d.outer}.${d.name}` : 'Apex class', '3', kind));
         }
         for (const e of typeEntries) if (e.src === 'type' && matchesTyped(e.name, partial)) candidates.push(typeItem(e.name, e.owner, '3'));
-        for (const name of WorkspaceIndex.allTypeNames()) if (matchesTyped(name, partial)) candidates.push(typeItem(name, 'Apex class', '3'));
+        for (const name of WorkspaceIndex.allTypeNames(r.part)) if (matchesTyped(name, partial)) candidates.push(typeItem(name, 'Apex class', '3'));
         for (const name of STD_TYPES) if (matchesTyped(name, partial)) candidates.push(typeItem(name, 'System', '4'));
         for (const name of await objectNames(this.ctx, this.doc.uri, this.token)) {
             if (!matchesTyped(name, partial)) continue;

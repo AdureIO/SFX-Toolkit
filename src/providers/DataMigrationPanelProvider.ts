@@ -7,6 +7,8 @@ import { SchemaCache } from "../utils/schemaCache";
 import { OrgMetadataCache } from "../utils/orgMetadataCache";
 import { getCachedOrgList, refreshOrgListCache, warmOrgListCache } from "../utils/orgListCache";
 import { onDidChangeDefaultOrg } from "../utils/defaultOrgEvents";
+import { PanelProjectBinding, orgPickerForProject } from "../utils/panelProject";
+import { PROJECT_SELECTOR_CSS, projectSelectorMarkup, projectSelectorScript } from "../utils/panelProjectUi";
 import { createSoqlInputRouter, monacoBaseUri, monacoPanelCsp, monacoResourceRoot } from "./soqlInputBridge";
 import { monacoSoqlInputCss, monacoSoqlInputScript } from "../webview/monacoSoqlInput";
 import {
@@ -140,11 +142,12 @@ export class DataMigrationPanelProvider {
   private static _panel: vscode.WebviewPanel | undefined;
 
   public static async show(globalStorageDir: string, extensionUri: vscode.Uri): Promise<void> {
-    const folder = vscode.workspace.workspaceFolders?.[0];
-    if (!folder) { vscode.window.showErrorMessage("No workspace open."); return; }
-    const workspaceRoot = folder.uri.fsPath;
+    const binding = new PanelProjectBinding();
+    let liveRoot = binding.current() ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!liveRoot) { binding.dispose(); vscode.window.showErrorMessage("No workspace open."); return; }
 
     if (DataMigrationPanelProvider._panel) {
+      binding.dispose();
       DataMigrationPanelProvider._panel.reveal();
       return;
     }
@@ -160,15 +163,25 @@ export class DataMigrationPanelProvider {
     panel.webview.html = DataMigrationPanelProvider.getHtml(panel.webview, extensionUri);
     // Language-server completion / hover for the source SOQL editor (one virtual buffer),
     // pinned to the SOURCE org — the query runs there, not against the target.
-    const soqlInput = createSoqlInputRouter(".vscode/soql-migration-buffer.soql", panel.webview);
+    const soqlInput = createSoqlInputRouter(".vscode/soql-migration-buffer.soql", panel.webview, () => liveRoot);
 
     // Default org changed: refresh the org list ("(default)" label). Explicit source/target picks are preserved.
-    const defaultOrgSub = onDidChangeDefaultOrg(async (username) => {
-      try {
-        const orgs = getCachedOrgList() ?? await refreshOrgListCache();
-        if (DataMigrationPanelProvider._panel !== panel) return;
-        void panel.webview.postMessage({ command: "init", orgs, defaultOrg: username ?? orgs[0]?.username ?? "" });
-      } catch { /* keep the current list */ }
+    const postInit = async (): Promise<void> => {
+      const root = liveRoot!;
+      const { orgs, defaultOrg } = await orgPickerForProject(root);
+      if (DataMigrationPanelProvider._panel !== panel || root !== liveRoot) return;
+      void panel.webview.postMessage({ command: "init", orgs, defaultOrg: defaultOrg || orgs[0]?.username || "" });
+    };
+    const defaultOrgSub = onDidChangeDefaultOrg(async () => {
+      try { await postInit(); } catch { /* keep the current list */ }
+    });
+    // Project selector: presets, the export folder and the org defaults follow the selected project.
+    const selectorSub = binding.attach(panel.webview);
+    const projectSub = binding.onDidChange(() => {
+      const next = binding.current();
+      if (!next || next === liveRoot) return;
+      liveRoot = next;
+      void postInit().catch(() => { /* keep the current list */ });
     });
 
     // Warm caches in background on panel open
@@ -194,12 +207,13 @@ export class DataMigrationPanelProvider {
       format?: "org" | "apex" | "csv" | "json";
     }) => {
       if (await soqlInput.handle(msg)) return;
+      // Snapshot: a project switch mid-run must not redirect where files / presets go.
+      const workspaceRoot = liveRoot!;
 
       // ── Init ─────────────────────────────────────────────────────────────
       if (msg.command === "panelReady") {
         const cached = getCachedOrgList();
-        const orgs = cached ?? await refreshOrgListCache();
-        panel.webview.postMessage({ command: "init", orgs, defaultOrg: orgs[0]?.username ?? "" });
+        await postInit();
         // Served from cache: re-warm in the background (deduped) so the list isn't stale next time.
         if (cached) warmOrgListCache();
         return;
@@ -697,6 +711,9 @@ export class DataMigrationPanelProvider {
     panel.onDidDispose(() => {
       messageListener.dispose();
       defaultOrgSub.dispose();
+      projectSub.dispose();
+      selectorSub.dispose();
+      binding.dispose();
       soqlInput.dispose();
       DataMigrationPanelProvider._panel = undefined;
       lastRun = null; // release the undo journal
@@ -719,6 +736,7 @@ export class DataMigrationPanelProvider {
 ::-webkit-scrollbar-thumb { background: var(--vscode-scrollbarSlider-background); border-radius: 3px; }
 body { font-family: var(--vscode-font-family); font-size: 13px; color: var(--vscode-foreground); background: var(--vscode-editor-background); display: flex; flex-direction: column; min-height: 100vh; }
 
+${PROJECT_SELECTOR_CSS}
 /* ── Page header ── */
 .page-header { padding: 10px 16px; border-bottom: 1px solid var(--vscode-panel-border); background: var(--vscode-sideBarSectionHeader-background); flex-shrink: 0; display: flex; align-items: center; gap: 10px; }
 .page-title { font-size: 13px; font-weight: 700; letter-spacing: .02em; }
@@ -983,6 +1001,7 @@ ${monacoSoqlInputCss()}
 
 <div class="page-header">
   <span class="page-title">🔄 Data Migration Wizard</span>
+  ${projectSelectorMarkup()}
 </div>
 
 <!-- Steps bar -->
@@ -1150,6 +1169,7 @@ ${monacoSoqlInputCss()}
 
 <script src="${monacoBase}/loader.js"></script>
 <script>${monacoSoqlInputScript()}</script>
+<script>${projectSelectorScript("vsc")}</script>
 <script>
 /* ══════════════════════════════════════════════════════════════════════════
    VS Code bridge

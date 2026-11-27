@@ -74,19 +74,26 @@ describe("orgBrowser filter: query parsing", () => {
 		assert.deepStrictEqual(names(SAMPLE, { query: 'by:"john smith" type:flow' }), ["Case_Router"]);
 	});
 
-	it("status: uses the local status per row", () => {
-		const status = new Uint8Array(SAMPLE.length);
-		status[0] = 1;
-		status[3] = 2;
+	it("status: uses the local-vs-org status per row", () => {
+		const status = new Uint8Array(SAMPLE.length); // all 0 = not in project
+		status[0] = 1; // equal
+		status[3] = 3; // changed in org
 		const c = ctx({ status });
-		assert.deepStrictEqual(names(SAMPLE, { query: "status:local" }, c), ["AccountHandler"]);
+		assert.deepStrictEqual(names(SAMPLE, { query: "status:equal" }, c), ["AccountHandler"]);
 		assert.deepStrictEqual(names(SAMPLE, { query: "status:changed" }, c), ["AccountTrigger"]);
+		assert.deepStrictEqual(names(SAMPLE, { query: "status:changed-in-org" }, c), ["AccountTrigger"]);
+		assert.strictEqual(names(SAMPLE, { query: "status:not-in-project" }, c).length, SAMPLE.length - 2);
 		assert.strictEqual(names(SAMPLE, { query: "status:not-local" }, c).length, SAMPLE.length - 2);
-		assert.deepStrictEqual(names(SAMPLE, { query: "status:local status:changed" }, c), ["AccountHandler", "AccountTrigger"]);
-		status[1] = 3;
+		assert.deepStrictEqual(names(SAMPLE, { query: "status:inproject" }, c), ["AccountHandler", "AccountTrigger"]);
+		assert.deepStrictEqual(names(SAMPLE, { query: "status:equal status:changed" }, c), ["AccountHandler", "AccountTrigger"]);
+		status[1] = 5; // partial
 		const cp = ctx({ status });
 		assert.deepStrictEqual(names(SAMPLE, { query: "status:partial" }, cp), [SAMPLE[1].n]);
-		assert.ok(!names(SAMPLE, { query: "status:local" }, cp).includes(SAMPLE[1].n));
+		assert.ok(!names(SAMPLE, { query: "status:equal" }, cp).includes(SAMPLE[1].n));
+		status[2] = 2; // changed locally
+		status[4] = 4; // conflict
+		assert.deepStrictEqual(names(SAMPLE, { query: "status:modified" }, ctx({ status })), [SAMPLE[2].n]);
+		assert.deepStrictEqual(names(SAMPLE, { query: "status:conflict" }, ctx({ status })), [SAMPLE[4].n]);
 	});
 
 	it("supports * and ? wildcards that must match the whole name", () => {
@@ -154,7 +161,7 @@ describe("orgBrowser filter: facets and state filters", () => {
 		assert.strictEqual(f.types.get("CustomField"), 1);
 		// Namespace facet respects the type filter.
 		assert.strictEqual(f.namespaces.get(""), 1);
-		assert.deepStrictEqual(f.status, [1, 0, 0, 0]);
+		assert.deepStrictEqual(f.status, [1, 0, 0, 0, 0, 0, 0]);
 	});
 });
 

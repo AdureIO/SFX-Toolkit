@@ -4,6 +4,19 @@
  */
 
 /**
+ * True when the string looks like a real access token. Newer CLIs replace the token in
+ * `sf org display --json` with a placeholder such as "[REDACTED ...]". Deliberately does
+ * not require the 00D...!... shape (other token formats exist).
+ */
+export function isUsableAccessToken(t: string | undefined | null): boolean {
+	if (typeof t !== "string" || t.length === 0) return false;
+	if (/redacted/i.test(t)) return false;
+	if (t.startsWith("[") || t.startsWith("*")) return false;
+	if (/\s/.test(t)) return false;
+	return true;
+}
+
+/**
  * A cached token is trusted for this long at most. Production orgs often have a 15-30 min session
  * timeout, so the old 55 min window regularly served a token Salesforce had already dropped.
  */

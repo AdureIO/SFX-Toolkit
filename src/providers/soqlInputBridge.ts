@@ -30,9 +30,9 @@ export function monacoPanelCsp(cspSource: string): string {
 }
 
 /** Create the router for a panel's SOQL input. Dispose it with the panel. */
-export function createSoqlInputRouter(bufferRelativePath: string, webview: vscode.Webview): SoqlInputRouter {
+export function createSoqlInputRouter(bufferRelativePath: string, webview: vscode.Webview, projectDir?: () => string | undefined): SoqlInputRouter {
 	return new SoqlInputRouter(
-		new ApexBufferBridge(bufferRelativePath, "soql"),
+		new ApexBufferBridge(bufferRelativePath, "soql", false, projectDir),
 		(m) => webview.postMessage(m),
 		(org, text) => getSoqlMarkers(org, text),
 	);

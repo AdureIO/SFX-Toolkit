@@ -5,11 +5,15 @@ import { runCommandArgs } from "../utils/commandRunner";
 import { getToolingApiVersion } from "../utils/constants";
 import { Logger } from "../utils/outputChannel";
 import { reportError } from "../utils/reportError";
+import { rescanProjects } from "../utils/projectRegistry";
+import { SELECT_PROJECT_COMMAND } from "./selectProject";
 import {
 	CONVERT_MDAPI_COMMAND,
 	MDAPI_PROJECT_MESSAGE,
 	isMdapiProject,
+	isSalesforceProject,
 	mdapiFolders,
+	primaryProjectRoot,
 	updateSalesforceProjectContext,
 } from "../utils/projectUtils";
 import {
@@ -26,11 +30,17 @@ export interface ConvertHooks {
 }
 
 const CONVERT_BUTTON = "Convert to SFDX format…";
+const SWITCH_BUTTON = "Switch project…";
 
-/** Hint shown when a source-based command is used in an MDAPI project. */
+/**
+ * Hint shown when a source-based command is used while an MDAPI project is active. When an
+ * SFDX project exists elsewhere in the workspace, it also offers to switch to it.
+ */
 export async function showConvertHint(): Promise<void> {
-	const pick = await vscode.window.showInformationMessage(MDAPI_PROJECT_MESSAGE, CONVERT_BUTTON);
+	const buttons = isSalesforceProject() ? [CONVERT_BUTTON, SWITCH_BUTTON] : [CONVERT_BUTTON];
+	const pick = await vscode.window.showInformationMessage(MDAPI_PROJECT_MESSAGE, ...buttons);
 	if (pick === CONVERT_BUTTON) await vscode.commands.executeCommand(CONVERT_MDAPI_COMMAND);
+	else if (pick === SWITCH_BUTTON) await vscode.commands.executeCommand(SELECT_PROJECT_COMMAND);
 }
 
 async function isGitRepo(dir: string): Promise<boolean> {
@@ -73,7 +83,7 @@ const KEEP = "Convert and keep src";
 const MOVE = "Convert and move src to mdapi-src";
 
 export async function convertMdapiProject(hooks: ConvertHooks): Promise<void> {
-	if (!isMdapiProject()) {
+	if (mdapiFolders().length === 0) {
 		void vscode.window.showInformationMessage("Nothing to convert: no MDAPI project (src/package.xml) is open.");
 		return;
 	}
@@ -222,6 +232,7 @@ export async function convertMdapiProject(hooks: ConvertHooks): Promise<void> {
 		}
 	}
 
+	rescanProjects(); // sfdx-project.json now exists: don't wait for the watcher
 	updateSalesforceProjectContext();
 	hooks.onConverted();
 
@@ -261,7 +272,7 @@ export function registerMdapiUi(context: vscode.ExtensionContext): () => void {
 
 	const notify = () => {
 		if (!isMdapiProject()) return;
-		const folder = mdapiFolders()[0];
+		const folder = primaryProjectRoot();
 		if (!folder) return;
 		const key = NOTICE_KEY_PREFIX + folder;
 		if (context.workspaceState.get<boolean>(key) || sessionDismissed.has(key)) return;

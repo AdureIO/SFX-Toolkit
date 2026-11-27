@@ -5,7 +5,8 @@ import {
   getTargetOrgUsernameFromCli,
   setKnownTargetOrg
 } from "./orgListCache";
-import { readTargetOrgFromSfdxConfig } from "./sfdxConfig";
+import { primaryProjectRoot } from "./projectUtils";
+import { readGlobalTargetOrg, readTargetOrgFromSfdxConfig } from "./sfdxConfig";
 
 export interface DefaultOrgInfo {
   displayName: string;
@@ -23,26 +24,30 @@ function infoFromUsername(username: string): DefaultOrgInfo {
 }
 
 /**
- * Resolve default target-org username (sync).
- * 1. `.sfdx/sfdx-config.json`
- * 2. In-memory hint (set-as-default in this session)
- * 3. Cached org list default flag (may be stale; no CLI)
+ * Resolve default target-org username (sync) of a project (default: the active project).
+ * 1. `.sf/config.json` / `.sfdx/sfdx-config.json`
+ * 2. In-memory hint (set-as-default in this session), only if recorded for this project
+ * 3. The CLI's global default org (`~/.sf/config.json`, `~/.sfdx/sfdx-config.json`)
+ * 4. Cached org list default flag (may be stale; no CLI), only if the list was produced in this project
+ * The answer for a project never depends on whether it is the active one.
  */
 export function resolveDefaultTargetOrgUsernameSync(workspaceRoot?: string): string | null {
-  return readTargetOrgFromSfdxConfig(workspaceRoot) ?? getKnownTargetOrgUsername() ?? getDefaultUsernameFromOrgCache();
+  const root = workspaceRoot ?? primaryProjectRoot();
+  return readTargetOrgFromSfdxConfig(root) ?? getKnownTargetOrgUsername(root) ?? readGlobalTargetOrg() ?? getDefaultUsernameFromOrgCache(root);
 }
 
 /**
  * Resolve default target-org username with CLI fallback when sync sources are empty.
  */
 export async function resolveDefaultTargetOrgUsername(workspaceRoot?: string): Promise<string | null> {
-  const sync = resolveDefaultTargetOrgUsernameSync(workspaceRoot);
+  const root = workspaceRoot ?? primaryProjectRoot();
+  const sync = resolveDefaultTargetOrgUsernameSync(root);
   if (sync) {
     return sync;
   }
-  const cli = await getTargetOrgUsernameFromCli();
+  const cli = await getTargetOrgUsernameFromCli(root);
   if (cli) {
-    setKnownTargetOrg(cli);
+    setKnownTargetOrg(cli, root);
   }
   return cli;
 }
