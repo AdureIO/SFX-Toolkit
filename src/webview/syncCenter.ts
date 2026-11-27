@@ -872,6 +872,10 @@ function applyMode(): void {
 		b.setAttribute("aria-pressed", String(on));
 	}
 	$("secDelete").setAttribute("open", "");
+	const active = $(mode === "retrieve" ? "secRetrieve" : mode === "delete" ? "secDelete" : "secDeploy");
+	const selrow = active.querySelector("[data-selrow]");
+	const card = $("opCard");
+	if (selrow && selrow.nextElementSibling !== card) selrow.after(card);
 }
 
 function renderRight(): void {

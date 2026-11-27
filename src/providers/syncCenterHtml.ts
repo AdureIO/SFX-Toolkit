@@ -98,8 +98,6 @@ ${TEST_SUITE_CSS}
     <div id="panelSplit" class="vsplit" title="Drag to resize · double-click to reset" role="separator" aria-orientation="vertical" aria-label="Resize the right panel"></div>
     <div class="right" id="right">
       <div class="rp-body">
-        <div id="opCard" class="opcard" role="status" aria-live="polite" hidden></div>
-
         <div class="modebar"><span class="choice mode" id="modeSeg" role="group" aria-label="Action"><button type="button" data-mode="deploy" class="on" aria-pressed="true" title="Deploy or validate components of the project to the org">Deploy</button><button type="button" data-mode="retrieve" aria-pressed="false" title="Retrieve components of the org into the project">Retrieve</button><button type="button" data-mode="delete" aria-pressed="false" title="Delete components that exist only in the org">Delete</button></span></div>
 
         <details class="sec" id="secPresets" open>
@@ -133,6 +131,7 @@ ${TEST_SUITE_CSS}
             <div class="hint conflict-note" hidden></div>
             <button type="button" class="primary wide" id="deployBtn" disabled>Deploy (0)</button>
             <div class="selrow" data-selrow hidden><button type="button" class="linkbtn selsum" data-selsum></button><span class="selhid" data-selhid hidden> · <button type="button" class="linkbtn" data-hiddenshow title="Reset the filters and show only the selected components">show</button> · <button type="button" class="linkbtn" data-hiddenclear title="Deselect the selected components the current filter hides">clear hidden</button></span></div>
+            <div id="opCard" class="opcard" role="status" aria-live="polite" hidden></div>
             <div id="coverage-panel" class="coverage-panel" style="display:none;"></div>
           </div>
         </details>
@@ -383,7 +382,7 @@ button.danger-btn:hover:not(:disabled) { filter: brightness(1.1); }
 .hist-actions button { background: var(--vscode-button-secondaryBackground, transparent); color: var(--vscode-button-secondaryForeground, inherit); border: 1px solid var(--ob-border-strong); border-radius: 4px; padding: 2px 9px; font-size: 11.5px; }
 .hist-actions button:hover { background: var(--ob-hover); }
 /* Operation card (top of the right panel) */
-.opcard { border: 1px solid var(--ob-border); border-left: 3px solid var(--vscode-progressBar-background); border-radius: 6px; background: var(--asfx-card-bg); padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; font-size: 12px; flex-shrink: 0; }
+.opcard { border: 1px solid var(--ob-border); border-left: 3px solid var(--vscode-progressBar-background); border-radius: 6px; background: var(--asfx-card-bg); padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; font-size: 12px; flex-shrink: 0; margin: 6px 0; }
 .opcard[hidden] { display: none; }
 .opcard.done { border-left-color: var(--vscode-testing-iconPassed, var(--ob-ok)); }
 .opcard.failed { border-left-color: var(--vscode-testing-iconFailed, var(--vscode-errorForeground, var(--ob-bad))); }
